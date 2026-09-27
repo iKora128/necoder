@@ -2329,6 +2329,31 @@ impl AgentPanel {
             }
         })
         .detach();
+        // 開発用: NECODER_AGENT_START_PROBE=<エージェントの名前> で、いまのスレッドをそのエージェントにして
+        // セッションだけを立てる（**プロンプトは送らない**・initialize → session/new まで）。足したエージェントの
+        // 起動（binary の配備を含む）を offscreen で確かめる。最初のパネル 1 枚だけが拾う。
+        #[cfg(debug_assertions)]
+        {
+            static START_PROBE_CLAIMED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if let Ok(agent) = std::env::var("NECODER_AGENT_START_PROBE") {
+                if !agent.trim().is_empty()
+                    && !START_PROBE_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    cx.spawn(async move |panel, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(800))
+                            .await;
+                        let started = panel
+                            .update(cx, |panel, cx| panel.debug_start_session(agent.trim(), cx));
+                        if let Err(error) = started {
+                            eprintln!("NECODER_AGENT_START_PROBE: パネルが無い: {error:#}");
+                        }
+                    })
+                    .detach();
+                }
+            }
+        }
         // 開発用: NECODER_ACP_PROBE があれば、少し待って空スレッドへ自動送信（実機ストリーミングの自己検証）。
         // **最初に生成されたパネル 1 枚だけ**が拾う（レールに複数スロットがあると全パネルで発火し、
         // claude セッションが並走してしまう — 2026-08-27 の LP 素材撮りで実際に 5 本走った）。
@@ -2763,9 +2788,10 @@ PYEOF"#;
                 thread.last_input_at_ms = last_input_at_ms;
                 // 旧 DB 行（agent=NULL）は保存当時の Agent を知り得ないため現在の明示既定へ。
                 // 新しい行は thread 固有の Agent を復元し、Claude Code へ勝手に戻さない。
+                // 足したエージェント（H1）は今の設定の一覧で引く（名前を変えていても id で当たる）。
                 let recorded_agent = agent
-                    .filter(|agent| acp_client::AgentKind::by_label(agent).is_some())
-                    .map(SharedString::from);
+                    .and_then(|agent| settings::agent_by_label(cx, &agent))
+                    .map(|agent| SharedString::from(agent.label().to_string()));
                 thread.agent = recorded_agent
                     .clone()
                     .unwrap_or_else(|| default_agent_name(cx));
@@ -4400,7 +4426,7 @@ PYEOF"#;
             return;
         }
         match self.start_session(thread_index, cwd, cx) {
-            Some((command_tx, serial, usage_key)) => {
+            Ok((command_tx, serial, usage_key)) => {
                 if let Some(thread) = self.threads.get_mut(thread_index) {
                     thread.command_tx = Some(command_tx);
                     thread.session_serial = serial;
@@ -4410,7 +4436,7 @@ PYEOF"#;
                         Some(SharedString::from(i18n::t!("agent.session_resuming")));
                 }
             }
-            None => self.fail_turn(thread_index, &i18n::t!("agent.err_no_acp"), cx),
+            Err(message) => self.fail_turn(thread_index, &message, cx),
         }
         cx.notify();
     }
@@ -4473,10 +4499,15 @@ PYEOF"#;
         {
             return; // もう繋がっている（送信が先に立てた等）
         }
+        // 初回に binary を落とすエージェント（H2-b）は先張りしない。見ただけのタブで数十〜数百 MB を
+        // 黙って落とさない（最初の送信で、落としていることを出してから落とす）。
+        if self.needs_binary_deploy(index, cx) {
+            return;
+        }
         if !self.prewarmed.insert(thread_id.to_string()) {
             return;
         }
-        let Some((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) else {
+        let Ok((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) else {
             return; // エージェントが導入されていない。ここでは黙る
         };
         if let Some(thread) = self.threads.get_mut(index) {
@@ -4490,6 +4521,54 @@ PYEOF"#;
         self.prewarm_order.push(thread_id.to_string());
         self.retire_idle_prewarms();
         cx.notify();
+    }
+
+    /// 開発用（`NECODER_AGENT_START_PROBE`）: いまのスレッドを `agent` にしてセッションだけを立てる
+    /// （プロンプトは送らない）。起動できなければ「再開」と同じく失敗の 1 行を出す。
+    #[cfg(debug_assertions)]
+    fn debug_start_session(&mut self, agent: &str, cx: &mut Context<Self>) {
+        let index = self.active;
+        let Some(thread) = self.threads.get_mut(index) else {
+            return;
+        };
+        thread.agent = SharedString::from(agent.to_string());
+        apply_agent_sticky(thread, cx);
+        let Some(cwd) = self.session_cwd(index) else {
+            self.fail_turn(index, &i18n::t!("agent.err_no_project"), cx);
+            return;
+        };
+        match self.start_session(index, cwd, cx) {
+            Ok((command_tx, serial, usage_key)) => {
+                if let Some(thread) = self.threads.get_mut(index) {
+                    thread.command_tx = Some(command_tx);
+                    thread.session_serial = serial;
+                    thread.usage_key = Some(usage_key);
+                    thread.session_lost = false;
+                }
+            }
+            Err(message) => self.fail_turn(index, &message, cx),
+        }
+        cx.notify();
+    }
+
+    /// このスレッドのエージェントが、起こす前に binary を落として置く必要があるか（レジストリから
+    /// 足した binary で、この版をまだ置いていない・手元だけ）。組み込みはレジストリを読まずに `false`。
+    fn needs_binary_deploy(&self, thread_index: usize, cx: &App) -> bool {
+        let Some(agent) = self
+            .threads
+            .get(thread_index)
+            .and_then(|thread| settings::agent_by_label(cx, &thread.agent))
+        else {
+            return false;
+        };
+        let from_registry = agent.custom().is_some_and(|custom| {
+            matches!(custom.launch, acp_client::CustomLaunch::Registry { .. })
+        });
+        from_registry
+            && agent.needs_deploy(
+                self.dest_host.as_ref(),
+                acp_client::registry::load_cached().as_ref(),
+            )
     }
 
     /// 先張りしたまま **1 度も使っていない** セッションが [`MAX_IDLE_PREWARMED_SESSIONS`] を
@@ -5541,13 +5620,12 @@ PYEOF"#;
     fn selector_choices(&self, selector: Selector, cx: &App) -> Vec<SelectorChoice> {
         if selector == Selector::Agent {
             let current = self.selector_value(Selector::Agent);
-            let settings = settings::get(cx);
-            let mut options: Vec<SelectorChoice> = acp_client::authenticated_agent_labels()
+            // ログイン済みの組み込み + 設定で足したエージェント（H1）。使わないものは除いてある。
+            let mut options: Vec<SelectorChoice> = settings::selectable_agent_labels(cx)
                 .into_iter()
-                .filter(|label| settings::agent_label_enabled(&settings, label))
                 .map(|label| SelectorChoice {
-                    value: SharedString::from(label),
-                    label: SharedString::from(label),
+                    value: label.clone(),
+                    label,
                 })
                 .collect();
             // 明示既定/復元値は、起動直後の背景認証確認より強い。現在値を選択肢から消さない。
@@ -5656,10 +5734,10 @@ PYEOF"#;
         let active_agent_id = self
             .threads
             .get(self.active)
-            .and_then(|thread| acp_client::AgentKind::by_label(thread.agent.as_ref()))
-            .map(|kind| kind.id);
+            .and_then(|thread| settings::agent_by_label(cx, thread.agent.as_ref()))
+            .map(|agent| agent.id().to_string());
         if let (Some(agent_id), Some(config_id)) = (active_agent_id, selector.config_id()) {
-            let result = settings::set_agent_config_default(cx, agent_id, config_id, &value);
+            let result = settings::set_agent_config_default(cx, &agent_id, config_id, &value);
             self.report_settings_save(result, cx);
         }
         if let Some(thread) = self.threads.get_mut(self.active) {
@@ -6447,7 +6525,7 @@ PYEOF"#;
             .is_some_and(|thread| thread.command_tx.is_some());
         if !has_session {
             match self.start_session(thread_index, cwd, cx) {
-                Some((command_tx, serial, usage_key)) => {
+                Ok((command_tx, serial, usage_key)) => {
                     if let Some(thread) = self.threads.get_mut(thread_index) {
                         thread.command_tx = Some(command_tx);
                         thread.session_serial = serial;
@@ -6455,8 +6533,8 @@ PYEOF"#;
                         thread.session_lost = false;
                     }
                 }
-                None => {
-                    self.fail_turn(thread_index, &i18n::t!("agent.err_no_acp"), cx);
+                Err(message) => {
+                    self.fail_turn(thread_index, &message, cx);
                     return;
                 }
             }
@@ -6517,13 +6595,13 @@ PYEOF"#;
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
     /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドル・通し番号・
     /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる。
-    /// claude-agent-acp が見つからなければ `None`。
+    /// 起動できなければ理由の文（組み込みは「見つかりません」・足したエージェントは原因）。
     fn start_session(
         &self,
         thread_index: usize,
         cwd: PathBuf,
         cx: &mut Context<Self>,
-    ) -> Option<(mpsc::UnboundedSender<SessionCommand>, u64, usage::UsageKey)> {
+    ) -> Result<(mpsc::UnboundedSender<SessionCommand>, u64, usage::UsageKey), String> {
         // セッションの通し番号。ポンプ終了の後始末（`session_ended`）が「今のセッション」の
         // ものかを照合する。畳んだ直後に立て直した新セッションを、古いポンプが巻き込まないため。
         static SESSION_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -6544,10 +6622,12 @@ PYEOF"#;
             .map(|thread| thread.id.clone())
             .unwrap_or_default();
         let host = self.dest_host.clone();
-        let kind = acp_client::AgentKind::by_label(&agent_label)?;
+        // 組み込み・設定で足したエージェント（H1）のどちらも、今の設定の一覧から引く。
+        let agent = settings::agent_by_label(cx, &agent_label)
+            .ok_or_else(|| i18n::t!("agent.err_no_acp"))?;
         // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
-        let agent_override = agent_server_override(kind.id, cx);
+        let agent_override = agent_server_override(agent.id(), cx);
         // このセッションの使用量の鍵は、起動に渡すのと同じ宛先と env から今決める（R08。後で設定を
         // 変えても、このセッションの知らせは立てた時の鍵へ重ねる）。
         let usage_key = usage::UsageKey::with_override(
@@ -6556,22 +6636,35 @@ PYEOF"#;
             agent_override.as_ref(),
         );
         let registry = acp_client::registry::load_cached();
+        // レジストリから足した binary をまだ置いていなければ、背景で落として検証・展開してから起こす
+        // （H2-b・UI スレッドでダウンロードを待たない）。落としている間は transcript に 1 行出す。
+        let deploying = agent
+            .needs_deploy(host.as_ref(), registry.as_ref())
+            .then(|| {
+                let version = registry
+                    .as_ref()
+                    .and_then(|registry| registry.agent(agent.id()))
+                    .map(|entry| entry.version.clone())
+                    .unwrap_or_default();
+                i18n::t!("agent.deploying", "agent" => agent.label(), "version" => version)
+            });
         // local はここで解決する（PATH 探索だけ・一瞬）。remote は `command -v` を SSH 越しに
         // 流す＝往復なので、下の背景タスクの中で解決する（UI スレッドで再接続を待たない）。
-        let command = if host.is_remote() {
+        let command = if host.is_remote() || deploying.is_some() {
             None
         } else {
-            // local は探索が失敗しない（`Err` は remote だけ）。`Ok(None)` = 導入されていない。
-            Some(
-                kind.resolve_command_on(
-                    host.as_ref(),
-                    cwd.clone(),
-                    agent_override.as_ref(),
-                    registry.as_ref(),
-                )
-                .ok()
-                .flatten()?,
-            )
+            // 組み込みの local は探索が失敗しない（`Ok(None)` = 導入されていない）。足したエージェントは
+            // 起動できない理由（node が要る・レジストリに無い等）を `Err` で返すので、その文を出す。
+            match agent.resolve_command_on(
+                host.as_ref(),
+                cwd.clone(),
+                agent_override.as_ref(),
+                registry.as_ref(),
+            ) {
+                Ok(Some(command)) => Some(command),
+                Ok(None) => return Err(i18n::t!("agent.err_no_acp")),
+                Err(error) => return Err(launch_error_text(&error)),
+            }
         };
         let no_acp = i18n::t!("agent.err_no_acp");
         // スレッドの希望（sticky/前タブのモード・モデル・思考量）を起動時に渡す＝初回 prompt 前に
@@ -6622,9 +6715,26 @@ PYEOF"#;
 
         cx.background_executor()
             .spawn(async move {
-                let command = match command {
-                    Some(command) => command,
-                    None => match kind.resolve_command_on(
+                let command = match (command, deploying) {
+                    (Some(command), _) => command,
+                    (None, Some(deploying)) => {
+                        error_tx.unbounded_send(AgentEvent::Notice(deploying)).ok();
+                        match agent.deploy_command(cwd, registry.as_ref()) {
+                            Ok((command, outcome)) => {
+                                for note in deploy_notes(&outcome) {
+                                    error_tx.unbounded_send(AgentEvent::Notice(note)).ok();
+                                }
+                                command
+                            }
+                            Err(error) => {
+                                error_tx
+                                    .unbounded_send(AgentEvent::Failed(launch_error_text(&error)))
+                                    .ok();
+                                return;
+                            }
+                        }
+                    }
+                    (None, None) => match agent.resolve_command_on(
                         host.as_ref(),
                         cwd,
                         agent_override.as_ref(),
@@ -6636,13 +6746,11 @@ PYEOF"#;
                             error_tx.unbounded_send(AgentEvent::Failed(no_acp)).ok();
                             return;
                         }
-                        // 探せなかった（SSH 再接続の失敗など）。「見つかりません」と言わず原因を出す。
+                        // 探せなかった（SSH 再接続の失敗など）・足したエージェントを起動できない。
+                        // 「見つかりません」と言わず原因を出す。
                         Err(error) => {
                             error_tx
-                                .unbounded_send(AgentEvent::Failed(i18n::t!(
-                                    "agent.err_agent_lookup",
-                                    "message" => &format!("{error:#}")
-                                )))
+                                .unbounded_send(AgentEvent::Failed(launch_error_text(&error)))
                                 .ok();
                             return;
                         }
@@ -6685,7 +6793,7 @@ PYEOF"#;
         })
         .detach();
 
-        Some((command_tx, serial, usage_key))
+        Ok((command_tx, serial, usage_key))
     }
 
     /// `run_session` の [`AgentEvent`] を transcript へ逐次反映する（ストリーミングの心臓部）。
@@ -12315,9 +12423,19 @@ pub fn working_spinner(
 /// モノグラム角丸で代替（設定画面と同じ見た目・出所は `AgentKind::brand`）。アイコン＝「どのエージェントか」
 /// の識別で、スレッド色（＝どのスレッドか）とは別軸。svg は親の text_color を継承しないので直接指定する。
 pub fn agent_badge(label: &str, size: f32) -> gpui::AnyElement {
+    // 組み込みでない名前は設定で足したエージェント（H1）: 名前の頭文字と 1 色の地（設定画面と同じ）。
     let (icon, monogram, brand) = AgentKind::by_label(label)
-        .map(|agent| agent.brand())
-        .unwrap_or((None, "✳", 0x88_88_88));
+        .map(|agent| {
+            let (icon, monogram, brand) = agent.brand();
+            (icon, monogram.to_string(), brand)
+        })
+        .unwrap_or_else(|| {
+            (
+                None,
+                acp_client::custom::monogram_for(label),
+                acp_client::custom::CUSTOM_BRAND_COLOR,
+            )
+        });
     match icon {
         Some(path) => svg()
             .path(path)
@@ -12592,14 +12710,69 @@ pub fn human_tokens(count: u32) -> String {
 }
 
 /// 初期スレッド群。先頭は mock v0.3 の会話例を種として持つ（ACP 配線までのプレースホルダ）。
-/// 設定の既定エージェント（`AGENT_LABELS` にある表示名。無効/未設定なら "Claude Code"）。
+/// 設定の既定エージェント（選べるエージェントの表示名・足したエージェントも可。無効/未設定なら
+/// "Claude Code"）。
 fn default_agent_name(cx: &App) -> SharedString {
     let name = settings::get(cx).default_agent;
-    if acp_client::AGENT_LABELS.contains(&name.as_str()) {
-        SharedString::from(name)
-    } else {
-        SharedString::from("Claude Code")
+    match settings::agent_by_label(cx, &name) {
+        Some(agent) => SharedString::from(agent.label().to_string()),
+        None => SharedString::from("Claude Code"),
     }
+}
+
+/// エージェントを起動できない理由の文。足したエージェントの理由（[`acp_client::LaunchError`]）は
+/// 言葉にし、それ以外（SSH が切れていて探せない等）は「探せません: 原因」にする。
+fn launch_error_text(error: &anyhow::Error) -> String {
+    use acp_client::deploy::DeployError;
+    use acp_client::LaunchError;
+    match error.downcast_ref::<LaunchError>() {
+        Some(LaunchError::NotInRegistry { id }) => {
+            i18n::t!("agent.err_launch_not_in_registry", "id" => id)
+        }
+        Some(LaunchError::NoDistribution { platform }) => i18n::t!(
+            "agent.err_launch_no_distribution",
+            "platform" => platform.as_deref().unwrap_or("?")
+        ),
+        Some(LaunchError::NeedsNode) => i18n::t!("agent.err_launch_needs_node"),
+        Some(LaunchError::NeedsUv) => i18n::t!("agent.err_launch_needs_uv"),
+        Some(LaunchError::BinaryOnRemote) => i18n::t!("agent.err_launch_binary_on_remote"),
+        Some(LaunchError::NotDeployed) => i18n::t!("agent.err_launch_not_deployed"),
+        Some(LaunchError::Deploy(DeployError::Download { url, reason })) => i18n::t!(
+            "agent.err_deploy_download",
+            "url" => url,
+            "reason" => reason
+        ),
+        Some(LaunchError::Deploy(DeployError::ChecksumMismatch { expected, actual })) => i18n::t!(
+            "agent.err_deploy_checksum",
+            "expected" => expected,
+            "actual" => actual
+        ),
+        Some(LaunchError::Deploy(DeployError::UnsafeArchive(entry))) => {
+            i18n::t!("agent.err_deploy_unsafe", "entry" => entry)
+        }
+        Some(LaunchError::Deploy(other)) => {
+            i18n::t!("agent.err_deploy_other", "reason" => other.to_string())
+        }
+        None => i18n::t!("agent.err_agent_lookup", "message" => &format!("{error:#}")),
+    }
+}
+
+/// binary を置いた後に transcript へ出す知らせ（照合した / 検証の値が無かった・手元の古い版で起こした）。
+fn deploy_notes(outcome: &acp_client::DeployOutcome) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(newer) = &outcome.fallback_from {
+        notes.push(i18n::t!(
+            "agent.deploy_fallback",
+            "new" => newer,
+            "version" => &outcome.version
+        ));
+    } else if outcome.verified {
+        notes.push(i18n::t!("agent.deploy_verified"));
+    }
+    if !outcome.verified {
+        notes.push(i18n::t!("agent.deploy_unverified"));
+    }
+    notes
 }
 
 /// `settings.json` の `agent_servers.<id>` を acp_client の言葉へ写す。
@@ -12609,14 +12782,14 @@ fn default_agent_name(cx: &App) -> SharedString {
 fn agent_server_override(agent_id: &str, cx: &App) -> Option<acp_client::AgentOverride> {
     let setting = settings::get(cx).agent_servers.get(agent_id)?.clone();
     Some(match setting {
-        settings_core::AgentServerSetting::Custom { command, args, env } => {
-            acp_client::AgentOverride {
-                command: Some(command),
-                args,
-                env,
-            }
-        }
-        settings_core::AgentServerSetting::Registry { env } => acp_client::AgentOverride {
+        settings_core::AgentServerSetting::Custom {
+            command, args, env, ..
+        } => acp_client::AgentOverride {
+            command: Some(command),
+            args,
+            env,
+        },
+        settings_core::AgentServerSetting::Registry { env, .. } => acp_client::AgentOverride {
             command: None,
             args: Vec::new(),
             env,
@@ -12645,12 +12818,12 @@ fn bypass_mode_among(modes: &[(SharedString, SharedString)]) -> Option<SharedStr
 /// 未選択なら空。**別 vendor の綴りへフォールバックしない** — 当てずっぽうの綴りは広告と一致せず、
 /// 一致しない値は結局エージェント既定に落ちるので、嘘の候補を挟むだけ無駄で紛らわしい。
 fn agent_sticky_value(agent_label: &str, config_id: &str, cx: &App) -> SharedString {
-    let Some(kind) = acp_client::AgentKind::by_label(agent_label) else {
+    let Some(agent) = settings::agent_by_label(cx, agent_label) else {
         return SharedString::default();
     };
     settings::get(cx)
         .agent_config_defaults
-        .get(kind.id)
+        .get(agent.id())
         .and_then(|defaults| defaults.get(config_id))
         .filter(|value| !value.is_empty())
         .map(|value| SharedString::from(value.clone()))
@@ -15209,6 +15382,117 @@ PYEOF"#;
             );
         });
         let _ = std::fs::remove_file(path);
+    }
+
+    /// H1: settings.json で足したエージェントは、ピルの選択肢・既定のエージェント・ピルの記憶（id で）・
+    /// 使用量の鍵（その設定の env で）に、組み込みと同じ道で乗る。起動は書いたコマンドをそのまま組む
+    /// （ACP の initialize → session/new は acp_client の偽エージェントの試験で確かめる）。
+    #[gpui::test]
+    fn a_custom_agent_is_chosen_like_a_builtin(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_custom_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"agent_prewarm":false,"default_agent":"DeepSeek Harness",
+                "agent_config_defaults":{"dsh":{"model":"deepseek-v4"}},
+                "agent_servers":{"dsh":{"name":"DeepSeek Harness","command":"definitely-not-dsh-acp",
+                                        "args":["--stdio"],"env":{"DEEPSEEK_API_KEY":"secret"}}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            assert_eq!(
+                panel.threads[active].agent.as_ref(),
+                "DeepSeek Harness",
+                "足したエージェントも既定にできる"
+            );
+            assert_eq!(
+                panel.threads[active].model.as_ref(),
+                "deepseek-v4",
+                "ピルの記憶は id（dsh）で引く"
+            );
+            assert!(panel
+                .selector_choices(Selector::Agent, cx)
+                .iter()
+                .any(|choice| choice.value.as_ref() == "DeepSeek Harness"));
+            let agent = settings::agent_by_label(cx, "DeepSeek Harness").expect("一覧に在る");
+            let command = agent
+                .resolve_command_on(
+                    host::LocalHost::shared().as_ref(),
+                    std::env::temp_dir(),
+                    agent_server_override(agent.id(), cx).as_ref(),
+                    None,
+                )
+                .expect("手元は探索に失敗しない")
+                .expect("足した物は必ず組める");
+            assert!(command.path.ends_with("definitely-not-dsh-acp"));
+            assert_eq!(command.args, vec!["--stdio".to_string()]);
+            assert_eq!(
+                command.env.get("DEEPSEEK_API_KEY").map(String::as_str),
+                Some("secret")
+            );
+            // 使用量の鍵も同じ設定の env から作る（組み込みと同じく、認証の env が違えば別の鍵）。
+            let key = panel.prospective_usage_key(active, cx);
+            assert_ne!(
+                key,
+                usage::UsageKey::local("DeepSeek Harness"),
+                "設定の env を鍵に含める"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 足したエージェントを起動できない理由は言葉にして出す（型のまま acp_client から届く）。
+    /// それ以外の失敗（SSH が切れて探せない等）は従来どおり「探せません: 原因」。
+    #[test]
+    fn launch_problems_are_put_into_words() {
+        let needs_node = anyhow::Error::new(acp_client::LaunchError::NeedsNode);
+        assert_eq!(
+            launch_error_text(&needs_node),
+            i18n::t!("agent.err_launch_needs_node")
+        );
+        // uv が無い機械では「uv が要る」と案内する（necoder は入れない・H2-c）。
+        let needs_uv = anyhow::Error::new(acp_client::LaunchError::NeedsUv);
+        assert_eq!(
+            launch_error_text(&needs_uv),
+            i18n::t!("agent.err_launch_needs_uv")
+        );
+        let missing = anyhow::Error::new(acp_client::LaunchError::NotInRegistry {
+            id: "pi-acp".to_string(),
+        });
+        assert!(launch_error_text(&missing).contains("pi-acp"));
+        let lookup = anyhow::anyhow!("ssh が切れた");
+        assert!(launch_error_text(&lookup).contains("ssh が切れた"));
+        let mismatch = anyhow::Error::new(acp_client::LaunchError::Deploy(
+            acp_client::deploy::DeployError::ChecksumMismatch {
+                expected: "aa".to_string(),
+                actual: "bb".to_string(),
+            },
+        ));
+        let text = launch_error_text(&mismatch);
+        assert!(text.contains("aa") && text.contains("bb"), "{text}");
+        // 置いた後の知らせ: 手元の古い版で起こした・検証の値が無かった。
+        let notes = deploy_notes(&acp_client::DeployOutcome {
+            version: "0.8.0".to_string(),
+            verified: false,
+            fallback_from: Some("0.9.0".to_string()),
+        });
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("0.9.0") && notes[0].contains("0.8.0"));
+        assert_eq!(
+            deploy_notes(&acp_client::DeployOutcome {
+                version: "0.9.0".to_string(),
+                verified: true,
+                fallback_from: None,
+            }),
+            vec![i18n::t!("agent.deploy_verified")],
+            "照合したことも 1 行出す"
+        );
     }
 
     /// Modes も同じ規律で mode_id 一本。新規タブは直前タブの権限モードを引き継ぐ。

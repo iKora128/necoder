@@ -123,7 +123,10 @@ impl AgentPanel {
     ) -> anyhow::Result<Value> {
         if method == "new_thread" {
             let agent = params["agent"].as_str().unwrap_or("Claude Code");
-            anyhow::ensure!(AgentKind::by_label(agent).is_some(), "unknown_agent");
+            anyhow::ensure!(
+                settings::agent_by_label(cx, agent).is_some(),
+                "unknown_agent"
+            );
             anyhow::ensure!(self.threads.len() < 100, "thread_limit");
             let active = self.active;
             let index = self.new_thread_index(cx);

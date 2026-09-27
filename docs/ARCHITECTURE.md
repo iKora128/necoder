@@ -198,6 +198,60 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - npm 指定は**完全一致ピンにしない**（`pkg@0.0.0 - X` の上限範囲）。npm の `min-release-age` 環境で
   公開直後の版が入らなくなるため。詳細と Zed 比較の境界は `docs/research/acp-agent-registry-notes.md`
 
+**組み込みの 7 件の外のエージェント（H1・issue #38・2026-09-27）**: `agent_servers` のキーが組み込みの id
+（`claude` / `codex` …）でなければ、上書きではなく**新しいエージェント**として一覧に並ぶ。
+`{"name": "DeepSeek Harness", "command": "dsh-acp", "args": [], "env": {}}`（`type` は省略可・`command` が
+あれば `custom`）。`name` が無ければ id を出す。組み込みの id では今までどおり上書きで、`name` は読まない。
+
+- **一覧は設定の写し**: `settings::SettingsGlobal` が store を差し替えるたびに `acp_client::AgentCatalog` を
+  作り直す（`settings::agent_catalog(cx)`）。acp_client は設定のスキーマを知らないので、写すのは settings
+  （`custom_agent_specs`）。プロセス全体の可変な置き場は作らない（窓・テストごとの App が自分の一覧を持つ）
+- **スレッドは相手を表示名で覚える**（DB の `threads.agent`）ので、表示名は組み込み・他の足した物と
+  重ならないようにずらす（`名前 (id)`）。引く時は表示名 → id の順（名前を後から変えても前のスレッドが
+  相手を見失わない）。`disabled_agents` / `agent_config_defaults` は id で引く
+- 組み込みと足した物を 1 つの型で扱う入口は `acp_client::Agent`（`Builtin(&AgentKind)` / `Custom`）。
+  oneshot（題名づけ）・再ログインの案内・レジストリの版の解決・ログインの確かめは組み込みだけ
+- 起動は書いたコマンドをそのまま組む（PATH で探し、無ければ書いたまま渡す＝起動の失敗として原因が見える）。
+  リモートは探索をリモートに任せる
+
+**レジストリの全件から足す（H2・2026-09-27）**: 設定の「エージェントを追加」がレジストリの全件（キャッシュの写し）を
+並べ、選ぶと `agent_servers.<レジストリの id>` に `{"type": "registry", "name": "<レジストリの名前>"}` を書く
+（**新しいキーは作らない** — `type: registry` の意味は「起動はレジストリ・env だけ足す」のままで、キーが
+組み込みでなければそのレジストリの項目を足す、になるだけ）。`name` を書いておくのは、スレッドが表示名で
+相手を覚えるので、レジストリのキャッシュの有無で名前が変わらないようにするため。
+
+- 起動の配布は **binary（このマシンの `<os>-<arch>` に完全一致）→ npx → uvx** の順で選ぶ
+  （`RegistryAgent::launch_for`）。リモートは binary を使わない（手元の配布の形なので）。npx は `npx -y
+  <pkg@0.0.0 - 版> <args>`、uvx は `uvx <package> <args>`（uv がある機械だけ。無ければ `LaunchError::NeedsUv`
+  で「uv が要る」と案内し、**necoder は uv を入れない**）、binary は下の配備
+- 組み込みのエージェントのレジストリの項目（`claude-acp` 等）は足させない（同じエージェントが別の起動で
+  二重に並ぶ）。組み込みの起動（PATH / npx の版の解決）は変えない — binary / uvx の配備は足した物だけ
+- 起動できない理由は `acp_client::LaunchError`（レジストリに無い・このマシンの配布が無い・node が要る…）で
+  型のまま UI へ渡し、設定の行と transcript の失敗の文で言葉にする（acp_client は i18n を持たない）
+- 設定の画面・追加の画面は**キャッシュを読むだけ**。取りに行くのは人が「取得する」「取り直す」を押した時と、
+  既存の起動 12 秒後の背景の後追い（1 時間スロットル）だけ
+
+**binary の配備（H2-b・`acp_client::deploy`）— 外から落とした実行ファイルを走らせるので、ここを固定する**:
+
+- **落とす元**: レジストリの JSON の `distribution.binary.<os>-<arch>.archive` の URL **だけ**。necoder は URL を
+  組み立てない・書き換えない。`curl --proto =https --proto-redir =https`（リダイレクト先も https だけ）。
+  https でない URL は落とさない。止まった転送（1 KB/s 未満が 60 秒）は諦める
+- **置き場**: `<data>/external_agents/binary/<id>/<version>/<os>-<arch>/`（`deploy::binary_root`）。id・版・キーは
+  英数字と `._-+` だけ（置き場の外を指す名前を通さない）。版ごとに別のフォルダ＝更新で走っている版を書き換えない。
+  同じ版が置いてあれば落とし直さない（キャッシュ）。新しい版を置いたら 1 つ前の版だけ残して古い版を消す
+- **検証**: レジストリに `sha256` があれば、落とした書庫の sha256（`sha2` crate・64 KB ずつ読む）と照合し、
+  違えば展開せずに捨てる（代わりの版も使わない）。無い物は照合できない — 追加の画面・設定の行に「検証の値が
+  ありません」、起動時に transcript へ 1 行、完了の印（`.necoder-deployed.json` の `verified`）に残す
+- **展開**: 置き場の隣の一時フォルダ（`.staging-<pid>-<時刻>`）に落として、先に中身の名前を確かめる（絶対パス・
+  ドライブ名・`..` を含む書庫は展開しない）→ OS の `tar`（macOS / Windows の bsdtar は zip も）、Linux の zip だけ
+  `unzip` → 起動する `cmd` が置き場の中にあるか確かめて実行の権限を付ける → 印を書いて rename で公開。
+  印の無いフォルダは「置いていない」。書庫でない実行ファイル（拡張子なし・`.exe`）は `cmd` の名前で置く
+- **いつ落とすか**: 最初の起動（送信）の時に**背景で**（`Agent::needs_deploy` → `Agent::deploy_command`）。UI
+  スレッドの解決では落とさない。先張りはしない（見ただけのタブで黙って落とさない）。落としている間は
+  transcript に 1 行。新しい版を**落とせなかった**時だけ手元の一番新しい別の版で起こし、そう知らせる
+- 同じアプリの中で同時に初回が起きても落とすのは 1 回（プロセスの中の lock）。別のプロセスが先に同じ版を
+  置いたら、その完成品を使う
+
 ### 7.2 MCP サーバはクライアントが渡す（2026-09-10）
 
 **ACP では「どの MCP サーバへ繋ぐか」を決めるのはクライアント（＝necoder）**。エージェント側の

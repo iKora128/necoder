@@ -7,6 +7,8 @@
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
 pub mod codex_limits;
+pub mod custom;
+pub mod deploy;
 pub mod history;
 pub mod mcp;
 pub mod preset;
@@ -26,6 +28,11 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
+
+pub use custom::{
+    Agent, AgentCatalog, CustomAgent, CustomAgentSpec, CustomLaunch, DeployOutcome, LaunchError,
+    LaunchPlan,
+};
 
 /// 権限リクエストの選択肢の種類（UI のスタイル分け用。ACP `PermissionOptionKind` を簡約）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -830,7 +837,8 @@ impl AgentKind {
             }
         }
 
-        // 2) レジストリ。npx 経路だけ起動できる（binary 配備は未実装＝黙って落とさず次へ）。
+        // 2) レジストリ。組み込みは npm の版だけをここから取る（binary / uvx の配備は設定で足した
+        //    エージェントだけ・組み込みの既定の起動＝PATH / npx は変えない）。npx 以外は次へ。
         if let Some(entry) = self
             .registry_id
             .and_then(|id| registry.and_then(|reg| reg.agent(id)))
@@ -1073,22 +1081,7 @@ impl AgentKind {
             return Ok(self.command(cwd));
         }
         // ここは上の `if !host.is_remote()` で早期 return した後＝**必ずリモート（Linux）**。
-        // だから `sh` で正しい。`cfg!(windows)` で `cmd.exe` に振ってはいけない
-        // （Windows クライアントからリモート Linux へ cmd.exe を送ることになる・WINDOWS-PORT.md §D3）。
-        //
-        // `command -v` は読み取り専用なので **再送可**で送る。切断直後の 1 発目は「送ったが結果
-        // 不明」で接続が張り直されるが、非冪等扱いだとそこで失敗して次の候補（npx）へ落ちていた。
-        let resolve = |binary: &str| -> Result<Option<PathBuf>> {
-            let output = host
-                .run_command_retry_safe(&CommandSpec::new("sh", &cwd).args([
-                    "-lc".to_string(),
-                    format!("command -v -- {}", shell_word(binary)),
-                ]))
-                .with_context(|| format!("remote で {binary} を探せない"))?;
-            Ok(output
-                .success()
-                .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())))
-        };
+        let resolve = |binary: &str| find_on_remote(host, &cwd, binary);
         let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
         if let Some(path) = resolve(self.bin)? {
             return Ok(Some(AgentCommand::new(path, extra, cwd)));
@@ -1103,6 +1096,25 @@ impl AgentKind {
         args.extend(extra);
         Ok(Some(AgentCommand::new(npx, args, cwd)))
     }
+}
+
+/// リモートで `command -v` して実行ファイルのパスを引く（`Ok(None)` = 探せたが無い）。
+///
+/// リモートは**必ず Linux** なので `sh` で正しい。`cfg!(windows)` で `cmd.exe` に振ってはいけない
+/// （Windows クライアントからリモート Linux へ cmd.exe を送ることになる・WINDOWS-PORT.md §D3）。
+///
+/// `command -v` は読み取り専用なので **再送可**で送る。切断直後の 1 発目は「送ったが結果
+/// 不明」で接続が張り直されるが、非冪等扱いだとそこで失敗して次の候補（npx）へ落ちていた。
+fn find_on_remote(host: &dyn Host, cwd: &Path, binary: &str) -> Result<Option<PathBuf>> {
+    let output = host
+        .run_command_retry_safe(&CommandSpec::new("sh", cwd).args([
+            "-lc".to_string(),
+            format!("command -v -- {}", shell_word(binary)),
+        ]))
+        .with_context(|| format!("remote で {binary} を探せない"))?;
+    Ok(output
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())))
 }
 
 /// npm の指定を**完全一致ピンから上限つき範囲へ**変える（`pkg@1.2.3` → `pkg@0.0.0 - 1.2.3`）。

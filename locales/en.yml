@@ -69,6 +69,20 @@ agent:
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
   err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
+  err_launch_not_in_registry: "%{id} isnt in the ACP registry (refresh it from Settings → AI agents → Add agent)"
+  err_launch_no_distribution: "No build for this machine (%{platform})"
+  err_launch_needs_node: Needs node (npx). Install node, then resume
+  err_launch_needs_uv: Needs uv (uvx). Install uv, then resume (necoder doesn't install it)
+  err_launch_binary_on_remote: This agent only ships a binary, so it can't start over SSH
+  err_launch_not_deployed: Not downloaded yet (it's downloaded and checked on first send)
+  err_deploy_download: "Couldnt download %{url}: %{reason}"
+  err_deploy_checksum: "The download doesnt match the registrys sha256, so it wasnt used (registry %{expected} / download %{actual})"
+  err_deploy_unsafe: "The archive has a path outside its folder (%{entry}), so it wasnt unpacked"
+  err_deploy_other: "Couldnt put the binary in place: %{reason}"
+  deploying: "Downloading %{agent} %{version} (binary, first time only)…"
+  deploy_verified: Checked against the registry's sha256
+  deploy_unverified: The registry has no sha256 for this binary, so it's used unchecked
+  deploy_fallback: "Couldnt download the new version (%{new}), so starting the one in place (%{version})"
   err_session_lost: Session ended. Send again to reconnect
   err_session_ended: The agent session ended (treated as interrupted)
   err_cancel_session_lost: Interrupted — the session stopped responding
@@ -301,6 +315,7 @@ cmd:
   new_thread_opencode: "AI: New thread (OpenCode)"
   new_thread_kimi: "AI: New thread (Kimi CLI)"
   new_thread_grok: "AI: New thread (Grok Build)"
+  new_thread_with: "AI: New thread (%{agent})"
   next_tab: "Tabs: Next"
   prev_tab: "Tabs: Previous"
   next_thread: "AI: Next thread"
@@ -641,6 +656,45 @@ settings:
   agent_signed_out: Signed out
   agent_disabled: Off (hidden from choices)
   agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
+  agent_remove: Remove
+  custom_command_ready: "Starts with your command (%{command})"
+  custom_command_missing: "Command not found (%{command}). Write a name on the PATH or an absolute path"
+  custom_registry_npx: "Registry %{version} · npx (fetched on first start)"
+  custom_not_in_registry: "Not found in the registry (%{id}). Refresh it from Add agent"
+  custom_no_distribution: "No build for this machine (%{platform})"
+  custom_needs_node: Needs node (this build starts with npx)
+  custom_needs_uv: Needs uv (this build starts with uvx). Install uv to use it (necoder doesn't install it)
+  custom_registry_uvx: "Registry %{version} · uvx (fetched on first start)"
+  custom_binary_ready: "Registry %{version} · binary (in place, checked against sha256)"
+  custom_binary_ready_unverified: "Registry %{version} · binary (in place, no checksum to check)"
+  custom_binary_download: "Registry %{version} · binary (downloaded and checked against sha256 on first start)"
+  custom_binary_download_unverified: "Registry %{version} · binary (downloaded on first start, no checksum to check)"
+  custom_binary_on_remote: This agent only ships a binary, so it can't start over SSH
+  custom_not_deployed: Not downloaded yet (downloaded on first start)
+  custom_deploy_failed: "Couldnt put the binary in place: %{reason}"
+  add_agent_sha256: The binary is checked against the registry's sha256 after download
+  add_agent_no_sha256: No checksum in the registry (no sha256). The downloaded binary is used unchecked
+  agents_add: + Add agent
+  agents_add_hint: Pick from every agent in the ACP registry. For one that isn't listed, write your command in agent_servers in settings.json
+  add_agent_title: Add agent
+  add_agent_sub: "%{count} agents in the ACP registry. Added agents join the AI agents list, where you turn them on or off, make them the default, and change how they start, just like the built-in ones"
+  add_agent_search: Search by name, description, build (npx / binary / uvx), or OS
+  add_agent_add: Add
+  add_agent_added: Added
+  add_agent_builtin: "Built in (%{agent})"
+  add_agent_unusable: Not available on this machine
+  add_agent_os_any: Runs on any OS
+  add_agent_os: "Runs on %{os}"
+  add_agent_license: "License: %{license}"
+  add_agent_empty: No agents match
+  add_agent_no_registry: The ACP registry hasn't been fetched yet
+  add_agent_fetch: Fetch
+  add_agent_fetching: Fetching…
+  add_agent_refresh: Refresh
+  add_agent_fetch_failed: "Couldnt fetch: %{reason}"
+  add_agent_custom_hint: For an agent that isn't listed, write your command in agent_servers in settings.json
+  add_agent_open_settings_json: Open settings.json
+  add_agent_close: Close
   launch_default: Launch as usual (registry version and command)
   launch_env: "Launch: default + environment (%{names})"
   launch_custom: "Launch: own command (%{command})"

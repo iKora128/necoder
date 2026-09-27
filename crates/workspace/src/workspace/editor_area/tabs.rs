@@ -97,7 +97,7 @@ impl Workspace {
     /// エージェントを決めて新規スレッド（B28）。使わないと決めたエージェント（O16）なら開かずに知らせる
     /// （keymap.json に残したキーから来た時）。
     pub(crate) fn new_agent_thread_with(&mut self, agent: &str, cx: &mut Context<Self>) {
-        if !settings::agent_label_enabled(&settings::get(cx), agent) {
+        if !settings::agent_label_enabled(cx, agent) {
             self.push_toast(
                 SharedString::from(i18n::t!("agent.disabled_agent", "agent" => agent)),
                 self.accent(),

@@ -14,6 +14,9 @@
 //! `docs/research/acp-agent-registry-notes.md`）。
 //!
 //! ネットワークは `curl` に委ねる＝依存ゼロ（`workspace::updater` と同じ流儀）。
+//!
+//! 使い道は 2 つ: 組み込みの 7 件の npm の版の解決（[`crate::AgentKind::resolve_command`]）と、
+//! 設定の「エージェントを追加」で全件から選んで足す（H2・issue #38・[`crate::custom`]）。
 
 use anyhow::{Context as _, Result};
 use std::collections::BTreeMap;
@@ -41,6 +44,8 @@ pub struct RegistryAgent {
     pub distribution: Distribution,
     /// ブランドアイコンの URL（レジストリが配る svg）。necoder は在庫の svg を優先する。
     pub icon: Option<String>,
+    /// ライセンスの表記（`MIT` / `proprietary` 等・レジストリの書いたまま）。追加の画面に出す。
+    pub license: Option<String>,
 }
 
 /// 起動方法。`binary` と `npx` の両方を持つ項目があるので、**解決時に選ぶ**（[`RegistryAgent::launch`]）。
@@ -50,6 +55,27 @@ pub struct Distribution {
     pub binary: BTreeMap<String, BinaryDistribution>,
     /// npm パッケージ経由（node/npx が要る）。
     pub npx: Option<NpxDistribution>,
+    /// PyPI パッケージ経由（uv の `uvx` が要る）。
+    pub uvx: Option<UvxDistribution>,
+}
+
+/// 配布の形（追加の画面の表示と検索に使う）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DistributionKind {
+    Binary,
+    Npx,
+    Uvx,
+}
+
+impl DistributionKind {
+    /// 表示と検索の綴り（レジストリの JSON のキーと同じ）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DistributionKind::Binary => "binary",
+            DistributionKind::Npx => "npx",
+            DistributionKind::Uvx => "uvx",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,13 +98,34 @@ pub struct NpxDistribution {
     pub env: BTreeMap<String, String>,
 }
 
-/// 解決済みの起動方法。**この crate は npx 経路だけを起動できる**。
-/// binary 経路は「在ることは分かるが、まだ配備実装が無い」を型で表す（黙って落とさない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UvxDistribution {
+    /// `pkg==1.2.3` / `pkg@1.2.3` 形式（どちらも `uvx` がそのまま受ける）。
+    pub package: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+/// このマシンで使う配布（[`RegistryAgent::launch`] が選ぶ）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Launch {
+    /// このプラットフォーム向けのネイティブバイナリ（`platform` はレジストリのキー）。
+    Binary {
+        platform: String,
+        distribution: BinaryDistribution,
+    },
     Npx(NpxDistribution),
-    /// このプラットフォーム向けのネイティブバイナリが在るが、配備（DL/検証/展開）は未実装。
-    BinaryNotSupportedYet(BinaryDistribution),
+    Uvx(UvxDistribution),
+}
+
+impl Launch {
+    pub fn kind(&self) -> DistributionKind {
+        match self {
+            Launch::Binary { .. } => DistributionKind::Binary,
+            Launch::Npx(_) => DistributionKind::Npx,
+            Launch::Uvx(_) => DistributionKind::Uvx,
+        }
+    }
 }
 
 /// レジストリ全体。
@@ -93,23 +140,105 @@ impl Registry {
     pub fn agent(&self, id: &str) -> Option<&RegistryAgent> {
         self.agents.iter().find(|agent| agent.id == id)
     }
+
+    /// 追加の画面の検索（H2）。語を空白で区切り、**全部の語**が id・名前・説明・配布の形・対応 OS・
+    /// ライセンスのどれかに含まれる物（大文字小文字は無視）。空なら全部。並びは名前順。
+    pub fn search(&self, query: &str) -> Vec<&RegistryAgent> {
+        let words: Vec<String> = query
+            .split_whitespace()
+            .map(|word| word.to_lowercase())
+            .collect();
+        let mut found: Vec<&RegistryAgent> = self
+            .agents
+            .iter()
+            .filter(|agent| {
+                let haystack = agent.search_text();
+                words.iter().all(|word| haystack.contains(word.as_str()))
+            })
+            .collect();
+        found.sort_by_key(|agent| agent.name.to_lowercase());
+        found
+    }
 }
 
 impl RegistryAgent {
     /// このマシンでの起動方法を決める。**ネイティブバイナリが在ればそちらが優先**
-    /// （node に依存しないため）。無ければ npx。どちらも無ければ `None`。
+    /// （node に依存しないため）。無ければ npx、それも無ければ uvx。どれも無ければ `None`。
     pub fn launch(&self) -> Option<Launch> {
-        if let Some(platform) = platform_key() {
-            if let Some(binary) = self.distribution.binary.get(platform) {
-                return Some(Launch::BinaryNotSupportedYet(binary.clone()));
-            }
+        self.launch_for(platform_key())
+    }
+
+    /// [`Self::launch`] の本体（プラットフォームを渡せる）。`None` = binary を使わない
+    /// （プラットフォームが分からない・リモートで起動する）。OS / arch は**完全一致だけ**で選ぶ
+    /// （aarch64 の mac に x86_64 を Rosetta で走らせる等の代用はしない）。
+    pub fn launch_for(&self, platform: Option<&str>) -> Option<Launch> {
+        if let Some((key, binary)) = platform.and_then(|platform| {
+            self.distribution
+                .binary
+                .get_key_value(platform)
+                .map(|(key, binary)| (key.clone(), binary.clone()))
+        }) {
+            return Some(Launch::Binary {
+                platform: key,
+                distribution: binary,
+            });
         }
-        self.distribution.npx.clone().map(Launch::Npx)
+        if let Some(npx) = &self.distribution.npx {
+            return Some(Launch::Npx(npx.clone()));
+        }
+        self.distribution.uvx.clone().map(Launch::Uvx)
     }
 
     /// 起動に node/npx が要るか（設定画面の説明用）。
     pub fn needs_node(&self) -> bool {
         matches!(self.launch(), Some(Launch::Npx(_)))
+    }
+
+    /// 持っている配布の形（binary → npx → uvx の順）。
+    pub fn kinds(&self) -> Vec<DistributionKind> {
+        let mut kinds = Vec::new();
+        if !self.distribution.binary.is_empty() {
+            kinds.push(DistributionKind::Binary);
+        }
+        if self.distribution.npx.is_some() {
+            kinds.push(DistributionKind::Npx);
+        }
+        if self.distribution.uvx.is_some() {
+            kinds.push(DistributionKind::Uvx);
+        }
+        kinds
+    }
+
+    /// binary の配布があるプラットフォーム（`darwin-aarch64` 等・名前順）。
+    pub fn binary_platforms(&self) -> Vec<&str> {
+        self.distribution
+            .binary
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// 検索の当て先（小文字）。OS は `darwin` だけでなく `macos` / `mac` でも当たるように足す。
+    fn search_text(&self) -> String {
+        let mut text = format!(
+            "{}\n{}\n{}\n{}",
+            self.id,
+            self.name,
+            self.description,
+            self.license.as_deref().unwrap_or("")
+        );
+        for kind in self.kinds() {
+            text.push('\n');
+            text.push_str(kind.as_str());
+        }
+        for platform in self.binary_platforms() {
+            text.push('\n');
+            text.push_str(platform);
+            if platform.starts_with("darwin") {
+                text.push_str(" macos mac");
+            }
+        }
+        text.to_lowercase()
     }
 }
 
@@ -166,6 +295,10 @@ fn parse_agent(value: &serde_json::Value) -> Option<RegistryAgent> {
     let version = value.get("version")?.as_str()?.to_string();
     let distribution = parse_distribution(value.get("distribution")?)?;
     Some(RegistryAgent {
+        license: value
+            .get("license")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         name: value
             .get("name")
             .and_then(|v| v.as_str())
@@ -197,11 +330,12 @@ fn parse_distribution(value: &serde_json::Value) -> Option<Distribution> {
         })
         .unwrap_or_default();
     let npx = value.get("npx").and_then(parse_npx);
-    // どちらの起動方法も無い項目は使えない（`fast-agent` のように distribution が空のものが在る）。
-    if binary.is_empty() && npx.is_none() {
+    let uvx = value.get("uvx").and_then(parse_uvx);
+    // どの起動方法も無い項目は使えない（distribution が空・知らない形だけの項目）。
+    if binary.is_empty() && npx.is_none() && uvx.is_none() {
         return None;
     }
-    Some(Distribution { binary, npx })
+    Some(Distribution { binary, npx, uvx })
 }
 
 fn parse_binary(value: &serde_json::Value) -> Option<BinaryDistribution> {
@@ -219,6 +353,14 @@ fn parse_binary(value: &serde_json::Value) -> Option<BinaryDistribution> {
 
 fn parse_npx(value: &serde_json::Value) -> Option<NpxDistribution> {
     Some(NpxDistribution {
+        package: value.get("package")?.as_str()?.to_string(),
+        args: string_array(value.get("args")),
+        env: string_map(value.get("env")),
+    })
+}
+
+fn parse_uvx(value: &serde_json::Value) -> Option<UvxDistribution> {
+    Some(UvxDistribution {
         package: value.get("package")?.as_str()?.to_string(),
         args: string_array(value.get("args")),
         env: string_map(value.get("env")),
@@ -342,17 +484,29 @@ mod tests {
             "linux-x86_64":   { "archive": "https://example.invalid/b.tar.gz", "cmd": "./amp-acp" }
           } }
         },
+        {
+          "id": "fast-agent", "name": "fast-agent", "version": "0.10.1",
+          "description": "multi-provider", "license": "Apache 2.0",
+          "distribution": { "uvx": { "package": "fast-agent-acp==0.10.1", "args": ["-x"],
+                                     "env": { "FAST_AGENT_MODEL": "codexplan" } } }
+        },
         { "id": "no-distribution", "version": "1.0.0", "distribution": {} },
         { "name": "id が無い", "version": "1.0.0", "distribution": { "npx": { "package": "x@1" } } }
       ]
     }"#;
 
     #[test]
-    fn parses_both_distribution_shapes() {
+    fn parses_every_distribution_shape() {
         let registry = parse(SAMPLE).expect("パースできる");
         assert_eq!(registry.version, "1.0.0");
-        // 起動方法の無い項目と id の無い項目は落ちる＝2 件だけ残る。
-        assert_eq!(registry.agents.len(), 2);
+        // 起動方法の無い項目と id の無い項目は落ちる＝3 件だけ残る。
+        assert_eq!(registry.agents.len(), 3);
+        let fast = registry.agent("fast-agent").expect("uvx だけの項目も読む");
+        let uvx = fast.distribution.uvx.as_ref().expect("uvx");
+        assert_eq!(uvx.package, "fast-agent-acp==0.10.1");
+        assert_eq!(uvx.args, vec!["-x".to_string()]);
+        assert_eq!(fast.license.as_deref(), Some("Apache 2.0"));
+        assert_eq!(fast.kinds(), vec![DistributionKind::Uvx]);
 
         let claude = registry.agent("claude-acp").expect("claude-acp が在る");
         assert_eq!(claude.name, "Claude Code");
@@ -384,6 +538,70 @@ mod tests {
         if platform_key().is_some_and(|key| key == "darwin-aarch64" || key == "linux-x86_64") {
             assert!(!registry.agent("amp-acp").expect("在る").needs_node());
         }
+    }
+
+    /// OS / arch の選び方: このマシンのキーに完全一致する binary → 無ければ npx → uvx。
+    /// キーが分からない（リモートで起動する）時は binary を選ばない。
+    #[test]
+    fn a_binary_is_chosen_for_the_exact_platform_only() {
+        let registry = parse(SAMPLE).expect("パースできる");
+        let amp = registry.agent("amp-acp").expect("在る");
+        match amp.launch_for(Some("darwin-aarch64")) {
+            Some(Launch::Binary {
+                platform,
+                distribution,
+            }) => {
+                assert_eq!(platform, "darwin-aarch64");
+                assert_eq!(distribution.archive, "https://example.invalid/a.tar.gz");
+            }
+            other => panic!("darwin-aarch64 の binary を選ぶ: {other:?}"),
+        }
+        // x86_64 の mac 向けは無い＝aarch64 の物で代用しない（npx も無いので使えない）。
+        assert_eq!(amp.launch_for(Some("darwin-x86_64")), None);
+        assert_eq!(
+            amp.launch_for(None),
+            None,
+            "キーが分からなければ binary は無い"
+        );
+        let claude = registry.agent("claude-acp").expect("在る");
+        assert!(matches!(
+            claude.launch_for(Some("darwin-aarch64")),
+            Some(Launch::Npx(_))
+        ));
+        let fast = registry.agent("fast-agent").expect("在る");
+        assert_eq!(
+            fast.launch_for(Some("linux-x86_64"))
+                .map(|launch| launch.kind()),
+            Some(DistributionKind::Uvx)
+        );
+        assert_eq!(
+            amp.binary_platforms(),
+            vec!["darwin-aarch64", "linux-x86_64"]
+        );
+    }
+
+    /// 追加の画面の検索: 全部の語がどこかに当たる物だけ・大文字小文字は無視・名前順。
+    #[test]
+    fn the_registry_is_searched_by_every_word() {
+        let registry = parse(SAMPLE).expect("パースできる");
+        let names = |query: &str| -> Vec<String> {
+            registry
+                .search(query)
+                .iter()
+                .map(|agent| agent.id.clone())
+                .collect()
+        };
+        assert_eq!(names(""), vec!["amp-acp", "claude-acp", "fast-agent"]);
+        assert_eq!(names("AMP"), vec!["amp-acp"]);
+        assert_eq!(names("binary linux"), vec!["amp-acp"]);
+        assert_eq!(
+            names("macos"),
+            vec!["amp-acp"],
+            "darwin は macos でも当たる"
+        );
+        assert_eq!(names("uvx apache"), vec!["fast-agent"]);
+        assert_eq!(names("npx claude"), vec!["claude-acp"]);
+        assert!(names("npx amp").is_empty(), "全部の語が当たる物だけ");
     }
 
     #[test]
@@ -429,7 +647,7 @@ mod live_tests {
         for agent in &registry.agents {
             assert!(!agent.id.is_empty(), "id の無い項目が残っている");
             assert!(
-                agent.distribution.npx.is_some() || !agent.distribution.binary.is_empty(),
+                !agent.kinds().is_empty(),
                 "{}: 起動方法の無い項目が落とされていない",
                 agent.id
             );

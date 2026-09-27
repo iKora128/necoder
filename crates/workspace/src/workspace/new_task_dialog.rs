@@ -22,9 +22,9 @@ pub(crate) struct NewTaskDialog {
     skip_setup: bool,
     /// 並べて比べるエージェント（表示名・空 = 既定のエージェントで 1 本・O23）。
     fanout_agents: Vec<String>,
-    /// 並べて比べる時に選べるエージェント（ログイン済みのもの・開いた時に 1 回読む）。
+    /// 並べて比べる時に選べるエージェント（ログイン済みのもの + 設定で足したもの・開いた時に 1 回読む）。
     /// まだ 1 つも分からなければカタログ全部（選べないより、選んで失敗を見せる方がよい）。
-    fanout_choices: Vec<&'static str>,
+    fanout_choices: Vec<SharedString>,
     /// エージェントごとの本数（1〜3）。
     fanout_count: usize,
     /// 開く直前にフォーカスがあった場所。取り消し（Esc / キャンセル）でそこへ返す。
@@ -58,11 +58,12 @@ impl Workspace {
             worktree.host().metadata(&project::worktree_setup_script(worktree.root())).is_ok()
         });
         let default_base = integration.and_then(|worktree| project::repository_task_base_on(worktree.host().as_ref(), worktree.root()));
-        let mut fanout_choices = acp_client::authenticated_agent_labels();
-        if fanout_choices.is_empty() { fanout_choices = acp_client::AGENT_LABELS.to_vec(); }
-        // 使わないエージェント（O16）は並べて比べる候補にも出さない。
-        let agent_settings = settings::get(cx);
-        fanout_choices.retain(|label| settings::agent_label_enabled(&agent_settings, label));
+        // 使わないエージェント（O16）は並べて比べる候補にも出さない（selectable が除いてある）。
+        let mut fanout_choices = settings::selectable_agent_labels(cx);
+        if fanout_choices.is_empty() {
+            fanout_choices = settings::agent_catalog(cx).labels().into_iter().map(SharedString::from)
+                .filter(|label| settings::agent_label_enabled(cx, label)).collect();
+        }
         self.chrome.new_task = Some(NewTaskDialog {
             editor,
             details_open: false,
@@ -257,13 +258,13 @@ impl Workspace {
                         .child(SharedString::from(label))
                 };
                 let mut agents = div().flex().flex_wrap().gap(px(4.));
-                for (index, label) in dialog.fanout_choices.iter().copied().enumerate() {
-                    let selected = dialog.fanout_agents.iter().any(|agent| agent == label);
+                for (index, label) in dialog.fanout_choices.iter().cloned().enumerate() {
+                    let selected = dialog.fanout_agents.iter().any(|agent| agent.as_str() == label.as_ref());
                     agents = agents.child(chip(("new-task-fanout-agent", index), label.to_string(), selected)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             if let Some(dialog) = this.chrome.new_task.as_mut() {
-                                if let Some(position) = dialog.fanout_agents.iter().position(|agent| agent == label) {
+                                if let Some(position) = dialog.fanout_agents.iter().position(|agent| agent.as_str() == label.as_ref()) {
                                     dialog.fanout_agents.remove(position);
                                 } else {
                                     dialog.fanout_agents.push(label.to_string());
@@ -354,8 +355,12 @@ mod tests {
             let dialog = workspace.chrome.new_task.as_ref().expect("開く");
             assert_eq!(dialog.default_base.as_deref(), Some("origin/develop"));
             // 並べて比べるエージェントはログイン済みのもの。1 つも分からなければカタログ全部（空にしない）。
-            let signed_in = acp_client::authenticated_agent_labels();
-            let expected = if signed_in.is_empty() { acp_client::AGENT_LABELS.to_vec() } else { signed_in };
+            let signed_in = settings::selectable_agent_labels(cx);
+            let expected: Vec<SharedString> = if signed_in.is_empty() {
+                acp_client::AGENT_LABELS.iter().map(|label| SharedString::from(*label)).collect()
+            } else {
+                signed_in
+            };
             assert_eq!(dialog.fanout_choices, expected);
         });
         std::fs::remove_dir_all(&root).ok();

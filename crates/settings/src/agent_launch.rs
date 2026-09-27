@@ -7,6 +7,11 @@
 //!
 //! 値は settings.json に平文で残るので、API キーなどの秘密は書かない（案内を出す）。効くのは次に
 //! 起動するエージェントから。
+//!
+//! 設定で足したエージェント（H1・組み込みでない id）も同じダイアログで変える。違いは 2 つ:
+//! 「既定に戻す」の代わりに「外す」（`agent_servers.<id>` を消す＝一覧から消える）、保存しても
+//! `name` を保つ（消すと一覧の名前が id に戻る）。自分のコマンドの物には「環境変数を足す」の形が無い
+//! （戻る先のレジストリの起動が無い）。
 
 use super::*;
 use gpui::Focusable as _;
@@ -14,8 +19,14 @@ use settings_core::{env_lines, parse_arg_lines, parse_env_lines, AgentServerSett
 
 /// 起動の上書きを編んでいるダイアログ。
 pub(crate) struct LaunchEditor {
-    pub(crate) agent_id: &'static str,
-    pub(crate) agent_label: &'static str,
+    pub(crate) agent_id: SharedString,
+    pub(crate) agent_label: SharedString,
+    /// 組み込みの 7 件か（`false` = 設定で足したエージェント）。
+    pub(crate) builtin: bool,
+    /// 足したエージェントの一覧の名前（保存しても保つ）。
+    pub(crate) name: Option<String>,
+    /// 「既定の起動に環境変数を足す」の形を選べるか（自分のコマンドで足した物は選べない）。
+    pub(crate) registry_allowed: bool,
     /// `true` = 自分のコマンドで起動（`custom`）。
     pub(crate) custom: bool,
     pub(crate) command: Entity<EditorView>,
@@ -39,10 +50,10 @@ pub fn set_agent_server(
 pub(crate) fn launch_summary(setting: Option<&AgentServerSetting>) -> String {
     match setting {
         None => i18n::t!("settings.launch_default"),
-        Some(AgentServerSetting::Registry { env }) if env.is_empty() => {
+        Some(AgentServerSetting::Registry { env, .. }) if env.is_empty() => {
             i18n::t!("settings.launch_default")
         }
-        Some(AgentServerSetting::Registry { env }) => i18n::t!(
+        Some(AgentServerSetting::Registry { env, .. }) => i18n::t!(
             "settings.launch_env",
             "names" => env.keys().cloned().collect::<Vec<_>>().join(", ")
         ),
@@ -61,12 +72,23 @@ impl SettingsView {
     /// 「変える…」: 今の設定を欄に入れてダイアログを開く（環境変数の欄へフォーカス）。
     pub(crate) fn open_launch_editor(
         &mut self,
-        agent_id: &'static str,
-        agent_label: &'static str,
+        agent_id: SharedString,
+        agent_label: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = get(cx).agent_servers.get(agent_id).cloned();
+        let current = get(cx).agent_servers.get(agent_id.as_ref()).cloned();
+        let builtin = acp_client::AGENTS
+            .iter()
+            .any(|agent| agent.id == agent_id.as_ref());
+        let name = current
+            .as_ref()
+            .and_then(AgentServerSetting::name)
+            .map(str::to_string)
+            .filter(|_| !builtin);
+        // 自分のコマンドで足した物には戻る先（レジストリの起動）が無い。
+        let registry_allowed =
+            builtin || !matches!(current, Some(AgentServerSetting::Custom { .. }));
         let theme = self.theme.clone();
         let accent = self.accent;
         let field = |text: String, submit_on_enter: bool, cx: &mut Context<Self>| {
@@ -99,6 +121,9 @@ impl SettingsView {
         self.launch_editor = Some(LaunchEditor {
             agent_id,
             agent_label,
+            builtin,
+            name,
+            registry_allowed,
             custom,
             command,
             args,
@@ -116,35 +141,47 @@ impl SettingsView {
 
     pub(crate) fn set_launch_custom(&mut self, custom: bool, cx: &mut Context<Self>) {
         if let Some(editor) = self.launch_editor.as_mut() {
-            editor.custom = custom;
+            editor.custom = custom || !editor.registry_allowed;
             editor.error = None;
             cx.notify();
         }
     }
 
     /// 欄から設定を作る（`None` = 何も足さない＝既定の起動）。誤りは理由。
+    /// 足したエージェントは空の環境変数でも項目を残す（消すと一覧から消える）。
     fn launch_editor_setting(&self, cx: &App) -> Result<Option<AgentServerSetting>, String> {
         let editor = self.launch_editor.as_ref().ok_or_else(String::new)?;
         let env = parse_env_lines(&editor.env.read(cx).plain_text())?;
+        let name = editor.name.clone();
         if editor.custom {
             let command = editor.command.read(cx).plain_text().trim().to_string();
             if command.is_empty() {
                 return Err(i18n::t!("settings.launch_command_missing"));
             }
             let args = parse_arg_lines(&editor.args.read(cx).plain_text());
-            return Ok(Some(AgentServerSetting::Custom { command, args, env }));
+            return Ok(Some(AgentServerSetting::Custom {
+                name,
+                command,
+                args,
+                env,
+            }));
         }
-        Ok((!env.is_empty()).then_some(AgentServerSetting::Registry { env }))
+        Ok((!editor.builtin || !env.is_empty())
+            .then_some(AgentServerSetting::Registry { name, env }))
     }
 
     /// 「保存」: 確かめて settings.json に書く。書けたら閉じる。
     pub(crate) fn save_launch_editor(&mut self, cx: &mut Context<Self>) {
         let setting = self.launch_editor_setting(cx);
-        let Some(agent_id) = self.launch_editor.as_ref().map(|editor| editor.agent_id) else {
+        let Some(agent_id) = self
+            .launch_editor
+            .as_ref()
+            .map(|editor| editor.agent_id.clone())
+        else {
             return;
         };
         let result = setting.and_then(|setting| {
-            set_agent_server(cx, agent_id, setting.as_ref())
+            set_agent_server(cx, &agent_id, setting.as_ref())
                 .map_err(|error| save_failure_message(&error).to_string())
         });
         match result {
@@ -165,17 +202,41 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// 足したエージェントの「外す」: `agent_servers.<id>` を消す（一覧から消える）。既定のエージェントと
+    /// Captain は外せない（使う / 使わないのスイッチと同じ理由・先に別のエージェントを既定にする）。
+    pub(crate) fn remove_custom_agent(
+        &mut self,
+        agent_id: &str,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if locked {
+            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(i18n::t!(
+                "settings.agent_disable_locked"
+            ))));
+            return;
+        }
+        let result = set_agent_server(cx, agent_id, None);
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
     /// 1 エージェント分の起動の行: 「起動: 今の起動」+「変える…」（+ 上書きがあれば「既定に戻す」）。
+    /// 足したエージェント（`removable`）は「既定に戻す」の代わりに「外す」を出す。`locked` = 外せない
+    /// （既定のエージェント・Captain）。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn launch_line(
         &self,
         index: usize,
-        agent_id: &'static str,
-        agent_label: &'static str,
+        agent_id: SharedString,
+        agent_label: SharedString,
+        removable: bool,
+        locked: bool,
         settings: &Settings,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = self.theme.clone();
-        let current = settings.agent_servers.get(agent_id);
+        let current = settings.agent_servers.get(agent_id.as_ref());
         let link = |id: (&'static str, usize), label: String| {
             div()
                 .id(id)
@@ -202,22 +263,36 @@ impl SettingsView {
                     .text_color(theme.fg2)
                     .child(SharedString::from(launch_summary(current))),
             )
-            .child(
+            .child({
+                let (agent_id, agent_label) = (agent_id.clone(), agent_label.clone());
                 link(("launch-edit", index), i18n::t!("settings.launch_edit")).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |view, _, window, cx| {
-                        view.open_launch_editor(agent_id, agent_label, window, cx)
+                        view.open_launch_editor(agent_id.clone(), agent_label.clone(), window, cx)
                     }),
-                ),
-            )
-            .when(current.is_some(), |line| {
+                )
+            })
+            .when(!removable && current.is_some(), |line| {
+                let agent_id = agent_id.clone();
                 line.child(
                     link(("launch-reset", index), i18n::t!("settings.launch_reset")).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, _, _window, cx| {
-                            view.reset_agent_launch(agent_id, cx)
+                            view.reset_agent_launch(&agent_id, cx)
                         }),
                     ),
+                )
+            })
+            .when(removable, |line| {
+                line.child(
+                    link(("agent-remove", index), i18n::t!("settings.agent_remove"))
+                        .when(locked, |link| link.opacity(0.45))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _window, cx| {
+                                view.remove_custom_agent(&agent_id, locked, cx)
+                            }),
+                        ),
                 )
             })
     }
@@ -323,36 +398,42 @@ impl SettingsView {
                     .text_color(theme.fg0)
                     .child(SharedString::from(i18n::t!(
                         "settings.launch_title",
-                        "agent" => editor.agent_label
+                        "agent" => editor.agent_label.as_ref()
                     ))),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(
-                        chip(
-                            "launch-registry",
-                            i18n::t!("settings.launch_mode_registry"),
-                            !custom,
+            .when(editor.registry_allowed, |card| {
+                card.child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .child(
+                            chip(
+                                "launch-registry",
+                                i18n::t!("settings.launch_mode_registry"),
+                                !custom,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _window, cx| {
+                                    view.set_launch_custom(false, cx)
+                                }),
+                            ),
                         )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, _window, cx| view.set_launch_custom(false, cx)),
+                        .child(
+                            chip(
+                                "launch-custom",
+                                i18n::t!("settings.launch_mode_custom"),
+                                custom,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _window, cx| {
+                                    view.set_launch_custom(true, cx)
+                                }),
+                            ),
                         ),
-                    )
-                    .child(
-                        chip(
-                            "launch-custom",
-                            i18n::t!("settings.launch_mode_custom"),
-                            custom,
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, _window, cx| view.set_launch_custom(true, cx)),
-                        ),
-                    ),
-            )
+                )
+            })
             .when(custom, |card| {
                 card.child(field(
                     i18n::t!("settings.launch_command"),

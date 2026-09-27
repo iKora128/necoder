@@ -116,9 +116,9 @@ impl AgentPanel {
             return None;
         }
         let cwd = self.dest_cwd.clone()?;
-        let kind = acp_client::AgentKind::by_label(agent)?;
+        let kind = settings::agent_by_label(cx, agent)?;
         let host = self.dest_host.clone();
-        let agent_override = agent_server_override(kind.id, cx);
+        let agent_override = agent_server_override(kind.id(), cx);
         let registry = acp_client::registry::load_cached();
         let not_installed = i18n::t!("agent.err_no_acp");
         Some(cx.background_executor().spawn(async move {
@@ -152,7 +152,7 @@ impl AgentPanel {
             self.switch_thread(index, cx);
             return Some(index);
         }
-        acp_client::AgentKind::by_label(agent)?;
+        settings::agent_by_label(cx, agent)?;
         let index = self.threads.len();
         let name = session
             .title
@@ -183,7 +183,7 @@ impl AgentPanel {
         // 送信を待たずに起こす＝再生がすぐ transcript に並ぶ（prompt は送らない）。
         match self.session_cwd(index) {
             Some(cwd) => match self.start_session(index, cwd, cx) {
-                Some((command_tx, serial, usage_key)) => {
+                Ok((command_tx, serial, usage_key)) => {
                     if let Some(thread) = self.threads.get_mut(index) {
                         thread.command_tx = Some(command_tx);
                         thread.session_serial = serial;
@@ -191,7 +191,7 @@ impl AgentPanel {
                         thread.session_lost = false;
                     }
                 }
-                None => self.fail_turn(index, &i18n::t!("agent.err_no_acp"), cx),
+                Err(message) => self.fail_turn(index, &message, cx),
             },
             None => self.fail_turn(index, &i18n::t!("agent.err_no_project"), cx),
         }
@@ -301,7 +301,7 @@ impl AgentPanel {
         // 送信を待たずに新しいセッションを起こす（ピルとトークンの表示が新しい会話に揃う）。
         // エージェントが無ければ黙る（送信すれば同じ経路でエラーが出る）。
         if let Some(cwd) = self.session_cwd(index) {
-            if let Some((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) {
+            if let Ok((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) {
                 if let Some(thread) = self.threads.get_mut(index) {
                     thread.command_tx = Some(command_tx);
                     thread.session_serial = serial;

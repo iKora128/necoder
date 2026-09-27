@@ -90,6 +90,10 @@ async-io = "2"
 image = "0.25"
 # composer に貼った画像を ACP の image ブロック（base64）で送る。依存ツリーに lock 済みの版を共有する。
 base64 = "0.22"
+# レジストリから落としたエージェントの書庫を、レジストリの sha256 と照合する（issue #38 H2-b・
+# `acp_client::deploy`）。RustCrypto の実装（MIT OR Apache-2.0）で、依存ツリーに lock 済みの版を共有する。
+# 外から落とした実行ファイルを走らせる前の検証なので、手書きの実装ではなくこれを使う。
+sha2 = "0.10"
 # M8 統合ターミナル。crates.io の公開 API を使用する。
 alacritty_terminal = "0.26"
 # 端末の PTY を包むのに要る（alacritty_terminal の EventedReadWrite が polling の型を取る）。

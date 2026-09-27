@@ -173,15 +173,14 @@ impl Workspace {
             keymap_core::KeymapPlatform::current(),
         ))
         .unwrap_or_default();
-        let agent_settings = settings::get(cx);
-        let items = COMMAND_REGISTRY
+        let mut items: Vec<PickerItem> = COMMAND_REGISTRY
             .entries()
             .iter()
             .enumerate()
             // 使わないエージェント（O16）の「新しいスレッド（…）」は出さない。
             .filter(|(_, entry)| {
                 editor_area::agent_for_thread_action(entry.action_name)
-                    .is_none_or(|agent| settings::agent_label_enabled(&agent_settings, agent))
+                    .is_none_or(|agent| settings::agent_label_enabled(cx, agent))
             })
             .map(|(id, entry)| {
                 let mut item = PickerItem::new(id, i18n::t!(entry.label_key));
@@ -192,6 +191,21 @@ impl Workspace {
                 item
             })
             .collect();
+        // 設定で足したエージェント（H1）の「新しいスレッド（…）」。action を持たないので行の id で引く。
+        self.overlays.picker_agent_threads = settings::agent_catalog(cx)
+            .customs()
+            .iter()
+            .map(|custom| SharedString::from(custom.label.clone()))
+            .filter(|label| settings::agent_label_enabled(cx, label))
+            .collect();
+        items.extend(self.overlays.picker_agent_threads.iter().enumerate().map(
+            |(position, label)| {
+                PickerItem::new(
+                    PALETTE_CUSTOM_AGENT_ROW + position,
+                    i18n::t!("cmd.new_thread_with", "agent" => label.as_ref()),
+                )
+            },
+        ));
         self.open_picker(
             PickerMode::Commands,
             i18n::t!("palette.placeholder"),
@@ -785,6 +799,16 @@ impl Workspace {
                         }
                     }
                     PickerMode::Commands => {
+                        // 設定で足したエージェントの「新しいスレッド（…）」（H1）。
+                        if let Some(label) =
+                            id.checked_sub(PALETTE_CUSTOM_AGENT_ROW)
+                                .and_then(|position| {
+                                    self.overlays.picker_agent_threads.get(position).cloned()
+                                })
+                        {
+                            self.new_agent_thread_with(&label, cx);
+                            return;
+                        }
                         // パレットは既に閉じた（上の close_picker）ので、フォーカスは
                         // エディタへ戻っている = Editor/Workspace コンテキストで解決される。
                         if let Some(entry) = COMMAND_REGISTRY.get(id) {
@@ -1463,6 +1487,10 @@ impl Workspace {
     // ターミナルの file:line リンク（M13）。相対パスはアクティブプロジェクトの root 基準。
     // subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
 }
+
+/// パレットの「新しいスレッド（…）」のうち設定で足したエージェント（H1）の行の id の始まり。
+/// コマンドの登録簿の番号（数百）と重ならないよう大きく離す。
+pub(crate) const PALETTE_CUSTOM_AGENT_ROW: usize = 100_000;
 
 /// ⌘P の並びの加点（D19）。あいまい一致のスコアはおおむね数十〜数百の幅なので、桁を分けて
 /// 「最近開いたファイルは一致したものの中で必ず上」「無視されたファイル（2 回目）は必ず下」にする。

@@ -104,44 +104,112 @@ impl Default for RailSettings {
 /// **`custom` と `registry` を分ける理由**: 起動コマンドを持つのは `custom` だけにして、
 /// 「レジストリ管理のエージェントのコマンドだけを半端に差し替える」形を作らせない。
 /// 半端な上書きは、版とコマンドが食い違ったまま動く状態を生む。
+///
+/// **キーが組み込みの 7 件（`claude` / `codex` …）でない時は、新しいエージェントを足す**（H1・issue #38）:
+/// `{"name": "DeepSeek Harness", "command": "dsh-acp", "args": [], "env": {}}` と書けば一覧に並び、
+/// ACP で起動できる。`name` が無ければ id を出す。組み込みの id では `name` を読まない（上書きの意味は
+/// 変えない）。`type` は省いてよい（`command` があれば `custom`・無ければ `registry`）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(try_from = "RawAgentServerSetting")]
 pub enum AgentServerSetting {
     /// 起動を丸ごと自前で決める。necoder はこのコマンドをそのまま起動する（版の解決もしない）。
     Custom {
+        /// 一覧に出す名前（新しい id の時だけ使う）。
+        name: Option<String>,
         /// 実行するコマンド（絶対パス、または PATH 上の名前）。
         command: String,
-        #[serde(default)]
         args: Vec<String>,
-        #[serde(default)]
         env: BTreeMap<String, String>,
     },
     /// レジストリ管理のまま、環境変数だけ足す。**コマンドと版はレジストリが持つ**。
     Registry {
-        #[serde(default)]
+        /// 一覧に出す名前（新しい id の時だけ使う）。
+        name: Option<String>,
         env: BTreeMap<String, String>,
     },
+}
+
+/// settings.json の 1 件をそのまま受ける形（`type` の省略を許すため、一度ここで受けてから分ける）。
+#[derive(Deserialize)]
+struct RawAgentServerSetting {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    name: Option<String>,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+impl TryFrom<RawAgentServerSetting> for AgentServerSetting {
+    type Error = String;
+
+    fn try_from(raw: RawAgentServerSetting) -> std::result::Result<Self, Self::Error> {
+        let RawAgentServerSetting {
+            kind,
+            name,
+            command,
+            args,
+            env,
+        } = raw;
+        match (kind.as_deref(), command) {
+            (Some("custom") | None, Some(command)) => Ok(Self::Custom {
+                name,
+                command,
+                args,
+                env,
+            }),
+            (Some("custom"), None) => Err("agent_servers: custom には command が要る".to_string()),
+            // registry は command を持たない（書いてあっても読まない＝半端な差し替えを作らない）。
+            (Some("registry") | None, _) => Ok(Self::Registry { name, env }),
+            (Some(other), _) => Err(format!(
+                "agent_servers: 知らない type です: {other}（custom か registry）"
+            )),
+        }
+    }
 }
 
 impl AgentServerSetting {
     /// この設定が足す環境変数（どちらの形でも持つ）。
     pub fn env(&self) -> &BTreeMap<String, String> {
         match self {
-            Self::Custom { env, .. } | Self::Registry { env } => env,
+            Self::Custom { env, .. } | Self::Registry { env, .. } => env,
         }
     }
 
-    /// settings.json に書く形（`type` つき・空の `args` / `env` も書く）。
-    pub fn to_json(&self) -> Value {
+    /// 一覧に出す名前（新しい id の時だけ使う）。
+    pub fn name(&self) -> Option<&str> {
         match self {
-            Self::Custom { command, args, env } => serde_json::json!({
-                "type": "custom",
-                "command": command,
-                "args": args,
-                "env": env,
-            }),
-            Self::Registry { env } => serde_json::json!({ "type": "registry", "env": env }),
+            Self::Custom { name, .. } | Self::Registry { name, .. } => name.as_deref(),
         }
+    }
+
+    /// settings.json に書く形（`type` つき・空の `args` / `env` も書く・`name` は在る時だけ）。
+    pub fn to_json(&self) -> Value {
+        let (mut value, name) = match self {
+            Self::Custom {
+                name,
+                command,
+                args,
+                env,
+            } => (
+                serde_json::json!({
+                    "type": "custom",
+                    "command": command,
+                    "args": args,
+                    "env": env,
+                }),
+                name,
+            ),
+            Self::Registry { name, env } => {
+                (serde_json::json!({ "type": "registry", "env": env }), name)
+            }
+        };
+        if let (Some(name), Some(object)) = (name, value.as_object_mut()) {
+            object.insert("name".to_string(), Value::String(name.clone()));
+        }
+        value
     }
 }
 
@@ -301,7 +369,8 @@ pub struct Settings {
     pub agent_tabs_view: String,
     /// 作業ペイン / ファイルタブの既定位置。各 Fleet ペインは個別に上書きできる。
     pub work_tabs_position: String,
-    /// 新規スレッドの既定 AI エージェント（表示名。`acp_client::AGENT_LABELS` のいずれか）。
+    /// 新規スレッドの既定 AI エージェント（表示名。組み込みの `acp_client::AGENT_LABELS` か、
+    /// `agent_servers` で足したエージェントの表示名）。
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
     pub default_agent: String,
@@ -317,7 +386,8 @@ pub struct Settings {
     /// `default_agent` は §8 のまま Settings 画面だけが変える — 「どの agent か」と「その agent の設定」を分離する。
     pub agent_config_defaults: BTreeMap<String, BTreeMap<String, String>>,
     /// エージェントの起動方法の上書き（necoder の `AgentKind::id` がキー。例 `"codex"`）。
-    /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。詳細は [`AgentServerSetting`]。
+    /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。組み込みでない id は**新しいエージェント**
+    /// として一覧に並ぶ（H1・issue #38）。詳細は [`AgentServerSetting`]。
     pub agent_servers: BTreeMap<String, AgentServerSetting>,
     /// 新しいスレッドの権限モードの既定（O16）。`"default"`（既定）= エージェントの既定のモード（毎回
     /// 聞く側）/ `"bypass"` = 聞かずに進める（Yolo）: エージェントが広告するモードのうち「聞かない」もの
@@ -1165,6 +1235,60 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// H1: 新しい id のエージェントは `name` と起動だけで書ける（`type` は省ける）。`name` は書き戻しても
+    /// 残る。知らない `type`・command の無い custom は読めない（黙って別の意味に読まない）。
+    #[test]
+    fn custom_agents_are_read_with_or_without_type() {
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{"agent_servers":{
+                "dsh":{"name":"DeepSeek Harness","command":"dsh-acp","args":["--stdio"],"env":{"DEEPSEEK_MODEL":"v4"}},
+                "amp-acp":{"name":"Amp"},
+                "pi":{"type":"custom","command":"pi-acp"},
+                "codex":{"type":"registry","env":{"CODEX_HOME":"/x"}}
+            }}"#,
+        ])
+        .expect("読める");
+        let servers = &store.settings().agent_servers;
+        assert_eq!(
+            servers["dsh"],
+            AgentServerSetting::Custom {
+                name: Some("DeepSeek Harness".to_string()),
+                command: "dsh-acp".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: [("DEEPSEEK_MODEL".to_string(), "v4".to_string())]
+                    .into_iter()
+                    .collect(),
+            }
+        );
+        assert_eq!(
+            servers["amp-acp"],
+            AgentServerSetting::Registry {
+                name: Some("Amp".to_string()),
+                env: BTreeMap::new(),
+            },
+            "command が無ければ registry"
+        );
+        assert_eq!(servers["pi"].name(), None);
+        assert!(matches!(
+            servers["codex"],
+            AgentServerSetting::Registry { .. }
+        ));
+        // 書き戻しても name は残る（無ければ書かない）。
+        assert_eq!(servers["dsh"].to_json()["name"], "DeepSeek Harness");
+        assert!(servers["pi"].to_json().get("name").is_none());
+
+        for broken in [
+            r#"{"agent_servers":{"x":{"type":"custom"}}}"#,
+            r#"{"agent_servers":{"x":{"type":"binary","command":"x"}}}"#,
+        ] {
+            assert!(
+                SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, broken]).is_err(),
+                "{broken}"
+            );
+        }
+    }
+
     #[test]
     fn account_names_count_from_two() {
         assert_eq!(next_account_name(&[]), "account-2");
@@ -1339,6 +1463,7 @@ mod tests {
         let path = dir.join("settings.json");
         std::fs::write(&path, r#"{ "theme": "necoder-light" }"#).expect("seed");
         let custom = AgentServerSetting::Custom {
+            name: None,
             command: "codex-acp".into(),
             args: vec!["--verbose".into()],
             env,

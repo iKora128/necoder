@@ -939,6 +939,7 @@ impl Workspace {
                 picker_fonts: Vec::new(),
                 picker_font_key: "",
                 picker_shells: Vec::new(),
+                picker_agent_threads: Vec::new(),
                 theme_before_preview: None,
                 picker_observation: None,
                 color_picker: None,
