@@ -823,7 +823,7 @@ claude.ai のように、特定のプロジェクトに属さない相談や資�
 | 置換 | ⌥⌘F | Ctrl+H |
 | カーソルを追加 | ⌥⌘↑ / ⌥⌘↓ | Ctrl+Alt+↑ / ↓ |
 | 前後のプロジェクト | ⌃⌘↑ / ⌃⌘↓ | Ctrl+Alt+Shift+↑ / ↓ |
-| 系譜の帯（Fleet） | ⌘⇧G | Ctrl+Alt+G |
+| 編隊図（Fleet・ブリッジへ行く） | ⌘⇧G | Ctrl+Alt+G |
 | やり直し | ⌘⇧Z | Ctrl+Shift+Z または Ctrl+Y |
 | 終了 | ⌘Q | Alt+F4 |
 | ターミナル内のコピー / 貼り付け / すべて選択 | ⌘C / ⌘V / ⌘A | Ctrl+Shift+C / V / A |
