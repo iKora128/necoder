@@ -309,10 +309,13 @@ impl Workspace {
         let Some(branch) = task.branch.clone().or_else(|| task.worktree_branch.clone()) else {
             return;
         };
-        let repository_id = task.task_space.repository_id.clone();
-        let Some(integration) = self.project_sessions.projects.iter().find(|slot| {
-            slot.task_space.repository_id == repository_id && slot.task_space.is_integration()
-        }) else {
+        // 統合先は ＋ Task・Captain・サイドバーと同じ選び方（メインの作業ツリーを優先・O21）。
+        // 最初に見つかった統合先扱いの slot だと、⌘O で開いた linked worktree が先にあると取り違える。
+        let key = task.repository_key().to_string();
+        let Some(integration) = self
+            .integration_slot_for(&key)
+            .and_then(|index| self.project_sessions.projects.get(index))
+        else {
             self.push_toast(
                 i18n::t!("fleet.toast_no_integration_space").into(),
                 self.accent(),
@@ -378,10 +381,9 @@ impl Workspace {
         let Some(branch) = task.branch.clone().or_else(|| task.worktree_branch.clone()) else {
             return;
         };
-        let repository_id = task.task_space.repository_id.clone();
-        let Some(integration_index) = self.project_sessions.projects.iter().position(|slot| {
-            slot.task_space.repository_id == repository_id && slot.task_space.is_integration()
-        }) else {
+        // 統合先の選び方は `review_task_for_merge` と同じ（メインの作業ツリーを優先）。
+        let key = task.repository_key().to_string();
+        let Some(integration_index) = self.integration_slot_for(&key) else {
             return;
         };
         let integration = &self.project_sessions.projects[integration_index];
