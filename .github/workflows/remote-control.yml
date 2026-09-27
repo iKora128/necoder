@@ -31,3 +31,12 @@ jobs:
         run: npx playwright install chromium webkit
       - if: runner.os == 'macOS'
         run: npm run test:browser
+      # 落ちた時の Playwright trace（playwright.config の retain-on-failure）を持ち帰る。
+      # 2026-09-14 はこれが無く、trace を見られないまま 5 コミット手探りした。
+      - if: failure() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: relay/test-results/
+          if-no-files-found: ignore
+          retention-days: 14

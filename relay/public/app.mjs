@@ -363,7 +363,7 @@ function pairingFragment(text) {
 }
 async function startScan() {
   $('scan-error').textContent = '';
-  // WebKit はカメラの無い機械では navigator.mediaDevices ごと生やさない。拒否と同じ扱い（貼り付けへ倒す）。
+  // navigator.mediaDevices は secure context 以外や一部の WebView では生えない。拒否と同じ扱い（貼り付けへ倒す）。
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('camera_unavailable');
   scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
   const video = $('scan-video');

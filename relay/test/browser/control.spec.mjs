@@ -59,18 +59,26 @@ test('部屋作成はアカウント不要・壊れた資格情報と異なる O
   await page.screenshot({ path: 'test-results/pwa-welcome.png', fullPage: true });
 });
 
-/// 偽カメラを `navigator.mediaDevices.getUserMedia` に差し込む（`qr` = QR を写す / `denied` = 拒否）。
-/// **`page.goto` の後に呼ぶこと**。
+/// 偽カメラを `getUserMedia` に差し込む（`qr` = QR を写す / `denied` = 拒否）。
+/// **`page.goto` の後に呼ぶこと**（アプリがカメラを触るのはボタンを押した後なので、文書ができてからで足りる）。
 ///
-/// `addInitScript` では効かない。WebKit は**文書が確定する時に `navigator` を作り直す**ので、
-/// init script が navigator に載せた own property は消える（`window` に置いた印だけ残るため
-/// 「差し込めた」ように見えて、実際には本物の getUserMedia が呼ばれる）。本物は permission 待ちの
-/// まま解決も拒否もしないので、失敗が 45 秒のテストタイムアウトに化けて原因が読めなかった
-/// （CI の WebKit だけで落ちた 2026-09-14。手元の Mac は内蔵カメラがあるので素の代入で通っていた）。
-/// アプリがカメラを触るのはボタンを押した後なので、文書ができてから差し込めば足りる。
+/// **`MediaDevices.prototype` に載せる。`navigator.mediaDevices`（インスタンス）の own property にしない。**
+/// WebKit は `MediaDevices` の JS ラッパーを GC で回収し、次のアクセスで作り直す（IDL に
+/// `GenerateIsReachable` が無い ＝ JS 側から参照が切れれば回収対象。`Navigator` の方は
+/// `GenerateIsReachable=ReachableFromDOMWindow` で window と同寿命）。インスタンスに載せた own property は
+/// ラッパーごと消えるので、差し込み直後の `expectFakeCamera` は通るのに、ボタンを押した時には本物の
+/// getUserMedia が呼ばれて permission 待ちのまま固まる。GC のタイミング次第で落ちる純粋なフレークで、
+/// relay に 1 行の変更も無いまま CI の WebKit だけ 1 勝 4 敗だった（2026-09-14〜09-24。落ちるテストも
+/// 回ごとに違った）。Chromium はラッパーを保持するので own property でも通ってしまい、手元では気づけない。
+/// prototype は global object が握っていて回収されない（Playwright WebKit 26 / revision 2248 で、
+/// GC 圧をかけてもインスタンス側は消え prototype 側は残ることを確認済み・2026-09-24）。
 ///
-/// **カメラの無い機械では `navigator.mediaDevices` ごと生えない**（CI の runner がこれ）ので、
-/// 器が無ければ器から作る。
+/// 2026-09-14 に `addInitScript` で効かなかったのもこれで説明がつく（init script は
+/// `navigator.mediaDevices` に own property を載せていた）。「文書が確定する時に navigator を作り直す」
+/// という当時の読みは誤診。
+///
+/// `navigator.mediaDevices` は secure context 以外や一部の WebView では生えない。その環境だけ
+/// `navigator` 側に器を作る（`Navigator` のラッパーは window と同寿命なので own property でも残る）。
 async function installFakeCamera(page, mode, image = null) {
   await page.evaluate(([mode, source]) => {
     const getUserMedia = mode === 'denied'
@@ -86,20 +94,23 @@ async function installFakeCamera(page, mode, image = null) {
         return canvas.captureStream(15);
       };
     getUserMedia.fakeCamera = true;
-    const media = navigator.mediaDevices ?? {};
-    Object.defineProperty(media, 'getUserMedia', { configurable: true, writable: true, value: getUserMedia });
-    if (navigator.mediaDevices?.getUserMedia?.fakeCamera !== true)
-      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: media });
+    if (typeof MediaDevices === 'function' && navigator.mediaDevices)
+      Object.defineProperty(MediaDevices.prototype, 'getUserMedia', { configurable: true, writable: true, value: getUserMedia });
+    else
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia } });
   }, [mode, image]);
 }
 
 /// 偽カメラが**実際に呼ばれる**か。差し込んだつもりで本物が残っていると固まるだけなので、
-/// 形（own property になっているか・印が付いているか）と呼び出し結果を両方見て、
+/// 形（prototype に載っているか・インスタンスの own property に戻っていないか・印が付いているか）と
+/// 呼び出し結果を両方見て、
 /// 落ちた時は中身を報告する。
 async function expectFakeCamera(page) {
   const report = await page.evaluate(async () => {
     const shape = {
       ownOnNavigator: !!Object.getOwnPropertyDescriptor(navigator, 'mediaDevices'),
+      onPrototype: globalThis.MediaDevices?.prototype?.getUserMedia?.fakeCamera === true,
+      // インスタンスの own property は WebKit の GC で消える側。true なら差し込み方が退行している。
       ownGetUserMedia: !!Object.getOwnPropertyDescriptor(navigator.mediaDevices ?? {}, 'getUserMedia'),
       marked: navigator.mediaDevices?.getUserMedia?.fakeCamera === true,
     };
