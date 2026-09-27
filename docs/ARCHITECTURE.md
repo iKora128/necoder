@@ -40,7 +40,7 @@
 | `lang` | tree-sitter ハイライト・LSP クライアント | 公開 LSP 仕様と tree-sitter crates 上の独立実装 | M7 |
 | `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
 | `review_view` | 変更レビュー（worktree の全変更を 1 画面で・可変高リスト・ツリー・畳み）。構造化 diff は `project::review`（git CLI の unified diff を解析）。`editor_view` は構文色の写像だけ借りる（コアは変更レビューを知らない） | GPUI の公開 API・Git CLI 上の独立実装（Orca の機能比較のみ） | parity O6 |
-| `webview_view` | ローカル HTML プレビュー / artifact の隔離表示 / localhost の Web タブ | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱）。Web タブの移動判定を最上位だけに掛けるため、macOS は wry の navigation delegate を包む（`main_frame.rs`・objc2）。Design モードのピッカー（`design_picker.js`・初期化スクリプト）と IPC は Web タブの WebView にだけ付け、受けた知らせは `design.rs` が送り手・nonce・形・大きさで検め秘密を伏せる。要素の切り抜きは `snapshot.rs`（macOS=`takeSnapshotWithConfiguration` / Windows=`CapturePreview` + 切り抜き） | M14 |
+| `webview_view` | ローカル HTML プレビュー / artifact の隔離表示 / localhost の Web タブ | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱）。Web タブの移動判定を最上位だけに掛けるため、macOS は wry の navigation delegate を包む（`main_frame.rs`・objc2）。Design モードのピッカー（`design_picker.js`・初期化スクリプト）と IPC は Web タブの WebView にだけ付け、受けた知らせは `design.rs` が送り手・nonce・形・大きさで検め秘密を伏せる。要素の切り抜きは `snapshot.rs`（macOS=`takeSnapshotWithConfiguration` / Windows=`CapturePreview` + 切り抜き）。HTML ファイルを Web タブで開く**内蔵の配信**は `static_server.rs`（std の `TcpListener` だけ・`127.0.0.1`・token 付きの URL・Host 検査・使う Web タブがある間だけ動く） | M14 |
 | `graph_view` | worktree×commit の DAG・custom Element | Git CLI の出力を使う独立実装 | M14 |
 
 Zed のソースは GPUI API の利用例や設計比較のために閲覧しているため、本プロジェクトを厳密な意味での

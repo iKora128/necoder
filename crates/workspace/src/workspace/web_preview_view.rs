@@ -10,13 +10,18 @@
 //!
 //! 色は識別に集約（UI-SPEC §1.3）: ツールバーは bg1・fg2/fg0 と中立の選択面 bg3 だけで、識別色は使わない。
 //!
+//! **HTML ファイル**も同じ Web タブで開ける（内蔵の配信・`webview_view::static_server`）。その時は
+//! [`StaticSource`] が配っているフォルダの口を握り（このタブが生きている間だけ配信が動く）、鍵は
+//! ファイルの `file://` URL（[`static_tab_key`]）、ツールバーの URL 欄は token 付きの URL ではなく
+//! フォルダからの相対パスを出す。
+//!
 //! **Design Mode**（⌘⇧D・ツールバーの Design）: ページの要素を選び、その HTML・計算済みスタイル・
 //! 切り抜き（PNG）をアクティブなスレッドの composer へ添える（送信はしない）。ピッカーは生成時に
 //! 文書の頭へ入れておき（`webview_view::design`）、Design の間だけ nonce を渡して動かす。ページ →
 //! necoder の IPC は Web タブにだけ付き、Design 中かつ nonce が一致した物だけを受ける。
 
 use crate::workspace::*;
-use webview_view::{design, localhost, WebViewEvent, WebViewView};
+use webview_view::{design, localhost, static_server, WebViewEvent, WebViewView};
 
 /// Design Mode の知らせ（Workspace が composer へ添える）。
 ///
@@ -90,6 +95,26 @@ pub(crate) fn web_tab_url(path: &Path) -> Option<String> {
     localhost::normalize(text)
 }
 
+/// 内蔵の配信で開いた HTML の Web タブの鍵: そのファイルの `file://` URL。ファイルの鍵（絶対パス）とも
+/// localhost の Web タブの鍵（`http://`）とも衝突せず、窓セッションの `open_files` にそのまま載る
+/// （配信のポートと token は起動ごとに変わるので、鍵にはファイルを使う）。
+pub(crate) fn static_tab_key(file: &Path) -> Option<PathBuf> {
+    static_server::file_url(file).map(PathBuf::from)
+}
+
+/// 鍵が内蔵の配信の Web タブの物なら、その HTML ファイル。
+pub(crate) fn static_tab_file(path: &Path) -> Option<PathBuf> {
+    static_server::file_of_url(path.to_str()?)
+}
+
+/// 内蔵の配信で開いた HTML（localhost の開発サーバなら無い）。
+struct StaticSource {
+    /// 開いた HTML ファイル（開いた時の綴り）。
+    file: PathBuf,
+    /// 配っているフォルダの口。このタブが生きている間だけ握る（全部閉じたら配信が止まる）。
+    mount: static_server::StaticMount,
+}
+
 /// ビューポート幅（WebView の矩形の幅を絞って中央に置く）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Viewport {
@@ -138,11 +163,13 @@ fn next_zoom(current: f64, direction: i32) -> f64 {
 /// Web タブ。OS の WebView を載せた [`WebViewView`] を 1 枚抱え、上にツールバーを置く。
 /// 編集・保存・LSP・hot exit は関与しない（画像 / PDF タブと同じ表示専用タブ）。
 pub(crate) struct WebPreviewView {
-    /// タブの鍵にした URL（開いた時の正規形）。ページの中で移動しても変えない＝同じ URL を開き直すと
-    /// このタブへ戻る。いま見ている URL は [`Self::current_url`]。
+    /// 開いた時の URL（localhost はタブの鍵と同じ正規形・内蔵の配信は token 付きの URL）。ページの中で
+    /// 移動しても変えない。いま見ている URL は [`Self::current_url`]。
     url: String,
     /// OS の WebView。載せられない環境（Linux）では None でフォールバック表示。
     viewer: Option<Entity<WebViewView>>,
+    /// 内蔵の配信で開いた HTML（localhost の開発サーバなら `None`）。
+    source: Option<StaticSource>,
     viewport: Viewport,
     design: Option<DesignSession>,
     /// Design を始めた回数（R05）。
@@ -156,6 +183,9 @@ pub(crate) struct WebPreviewView {
     ready_picks: std::collections::BTreeMap<u64, Option<ReadyPick>>,
     /// 選んだ時の宛先（Workspace が `PickStarted` を受けて控える）。
     pick_targets: HashMap<u64, PickTarget>,
+    /// テスト用: 読み込み直しを頼まれた回数（テスト窓には WebView が無く、読み込みは起きない）。
+    #[cfg(test)]
+    reload_requests: usize,
     theme: Theme,
     focus_handle: FocusHandle,
     _viewer_subscriptions: Vec<Subscription>,
@@ -165,6 +195,27 @@ impl EventEmitter<WebPreviewEvent> for WebPreviewView {}
 
 impl WebPreviewView {
     pub(crate) fn new(url: &str, theme: Theme, cx: &mut Context<Self>) -> Self {
+        Self::with_source(url, None, theme, cx)
+    }
+
+    /// 内蔵の配信で HTML ファイルを開く Web タブ。`mount` はそのファイルのフォルダを配る口で、
+    /// このタブが閉じるまで握る。`url` は `mount.url_for(&file)`（呼び側が確かめてから渡す）。
+    pub(crate) fn new_static(
+        file: PathBuf,
+        mount: static_server::StaticMount,
+        url: &str,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_source(url, Some(StaticSource { file, mount }), theme, cx)
+    }
+
+    fn with_source(
+        url: &str,
+        source: Option<StaticSource>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let viewer = webview_view::is_supported().then(|| {
             let viewer_theme = theme.clone();
             let url = url.to_string();
@@ -185,6 +236,7 @@ impl WebPreviewView {
         Self {
             url: url.to_string(),
             viewer,
+            source,
             viewport: Viewport::Full,
             design: None,
             design_generation: 0,
@@ -193,6 +245,8 @@ impl WebPreviewView {
             next_emit: 0,
             ready_picks: std::collections::BTreeMap::new(),
             pick_targets: HashMap::new(),
+            #[cfg(test)]
+            reload_requests: 0,
             theme,
             focus_handle: cx.focus_handle(),
             _viewer_subscriptions: subscriptions,
@@ -230,6 +284,12 @@ impl WebPreviewView {
     #[cfg(test)]
     pub(crate) fn begin_navigation_for_test(&mut self, cx: &mut Context<Self>) {
         self.on_page_load_started(cx);
+    }
+
+    /// テスト用: 読み込み直しを頼まれた回数。
+    #[cfg(test)]
+    pub(crate) fn reload_requests(&self) -> usize {
+        self.reload_requests
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -405,6 +465,12 @@ impl WebPreviewView {
                 self.stop_design(cx);
             }
         }
+        let mut capture = capture;
+        // 内蔵の配信のページは、token 付きの URL（起動ごとに変わり、AI には意味が無い）でなく
+        // ファイルのパスで渡す（エージェントが直すのはそのファイル）。
+        if let Some(file) = self.served_file(&capture.page.url) {
+            capture.page.url = file.display().to_string();
+        }
         #[cfg(debug_assertions)]
         debug_dump_capture(&capture, png.as_deref());
         self.ready_picks.insert(
@@ -437,9 +503,65 @@ impl WebPreviewView {
         cx.notify();
     }
 
-    /// タブの鍵にした URL。
+    /// 開いた時の URL。
     pub(crate) fn url(&self) -> &str {
         &self.url
+    }
+
+    /// 内蔵の配信で開いた HTML ファイル（localhost の開発サーバなら `None`）。
+    pub(crate) fn static_file(&self) -> Option<&Path> {
+        self.source.as_ref().map(|source| source.file.as_path())
+    }
+
+    /// 内蔵の配信で配っているフォルダ（ファイル監視のパスと比べる綴り: 実体と、開いた時の綴り）。
+    pub(crate) fn static_roots(&self) -> Vec<PathBuf> {
+        let Some(source) = &self.source else {
+            return Vec::new();
+        };
+        let mut roots = vec![source.mount.root().to_path_buf()];
+        if let Some(parent) = source.file.parent() {
+            if parent != source.mount.root() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+        roots
+    }
+
+    /// 短い表記: localhost は `localhost:5173/app`、内蔵の配信は `site/about.html`
+    /// （配っているフォルダの名前 + 相対パス。token 付きの URL は出さない）。
+    fn display_label(&self, url: &str) -> String {
+        let Some(source) = &self.source else {
+            return localhost::display_label(url);
+        };
+        let folder = source
+            .mount
+            .root()
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match source.mount.relative_path_of(url) {
+            Some(relative) if folder.is_empty() => relative,
+            Some(relative) => format!("{folder}/{relative}"),
+            None => localhost::display_label(url),
+        }
+    }
+
+    /// 内蔵の配信のページ（URL）が指すディスクの上のファイル（localhost・範囲外なら `None`）。
+    /// 綴りは開いた時のフォルダに合わせる（エクスプローラで見えている綴り・Windows の `\\?\` を出さない）。
+    fn served_file(&self, url: &str) -> Option<PathBuf> {
+        let source = self.source.as_ref()?;
+        let relative = source.mount.relative_path_of(url)?;
+        let folder = source.file.parent().unwrap_or(source.mount.root());
+        Some(folder.join(relative))
+    }
+
+    /// URL 欄のツールチップ: localhost は URL、内蔵の配信はディスクの上のファイル。
+    fn url_tooltip(&self, url: &str) -> String {
+        let Some(source) = &self.source else {
+            return url.to_string();
+        };
+        let file = self.served_file(url).unwrap_or_else(|| source.file.clone());
+        i18n::t!("webtab.static_tip", "path" => file.display())
     }
 
     /// いま見ている URL（ページの中の移動に追従）。WebView が無ければ開いた時の URL。
@@ -457,7 +579,7 @@ impl WebPreviewView {
             .viewer
             .as_ref()
             .and_then(|viewer| viewer.read(cx).page_title().map(str::to_string))
-            .unwrap_or_else(|| localhost::display_label(&self.current_url(cx)));
+            .unwrap_or_else(|| self.display_label(&self.current_url(cx)));
         truncate_label(&label, TAB_LABEL_MAX_CHARS)
     }
 
@@ -518,6 +640,10 @@ impl WebPreviewView {
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.reload_requests += 1;
+        }
         if let Some(viewer) = &self.viewer {
             viewer.update(cx, |viewer, cx| {
                 viewer.reload();
@@ -821,11 +947,11 @@ impl WebPreviewView {
                     .child(SharedString::from(if designing {
                         i18n::t!("design.hint")
                     } else if loading {
-                        format!("{} …", localhost::display_label(&current))
+                        format!("{} …", self.display_label(&current))
                     } else {
-                        localhost::display_label(&current)
+                        self.display_label(&current)
                     }))
-                    .tooltip(Tooltip::text(current.clone(), theme.clone())),
+                    .tooltip(Tooltip::text(self.url_tooltip(&current), theme.clone())),
             )
             .child(
                 self.text_chip("web-zoom-out", "−".to_string(), false)
