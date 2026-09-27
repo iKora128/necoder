@@ -5,6 +5,10 @@
 //! （資格情報に触れない・常駐のタイマーを持たない）。例外は Codex だけで、ACP に出さない代わりに、
 //! 利用者が使用量のポップオーバーを開いた時に `codex app-server` へ 1 回だけ訊く
 //! （[`refresh_codex_limits`]・認証は codex 本体）。
+//!
+//! **報告の無い値を 0 と断定しない**（R08）。トークンやコストを報告しなかったターンは「無い」のまま
+//! 台帳へ書き、集計では 0 として足さない（[`reported_total_label`]）。コストはエージェントの推定で、
+//! 実際の請求額ではない。
 
 pub use acp_client::usage::{LimitStatus, LimitWindow};
 use acp_client::usage::{RateLimits, TurnTokens};
@@ -41,10 +45,10 @@ pub(crate) struct CostMeter {
     pending_tokens: Option<TurnTokens>,
 }
 
-/// 台帳へ書く 1 ターン分（[`CostMeter::take_turn`]）。
+/// 台帳へ書く 1 ターン分（[`CostMeter::take_turn`]）。報告の無い値は `None`（0 にしない・R08）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TurnSpend {
-    pub tokens: TurnTokens,
+    pub tokens: Option<TurnTokens>,
     pub cost_usd: Option<f64>,
     pub session_total_usd: Option<f64>,
 }
@@ -92,7 +96,7 @@ impl CostMeter {
             return None;
         }
         Some(TurnSpend {
-            tokens: self.pending_tokens.take().unwrap_or_default(),
+            tokens: self.pending_tokens.take(),
             cost_usd: self.pending_usd.take(),
             session_total_usd: self.total_usd,
         })
@@ -563,6 +567,16 @@ pub fn tokens_label(tokens: i64) -> String {
     }
 }
 
+/// 報告から数えた合計の表示。報告が 1 つも無ければ `—`（0 と断定しない）、一部のターンにしか
+/// 報告が無ければ `≥`（報告の無い分は足していない＝下限）を付ける（R08）。
+pub fn reported_total_label(total: Option<String>, reported_turns: i64, turns: i64) -> String {
+    match total {
+        None => "—".to_string(),
+        Some(total) if reported_turns < turns => format!("≥ {total}"),
+        Some(total) => total,
+    }
+}
+
 /// 金額（USD。例 `$0.37`・1 セント未満は `<$0.01`）。
 pub fn usd_label(amount: f64) -> String {
     if amount > 0.0 && amount < 0.005 {
@@ -642,7 +656,7 @@ mod tests {
             ..TurnTokens::default()
         });
         let first = meter.take_turn().expect("1 ターン目");
-        assert_eq!(first.tokens.total, 1_000);
+        assert_eq!(first.tokens.map(|tokens| tokens.total), Some(1_000));
         assert!((first.cost_usd.expect("コスト") - 0.25).abs() < 1e-9);
         assert_eq!(first.session_total_usd, Some(0.25));
         assert_eq!(meter.take_turn(), None, "書いたら空になる");
@@ -653,9 +667,8 @@ mod tests {
         let second = meter.take_turn().expect("2 ターン目");
         assert!((second.cost_usd.expect("コスト") - 0.5).abs() < 1e-9);
         assert_eq!(
-            second.tokens,
-            TurnTokens::default(),
-            "トークンの報告が無いターン"
+            second.tokens, None,
+            "トークンの報告が無いターンは 0 ではなく「無い」（R08）"
         );
 
         // 累計が減った＝数え直し。今の値がそのまま新しい分。
@@ -853,5 +866,17 @@ mod tests {
         assert_eq!(usd_label(0.374), "$0.37");
         assert_eq!(usd_label(0.001), "<$0.01");
         assert_eq!(usd_label(0.0), "$0.00");
+        // 報告の無い値は 0 と書かない（R08）。
+        assert_eq!(reported_total_label(Some("4.0k".into()), 2, 2), "4.0k");
+        assert_eq!(
+            reported_total_label(Some("4.0k".into()), 1, 2),
+            "≥ 4.0k",
+            "一部のターンにしか報告が無い合計は下限"
+        );
+        assert_eq!(
+            reported_total_label(None, 0, 2),
+            "—",
+            "報告が 1 つも無ければ 0 ではなく —"
+        );
     }
 }

@@ -1646,12 +1646,12 @@ usage:
   stats_agent: エージェント
   stats_turns: ターン
   stats_tokens: トークン
-  stats_cost: コスト
+  stats_cost: 推定コスト
   stats_total: 30 日の合計
   stats_empty: まだ記録がありません。エージェントが使用量を知らせたターンから記録します。
   stats_loading: 読み込み中…
   stats_failed: "使用量を読めませんでした: %{error}"
-  stats_note: トークンとコストは、エージェントがターンごとに報告した推定値です（Claude のコストは Claude Code の推定。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけ）。~/.claude などのローカルのログは読みません。
+  stats_note: トークンと推定コストは、エージェントがターンごとに報告した値です。コストは Claude Code が出す推定（USD）で、実際の請求額ではありません（請求の正は各社の請求画面）。報告の無い値は —（0 ではありません）、一部のターンにしか報告が無い合計には ≥ を付けています。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけです。~/.claude などのローカルのログは読みません。
 ports:
   title: 開いているポート
   loading: 読んでいます…

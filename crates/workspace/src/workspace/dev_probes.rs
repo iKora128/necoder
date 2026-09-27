@@ -40,7 +40,7 @@ impl Workspace {
     /// `limits` / `near` / `blocked` = いまのスレッドにレート制限を流す（本番と同じ `on_event`）/
     /// `codex` = Codex の値を置き場へ直接入れる（**codex app-server は起こさない**）/
     /// `codex-loading` / `codex-failed` = Codex の読み取りの途中 / 失敗の行 /
-    /// `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ直近 12 日分の使用量を書く /
+    /// `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ直近 12 日分の使用量を書く（報告の無いターンを含む）/
     /// `popover` = チップを押したのと同じにポップオーバーを開く（Codex は訊かない）/ `stats` = 統計の画面。
     #[cfg(debug_assertions)]
     pub fn debug_usage_probe(
@@ -86,7 +86,9 @@ impl Workspace {
     }
 
     /// 開発用: 直近 12 日分の使用量を台帳へ書く（`NECODER_USAGE_PROBE=seed`）。本物の DB を汚さないよう、
-    /// `NECODER_HOME` で隔離している時だけ書く。
+    /// `NECODER_HOME` で隔離している時だけ書く。報告の無いターンも混ぜる（R08 の `—` / `≥` の検証）:
+    /// 今日の Claude の最後のターンはトークンなし・2 日前の Claude の最初のターンはコストなし・
+    /// 1 日前の Codex はトークンの報告が 1 つも無い。
     #[cfg(debug_assertions)]
     fn debug_seed_usage_rows(&self) {
         if std::env::var_os("NECODER_HOME").is_none() {
@@ -116,16 +118,24 @@ impl Workspace {
                     continue; // Codex を使わなかった日
                 }
                 for turn in 0..count {
+                    let tokens_reported =
+                        !(day == 0 && agent == "Claude Code" && turn == count - 1)
+                            && !(day == 1 && agent == "Codex");
+                    let cost_reported = !(day == 2 && agent == "Claude Code" && turn == 0);
                     let record = storage::TurnUsageRecord {
                         thread_id: format!("probe-{agent}"),
                         agent: agent.to_string(),
                         ended_at: now - day * 24 * HOUR - turn * HOUR,
-                        input_tokens: tokens as u64 / 4,
-                        output_tokens: tokens as u64 / 4,
-                        cached_read_tokens: tokens as u64 / 2,
-                        cached_write_tokens: 0,
-                        total_tokens: tokens as u64,
-                        cost_usd: cost.map(|cost| cost / count as f64),
+                        tokens: tokens_reported.then(|| storage::TurnTokenCounts {
+                            input: tokens as u64 / 4,
+                            output: tokens as u64 / 4,
+                            cached_read: tokens as u64 / 2,
+                            cached_write: 0,
+                            total: tokens as u64,
+                        }),
+                        cost_usd: cost
+                            .filter(|_| cost_reported)
+                            .map(|cost| cost / count as f64),
                         session_cost_usd: None,
                     };
                     if let Err(error) = storage.record_turn_usage(&record) {

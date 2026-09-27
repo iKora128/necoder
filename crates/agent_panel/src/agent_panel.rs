@@ -2878,11 +2878,14 @@ PYEOF"#;
             thread_id: thread.id.clone(),
             agent: thread.agent.to_string(),
             ended_at: now_unix_ms(),
-            input_tokens: spend.tokens.input,
-            output_tokens: spend.tokens.output,
-            cached_read_tokens: spend.tokens.cached_read,
-            cached_write_tokens: spend.tokens.cached_write,
-            total_tokens: spend.tokens.total,
+            // 報告の無いトークンは 0 と書かない（NULL のまま・R08）。
+            tokens: spend.tokens.map(|tokens| storage::TurnTokenCounts {
+                input: tokens.input,
+                output: tokens.output,
+                cached_read: tokens.cached_read,
+                cached_write: tokens.cached_write,
+                total: tokens.total,
+            }),
             cost_usd: spend.cost_usd,
             session_cost_usd: spend.session_total_usd,
         };
@@ -16238,7 +16241,7 @@ PYEOF"#;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].agent, "Claude Code");
         assert_eq!(rows[0].turns, 2);
-        assert_eq!(rows[0].total_tokens, 150);
+        assert_eq!(rows[0].total_tokens, Some(150));
         assert!(
             (rows[0].cost_usd.expect("コスト") - 1.0).abs() < 1e-9,
             "{rows:?}"
@@ -16268,6 +16271,42 @@ PYEOF"#;
         assert_eq!(
             storage.last_session_cost(&thread_id).expect("読める"),
             Some(1.3)
+        );
+
+        // コストだけ知らせてトークンを知らせないターン（R08）: トークンは 0 ではなく「無い」まま書き、
+        // 合計には足さない（報告のあったターンの数で分かる）。
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.on_event(active, AgentEvent::TurnStarted, cx);
+            panel.on_event(
+                active,
+                AgentEvent::SessionCost {
+                    amount: 1.5,
+                    currency: "USD".into(),
+                },
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert_eq!(rows[0].turns, 4, "{rows:?}");
+        assert_eq!(
+            rows[0].total_tokens,
+            Some(160),
+            "報告の無いターンは足さない"
+        );
+        assert_eq!(rows[0].token_turns, 3, "トークンを報告したのは 3 ターン");
+        assert_eq!(rows[0].cost_turns, 4, "{rows:?}");
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.5).abs() < 1e-9,
+            "{rows:?}"
         );
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);

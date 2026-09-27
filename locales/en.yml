@@ -1645,12 +1645,12 @@ usage:
   stats_agent: Agent
   stats_turns: Turns
   stats_tokens: Tokens
-  stats_cost: Cost
+  stats_cost: Est. cost
   stats_total: 30-day total
   stats_empty: Nothing recorded yet. Turns are recorded once an agent reports usage.
   stats_loading: Loading…
   stats_failed: "Couldn't read usage: %{error}"
-  stats_note: Tokens and cost are estimates each agent reports per turn (Claude's cost is Claude Code's estimate; Codex reports no cost, and its tokens cover only the last request of each turn). Local logs such as ~/.claude are not read.
+  stats_note: Tokens and estimated cost are what each agent reported per turn. Cost is Claude Code's estimate (USD), not the amount you are billed (your provider's billing page is the source of truth). Unreported values show — (not 0), and totals that only some turns reported are marked ≥. Codex reports no cost, and its tokens cover only the last request of each turn. Local logs such as ~/.claude are not read.
 ports:
   title: Open ports
   loading: Reading…

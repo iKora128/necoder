@@ -74,7 +74,7 @@
 | ↳ **新しいセッションで続ける**（handoff。今の会話の抜粋を前置きに、同じタブで新しいセッションへ。要約はしない） | `AgentPanel::continue_in_new_session` / `Thread.handoff_preamble`（action `ContinueInNewSession`） | 新しいセッションで続ける | Continue in a new session |
 | ↳ **区切り**（transcript の会話ではない一行: 省略・新しいセッション。検索・前置きに入れない） | `Entry::Notice`（DB の role `notice`） | （文そのもの） | （the text itself） |
 | ↳ **前の会話**（新しいセッションで続けた・引き継げずに替わった会話 id。履歴で重ねて出さない鍵） | `thread_past_sessions`（storage） | — | — |
-| ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。台帳に 1 ターン 1 行・O11） | `turn_usage`（storage）/ `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` | 使用量 | Usage |
+| ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。**推定コストは実際の請求額ではない**。報告の無い値は NULL＝`—`（0 と書かない）・一部のターンにしか報告が無い合計は `≥`（下限）。台帳に 1 ターン 1 行・O11・R08） | `turn_usage`（storage）/ `storage::TurnTokenCounts` / `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` / `usage::reported_total_label` | 使用量 / 推定コスト | Usage / Est. cost |
 | ↳ **レート制限**（プランの利用上限の窓と使用率。エージェントが知らせてきた**最後の値**・O11） | `acp_client::usage::RateLimits` / `AgentEvent::RateLimits` / `agent_panel::usage::UsageLimits` | レート制限 | Rate limits |
 | ↳ **窓**（レート制限の期間） | `LimitWindow::{FiveHour, Weekly, Named, Minutes}` | 5 時間枠 / 週枠 / 〈名前〉の週枠 | 5-hour window / Weekly window / Weekly (〈name〉) |
 | ↳ **使用量の統計**（日付 × エージェントの集計画面） | `usage_view::render_usage_stats` / `Storage::daily_usage` | 使用量の統計 | Usage statistics |

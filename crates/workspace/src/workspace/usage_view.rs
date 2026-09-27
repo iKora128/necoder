@@ -646,7 +646,7 @@ impl Workspace {
         let totals = usage_totals(rows);
         let max_tokens = rows
             .iter()
-            .map(|row| row.total_tokens)
+            .filter_map(|row| row.total_tokens)
             .max()
             .unwrap_or(0)
             .max(1);
@@ -685,9 +685,12 @@ impl Workspace {
                 .then(|| chat_core::date::Date::from_unix_utc(row.day * 86_400).to_string());
             let first_of_day = date.is_some();
             previous_day = Some(row.day);
-            let bar = row.total_tokens as f32 / max_tokens as f32;
+            // 報告の無い日は棒も出さない（0 の棒を描かない）。
+            let bar = row
+                .total_tokens
+                .map(|tokens| tokens as f32 / max_tokens as f32);
             table = table.child(
-                self.render_usage_row(date, row, Some(bar), false)
+                self.render_usage_row(date, row, bar, false)
                     .when(first_of_day && index == 0, |element| element.mt(px(6.)))
                     .when(first_of_day && index > 0, |element| {
                         element
@@ -701,7 +704,8 @@ impl Workspace {
         table
     }
 
-    /// 表の 1 行。`bar` = トークンの棒の長さ（その期間の最大に対する割合・合計の行は無し）。
+    /// 表の 1 行。`bar` = トークンの棒の長さ（その期間の最大に対する割合・合計の行と報告の無い日は無し）。
+    /// 報告の無い値は `—`、一部のターンにしか報告が無い合計は `≥`（[`usage::reported_total_label`]・R08）。
     fn render_usage_row(
         &self,
         date: Option<String>,
@@ -774,8 +778,16 @@ impl Workspace {
                             .w(px(58.))
                             .flex_none()
                             .text_right()
-                            .text_color(text)
-                            .child(SharedString::from(usage::tokens_label(row.total_tokens))),
+                            .text_color(if row.total_tokens.is_some() {
+                                text
+                            } else {
+                                theme.fg2
+                            })
+                            .child(SharedString::from(usage::reported_total_label(
+                                row.total_tokens.map(usage::tokens_label),
+                                row.token_turns,
+                                row.turns,
+                            ))),
                     ),
             )
             .child(
@@ -788,27 +800,33 @@ impl Workspace {
                     } else {
                         theme.fg2
                     })
-                    .child(SharedString::from(
-                        row.cost_usd
-                            .map(usage::usd_label)
-                            .unwrap_or_else(|| "—".to_string()),
-                    )),
+                    .child(SharedString::from(usage::reported_total_label(
+                        row.cost_usd.map(usage::usd_label),
+                        row.cost_turns,
+                        row.turns,
+                    ))),
             )
     }
 }
 
-/// エージェントごとの期間の合計（ターン・トークン・コスト）。コストはどこかの日にあれば合計、無ければ `None`。
+/// エージェントごとの期間の合計（ターン・トークン・推定コスト）。トークンとコストはどこかの日に報告が
+/// あれば合計、無ければ `None`（0 と区別する）。報告のあったターンの数も足す（`≥` の判定に使う・R08）。
 fn usage_totals(rows: &[storage::DailyUsage]) -> Vec<storage::DailyUsage> {
+    fn add<T: std::ops::Add<Output = T>>(left: Option<T>, right: Option<T>) -> Option<T> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(left + right),
+            (left, right) => left.or(right),
+        }
+    }
     let mut totals: Vec<storage::DailyUsage> = Vec::new();
     for row in rows {
         match totals.iter_mut().find(|total| total.agent == row.agent) {
             Some(total) => {
                 total.turns += row.turns;
-                total.total_tokens += row.total_tokens;
-                total.cost_usd = match (total.cost_usd, row.cost_usd) {
-                    (Some(left), Some(right)) => Some(left + right),
-                    (left, right) => left.or(right),
-                };
+                total.total_tokens = add(total.total_tokens, row.total_tokens);
+                total.token_turns += row.token_turns;
+                total.cost_usd = add(total.cost_usd, row.cost_usd);
+                total.cost_turns += row.cost_turns;
             }
             None => totals.push(storage::DailyUsage {
                 day: 0,
@@ -841,11 +859,12 @@ fn text_chip(id: &'static str, label: String, theme: &Theme) -> Stateful<Div> {
 mod tests {
     use super::*;
 
+    /// 集計 1 行（トークン・コストの報告はどのターンにもあった＝`None` なら 1 つも無かった）。
     fn daily(
         day: i64,
         agent: &str,
         turns: i64,
-        tokens: i64,
+        tokens: Option<i64>,
         cost: Option<f64>,
     ) -> storage::DailyUsage {
         storage::DailyUsage {
@@ -853,7 +872,9 @@ mod tests {
             agent: agent.into(),
             turns,
             total_tokens: tokens,
+            token_turns: if tokens.is_some() { turns } else { 0 },
             cost_usd: cost,
+            cost_turns: if cost.is_some() { turns } else { 0 },
         }
     }
 
@@ -876,7 +897,10 @@ mod tests {
                 thread_id: "thread-1".into(),
                 agent: "Claude Code".into(),
                 ended_at: agent_panel::now_unix_ms(),
-                total_tokens: 1_000,
+                tokens: Some(storage::TurnTokenCounts {
+                    total: 1_000,
+                    ..storage::TurnTokenCounts::default()
+                }),
                 cost_usd: Some(0.5),
                 ..storage::TurnUsageRecord::default()
             })
@@ -917,7 +941,7 @@ mod tests {
             {
                 Some(StatsRows::Loaded(rows)) => {
                     assert_eq!(rows.len(), 1, "{rows:?}");
-                    assert_eq!(rows[0].total_tokens, 1_000);
+                    assert_eq!(rows[0].total_tokens, Some(1_000));
                 }
                 _ => panic!("台帳を読み終えている"),
             }
@@ -935,21 +959,57 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("片付けられる");
     }
 
-    /// 期間の合計はエージェントごと。コストはある日だけ足し、どの日にも無ければ無し（0 と区別する）。
+    /// 期間の合計はエージェントごと。トークンもコストもある日だけ足し、どの日にも無ければ無し
+    /// （0 と区別する）。報告のあったターンの数も足す（一部だけなら表示は `≥`・R08）。
     #[test]
-    fn totals_sum_per_agent_and_keep_unknown_cost_unknown() {
+    fn totals_sum_per_agent_and_keep_unknown_values_unknown() {
         let totals = usage_totals(&[
-            daily(10, "Claude Code", 2, 4_000, Some(0.75)),
-            daily(10, "Codex", 1, 7_000, None),
-            daily(9, "Claude Code", 1, 500, None),
-            daily(8, "Codex", 3, 1_000, None),
+            daily(10, "Claude Code", 2, Some(4_000), Some(0.75)),
+            daily(10, "Codex", 1, Some(7_000), None),
+            daily(9, "Claude Code", 1, None, None),
+            daily(8, "Codex", 3, Some(1_000), None),
+            daily(7, "Qwen Code", 2, None, None),
         ]);
+        let claude = storage::DailyUsage {
+            token_turns: 2,
+            cost_turns: 2,
+            ..daily(0, "Claude Code", 3, Some(4_000), Some(0.75))
+        };
         assert_eq!(
             totals,
             vec![
-                daily(0, "Claude Code", 3, 4_500, Some(0.75)),
-                daily(0, "Codex", 4, 8_000, None),
+                claude.clone(),
+                daily(0, "Codex", 4, Some(8_000), None),
+                daily(0, "Qwen Code", 2, None, None),
             ]
+        );
+        assert_eq!(
+            usage::reported_total_label(
+                claude.total_tokens.map(usage::tokens_label),
+                claude.token_turns,
+                claude.turns
+            ),
+            "≥ 4.0k",
+            "報告の無いターンがある合計は下限として出す"
+        );
+        assert_eq!(
+            usage::reported_total_label(
+                claude.cost_usd.map(usage::usd_label),
+                claude.cost_turns,
+                claude.turns
+            ),
+            "≥ $0.75",
+            "推定コストも同じ"
+        );
+        let qwen = &totals[2];
+        assert_eq!(
+            usage::reported_total_label(
+                qwen.total_tokens.map(usage::tokens_label),
+                qwen.token_turns,
+                qwen.turns
+            ),
+            "—",
+            "報告が 1 つも無ければ 0 ではなく —"
         );
     }
 }
