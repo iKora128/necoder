@@ -568,6 +568,28 @@ pub fn git_common_dir_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
     })
 }
 
+/// `dir` が linked worktree（`git worktree add` で切った側）か。本体チェックアウトや repo 外は `false`。
+/// 本体の Git directory は common dir と一致し、linked worktree は `<common>/worktrees/<name>` を持つ。
+pub fn git_is_linked_worktree_on(host: &dyn Host, dir: &Path) -> bool {
+    let Some(common_dir) = git_common_dir_on(host, dir) else {
+        return false;
+    };
+    let Ok(output) = run_git(
+        host,
+        dir,
+        ["rev-parse", "--path-format=absolute", "--git-dir"],
+    ) else {
+        return false;
+    };
+    if !output.success() {
+        return false;
+    }
+    // 両方とも git 自身が `--path-format=absolute` で解決した値＝同じ流儀で比べられる
+    // （remote host の path をローカルで canonicalize しない）。
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    git_dir != common_dir
+}
+
 /// UI / CLI / MCP が同じ TaskSpace ID を生成するための共有実装。
 pub fn stable_worktree_id_on(host: &dyn Host, root: &Path) -> String {
     let identity = format!("{}\0{}", host.id(), root.display());
@@ -2355,6 +2377,43 @@ mod tests {
             std::env::temp_dir().join(format!("necoder_project_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// 本体チェックアウトは `task/*` に居ても linked worktree ではない（レールから消さない判定の土台）。
+    #[test]
+    fn linked_worktree_is_distinguished_from_main_checkout() {
+        let base = scratch("linked-worktree");
+        let main = base.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&main, &["init", "-q", "-b", "main"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        git(&main, &["config", "user.email", "t@example.com"]);
+        git(&main, &["config", "user.name", "tester"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&main, &["switch", "-q", "-c", "task/in-main"]);
+        let linked = base.join("linked");
+        let linked_arg = linked.to_string_lossy().to_string();
+        git(
+            &main,
+            &["worktree", "add", "-q", "-b", "task/linked", &linked_arg],
+        );
+
+        assert!(!git_is_linked_worktree_on(&LocalHost, &main));
+        assert!(git_is_linked_worktree_on(&LocalHost, &linked));
+        assert!(
+            !git_is_linked_worktree_on(&LocalHost, &base),
+            "repo 外は false"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
