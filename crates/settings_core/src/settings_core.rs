@@ -369,7 +369,8 @@ pub struct Settings {
     pub agent_tabs_view: String,
     /// 作業ペイン / ファイルタブの既定位置。各 Fleet ペインは個別に上書きできる。
     pub work_tabs_position: String,
-    /// 新規スレッドの既定 AI エージェント（表示名。`acp_client::AGENT_LABELS` のいずれか）。
+    /// 新規スレッドの既定 AI エージェント（表示名。組み込みの `acp_client::AGENT_LABELS` か、
+    /// `agent_servers` で足したエージェントの表示名）。
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
     pub default_agent: String,

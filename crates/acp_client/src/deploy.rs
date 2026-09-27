@@ -204,7 +204,7 @@ impl BinaryTarget<'_> {
         let relative = command_relative(&self.distribution.cmd)?;
         extract(download, url, staging, &relative)?;
         let command = staging.join(&relative);
-        if !command.is_file() {
+        if !command.is_file() || !inside(&command, staging) {
             return Err(DeployError::CommandMissing(self.distribution.cmd.clone()));
         }
         make_executable(&command)?;
@@ -347,6 +347,15 @@ fn read_marker(directory: &Path) -> Option<Deployed> {
             .unwrap_or_default()
             .to_string(),
     })
+}
+
+/// `path` の実体（symlink を辿った先）が `directory` の中にあるか。書庫の中の symlink で置き場の外の
+/// 実行ファイルを起動することにならないよう、起動するコマンドはここで確かめる。
+fn inside(path: &Path, directory: &Path) -> bool {
+    match (paths::canonicalize(path), paths::canonicalize(directory)) {
+        (Ok(path), Ok(directory)) => path.starts_with(directory),
+        _ => false,
+    }
 }
 
 /// フォルダ名に使える名前か（英数字と `.` `_` `-` `+` だけ・`.` / `..` / 空は不可）。レジストリの id・版・
@@ -844,6 +853,39 @@ mod tests {
                 "http://example.invalid/a.tar.gz".to_string()
             ))
         );
+    }
+
+    /// 起動するコマンドが書庫の中の symlink で置き場の外を指していたら置かない。
+    #[cfg(unix)]
+    #[test]
+    fn a_command_linking_outside_the_place_is_refused() {
+        let scratch = Scratch::new("symlink");
+        let content = scratch.0.join("content");
+        std::fs::create_dir_all(&content).expect("作れる");
+        std::os::unix::fs::symlink("/bin/sh", content.join("agent")).expect("symlink を作れる");
+        let archive = scratch.0.join("agent.tar.gz");
+        let status = Command::new(tar_program())
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&content)
+            .arg("agent")
+            .status()
+            .expect("tar を起こせる");
+        assert!(status.success());
+        let binary = distribution("https://example.invalid/agent.tar.gz", "./agent", None);
+        let target = BinaryTarget {
+            id: "linked",
+            version: "1.0.0",
+            platform: "darwin-aarch64",
+            distribution: &binary,
+        };
+        let root = scratch.0.join("binary");
+        assert_eq!(
+            target.deploy_with(&root, copy_from(archive)),
+            Err(DeployError::CommandMissing("./agent".to_string()))
+        );
+        assert_eq!(target.installed(&root), None, "何も置かない");
     }
 
     /// 検証の値が無い物は照合せずに置き、そのことを印に残す。書庫でない実行ファイルは `cmd` の名前で置く。

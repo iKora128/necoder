@@ -2535,16 +2535,23 @@ impl SettingsView {
             Some(i18n::t!("settings.permission_default_sub")),
             choices.into_any_element(),
         ));
-        let remembered: Vec<(usize, &'static str, &'static str, String)> = acp_client::AGENTS
+        // 足したエージェント（H1・H2）の記憶も同じく並べる（id で覚えている）。
+        let remembered: Vec<(usize, SharedString, String, String)> = agent_catalog(cx)
+            .agents()
             .iter()
             .enumerate()
             .filter_map(|(index, agent)| {
                 let mode = settings
                     .agent_config_defaults
-                    .get(agent.id)?
+                    .get(agent.id())?
                     .get("mode")
                     .filter(|mode| !mode.is_empty())?;
-                Some((index, agent.id, agent.label, mode.clone()))
+                Some((
+                    index,
+                    SharedString::from(agent.id().to_string()),
+                    agent.label().to_string(),
+                    mode.clone(),
+                ))
             })
             .collect();
         if !remembered.is_empty() {
@@ -2579,7 +2586,7 @@ impl SettingsView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, _, _window, cx| {
-                                view.forget_remembered_mode(agent_id, cx)
+                                view.forget_remembered_mode(&agent_id, cx)
                             }),
                         ),
                 );

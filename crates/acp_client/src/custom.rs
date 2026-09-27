@@ -1,7 +1,9 @@
 //! custom — 設定で足したエージェント（H1・H2）と、組み込みとまとめた「選べるエージェント」の一覧。
 //!
 //! 足し方は 2 つ: 自分のコマンド（H1・`type: "custom"`）と、ACP の公開レジストリの項目（H2・
-//! `type: "registry"`・id がレジストリの id。設定の「エージェントを追加」が書く）。
+//! `type: "registry"`・id がレジストリの id。設定の「エージェントを追加」が書く）。レジストリの物は
+//! このマシン向けの binary → npx → uvx の順で配布を選ぶ（binary は [`crate::deploy`] が落として置く）。
+//!
 //! 組み込みの [`AgentKind`]（[`AGENTS`]）は necoder が検証した `const`。こちらは settings.json の
 //! `agent_servers.<新しい id>` から実行時に決まる。acp_client は設定のスキーマを知らない
 //! （依存の向き）ので、settings 層が [`CustomAgentSpec`] に写して [`AgentCatalog::new`] に渡す。
