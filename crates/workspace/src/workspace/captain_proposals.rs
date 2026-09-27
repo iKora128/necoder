@@ -139,7 +139,9 @@ fn now_unix_ms() -> i64 {
 /// 押し直せる）。別の窓が先に裁いた・DB に無い案（[`storage::ProposalNotPending`]）は戻さない（押し直しても
 /// 裁けないカードを残さない）。
 fn card_survives_failed_resolve(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<storage::ProposalNotPending>().is_none()
+    error
+        .downcast_ref::<storage::ProposalNotPending>()
+        .is_none()
 }
 
 /// 承認した行を担当への最初の指示にする。**1 行目は題名**（＋ Task と同じく 1 行目から Task 名とブランチ名を作る）。
@@ -185,7 +187,11 @@ impl CaptainProposal {
 
 impl Workspace {
     /// 分解案を画面へ足す（IPC の `propose_tasks` と起動時の復元）。同じ id は重ねない。
-    pub(crate) fn add_captain_proposal(&mut self, proposal: CaptainProposal, cx: &mut Context<Self>) {
+    pub(crate) fn add_captain_proposal(
+        &mut self,
+        proposal: CaptainProposal,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .chrome
             .captain_proposals
@@ -242,7 +248,12 @@ impl Workspace {
     }
 
     /// 分解案カードの行の印を切り替える。
-    pub(crate) fn toggle_proposal_row(&mut self, proposal_id: &str, row: usize, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_proposal_row(
+        &mut self,
+        proposal_id: &str,
+        row: usize,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(selected) = self
             .chrome
             .captain_proposals
@@ -283,7 +294,13 @@ impl Workspace {
             "skipped": skipped.iter().map(|(task, _)| task.title.as_str()).collect::<Vec<_>>(),
         })
         .to_string();
-        self.resolve_proposal(proposal, storage::ProposalStatus::Approved, outcome, chosen, cx);
+        self.resolve_proposal(
+            proposal,
+            storage::ProposalStatus::Approved,
+            outcome,
+            chosen,
+            cx,
+        );
     }
 
     /// 却下: 何も作らない。
@@ -301,7 +318,13 @@ impl Workspace {
             "rejected": proposal.tasks.iter().map(|task| task.title.as_str()).collect::<Vec<_>>(),
         })
         .to_string();
-        self.resolve_proposal(proposal, storage::ProposalStatus::Rejected, outcome, Vec::new(), cx);
+        self.resolve_proposal(
+            proposal,
+            storage::ProposalStatus::Rejected,
+            outcome,
+            Vec::new(),
+            cx,
+        );
     }
 
     fn resolve_proposal(
@@ -366,7 +389,11 @@ impl Workspace {
         }
         let Some(integration) = self.integration_slot_for(repository) else {
             let accent = self.accent();
-            self.push_toast(SharedString::from(i18n::t!("captain.proposal_err_no_integration")), accent, cx);
+            self.push_toast(
+                SharedString::from(i18n::t!("captain.proposal_err_no_integration")),
+                accent,
+                cx,
+            );
             return;
         };
         let jobs = chosen
@@ -388,7 +415,12 @@ impl Workspace {
     }
 
     /// 分解案から作った Task に `⚑` 帰属を付け、台帳に `captain_task` を積む（再起動後も印が戻る）。
-    pub(crate) fn mark_captain_task(&mut self, space: usize, proposal_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn mark_captain_task(
+        &mut self,
+        space: usize,
+        proposal_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(slot) = self.project_sessions.projects.get_mut(space) else {
             return;
         };
@@ -398,7 +430,9 @@ impl Workspace {
             let payload = serde_json::json!({ "proposal": proposal_id }).to_string();
             cx.background_executor()
                 .spawn(async move {
-                    if let Err(error) = storage.append_task_event(&task_id, CAPTAIN_TASK_EVENT, &payload) {
+                    if let Err(error) =
+                        storage.append_task_event(&task_id, CAPTAIN_TASK_EVENT, &payload)
+                    {
                         eprintln!("⚑ 帰属を記録できない: {error:#}");
                     }
                 })
@@ -408,7 +442,10 @@ impl Workspace {
     }
 
     /// 要対応に出す分解案（このリポジトリの分・古い順）。
-    pub(crate) fn captain_proposals_for(&self, repository: &str) -> impl Iterator<Item = &CaptainProposal> {
+    pub(crate) fn captain_proposals_for(
+        &self,
+        repository: &str,
+    ) -> impl Iterator<Item = &CaptainProposal> {
         let repository = repository.to_string();
         self.chrome
             .captain_proposals
@@ -593,7 +630,9 @@ mod tests {
     /// R09: DB の失敗ならカードを戻し、もう裁けない案（先に裁かれた・DB に無い）は戻さない。
     #[test]
     fn only_a_database_failure_brings_the_card_back() {
-        assert!(card_survives_failed_resolve(&anyhow::anyhow!("database is locked")));
+        assert!(card_survives_failed_resolve(&anyhow::anyhow!(
+            "database is locked"
+        )));
         let resolved = anyhow::Error::new(storage::ProposalNotPending {
             id: "proposal-1".into(),
             missing: false,
@@ -603,7 +642,6 @@ mod tests {
             &resolved.context("分解案の裁きの追記に失敗")
         ));
     }
-
 
     fn arguments(value: serde_json::Value) -> Result<(Vec<ProposedTask>, Option<String>), String> {
         validate_proposed_tasks(&value)
@@ -621,20 +659,30 @@ mod tests {
         .unwrap();
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].title, "README の誤字", "前後の空白は落とす");
-        assert_eq!(tasks[0].agent.as_deref(), Some("Codex"), "id でも表示名へ寄せる");
+        assert_eq!(
+            tasks[0].agent.as_deref(),
+            Some("Codex"),
+            "id でも表示名へ寄せる"
+        );
         assert_eq!(tasks[1].scope.as_deref(), Some("calc.py と tests/"));
         assert_eq!(note.as_deref(), Some("実装とテストは 1 本に束ねた"));
 
         assert!(arguments(serde_json::json!({ "tasks": [] })).is_err());
         assert!(arguments(serde_json::json!({})).is_err());
-        let missing = arguments(serde_json::json!({ "tasks": [{ "title": "x", "goal": "y" }] }))
-            .unwrap_err();
-        assert!(missing.contains("done_when"), "何が足りないかを返す: {missing}");
+        let missing =
+            arguments(serde_json::json!({ "tasks": [{ "title": "x", "goal": "y" }] })).unwrap_err();
+        assert!(
+            missing.contains("done_when"),
+            "何が足りないかを返す: {missing}"
+        );
         let unknown = arguments(serde_json::json!({
             "tasks": [{ "title": "x", "goal": "y", "done_when": "z", "agent": "gpt" }]
         }))
         .unwrap_err();
-        assert!(unknown.contains("Claude Code"), "使える名前を添える: {unknown}");
+        assert!(
+            unknown.contains("Claude Code"),
+            "使える名前を添える: {unknown}"
+        );
         let too_many: Vec<_> = (0..=MAX_PROPOSED_TASKS)
             .map(|index| serde_json::json!({ "title": format!("t{index}"), "goal": "g", "done_when": "d" }))
             .collect();
@@ -650,8 +698,16 @@ mod tests {
             scope: Some("calc.py".into()),
             agent: None,
         });
-        assert_eq!(prompt.lines().next(), Some("割り算を足す"), "1 行目から Task 名とブランチ名を作る");
-        assert!(prompt.contains("divide を足す") && prompt.contains("pytest が通る") && prompt.contains("calc.py"));
+        assert_eq!(
+            prompt.lines().next(),
+            Some("割り算を足す"),
+            "1 行目から Task 名とブランチ名を作る"
+        );
+        assert!(
+            prompt.contains("divide を足す")
+                && prompt.contains("pytest が通る")
+                && prompt.contains("calc.py")
+        );
     }
 
     #[test]

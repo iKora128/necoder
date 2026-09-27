@@ -241,7 +241,10 @@ mod tests {
                 panel.threads[0].can_compact(),
                 "止めても id が残る＝次の送信が引き継ぐので /compact は出したまま"
             );
-            assert!(panel.threads[2].can_compact(), "使用量を報告しないエージェントでも出す");
+            assert!(
+                panel.threads[2].can_compact(),
+                "使用量を報告しないエージェントでも出す"
+            );
             assert!(
                 !panel.threads[3].can_compact(),
                 "送信路も id も無い（一度も起こしていない）スレッドには出さない"

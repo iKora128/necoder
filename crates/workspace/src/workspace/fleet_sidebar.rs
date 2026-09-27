@@ -739,7 +739,11 @@ impl Workspace {
                     .iter()
                     .map(|(_, _, status)| status.tokens_used)
                     .sum(),
-                shortstat: self.project_sessions.sessions.get(index).and_then(|session| session.repository.shortstat()),
+                shortstat: self
+                    .project_sessions
+                    .sessions
+                    .get(index)
+                    .and_then(|session| session.repository.shortstat()),
                 // レールの並び = ⌘1..9（`ActivateProjectN`）。10 本目以降は出さない。
                 rail_shortcut: (index < 9).then_some(index + 1),
                 last_input_at_ms: statuses

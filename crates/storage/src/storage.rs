@@ -941,7 +941,11 @@ impl Storage {
                     .query("SELECT MAX(id) FROM task_events", ())
                     .await
                     .context("task_events の末尾の読み出しに失敗")?;
-                match rows.next().await.context("task_events 末尾行の取得に失敗")? {
+                match rows
+                    .next()
+                    .await
+                    .context("task_events 末尾行の取得に失敗")?
+                {
                     Some(row) => Ok(row.get_value(0)?.as_integer().copied().unwrap_or(0)),
                     None => Ok(0),
                 }
@@ -961,7 +965,11 @@ impl Storage {
                     )
                     .await
                     .context("captain_cursors の読み出しに失敗")?;
-                match rows.next().await.context("captain_cursors 行の取得に失敗")? {
+                match rows
+                    .next()
+                    .await
+                    .context("captain_cursors 行の取得に失敗")?
+                {
                     Some(row) => Ok(Some(
                         *row.get_value(0)?.as_integer().context("last_event_id")?,
                     )),
@@ -1145,7 +1153,9 @@ impl Storage {
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
-                conn.execute("BEGIN", ()).await.context("proposal resolve begin")?;
+                conn.execute("BEGIN", ())
+                    .await
+                    .context("proposal resolve begin")?;
                 let result = async {
                     let pending = {
                         let mut rows = conn
@@ -1155,9 +1165,15 @@ impl Storage {
                             )
                             .await
                             .context("captain_proposals の読み出しに失敗")?;
-                        match rows.next().await.context("captain_proposals 行の取得に失敗")? {
-                            Some(row) => row.get_value(0)?.as_text().map(String::as_str)
-                                == Some(ProposalStatus::Pending.as_str()),
+                        match rows
+                            .next()
+                            .await
+                            .context("captain_proposals 行の取得に失敗")?
+                        {
+                            Some(row) => {
+                                row.get_value(0)?.as_text().map(String::as_str)
+                                    == Some(ProposalStatus::Pending.as_str())
+                            }
                             None => {
                                 return Err(anyhow::Error::new(ProposalNotPending {
                                     id: id.clone(),
@@ -1195,7 +1211,9 @@ impl Storage {
                         .await
                         .context("task event id の取得に失敗")?;
                     match rows.next().await.context("task event id 行の取得に失敗")? {
-                        Some(row) => Ok(*row.get_value(0)?.as_integer().context("task event id")?),
+                        Some(row) => {
+                            Ok(*row.get_value(0)?.as_integer().context("task event id")?)
+                        }
                         None => anyhow::bail!("task event id が返らない"),
                     }
                 }
@@ -4441,13 +4459,19 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        storage.upsert_task_space(&task("space-a", "repo-a", "rope 設計")).unwrap();
-        storage.upsert_task_space(&task("space-b", "repo-b", "別リポジトリ")).unwrap();
+        storage
+            .upsert_task_space(&task("space-a", "repo-a", "rope 設計"))
+            .unwrap();
+        storage
+            .upsert_task_space(&task("space-b", "repo-b", "別リポジトリ"))
+            .unwrap();
         assert_eq!(storage.latest_task_event_id().unwrap(), 0);
         let first = storage
             .append_task_event("space-a", "phase_changed", r#"{"phase":"review_ready"}"#)
             .unwrap();
-        storage.append_task_event("space-b", "phase_changed", r#"{"phase":"failed"}"#).unwrap();
+        storage
+            .append_task_event("space-b", "phase_changed", r#"{"phase":"failed"}"#)
+            .unwrap();
         let human = storage
             .append_task_event("space-a", "human_send", r#"{"text":"テストも"}"#)
             .unwrap();
@@ -4460,7 +4484,9 @@ mod tests {
         assert_eq!(storage.load_captain_cursor("repo-a").unwrap(), Some(first));
 
         // 未読はリポジトリで絞られ、Task の題名が付く。
-        let unread = storage.load_repository_events_since("repo-a", first, 100).unwrap();
+        let unread = storage
+            .load_repository_events_since("repo-a", first, 100)
+            .unwrap();
         assert_eq!(unread.len(), 1);
         assert_eq!(unread[0].event.kind, "human_send");
         assert_eq!(unread[0].title.as_deref(), Some("rope 設計"));
@@ -4471,7 +4497,8 @@ mod tests {
             repository_id: "repo-a".into(),
             root: PathBuf::from("/work/main"),
             note: Some("実装とテストは 1 本に束ねた".into()),
-            tasks: r#"[{"title":"割り算","goal":"divide を足す","done_when":"テストが通る"}]"#.into(),
+            tasks: r#"[{"title":"割り算","goal":"divide を足す","done_when":"テストが通る"}]"#
+                .into(),
             status: ProposalStatus::Pending,
             outcome: None,
             created_at: 5,
@@ -4480,15 +4507,24 @@ mod tests {
         storage.insert_captain_proposal(&proposal).unwrap();
         let pending = storage.load_pending_captain_proposals().unwrap();
         assert_eq!(pending, vec![proposal.clone()]);
-        let unread = storage.load_repository_events_since("repo-a", human, 100).unwrap();
+        let unread = storage
+            .load_repository_events_since("repo-a", human, 100)
+            .unwrap();
         assert_eq!(unread.len(), 1);
         assert_eq!(unread[0].event.kind, "captain_proposed");
         assert_eq!(unread[0].title, None);
-        assert!(storage.load_repository_events_since("repo-b", human, 100).unwrap().is_empty());
+        assert!(storage
+            .load_repository_events_since("repo-b", human, 100)
+            .unwrap()
+            .is_empty());
 
         // 裁く: 台帳に積まれ、pending から消え、二度目はエラー。
         let resolved = storage
-            .resolve_captain_proposal("proposal-1", ProposalStatus::Approved, r#"{"approved":["割り算"]}"#)
+            .resolve_captain_proposal(
+                "proposal-1",
+                ProposalStatus::Approved,
+                r#"{"approved":["割り算"]}"#,
+            )
             .unwrap();
         assert!(resolved > human);
         assert!(storage.load_pending_captain_proposals().unwrap().is_empty());
@@ -4511,14 +4547,21 @@ mod tests {
         assert!(storage
             .resolve_captain_proposal("proposal-1", ProposalStatus::Pending, "{}")
             .is_err());
-        let unread = storage.load_repository_events_since("repo-a", human, 100).unwrap();
+        let unread = storage
+            .load_repository_events_since("repo-a", human, 100)
+            .unwrap();
         assert_eq!(
-            unread.iter().map(|event| event.event.kind.as_str()).collect::<Vec<_>>(),
+            unread
+                .iter()
+                .map(|event| event.event.kind.as_str())
+                .collect::<Vec<_>>(),
             vec!["captain_proposed", "proposal_approved"]
         );
 
         // ⚑ 帰属の素材: 種類で Task を引ける。
-        storage.append_task_event("space-a", "captain_task", r#"{"proposal":"proposal-1"}"#).unwrap();
+        storage
+            .append_task_event("space-a", "captain_task", r#"{"proposal":"proposal-1"}"#)
+            .unwrap();
         assert_eq!(
             storage.load_task_ids_with_event("captain_task").unwrap(),
             vec!["space-a".to_string()]

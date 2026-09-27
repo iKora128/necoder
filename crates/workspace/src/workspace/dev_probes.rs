@@ -603,7 +603,10 @@ impl Workspace {
             // Captain の分解案を 1 件、要対応に仕込む（FLEET-V2 §5.5 のカードの見た目・DB には書かない）。
             // `proposal:<n>` で行数（既定 2・2 行目は印を外した状態）。
             "proposal" => {
-                let rows = argument.parse::<usize>().unwrap_or(2).clamp(1, MAX_PROPOSED_TASKS);
+                let rows = argument
+                    .parse::<usize>()
+                    .unwrap_or(2)
+                    .clamp(1, MAX_PROPOSED_TASKS);
                 let Some(integration) = self
                     .project_sessions
                     .projects
@@ -613,9 +616,27 @@ impl Workspace {
                     return;
                 };
                 let samples = [
-                    ("rope に置き換える", "buffer を rope に置き換え、undo を Transaction 単位にする", "cargo test -p editor_core が通る", Some("crates/editor_core"), Some("Claude Code")),
-                    ("README の誤字", "Calcurator を Calculator に直す", "grep で Calcurator が 0 件", Some("README.md"), Some("Codex")),
-                    ("割り算を足す", "calc.py に divide を足す（0 で割ったら ValueError）", "pytest が通る", None, None),
+                    (
+                        "rope に置き換える",
+                        "buffer を rope に置き換え、undo を Transaction 単位にする",
+                        "cargo test -p editor_core が通る",
+                        Some("crates/editor_core"),
+                        Some("Claude Code"),
+                    ),
+                    (
+                        "README の誤字",
+                        "Calcurator を Calculator に直す",
+                        "grep で Calcurator が 0 件",
+                        Some("README.md"),
+                        Some("Codex"),
+                    ),
+                    (
+                        "割り算を足す",
+                        "calc.py に divide を足す（0 で割ったら ValueError）",
+                        "pytest が通る",
+                        None,
+                        None,
+                    ),
                 ];
                 let tasks: Vec<ProposedTask> = samples
                     .iter()
@@ -638,7 +659,10 @@ impl Workspace {
                     id: new_proposal_id(),
                     repository_id: slot.repository_key().to_string(),
                     root: slot.worktree.root().to_path_buf(),
-                    note: Some("実装とテストは 1 本に束ねた。README は触る範囲が重ならないので別立て。".to_string()),
+                    note: Some(
+                        "実装とテストは 1 本に束ねた。README は触る範囲が重ならないので別立て。"
+                            .to_string(),
+                    ),
                     tasks: serde_json::to_string(&tasks).unwrap_or_default(),
                     status: storage::ProposalStatus::Pending,
                     outcome: None,

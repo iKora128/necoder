@@ -683,13 +683,23 @@ mod tests {
         let found = search["result"]["content"][0]["text"].as_str().unwrap();
         assert!(found.contains("a.rs"), "検索で a.rs が見つかる: {found}");
         // 未知メソッド → error
-        let unknown = handle(&json!({ "jsonrpc":"2.0","id":9,"method":"nope" }), &root, Profile::Full).unwrap();
+        let unknown = handle(
+            &json!({ "jsonrpc":"2.0","id":9,"method":"nope" }),
+            &root,
+            Profile::Full,
+        )
+        .unwrap();
         assert_eq!(unknown["error"]["code"], -32601);
         let _ = std::fs::remove_dir_all(&root);
     }
 
     fn tool_names(profile: Profile, root: &Path) -> Vec<String> {
-        let list = handle(&json!({ "jsonrpc":"2.0","id":1,"method":"tools/list" }), root, profile).unwrap();
+        let list = handle(
+            &json!({ "jsonrpc":"2.0","id":1,"method":"tools/list" }),
+            root,
+            profile,
+        )
+        .unwrap();
         list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -711,13 +721,22 @@ mod tests {
             "fleet_wait_task",
             "fleet_integrate_task",
         ] {
-            assert!(!captain.iter().any(|name| name == forbidden), "{forbidden} を出さない");
-            assert!(full.iter().any(|name| name == forbidden), "Full 版には残す: {forbidden}");
+            assert!(
+                !captain.iter().any(|name| name == forbidden),
+                "{forbidden} を出さない"
+            );
+            assert!(
+                full.iter().any(|name| name == forbidden),
+                "Full 版には残す: {forbidden}"
+            );
         }
         assert!(captain.iter().any(|name| name == "fleet_propose_tasks"));
         // 表に書いた名前は全部実在する（綴り違いで席の道具が消えない）。
         for tool in workspace::CAPTAIN_MCP_TOOLS {
-            assert!(captain.iter().any(|name| name == tool), "実在しない道具名: {tool}");
+            assert!(
+                captain.iter().any(|name| name == tool),
+                "実在しない道具名: {tool}"
+            );
         }
         let refused = handle(
             &json!({ "jsonrpc":"2.0","id":2,"method":"tools/call",

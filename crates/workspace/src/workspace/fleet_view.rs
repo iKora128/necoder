@@ -2108,45 +2108,53 @@ impl Workspace {
         }
 
         // 中央ハブ（リポジトリ）。スポークの上に重ねるため最後に child する。枠はプロジェクト色。
-        body =
-            body.child(
-                div()
-                    .absolute()
-                    .left(relative(center.0))
-                    .ml(px(-78.))
-                    .top(relative(center.1))
-                    .mt(px(-28.0))
-                    .w(px(156.))
-                    .h(px(56.))
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .items_center()
-                    .gap(px(2.))
-                    .rounded(px(12.))
-                    .bg(theme.bg2)
-                    .border_1()
-                    .border_color(accent)
-                    .child(
-                        div()
-                            .max_w(px(116.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(12.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg0)
-                            .child(SharedString::from(match &captain {
-                                Some(_) => format!("⚑ {}", i18n::t!("captain.title")),
-                                None => format!("⎇ {repo}"),
-                            })),
-                    )
-                    .child(div().max_w(px(142.)).overflow_hidden().whitespace_nowrap().text_size(px(9.5)).text_color(theme.fg2).child(
-                        SharedString::from(match &captain {
-                            Some(agent) => format!("{agent} · {}", i18n::t!("fleet.graph_hub_agents", "count" => lanes.len())),
+        body = body.child(
+            div()
+                .absolute()
+                .left(relative(center.0))
+                .ml(px(-78.))
+                .top(relative(center.1))
+                .mt(px(-28.0))
+                .w(px(156.))
+                .h(px(56.))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .items_center()
+                .gap(px(2.))
+                .rounded(px(12.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(accent)
+                .child(
+                    div()
+                        .max_w(px(116.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.fg0)
+                        .child(SharedString::from(match &captain {
+                            Some(_) => format!("⚑ {}", i18n::t!("captain.title")),
+                            None => format!("⎇ {repo}"),
+                        })),
+                )
+                .child(
+                    div()
+                        .max_w(px(142.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(9.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(match &captain {
+                            Some(agent) => format!(
+                                "{agent} · {}",
+                                i18n::t!("fleet.graph_hub_agents", "count" => lanes.len())
+                            ),
                             None => i18n::t!("fleet.graph_hub_agents", "count" => lanes.len()),
-                        }),
-                    )),
-            );
+                        })),
+                ),
+        );
 
         body.into_any_element()
     }
@@ -2523,7 +2531,9 @@ impl Workspace {
         let body = session_index
             .map(|session_index| {
                 let appointing = self.chrome.captain_appointing
-                    && self.project_sessions.projects[session_index].task_space.is_integration()
+                    && self.project_sessions.projects[session_index]
+                        .task_space
+                        .is_integration()
                     && settings::get(cx).captain_agent.is_none();
                 let conversation = if appointing {
                     self.render_captain_appoint(cx)

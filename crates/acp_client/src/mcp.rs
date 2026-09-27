@@ -391,7 +391,12 @@ pub fn codex_configured_server_names_for(codex_home: Option<&Path>) -> Vec<Strin
 pub fn codex_server_names_in(text: &str) -> Vec<String> {
     text.parse::<toml::Value>()
         .ok()
-        .and_then(|value| value.get("mcp_servers").and_then(toml::Value::as_table).cloned())
+        .and_then(|value| {
+            value
+                .get("mcp_servers")
+                .and_then(toml::Value::as_table)
+                .cloned()
+        })
         .map(|table| table.keys().cloned().collect())
         .unwrap_or_default()
 }

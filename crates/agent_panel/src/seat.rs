@@ -55,7 +55,9 @@ pub fn seat_permission_mode(agent_label: &str) -> Option<&'static str> {
 
 /// 題名に席の道具の名前を含むか（`mcp__necoder__fleet_list_tasks` / `mcp.necoder.fleet_list_tasks` の両方の綴り）。
 fn names_a_seat_tool(seat: &SeatPolicy, title: &str) -> bool {
-    seat.allowed_tools.iter().any(|tool| title.contains(tool.as_str()))
+    seat.allowed_tools
+        .iter()
+        .any(|tool| title.contains(tool.as_str()))
 }
 
 /// 権限の問いの裁定（純粋関数・テスト用に切り出す）。`true` = 許可。
@@ -65,15 +67,22 @@ fn seat_allows(seat: &SeatPolicy, kind: Option<ToolCallKind>, title: &str, mcp_t
         return names_a_seat_tool(seat, title);
     }
     match kind {
-        Some(ToolCallKind::Read | ToolCallKind::Search | ToolCallKind::Think | ToolCallKind::Fetch) => true,
-        Some(ToolCallKind::Edit | ToolCallKind::Delete | ToolCallKind::Move | ToolCallKind::Execute) => false,
+        Some(
+            ToolCallKind::Read | ToolCallKind::Search | ToolCallKind::Think | ToolCallKind::Fetch,
+        ) => true,
+        Some(
+            ToolCallKind::Edit | ToolCallKind::Delete | ToolCallKind::Move | ToolCallKind::Execute,
+        ) => false,
         Some(ToolCallKind::Other) | None => names_a_seat_tool(seat, title),
     }
 }
 
 /// 見張りの対象（完了したら決まりの漏れ）。
 fn is_writing_tool(kind: ToolCallKind) -> bool {
-    matches!(kind, ToolCallKind::Edit | ToolCallKind::Delete | ToolCallKind::Move)
+    matches!(
+        kind,
+        ToolCallKind::Edit | ToolCallKind::Delete | ToolCallKind::Move
+    )
 }
 
 impl AgentPanel {
@@ -90,7 +99,12 @@ impl AgentPanel {
         }
         let mut cleared = Vec::new();
         for (other, thread) in self.threads.iter_mut().enumerate() {
-            if other != index && thread.seat.as_ref().is_some_and(|seat| seat.id == policy.id) {
+            if other != index
+                && thread
+                    .seat
+                    .as_ref()
+                    .is_some_and(|seat| seat.id == policy.id)
+            {
                 thread.seat = None;
                 cleared.push(thread.id.clone());
             }
@@ -211,7 +225,9 @@ impl AgentPanel {
         thread.session_note = None;
         thread.seat_tools.clear();
         thread.tokens_used = 0;
-        thread.entries.push(Entry::LedgerEvent(SharedString::from(divider)));
+        thread
+            .entries
+            .push(Entry::LedgerEvent(SharedString::from(divider)));
         let thread_id = thread.id.clone();
         // DB の会話 id も忘れる（再起動で古い会話を `session/load` しない）。
         if let Some(storage) = self.storage.clone() {
@@ -324,7 +340,9 @@ impl AgentPanel {
         }
         let title = info.title.clone().unwrap_or_else(|| format!("{kind:?}"));
         let notice = format!("{} {title}", seat.violation_notice);
-        thread.entries.push(Entry::Agent(SharedString::from(notice)));
+        thread
+            .entries
+            .push(Entry::Agent(SharedString::from(notice)));
         Some(title)
     }
 }
@@ -346,25 +364,78 @@ mod tests {
     #[test]
     fn a_seat_allows_reading_and_its_own_tools_and_refuses_writing_and_the_shell() {
         let seat = captain_seat();
-        assert!(seat_allows(&seat, Some(ToolCallKind::Read), "Read src/main.rs", false));
-        assert!(seat_allows(&seat, Some(ToolCallKind::Search), "Grep TODO", false));
-        assert!(seat_allows(&seat, Some(ToolCallKind::Fetch), "WebFetch", false));
-        assert!(seat_allows(&seat, Some(ToolCallKind::Other), "mcp__necoder__fleet_propose_tasks", false));
-        assert!(seat_allows(&seat, None, "necoder.fleet_list_tasks", false), "エージェントごとの綴り違いも名前で拾う");
-        assert!(!seat_allows(&seat, Some(ToolCallKind::Edit), "Edit src/main.rs", false));
+        assert!(seat_allows(
+            &seat,
+            Some(ToolCallKind::Read),
+            "Read src/main.rs",
+            false
+        ));
+        assert!(seat_allows(
+            &seat,
+            Some(ToolCallKind::Search),
+            "Grep TODO",
+            false
+        ));
+        assert!(seat_allows(
+            &seat,
+            Some(ToolCallKind::Fetch),
+            "WebFetch",
+            false
+        ));
+        assert!(seat_allows(
+            &seat,
+            Some(ToolCallKind::Other),
+            "mcp__necoder__fleet_propose_tasks",
+            false
+        ));
+        assert!(
+            seat_allows(&seat, None, "necoder.fleet_list_tasks", false),
+            "エージェントごとの綴り違いも名前で拾う"
+        );
+        assert!(!seat_allows(
+            &seat,
+            Some(ToolCallKind::Edit),
+            "Edit src/main.rs",
+            false
+        ));
         assert!(!seat_allows(&seat, Some(ToolCallKind::Delete), "rm", false));
         assert!(!seat_allows(&seat, Some(ToolCallKind::Move), "mv", false));
         assert!(
-            !seat_allows(&seat, Some(ToolCallKind::Execute), "necoder fleet create . x", false),
+            !seat_allows(
+                &seat,
+                Some(ToolCallKind::Execute),
+                "necoder fleet create . x",
+                false
+            ),
             "shell は道具の名前を含んでいても断る（CLI の抜け道）"
         );
-        assert!(!seat_allows(&seat, Some(ToolCallKind::Other), "mcp__higgsfield__generate_image", false));
+        assert!(!seat_allows(
+            &seat,
+            Some(ToolCallKind::Other),
+            "mcp__higgsfield__generate_image",
+            false
+        ));
         assert!(!seat_allows(&seat, None, "write_file", false));
         // codex-acp の MCP の承認は種別「実行」で来る。印があれば題名で決める（shell とは分ける）。
-        assert!(seat_allows(&seat, Some(ToolCallKind::Execute), "mcp.necoder.fleet_propose_tasks", true));
-        assert!(!seat_allows(&seat, Some(ToolCallKind::Execute), "mcp.computer-use.click", true));
+        assert!(seat_allows(
+            &seat,
+            Some(ToolCallKind::Execute),
+            "mcp.necoder.fleet_propose_tasks",
+            true
+        ));
+        assert!(!seat_allows(
+            &seat,
+            Some(ToolCallKind::Execute),
+            "mcp.computer-use.click",
+            true
+        ));
         assert!(
-            !seat_allows(&seat, Some(ToolCallKind::Execute), "fleet_list_tasks", false),
+            !seat_allows(
+                &seat,
+                Some(ToolCallKind::Execute),
+                "fleet_list_tasks",
+                false
+            ),
             "印の無い実行は shell として断る"
         );
     }

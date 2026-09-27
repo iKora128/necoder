@@ -154,7 +154,10 @@ impl Workspace {
             .unwrap_or(self.project_sessions.active);
         // 2 本以上なら fan-out（舞台に並べて比べる・O23）。
         let fanout = plan.len() > 1;
-        let jobs = plan.into_iter().map(|task| (prompt.clone(), task)).collect();
+        let jobs = plan
+            .into_iter()
+            .map(|task| (prompt.clone(), task))
+            .collect();
         self.create_tasks_in(integration_index, start, jobs, fanout, cx);
     }
 
@@ -167,7 +170,13 @@ impl Workspace {
         jobs: Vec<(String, FanoutTask)>,
         cx: &mut Context<Self>,
     ) {
-        self.create_tasks_in(integration_index, project::TaskStart::default(), jobs, false, cx);
+        self.create_tasks_in(
+            integration_index,
+            project::TaskStart::default(),
+            jobs,
+            false,
+            cx,
+        );
     }
 
     /// 依頼から Task を切る（`jobs` = 1 本ごとの依頼と切り方）。worktree は**順に**作り、1 本ごとに作成中の

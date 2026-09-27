@@ -664,11 +664,11 @@ impl AgentPanel {
     /// 走っていた物があれば `true`。DB は書き換えない（再起動後は「中断」として読める）。
     pub(crate) fn stop_all_shell_runs(&mut self) -> bool {
         let mut stopped = false;
-        for thread in self
-            .threads
-            .iter_mut()
-            .chain(self.closed_threads.iter_mut().map(|closed| &mut closed.thread))
-        {
+        for thread in self.threads.iter_mut().chain(
+            self.closed_threads
+                .iter_mut()
+                .map(|closed| &mut closed.thread),
+        ) {
             stopped |= stop_thread_shell_runs(thread).0;
         }
         stopped

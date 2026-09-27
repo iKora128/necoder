@@ -66,11 +66,23 @@ impl Workspace {
             }
             agent_panel::PanelEvent::SeatViolation { thread, tool } => {
                 // 席の決まりの漏れ（許可を求めずに編集された・FLEET-V2 §5.8-4）。ターンは止めてある。
-                let text = SharedString::from(i18n::t!("captain.seat_violation_news", "tool" => tool.as_ref()));
+                let text = SharedString::from(
+                    i18n::t!("captain.seat_violation_news", "tool" => tool.as_ref()),
+                );
                 let accent = self.accent();
                 // 押すと Captain へ（space 無しの Captain 行・O13 の `open_news_item`）。
-                self.push_news(NewsKind::Captain, accent, thread.clone(), text.clone(), None);
-                self.push_toast(SharedString::from(format!("⚑ {thread} — {text}")), accent, cx);
+                self.push_news(
+                    NewsKind::Captain,
+                    accent,
+                    thread.clone(),
+                    text.clone(),
+                    None,
+                );
+                self.push_toast(
+                    SharedString::from(format!("⚑ {thread} — {text}")),
+                    accent,
+                    cx,
+                );
             }
 
             agent_panel::PanelEvent::TurnStarted { .. } => {
@@ -125,7 +137,13 @@ impl Workspace {
                 // Captain の采配は captain イベントとして監査（FLEET-V2 §5.6・ニュースは丸チップ）。
                 if is_integration_slot && is_captain_thread_name(thread.as_ref()) {
                     if completed {
-                        self.record_captain_decision(session_index, *color, digest.as_ref(), summary, cx);
+                        self.record_captain_decision(
+                            session_index,
+                            *color,
+                            digest.as_ref(),
+                            summary,
+                            cx,
+                        );
                     }
                     self.finish_captain_turn(session_index, completed, cx);
                 }
