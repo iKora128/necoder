@@ -5159,7 +5159,9 @@ mod tests {
     }
 
     /// Captain のテスト用の一時ディレクトリと設定。エージェントの起動コマンドは存在しないパスへ向ける
-    /// （送信が本物のエージェントを起こさず、起動の失敗として畳まれる）。
+    /// （送信が本物のエージェントを起こさず、起動の失敗として畳まれる）。✳ 要約と自動命名も止める —
+    /// どちらも起動コマンドの上書きを通らない一発生成（既定のエージェントの CLI）で、失敗したターンの後に
+    /// 本物の `claude -p` を起こしていた（利用者のサブスクで動く）。
     fn captain_test_home(label: &str) -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "necoder_captain_{label}_{}_{}",
@@ -5174,6 +5176,7 @@ mod tests {
         std::fs::write(
             &settings_path,
             r#"{"onboarded":true,"agent_prewarm":false,"captain_agent":"Claude Code",
+                "tier2_summaries":false,"agent_auto_name":false,
                 "agent_servers":{"claude":{"type":"custom","command":"/nonexistent/necoder-test-agent"}}}"#,
         )
         .unwrap();
