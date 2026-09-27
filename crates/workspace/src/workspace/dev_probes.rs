@@ -39,6 +39,7 @@ impl Workspace {
     ///
     /// `limits` / `near` / `blocked` = いまのスレッドにレート制限を流す（本番と同じ `on_event`）/
     /// `codex` = Codex の値を置き場へ直接入れる（**codex app-server は起こさない**）/
+    /// `keys` = 同じ Claude Code の別の鍵（SSH 先・別の置き場・認証に関わる env だけが違う物）の値を置く /
     /// `codex-loading` / `codex-failed` = Codex の読み取りの途中 / 失敗の行 /
     /// `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ直近 12 日分の使用量を書く（報告の無いターンを含む）/
     /// `popover` = チップを押したのと同じにポップオーバーを開く（Codex は訊かない）/ `stats` = 統計の画面。
@@ -63,6 +64,8 @@ impl Workspace {
                         .update(cx, |panel, cx| panel.debug_seed_rate_limits(command, cx));
                 }
                 "codex" => agent_panel::usage::debug_seed_codex_limits(cx),
+                // 同じ Claude Code の別の鍵（SSH 先・別の置き場・認証に関わる env）の値（R08）。
+                "keys" => agent_panel::usage::debug_seed_other_keys(cx),
                 "codex-loading" => agent_panel::usage::debug_set_codex_read(
                     agent_panel::usage::CodexRead::Loading,
                     cx,

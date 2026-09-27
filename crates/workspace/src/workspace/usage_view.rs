@@ -40,8 +40,8 @@ enum StatsRows {
 }
 
 impl Workspace {
-    /// statusbar の使用量チップ: いまのスレッドのエージェントの 5 時間枠・週枠（と上限に近い窓）。
-    /// 値が無ければ出さない。
+    /// statusbar の使用量チップ: いまのスレッドの鍵（エージェント + 動かしている場所 + 認証の環境・R08）の
+    /// 5 時間枠・週枠（と上限に近い窓）。値が無ければ出さない（別の鍵の値で代用しない）。
     pub(crate) fn render_usage_chip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         // 値の置き場が無ければ鍵も作らない（描画の手間を増やさない）。
         cx.try_global::<UsageLimits>()?;
@@ -156,37 +156,42 @@ impl Workspace {
         }
     }
 
-    /// 使用量のポップオーバー: エージェントごとの窓・使用率・リセットまでの時間・受け取った時刻。
+    /// 使用量のポップオーバー: 鍵（エージェント + 動かしている場所 + 認証の環境）ごとの窓・使用率・
+    /// リセットまでの時間・受け取った時刻。
     pub(crate) fn render_usage_popover(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.overlays.usage_popover.as_ref()?;
         let theme = self.theme.clone();
         let now_ms = agent_panel::now_unix_ms();
         let active_key = self.agent_panel.read(cx).active_usage_key(cx);
-        let (mut agents, codex_read, codex_installed) = match cx.try_global::<UsageLimits>() {
-            Some(limits) => (
-                limits
-                    .agents()
-                    .map(|(key, limits)| (key.clone(), limits.clone()))
-                    .collect::<Vec<_>>(),
-                limits.codex.clone(),
-                limits.codex_installed == Some(true),
-            ),
-            None => (Vec::new(), CodexRead::Idle, false),
-        };
-        // いまのスレッドの鍵を先頭に（残りは鍵の順のまま）。同じエージェントでも場所・置き場が違えば
-        // 別の行（R08）。
+        let (mut agents, codex_read, codex_key, codex_installed) =
+            match cx.try_global::<UsageLimits>() {
+                Some(limits) => (
+                    limits
+                        .agents()
+                        .map(|(key, limits)| (key.clone(), limits.clone()))
+                        .collect::<Vec<_>>(),
+                    limits.codex.clone(),
+                    limits.codex_key.clone(),
+                    limits.codex_installed == Some(true),
+                ),
+                None => (Vec::new(), CodexRead::Idle, None, false),
+            };
+        // いまのスレッドの鍵を先頭に（残りは鍵の順のまま）。同じエージェントでも場所・認証の環境が
+        // 違えば別の行（R08）。
         agents.sort_by_key(|(key, _)| Some(key) != active_key.as_ref());
-        let codex_label = usage::codex_label();
+        // Codex の読み取りの状態と「再読み込み」は、読みに行った鍵（手元の Codex × codex へ渡した env）の
+        // 行にだけ出す（別の置き場・別の API キーの古い値の行に今の失敗を添えない）。
+        let codex_key = codex_key.unwrap_or_else(|| usage::local_codex_key(cx));
 
         let mut body = div().flex().flex_col().gap(px(12.));
         for (key, limits) in &agents {
-            let codex = key.is_local_codex().then_some(&codex_read);
+            let codex = (key == &codex_key).then_some(&codex_read);
             body =
                 body.child(self.render_usage_agent(&key.label(), Some(limits), codex, now_ms, cx));
         }
-        if codex_installed && !agents.iter().any(|(key, _)| key.is_local_codex()) {
+        if codex_installed && !agents.iter().any(|(key, _)| key == &codex_key) {
             body = body.child(self.render_usage_agent(
-                &SharedString::from(codex_label),
+                &codex_key.label(),
                 None,
                 Some(&codex_read),
                 now_ms,
@@ -280,7 +285,8 @@ impl Workspace {
         )
     }
 
-    /// ポップオーバーの 1 エージェント分。`codex` = Codex の読み取りの状態（Codex の時だけ）。
+    /// ポップオーバーの 1 鍵分。`label` = [`usage::UsageKey::label`]。`codex` = Codex の読み取りの状態
+    /// （読みに行った鍵の行の時だけ）。
     fn render_usage_agent(
         &self,
         label: &SharedString,
@@ -308,24 +314,37 @@ impl Workspace {
                 "when" => agent_panel::relative_time_label(limits.received_at_ms)
             ))
         });
+        // 見出しは置き場のパスや「設定の env #…」で長くなり得る（R08）。カードからはみ出さないよう
+        // 見出しだけを縮め、見分けに効く両端（エージェント名と、末尾の置き場・指紋）を残して中ほどを省く。
         let header = div()
             .flex()
             .items_center()
             .gap(px(8.))
             .child(
                 div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_middle()
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.fg0)
                     .child(label.clone()),
             )
             .when_some(status, |element, (text, color)| {
-                element.child(div().text_size(px(10.5)).text_color(color).child(text))
+                element.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(color)
+                        .child(text),
+                )
             })
             .child(div().flex_1())
             .when_some(received, |element, received| {
                 element.child(
                     div()
+                        .flex_none()
                         .text_size(px(10.5))
                         .text_color(theme.fg2)
                         .child(received),

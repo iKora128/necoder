@@ -14,6 +14,8 @@ pub use acp_client::usage::{LimitStatus, LimitWindow};
 use acp_client::usage::{RateLimits, TurnTokens};
 use gpui::{App, SharedString};
 use std::collections::BTreeMap;
+use std::hash::{BuildHasher as _, RandomState};
+use std::sync::OnceLock;
 
 /// これ以上の使用率（表示の整数 %）の窓は目立たせる。
 pub const NEAR_LIMIT_PERCENT: f64 = 80.0;
@@ -217,8 +219,12 @@ pub enum CodexRead {
 }
 
 /// レート制限の値を分ける鍵（R08）。同じエージェントでも、動かしている場所（手元 / SSH 先）と
-/// 認証の置き場（設定の `agent_servers.<id>.env` の `CLAUDE_CONFIG_DIR` / `CODEX_HOME`）が違えば
-/// 別のアカウントかもしれないので、値を混ぜない。資格情報そのものは読まない（置き場のパスだけ）。
+/// 認証の環境（設定の `agent_servers.<id>.env`）が違えば別のアカウントかもしれないので、値を混ぜない。
+///
+/// 認証の環境は 2 つで見分ける: 置き場（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` のパス＝見出しに出してよい）と、
+/// それ以外の認証に関わる env（API キー・トークン・base URL 等・[`CREDENTIAL_WORDS`]）の**指紋**。
+/// 指紋はハッシュの数値だけで、秘密の値そのものは持たない・出さない・ログに書かない。資格情報の
+/// ファイルも読まない（置き場はパスだけ）。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UsageKey {
     pub agent: SharedString,
@@ -226,6 +232,8 @@ pub struct UsageKey {
     pub host: SharedString,
     /// 認証の置き場（無ければ空 = 既定の置き場）。
     pub profile: SharedString,
+    /// 置き場以外の認証に関わる env の指紋（[`credential_fingerprint`]）。そういう env が無ければ `None`。
+    pub credential_fingerprint: Option<u64>,
 }
 
 /// 使用量の鍵の「場所」: 手元は空、SSH 先はホストの表示名（R08）。Host を呼ぶので描画からは使わない。
@@ -237,8 +245,88 @@ pub fn host_label(host: &dyn host::Host) -> SharedString {
     }
 }
 
-/// 認証の置き場を表す env（値はディレクトリのパス。鍵やトークンの env は見ない）。
+/// 認証の置き場を表す env（値はディレクトリのパス＝見出しに出してよい。鍵の `profile` になる）。
 const AUTH_PROFILE_ENV: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+
+/// 認証に関わる env の名前の語。名前を `_` で区切った語のどれかがこれなら、値を指紋に入れる（R08）。
+///
+/// **範囲の判断**: env を全部（と起動コマンド）指紋にすると、`MAX_THINKING_TOKENS` や `DEBUG` を
+/// 変えただけで同じアカウントが別の行に割れ、見出しにも「設定の env」が付く。ここでは「どのアカウント・
+/// どの請求先・どの接続先で動くか」を変え得る語だけを見る。取りこぼすと値が混ざる（R08 の不具合
+/// そのもの）ので、迷う語は入れる側に倒す（入れすぎても行が分かれるだけ）。値が空の env は無いのと同じ。
+/// - 資格情報: `ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN`・`CLAUDE_CODE_OAUTH_TOKEN`・`OPENAI_API_KEY`・
+///   `AWS_SECRET_ACCESS_KEY`・`GH_TOKEN`・`GOOGLE_APPLICATION_CREDENTIALS`・`ANTHROPIC_CUSTOM_HEADERS`
+/// - 接続先: `ANTHROPIC_BASE_URL`・`OPENAI_BASE_URL`・`AZURE_OPENAI_ENDPOINT`
+/// - アカウントの範囲: `OPENAI_ORG_ID`・`OPENAI_PROJECT`・`GOOGLE_CLOUD_PROJECT`・`AWS_PROFILE`・`AWS_REGION`
+/// - 提供元の切り替え: `CLAUDE_CODE_USE_BEDROCK`・`CLAUDE_CODE_USE_VERTEX`・`GOOGLE_GENAI_USE_VERTEXAI`
+/// - 資格情報の置き場（パスを見出しに出す [`AUTH_PROFILE_ENV`] 以外）: `XDG_CONFIG_HOME`・`HOME`
+///
+/// 入れない物: `TOKENS`（`MAX_THINKING_TOKENS` などの上限）・`PROXY`（経路が変わるだけ）・`MODEL`（同じ
+/// アカウントの中の選択）。起動コマンドと引数も見ない（env ではない・版を差し替えただけで行が割れる。
+/// コマンドの中で資格情報を足すラッパーは、どのみち necoder からは見えない）。
+const CREDENTIAL_WORDS: &[&str] = &[
+    // 資格情報
+    "KEY",
+    "APIKEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "AUTH",
+    "OAUTH",
+    "BEARER",
+    "HEADER",
+    "HEADERS",
+    // 接続先
+    "URL",
+    "URI",
+    "ENDPOINT",
+    "HOST",
+    // アカウントの範囲
+    "ORG",
+    "ORGANIZATION",
+    "PROJECT",
+    "ACCOUNT",
+    "PROFILE",
+    "TENANT",
+    "REGION",
+    // 提供元の切り替え
+    "BEDROCK",
+    "VERTEX",
+    "VERTEXAI",
+    "AZURE",
+    // 資格情報の置き場
+    "HOME",
+    "CONFIG",
+];
+
+/// env の名前が認証に関わるか（[`CREDENTIAL_WORDS`]）。置き場のパスの 2 つは `profile` で持つので除く。
+fn is_credential_variable(name: &str) -> bool {
+    !AUTH_PROFILE_ENV.contains(&name)
+        && name
+            .to_ascii_uppercase()
+            .split('_')
+            .any(|word| CREDENTIAL_WORDS.contains(&word))
+}
+
+/// 指紋の塩（プロセスごとの乱数）。画面に出す短い指紋から、秘密の候補を総当たりで確かめられないように
+/// する。値は保存しないので、再起動で指紋が変わってよい。
+fn fingerprint_salt() -> &'static RandomState {
+    static SALT: OnceLock<RandomState> = OnceLock::new();
+    SALT.get_or_init(RandomState::new)
+}
+
+/// 認証に関わる env（名前と値）の指紋。そういう env が無ければ `None`。値はハッシュに通すだけで、
+/// どこにも残さない。
+fn credential_fingerprint(env: &BTreeMap<String, String>) -> Option<u64> {
+    let credentials: Vec<(&String, &String)> = env
+        .iter()
+        .filter(|(name, value)| !value.is_empty() && is_credential_variable(name))
+        .collect();
+    (!credentials.is_empty()).then(|| fingerprint_salt().hash_one(&credentials))
+}
 
 impl UsageKey {
     /// 手元・既定の認証の置き場。
@@ -247,20 +335,33 @@ impl UsageKey {
             agent: agent.into(),
             host: SharedString::default(),
             profile: SharedString::default(),
+            credential_fingerprint: None,
         }
     }
 
-    /// エージェントを動かしている場所（[`host_label`]）と、設定の認証の置き場から作る。
-    /// Host は呼ばない（描画からも呼ばれる）。
+    /// エージェントを動かしている場所（[`host_label`]）と、設定の認証の環境（`agent_servers.<id>.env`）
+    /// から作る。Host は呼ばない（描画からも呼ばれる）。
     pub fn for_agent(agent: SharedString, host: SharedString, cx: &App) -> Self {
-        let profile = acp_client::AGENTS
+        let agent_override = acp_client::AGENTS
             .iter()
             .find(|candidate| candidate.label == agent.as_ref())
-            .and_then(|candidate| crate::agent_server_override(candidate.id, cx))
-            .and_then(|agent_override| {
+            .and_then(|candidate| crate::agent_server_override(candidate.id, cx));
+        Self::with_override(agent, host, agent_override.as_ref())
+    }
+
+    /// 設定の上書き（`agent_servers.<id>`）から作る（[`Self::for_agent`] の本体）。見るのは env だけ
+    /// （置き場のパスと、認証に関わる env の指紋）。
+    fn with_override(
+        agent: SharedString,
+        host: SharedString,
+        agent_override: Option<&acp_client::AgentOverride>,
+    ) -> Self {
+        let env = agent_override.map(|agent_override| &agent_override.env);
+        let profile = env
+            .and_then(|env| {
                 AUTH_PROFILE_ENV
                     .iter()
-                    .find_map(|key| agent_override.env.get(*key).cloned())
+                    .find_map(|key| env.get(*key).cloned())
             })
             .map(SharedString::from)
             .unwrap_or_default();
@@ -268,24 +369,32 @@ impl UsageKey {
             agent,
             host,
             profile,
+            credential_fingerprint: env.and_then(credential_fingerprint),
         }
     }
 
-    /// 見出し: `Claude Code` / `Claude Code · dev-box` / `Claude Code · ~/.claude-work`。
+    /// 見出し: `Claude Code` / `Claude Code · dev-box` / `Claude Code · ~/.claude-work` /
+    /// `Claude Code · 設定の env #1a2b3c`（認証に関わる env の指紋で分かれる時。置き場のパスもあれば
+    /// その後ろに添える＝同じ見出しの行を作らない）。指紋は下 24 bit の 16 進だけを出す。
     pub fn label(&self) -> SharedString {
         let mut label = self.agent.to_string();
-        for part in [&self.host, &self.profile] {
+        let credentials = self.credential_fingerprint.map(|fingerprint| {
+            i18n::t!(
+                "usage.credential_env",
+                "id" => format!("#{:06x}", fingerprint & 0xff_ffff)
+            )
+        });
+        for part in [
+            self.host.as_ref(),
+            self.profile.as_ref(),
+            credentials.as_deref().unwrap_or_default(),
+        ] {
             if !part.is_empty() {
                 label.push_str(" · ");
                 label.push_str(part);
             }
         }
         SharedString::from(label)
-    }
-
-    /// 手元・既定の置き場の Codex（`refresh_codex_limits` が読みに行くのはこれだけ）か。
-    pub fn is_local_codex(&self) -> bool {
-        self.agent.as_ref() == codex_label() && self.host.is_empty()
     }
 }
 
@@ -301,7 +410,7 @@ impl From<&str> for UsageKey {
     }
 }
 
-/// エージェントごと（[`UsageKey`] = エージェント + 動かしている場所 + 認証の置き場）の、最後に受け取った
+/// エージェントごと（[`UsageKey`] = エージェント + 動かしている場所 + 認証の環境）の、最後に受け取った
 /// レート制限（O11・R08・gpui Global）。
 ///
 /// アカウント単位の値なので、同じ鍵ならスレッド・プロセス・ウィンドウをまたいで 1 つを共有する。
@@ -312,6 +421,9 @@ pub struct UsageLimits {
     agents: BTreeMap<UsageKey, AgentLimits>,
     /// Codex の読み取りの状態（ポップオーバーに出す）。
     pub codex: CodexRead,
+    /// その読み取りがどの鍵の分か（読みに行った時の手元の Codex × codex へ渡した env）。読み込み中 /
+    /// 失敗の行と「再読み込み」はこの鍵の行に出す（別の置き場・別の API キーの行に出さない）。
+    pub codex_key: Option<UsageKey>,
     /// codex が PATH に在るか（ポップオーバーを開いた時に確かめる。`None` = まだ見ていない）。
     pub codex_installed: Option<bool>,
     /// 最後に Codex を読みに行った時刻（unix ms）。
@@ -333,7 +445,7 @@ impl UsageLimits {
         self.agents.get(key)
     }
 
-    /// 手元・既定の認証の置き場のエージェントの値。
+    /// 手元・既定の認証の環境（置き場も認証に関わる env も足していない）のエージェントの値。
     pub fn agent(&self, agent: &str) -> Option<&AgentLimits> {
         self.get(&UsageKey::from(agent))
     }
@@ -353,12 +465,22 @@ pub fn codex_label() -> &'static str {
         .unwrap_or("Codex")
 }
 
+/// 手元の Codex の鍵（今の設定 `agent_servers.codex` の env で。`codex app-server` を訊く先）。
+pub fn local_codex_key(cx: &App) -> UsageKey {
+    UsageKey::for_agent(
+        SharedString::from(codex_label()),
+        SharedString::default(),
+        cx,
+    )
+}
+
 /// Codex の 5 時間枠・週枠を `codex app-server` に訊く（**使用量のポップオーバーを開いた時だけ**・O11）。
 ///
 /// codex が PATH に無ければ何もしない。読んでいる間と、`force` でなければ直近
 /// [`CODEX_REFRESH_INTERVAL_MS`] 以内に読みに行った後は重ねない。常駐も定期実行もしない。
 /// `settings.json` の `agent_servers.codex.env`（`CODEX_HOME` など）はエージェントと同じものを渡す
-/// （同じアカウントを見る）。
+/// （同じアカウントを見る）。値は渡した env の鍵（手元の Codex × 置き場・認証に関わる env の指紋）へ
+/// 重ねる（R08）。
 pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     // 表示の検証（`NECODER_USAGE_PROBE`）では本物の codex を起こさない（本人のアカウントで外へ出る）。
     #[cfg(debug_assertions)]
@@ -369,19 +491,31 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     let codex =
         acp_client::find_in_path("codex").filter(|_| settings::get(cx).agent_enabled("codex"));
     let now = crate::now_unix_ms();
+    // 鍵は codex へ渡す env と同じ設定から、読みに行く前に作る（読んでいる間に設定が変わっても、
+    // 値は読んだ env の鍵へ重ねる＝別の環境の値と混ぜない）。
+    let agent_override = crate::agent_server_override("codex", cx);
+    let key = UsageKey::with_override(
+        SharedString::from(codex_label()),
+        SharedString::default(),
+        agent_override.as_ref(),
+    );
     let limits = cx.default_global::<UsageLimits>();
     limits.codex_installed = Some(codex.is_some());
     let Some(codex) = codex else {
         return;
     };
-    if limits.codex == CodexRead::Loading
-        || (!force && now - limits.codex_attempted_at_ms < CODEX_REFRESH_INTERVAL_MS)
+    // 認証の環境を変えた後は、前の鍵の読み取りの間隔を待たない（別のアカウントを読む）。
+    let same_key = limits.codex_key.as_ref() == Some(&key);
+    if same_key
+        && (limits.codex == CodexRead::Loading
+            || (!force && now - limits.codex_attempted_at_ms < CODEX_REFRESH_INTERVAL_MS))
     {
         return;
     }
     limits.codex = CodexRead::Loading;
+    limits.codex_key = Some(key.clone());
     limits.codex_attempted_at_ms = now;
-    let env = crate::agent_server_override("codex", cx)
+    let env = agent_override
         .map(|agent_override| agent_override.env)
         .unwrap_or_default();
     let read = cx
@@ -390,21 +524,21 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = read.await;
         cx.update(|cx| {
-            // 読みに行ったのは手元の codex（設定の CODEX_HOME を渡した）。
-            let key = UsageKey::for_agent(
-                SharedString::from(codex_label()),
-                SharedString::default(),
-                cx,
-            );
             let limits = cx.default_global::<UsageLimits>();
+            // 読んでいる間に認証の環境を変えて読み直した: 古い読み取りの結果で新しい状態を上書きしない。
+            let current = limits.codex_key.as_ref() == Some(&key);
             match result {
                 Ok(snapshot) => {
                     limits.record(key, snapshot, crate::now_unix_ms());
-                    limits.codex = CodexRead::Idle;
+                    if current {
+                        limits.codex = CodexRead::Idle;
+                    }
                 }
                 Err(error) => {
                     eprintln!("Codex の利用上限を読めない: {error:#}");
-                    limits.codex = CodexRead::Failed(SharedString::from(format!("{error:#}")));
+                    if current {
+                        limits.codex = CodexRead::Failed(SharedString::from(format!("{error:#}")));
+                    }
                 }
             }
         });
@@ -419,10 +553,12 @@ pub fn debug_seed_codex_limits(cx: &mut App) {
     use acp_client::usage::WindowUsage;
     let now_ms = crate::now_unix_ms();
     let now_secs = now_ms / 1000;
+    let key = local_codex_key(cx);
     let limits = cx.default_global::<UsageLimits>();
     limits.codex_installed = Some(true);
+    limits.codex_key = Some(key.clone());
     limits.record(
-        SharedString::from(codex_label()),
+        key,
         RateLimits {
             status: None,
             windows: vec![
@@ -445,9 +581,92 @@ pub fn debug_seed_codex_limits(cx: &mut App) {
 /// 開発用: Codex の読み取りの状態だけを置く（`NECODER_USAGE_PROBE`・読み込み中 / 失敗の行の描画検証）。
 #[cfg(debug_assertions)]
 pub fn debug_set_codex_read(read: CodexRead, cx: &mut App) {
+    let key = local_codex_key(cx);
     let limits = cx.default_global::<UsageLimits>();
     limits.codex_installed = Some(true);
+    limits.codex_key = Some(key);
     limits.codex = read;
+}
+
+/// 開発用: 同じ Claude Code の別の鍵（SSH 先・別の置き場・認証に関わる env だけが違う物・置き場 + env）の
+/// 値を置く（`NECODER_USAGE_PROBE=keys`・R08 の見出しの検証）。SSH には繋がない。env の値は偽物で、
+/// 鍵には指紋しか残らない。
+#[cfg(debug_assertions)]
+pub fn debug_seed_other_keys(cx: &mut App) {
+    use acp_client::usage::WindowUsage;
+    let now_ms = crate::now_unix_ms();
+    let now_secs = now_ms / 1000;
+    let claude = || SharedString::from("Claude Code");
+    let with_env = |pairs: &[(&str, &str)]| acp_client::AgentOverride {
+        command: None,
+        args: Vec::new(),
+        env: pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+    };
+    let keys = [
+        (
+            UsageKey {
+                host: SharedString::from("dev-box"),
+                ..UsageKey::local(claude())
+            },
+            9.0,
+            12,
+        ),
+        (
+            UsageKey::with_override(
+                claude(),
+                SharedString::default(),
+                Some(&with_env(&[("CLAUDE_CONFIG_DIR", "~/.claude-work")])),
+            ),
+            67.0,
+            40,
+        ),
+        (
+            UsageKey::with_override(
+                claude(),
+                SharedString::default(),
+                Some(&with_env(&[(
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    "probe-not-a-real-token",
+                )])),
+            ),
+            23.0,
+            5,
+        ),
+        // アカウントの切り替え（O14）が書く長いパス + 接続先: 見出しの中ほどが省かれる幅。
+        (
+            UsageKey::with_override(
+                claude(),
+                SharedString::default(),
+                Some(&with_env(&[
+                    (
+                        "CLAUDE_CONFIG_DIR",
+                        "/Users/me/Library/Application Support/necoder/accounts/claude/account-2",
+                    ),
+                    ("ANTHROPIC_BASE_URL", "https://gateway.example.invalid"),
+                ])),
+            ),
+            51.0,
+            25,
+        ),
+    ];
+    let limits = cx.default_global::<UsageLimits>();
+    for (key, percent, minutes_ago) in keys {
+        limits.record(
+            key,
+            RateLimits {
+                status: None,
+                windows: vec![WindowUsage {
+                    window: LimitWindow::FiveHour,
+                    used_percent: Some(percent),
+                    resets_at: Some(now_secs + 2 * 3_600),
+                }],
+            },
+            now_ms - minutes_ago * 60_000,
+        );
+    }
 }
 
 // ── 表示 ──
@@ -641,6 +860,189 @@ mod tests {
             window,
             used_percent: percent,
             resets_at,
+        }
+    }
+
+    /// 設定 `agent_servers.<id>` の env だけを足した上書き（`type: registry` と同じ形）。
+    fn with_env(pairs: &[(&str, &str)]) -> acp_client::AgentOverride {
+        acp_client::AgentOverride {
+            command: None,
+            args: Vec::new(),
+            env: pairs
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    fn claude_key(host: &str, pairs: &[(&str, &str)]) -> UsageKey {
+        UsageKey::with_override(
+            SharedString::from("Claude Code"),
+            SharedString::from(host.to_string()),
+            Some(&with_env(pairs)),
+        )
+    }
+
+    /// R08: 置き場のパスが無くても、認証に関わる env（API キー・トークン・base URL 等）だけが違えば
+    /// 別の鍵で、値は混ざらない。同じ env なら同じ鍵（スレッドをまたいで共有する）。認証に関わらない
+    /// env は鍵を割らない。
+    #[test]
+    fn limits_are_kept_apart_per_credential_env() {
+        let first = claude_key("", &[("ANTHROPIC_API_KEY", "sk-ant-first")]);
+        let second = claude_key("", &[("ANTHROPIC_API_KEY", "sk-ant-second")]);
+        assert_ne!(first, second, "API キーの env だけが違えば別の鍵");
+        assert!(first.profile.is_empty() && second.profile.is_empty());
+        assert_eq!(
+            first,
+            claude_key("", &[("ANTHROPIC_API_KEY", "sk-ant-first")]),
+            "同じ env なら同じ鍵"
+        );
+
+        let mut limits = UsageLimits::default();
+        let at = |percent: f64| RateLimits {
+            status: Some(LimitStatus::Allowed),
+            windows: vec![window(LimitWindow::FiveHour, Some(percent), Some(5_000))],
+        };
+        limits.record(first.clone(), at(12.0), 10);
+        limits.record(second.clone(), at(91.0), 20);
+        assert_eq!(
+            limits.get(&first).map(|limits| limits.headline(100)),
+            Some(vec![(LimitWindow::FiveHour, 12.0)])
+        );
+        assert_eq!(
+            limits.get(&second).map(|limits| limits.headline(100)),
+            Some(vec![(LimitWindow::FiveHour, 91.0)]),
+            "片方の知らせで他方は変わらない"
+        );
+        assert!(
+            limits.agent("Claude Code").is_none(),
+            "既定の環境の鍵には何も重ねない"
+        );
+        assert_eq!(limits.agents().count(), 2);
+
+        // トークン（サブスクのログイン）・接続先も同じ。置き場のパスと env の両方があれば両方で分ける。
+        assert_ne!(
+            claude_key("", &[("CLAUDE_CODE_OAUTH_TOKEN", "first")]),
+            claude_key("", &[("CLAUDE_CODE_OAUTH_TOKEN", "second")])
+        );
+        assert_ne!(
+            claude_key("", &[("ANTHROPIC_BASE_URL", "https://a.example")]),
+            claude_key("", &[("ANTHROPIC_BASE_URL", "https://b.example")])
+        );
+        assert_ne!(
+            claude_key(
+                "",
+                &[("CLAUDE_CONFIG_DIR", "/w"), ("ANTHROPIC_API_KEY", "first")]
+            ),
+            claude_key(
+                "",
+                &[("CLAUDE_CONFIG_DIR", "/w"), ("ANTHROPIC_API_KEY", "second")]
+            )
+        );
+        // 認証に関わらない env だけなら既定の環境と同じ鍵（見出しにも何も添えない）。値が空の env も同じ。
+        let tuned = claude_key("", &[("MAX_THINKING_TOKENS", "10000"), ("DEBUG", "1")]);
+        assert_eq!(tuned, UsageKey::local("Claude Code"));
+        assert_eq!(tuned.label().as_ref(), "Claude Code");
+        assert_eq!(
+            claude_key("", &[("ANTHROPIC_API_KEY", "")]),
+            UsageKey::local("Claude Code")
+        );
+        // 置き場のパスだけなら、指紋は持たず見出しは今までどおり。
+        let work = claude_key("", &[("CLAUDE_CONFIG_DIR", "~/.claude-work")]);
+        assert_eq!(work.credential_fingerprint, None);
+        assert_eq!(work.label().as_ref(), "Claude Code · ~/.claude-work");
+    }
+
+    /// R08: 鍵は秘密の値を持たない・出さない（Debug にも見出しにも写らない）。見出しに出すのは短い
+    /// 指紋（`#` + 16 進 6 桁）だけ。置き場のパス・SSH 先はそのまま出す。
+    #[test]
+    fn a_credential_fingerprint_does_not_carry_the_secret() {
+        let secret = "sk-ant-api03-do-not-show-this-value";
+        let keyed = claude_key(
+            "dev-box",
+            &[
+                ("ANTHROPIC_API_KEY", secret),
+                ("CLAUDE_CONFIG_DIR", "/Users/me/.claude-work"),
+            ],
+        );
+        let label = keyed.label();
+        let shown = format!("{keyed:?} {label}");
+        assert!(!shown.contains(secret), "{shown}");
+        assert!(!shown.contains("do-not-show"), "{shown}");
+        assert!(
+            label.starts_with("Claude Code · dev-box · /Users/me/.claude-work · settings env #"),
+            "{label}"
+        );
+        let id = label.rsplit('#').next().expect("指紋の表示");
+        assert!(
+            id.len() == 6 && id.chars().all(|character| character.is_ascii_hexdigit()),
+            "{label}"
+        );
+
+        // 置き場のパスが無く指紋だけで分かれる時は「設定の env #…」だけ。
+        let only = UsageKey::with_override(
+            SharedString::from("Codex"),
+            SharedString::default(),
+            Some(&with_env(&[("OPENAI_API_KEY", secret)])),
+        );
+        assert!(
+            only.label().starts_with("Codex · settings env #"),
+            "{}",
+            only.label()
+        );
+        assert!(!format!("{only:?} {}", only.label()).contains(secret));
+    }
+
+    /// 指紋に入れる env の範囲（[`CREDENTIAL_WORDS`]）: 資格情報・接続先・アカウントの範囲・提供元の
+    /// 切り替え・資格情報の置き場は入れ、上限や経路の env は入れない。見出しにパスを出す 2 つは
+    /// `profile` で持つので除く。
+    #[test]
+    fn credential_variables_are_told_from_other_env() {
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT",
+            "CODEX_API_KEY",
+            "AWS_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_REGION",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GEMINI_API_KEY",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "DASHSCOPE_API_KEY",
+            "XAI_API_KEY",
+            "AZURE_OPENAI_ENDPOINT",
+            "XDG_CONFIG_HOME",
+            "HOME",
+        ] {
+            assert!(is_credential_variable(name), "{name} は認証に関わる");
+        }
+        for name in [
+            "MAX_THINKING_TOKENS",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "DEBUG",
+            "DISABLE_TELEMETRY",
+            "NODE_OPTIONS",
+            "HTTPS_PROXY",
+            "ANTHROPIC_MODEL",
+            "BASH_DEFAULT_TIMEOUT_MS",
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+        ] {
+            assert!(!is_credential_variable(name), "{name} は指紋に入れない");
         }
     }
 

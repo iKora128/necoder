@@ -1628,13 +1628,14 @@ usage:
   duration_hours_only: "%{hours} 時間"
   duration_days: "%{days} 日 %{hours} 時間"
   duration_days_only: "%{days} 日"
+  credential_env: "設定の env %{id}"
   chip_tip: "%{agent} の使用量（最後に受け取った値）。クリックで詳細"
   popover_title: 使用量・レート制限
   received: "受信 %{when}"
   status_warning: 上限が近い
   status_rejected: 上限に達しています
   no_values: まだ値を受け取っていません。エージェントが知らせてきたら出ます
-  note: 値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。
+  note: "値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。同じエージェントでも、SSH の接続先や認証の設定（agent_servers の env の置き場・API キーなど）が違えば分けて出します（「設定の env #…」は見分けるための印で、キーの値ではありません）。"
   codex_note: Codex だけは ACP で知らせてこないので、このポップオーバーを開いた時に codex 本体（codex app-server）に訊きます。
   codex_loading: Codex の値を読み込み中…
   codex_failed: "Codex の値を読めませんでした: %{error}"

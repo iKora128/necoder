@@ -1627,13 +1627,14 @@ usage:
   duration_hours_only: "%{hours}h"
   duration_days: "%{days}d %{hours}h"
   duration_days_only: "%{days}d"
+  credential_env: "settings env %{id}"
   chip_tip: "%{agent} usage (last value received). Click for details"
   popover_title: Usage & rate limits
   received: "received %{when}"
   status_warning: Near the limit
   status_rejected: Limit reached
   no_values: No values yet. They appear once an agent reports them
-  note: Values change only when an agent reports them. What you see here is the last value received.
+  note: "Values change only when an agent reports them. What you see here is the last value received. The same agent is listed separately when its SSH host or auth settings (config folder, API keys and so on in the agent_servers env) differ; settings env #… is only a marker to tell them apart, not the key itself."
   codex_note: Codex does not report limits over ACP, so they are read from the Codex CLI (codex app-server) when you open this panel.
   codex_loading: Reading Codex limits…
   codex_failed: "Couldn't read Codex limits: %{error}"

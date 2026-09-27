@@ -76,6 +76,7 @@
 | ↳ **前の会話**（新しいセッションで続けた・引き継げずに替わった会話 id。履歴で重ねて出さない鍵） | `thread_past_sessions`（storage） | — | — |
 | ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。**推定コストは実際の請求額ではない**。報告の無い値は NULL＝`—`（0 と書かない）・一部のターンにしか報告が無い合計は `≥`（下限）。台帳に 1 ターン 1 行・O11・R08） | `turn_usage`（storage）/ `storage::TurnTokenCounts` / `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` / `usage::reported_total_label` | 使用量 / 推定コスト | Usage / Est. cost |
 | ↳ **レート制限**（プランの利用上限の窓と使用率。エージェントが知らせてきた**最後の値**・O11） | `acp_client::usage::RateLimits` / `AgentEvent::RateLimits` / `agent_panel::usage::UsageLimits` | レート制限 | Rate limits |
+| ↳ **使用量の鍵**（レート制限の値を分ける単位 = エージェント + 動かしている場所 + 認証の置き場 + 認証に関わる env の指紋。鍵が違えば値を混ぜない・R08。指紋はハッシュだけで秘密の値は持たない） | `agent_panel::usage::UsageKey`（`profile` / `credential_fingerprint`・範囲は `CREDENTIAL_WORDS`） | —（見出しに `dev-box` / 置き場のパス / `設定の env #1a2b3c` を添える） | —（`settings env #1a2b3c`） |
 | ↳ **窓**（レート制限の期間） | `LimitWindow::{FiveHour, Weekly, Named, Minutes}` | 5 時間枠 / 週枠 / 〈名前〉の週枠 | 5-hour window / Weekly window / Weekly (〈name〉) |
 | ↳ **使用量の統計**（日付 × エージェントの集計画面） | `usage_view::render_usage_stats` / `Storage::daily_usage` | 使用量の統計 | Usage statistics |
 | **遷移スナップショット**（状態遷移時の 1 行） | `digest` / `digest_tail` / `Thread.digest` | （文そのもの・ラベル無し） | （no label） |
