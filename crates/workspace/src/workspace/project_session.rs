@@ -1415,7 +1415,19 @@ impl Workspace {
         let host = worktree.host().clone();
         // 端末のタブ（O24）はファイルではないので開き直さずに残す（ブランチを切り替えてもシェルは
         // 動き続けている）。ファイルのタブはその後ろへ積み直すので、選ぶ位置はその分ずらす。
+        // 変更レビューのタブ（一時タブ）は開き直さない＝閉じたのと同じく読み込みを止める（R02）。
+        let reviews: Vec<Entity<ReviewView>> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match &tab.content {
+                TabContent::Review(review) => Some(review.clone()),
+                _ => None,
+            })
+            .collect();
         self.tabs.retain(EditorTab::is_terminal);
+        for review in &reviews {
+            self.review_tab_closed(review, cx);
+        }
         self.active_tab = 0;
         if host.is_remote() {
             self.open_slot_files_remote(host, files, active_file, pinned, window, cx);

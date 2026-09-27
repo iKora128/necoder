@@ -258,6 +258,35 @@ impl Workspace {
         }
     }
 
+    /// 変更レビューのタブが消えた（閉じた・レール / ブランチの切替でタブ列ごと入れ替わった）: 背景の
+    /// 読み込みを止める（R02・読み終えた分と印は残し、途中だったなら次に表示した時に続きを読む）。
+    /// Fleet の Task カードで「変更」タブを選んだままなら、Fleet へ戻るとそのまま見えるので止めない。
+    pub(crate) fn review_tab_closed(
+        &mut self,
+        review: &Entity<ReviewView>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.review_shown_in_fleet(review) {
+            review.update(cx, |review, cx| review.deactivate(cx));
+        }
+    }
+
+    /// この変更レビューを、Fleet の Task カードで「変更」タブに選んだままか（Fleet へ戻ると読み込みの
+    /// 入口 [`Self::activate_review`] を通らずにそのまま見える）。
+    fn review_shown_in_fleet(&self, review: &Entity<ReviewView>) -> bool {
+        self.project_sessions
+            .sessions
+            .iter()
+            .zip(&self.project_sessions.projects)
+            .any(|(session, slot)| {
+                session.review.as_ref() == Some(review)
+                    && matches!(
+                        self.chrome.stage_tabs.get(&slot.task_space.id),
+                        Some(FleetPane::Diff { .. })
+                    )
+            })
+    }
+
     /// 作業ツリーが変わった（ファイル監視）: 開いている変更レビューに「新しい変更があります」を出す。
     pub(crate) fn mark_review_outdated(&mut self, session_index: usize, cx: &mut Context<Self>) {
         let review = self
@@ -342,6 +371,82 @@ mod tests {
             assert!(
                 review.read(cx).send_menu_open(),
                 "届かなかったら宛先のメニューを開き直す"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 変更レビューのタブを × と同じ入口で閉じる。
+    fn close_review_tab(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let index = workspace
+            .tabs
+            .iter()
+            .position(EditorTab::is_review)
+            .expect("変更レビューのタブ");
+        workspace.close_tab_now(index, window, cx);
+    }
+
+    /// R02: 変更レビューのタブを閉じたら、背景の読み込みを止める（次に開いた時に読み直す）。レール /
+    /// ブランチの切替でタブ列ごと入れ替わった時も同じ。Fleet の Task カードで「変更」タブを選んだ
+    /// ままなら、Fleet へ戻るとそのまま見えるので止めない。
+    #[gpui::test]
+    fn closing_the_review_tab_stops_its_load_unless_fleet_shows_it(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_review_close_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let review = workspace.project_sessions.sessions[0]
+                .review
+                .clone()
+                .expect("session には変更レビューがある");
+            workspace.open_review_tab(&OpenReview, window, cx);
+            assert_eq!(review.read(cx).load_progress().0, "loading");
+            close_review_tab(workspace, window, cx);
+            assert_eq!(
+                review.read(cx).load_progress().0,
+                "idle",
+                "閉じたら読み込みを止める（次に開いた時に読み直す）"
+            );
+
+            workspace.open_review_tab(&OpenReview, window, cx);
+            assert_eq!(review.read(cx).load_progress().0, "loading");
+            workspace.open_slot_files(window, cx);
+            assert!(!workspace.tabs.iter().any(EditorTab::is_review));
+            assert_eq!(
+                review.read(cx).load_progress().0,
+                "idle",
+                "タブ列ごと入れ替わって消えた時も止める"
+            );
+
+            let space = workspace.project_sessions.projects[0].task_space.id.clone();
+            workspace
+                .chrome
+                .stage_tabs
+                .insert(space.clone(), FleetPane::Diff { space });
+            workspace.open_review_tab(&OpenReview, window, cx);
+            assert_eq!(review.read(cx).load_progress().0, "loading");
+            close_review_tab(workspace, window, cx);
+            assert_eq!(
+                review.read(cx).load_progress().0,
+                "loading",
+                "Fleet の「変更」タブに出ているので読み続ける"
             );
         });
         let _ = std::fs::remove_dir_all(&root);

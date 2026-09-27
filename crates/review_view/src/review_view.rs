@@ -4,6 +4,8 @@
 //! 全ファイルの diff を縦に並べる。左にファイルツリー、+/− の行は ok / err の薄い面、旧・新の
 //! 行番号の 2 列、`crates/lang` のハイライタで旧・新の全文を解析して行に割り当てる。変更の無い
 //! 領域は「⋯ N 行」に畳み、押すと前後 20 行ずつ開く。git と解析は背景で走らせ、UI を止めない。
+//! 基準を変えた・読み直した・タブを閉じた時は、背景の読み込みを取り消す（R02・結果を捨てるだけで
+//! なく、残りの git・読み込み・ハイライトをしない）。
 //!
 //! エディタのコア（`editor_view`）は拡張しない。行の間にブロックを差し込む API も任意色の行背景も
 //! 無いので、可変高の仮想リスト（`ListState`）に「ファイル見出し / 行 / 畳んだ領域」を並べる
@@ -39,13 +41,14 @@ pub use syntax::{highlight_text, split_highlights, FileSyntax, HighlightedText};
 use annotations::NoteWrite;
 use editor_view::EditorView;
 use gpui::{
-    div, list, prelude::*, px, App, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    div, list, prelude::*, px, App, AsyncApp, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, FontWeight, HighlightStyle, Hsla, KeyDownEvent, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText, Window,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText, WeakEntity,
+    Window,
 };
 use host::Host;
 use project::review::{
-    DiffLineKind, FileChangeKind, FileDiff, ReviewBase, ReviewDiff, ReviewError,
+    DiffLineKind, FileChangeKind, FileDiff, ReviewBase, ReviewCancel, ReviewDiff, ReviewError,
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -234,6 +237,12 @@ pub struct ReviewView {
     diff: Option<Arc<ReviewDiff>>,
     /// ファイルごとの全文ハイライト（`diff.files` と同じ添字・届いた分だけ `Some`）。
     syntax: Vec<Option<Arc<FileSyntax>>>,
+    /// `syntax` に持っている全文のバイト（全文の予算 R02 を、途中で閉じて続きから読む時にも守る）。
+    syntax_text_bytes: usize,
+    /// 全文を読む背景の仕事が動いている世代（`None` = 動いていない）。
+    syntax_loader: Option<u64>,
+    /// いまの読み込み（差分・全文）の取り消しの印。基準を変えた・読み直した・閉じた時に立てる（R02）。
+    load_cancel: ReviewCancel,
     rows: Vec<Row>,
     list: ListState,
     expansions: HashMap<(String, usize), GapExpansion>,
@@ -284,6 +293,13 @@ impl Focusable for ReviewView {
     }
 }
 
+impl Drop for ReviewView {
+    /// session ごと閉じた: 背景の読み込みを止める（R02・残りの git・読み込み・ハイライトをしない）。
+    fn drop(&mut self) {
+        self.load_cancel.cancel();
+    }
+}
+
 impl ReviewView {
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
         let accent = theme.fg1;
@@ -298,6 +314,9 @@ impl ReviewView {
             load: Load::Idle,
             diff: None,
             syntax: Vec::new(),
+            syntax_text_bytes: 0,
+            syntax_loader: None,
+            load_cancel: ReviewCancel::new(),
             rows: Vec::new(),
             list: ListState::new(0, ListAlignment::Top, px(600.)),
             expansions: HashMap::new(),
@@ -344,12 +363,14 @@ impl ReviewView {
         let default_base = default_base(&context);
         self.context = Some(context);
         if !same_place {
-            self.generation += 1;
+            // 前の場所の読み込みは要らない（残りを読まない）。
+            self.cancel_loading();
             self.base = default_base;
             self.base_chosen = false;
             self.load = Load::Idle;
             self.diff = None;
             self.syntax.clear();
+            self.syntax_text_bytes = 0;
             self.rows.clear();
             self.list.reset(0);
             self.expansions.clear();
@@ -372,11 +393,44 @@ impl ReviewView {
         cx.notify();
     }
 
-    /// 表示された: まだ読んでいなければ読む。
+    /// 表示された: まだ読んでいなければ読む。全文の途中で閉じていたら（[`Self::deactivate`]）、
+    /// 読み終えていないファイルから続きを読む。
     pub fn activate(&mut self, cx: &mut Context<Self>) {
-        if self.load == Load::Idle {
-            self.reload(cx);
+        match self.load {
+            Load::Idle => self.reload(cx),
+            Load::Ready => {
+                if let Some(job) = self.start_syntax_job() {
+                    cx.spawn(async move |this, cx| job.run(this, cx).await)
+                        .detach();
+                }
+            }
+            Load::Loading | Load::Failed(_) => {}
         }
+    }
+
+    /// 画面から外れた（タブを閉じた）: 背景の読み込みを取り消す（R02・残りの git・読み込み・
+    /// ハイライトをしない）。読み終えた差分・全文・見た印・注記は残す。差分の途中だったなら次に
+    /// 表示された時に読み直し、全文の途中だったなら続きから読む（[`Self::activate`]）。
+    pub fn deactivate(&mut self, cx: &mut Context<Self>) {
+        let loading = self.load == Load::Loading;
+        let highlighting = self.syntax_loader == Some(self.generation);
+        if !loading && !highlighting {
+            return;
+        }
+        self.cancel_loading();
+        if loading {
+            self.load = Load::Idle;
+        }
+        cx.notify();
+    }
+
+    /// 今の読み込み（差分・全文）を取り消して世代を進める。背景の仕事は区切りで止まり（残りを
+    /// 読まない）、止まる前に届いた結果は世代で捨てる。
+    fn cancel_loading(&mut self) {
+        self.load_cancel.cancel();
+        self.load_cancel = ReviewCancel::new();
+        self.generation += 1;
+        self.syntax_loader = None;
     }
 
     /// 作業ツリーが変わった合図（読み直しはユーザーが押した時だけ＝読んでいる行を動かさない）。
@@ -405,6 +459,18 @@ impl ReviewView {
     /// 並んでいるファイル数（テスト・プローブ用）。
     pub fn file_count(&self) -> usize {
         self.diff.as_ref().map_or(0, |diff| diff.files.len())
+    }
+
+    /// 読み込みの様子（プローブ用）: 状態・全文を読み終えたファイル数・ファイル数。
+    pub fn load_progress(&self) -> (&'static str, usize, usize) {
+        let state = match self.load {
+            Load::Idle => "idle",
+            Load::Loading => "loading",
+            Load::Ready => "ready",
+            Load::Failed(_) => "failed",
+        };
+        let loaded = self.syntax.iter().filter(|syntax| syntax.is_some()).count();
+        (state, loaded, self.syntax.len())
     }
 
     /// 基準を選ぶ（メニュー・プローブ）。
@@ -447,13 +513,15 @@ impl ReviewView {
         }
     }
 
-    /// 読み直す（基準・`-w` はそのまま。開いた畳み・見た印・スクロール位置は保つ）。
+    /// 読み直す（基準・`-w` はそのまま。開いた畳み・見た印・スクロール位置は保つ）。前の読み込みは
+    /// 取り消す（R02・古い基準の残りの git・読み込み・ハイライトをしない）。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let Some(context) = self.context.clone() else {
             return;
         };
-        self.generation += 1;
+        self.cancel_loading();
         let generation = self.generation;
+        let cancel = self.load_cancel.clone();
         self.load = Load::Loading;
         self.outdated = false;
         cx.notify();
@@ -465,23 +533,31 @@ impl ReviewView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    project::review::review_diff_on(host.as_ref(), &root, &base, ignore_whitespace)
-                        .map(|diff| {
-                            let fingerprints = diff.files.iter().map(file_fingerprint).collect();
-                            (diff, fingerprints)
-                        })
+                    project::review::review_diff_on(
+                        host.as_ref(),
+                        &root,
+                        &base,
+                        ignore_whitespace,
+                        &cancel,
+                    )
+                    .map(|diff| {
+                        let fingerprints = diff.files.iter().map(file_fingerprint).collect();
+                        (diff, fingerprints)
+                    })
                 })
                 .await;
-            let loaded = this.update(cx, |this, cx| {
+            let job = this.update(cx, |this, cx| {
+                // 取り消した（読み直した・閉じた）後に届いた結果は捨てる。
                 if this.generation != generation {
                     return None;
                 }
                 match result {
                     Ok((diff, fingerprints)) => {
-                        let diff = Arc::new(diff);
-                        this.apply_diff(diff.clone(), fingerprints, cx);
-                        Some(diff)
+                        this.apply_diff(Arc::new(diff), fingerprints, cx);
+                        this.start_syntax_job()
                     }
+                    // 取り消しは世代も進めるので、ここへは来ない（来ても失敗としては出さない）。
+                    Err(ReviewError::Cancelled) => None,
                     Err(error) => {
                         this.load = Load::Failed(error);
                         cx.notify();
@@ -489,52 +565,40 @@ impl ReviewView {
                     }
                 }
             });
-            let Ok(Some(diff)) = loaded else {
-                return;
-            };
-            // 全文とハイライトは届いた分から色を付ける（最初の表示を待たせない）。全文はレビュー全体の
-            // 予算の中でだけ持つ（R02）。色は描く時に全文から引くので、行の並べ直し（畳みの行数が
-            // 決まる）は数チャンクに 1 回へまとめ、最後のチャンクで必ず行う。
-            let text_budget = Arc::new(AtomicUsize::new(project::review::MAX_TOTAL_TEXT_BYTES));
-            let mut rebuilt_at: Option<Instant> = None;
-            for start in (0..diff.files.len()).step_by(SYNTAX_CHUNK) {
-                let end = (start + SYNTAX_CHUNK).min(diff.files.len());
-                let last_chunk = end == diff.files.len();
-                let chunk_diff = diff.clone();
-                let host = context.host.clone();
-                let budget = text_budget.clone();
-                let syntax = cx
-                    .background_executor()
-                    .spawn(
-                        async move { load_syntax(host.as_ref(), &chunk_diff, start..end, &budget) },
-                    )
-                    .await;
-                let current = this.update(cx, |this, cx| {
-                    if this.generation != generation {
-                        return false;
-                    }
-                    for (offset, file_syntax) in syntax.into_iter().enumerate() {
-                        if let Some(slot) = this.syntax.get_mut(start + offset) {
-                            *slot = Some(Arc::new(file_syntax));
-                        }
-                    }
-                    let due = last_chunk
-                        || rebuilt_at.is_none_or(|at| at.elapsed() >= ROW_REBUILD_INTERVAL);
-                    if due {
-                        // 全文が届いた = diff の外の行（開いた畳みの行）も確かめられる。
-                        this.reconcile_notes(cx);
-                        this.rebuild_rows();
-                        rebuilt_at = Some(Instant::now());
-                    }
-                    cx.notify();
-                    true
-                });
-                if !matches!(current, Ok(true)) {
-                    break;
-                }
+            // 全文とハイライトは届いた分から色を付ける（最初の表示を待たせない）。
+            if let Ok(Some(job)) = job {
+                job.run(this, cx).await;
             }
         })
         .detach();
+    }
+
+    /// 全文を読んでいないファイルが残っていれば、その先頭から読む背景の仕事を作る（読み込み直後と、
+    /// 全文の途中で閉じた後にまた表示された時）。読んでいる最中・全部読んだ・差分が無ければ `None`。
+    /// 全文はレビュー全体の予算（R02）の残りの中でだけ読む。
+    fn start_syntax_job(&mut self) -> Option<SyntaxJob> {
+        if self.load != Load::Ready {
+            return None;
+        }
+        if self.load_cancel.is_cancelled() {
+            // 前の仕事は取り消されて止まる: 新しい印と世代で続きを読む。
+            self.cancel_loading();
+        } else if self.syntax_loader == Some(self.generation) {
+            return None;
+        }
+        let host = self.context.as_ref()?.host.clone();
+        let diff = self.diff.clone()?;
+        let first = self.syntax.iter().position(Option::is_none)?;
+        let budget = project::review::MAX_TOTAL_TEXT_BYTES.saturating_sub(self.syntax_text_bytes);
+        self.syntax_loader = Some(self.generation);
+        Some(SyntaxJob {
+            generation: self.generation,
+            cancel: self.load_cancel.clone(),
+            host,
+            diff,
+            first,
+            budget: Arc::new(AtomicUsize::new(budget)),
+        })
     }
 
     fn apply_diff(
@@ -547,6 +611,7 @@ impl ReviewView {
         self.refresh_reviewed_marks(&diff, &fingerprints);
         self.fingerprints = fingerprints;
         self.syntax = vec![None; diff.files.len()];
+        self.syntax_text_bytes = 0;
         self.diff = Some(diff);
         self.load = Load::Ready;
         self.picked_file = None;
@@ -971,33 +1036,121 @@ pub fn short_sha(oid: &str) -> String {
     oid.chars().take(7).collect()
 }
 
-/// 背景スレッドで全文を読んでハイライトする（`range` のファイルだけ）。
-/// 全文を読んでハイライトする。`budget` はレビュー全体で全文に使える残りのバイト（R02）で、
-/// 差し引けなかったファイルは全文を持たない（色無し・畳みは開けない。差分の行はそのまま見える）。
+/// 全文とハイライトを読む背景の仕事（[`ReviewView::start_syntax_job`]）。`first` のファイルから
+/// チャンクごとに読み、届いた分から色を付ける。取り消されたら残りのファイルは読まない（R02）。
+struct SyntaxJob {
+    generation: u64,
+    cancel: ReviewCancel,
+    host: Arc<dyn Host>,
+    diff: Arc<ReviewDiff>,
+    /// 最初に読むファイル（全文の途中で閉じた後なら、読み終えていない最初のファイル）。
+    first: usize,
+    /// レビュー全体で全文に使える残りのバイト（R02）。
+    budget: Arc<AtomicUsize>,
+}
+
+impl SyntaxJob {
+    async fn run(self, this: WeakEntity<ReviewView>, cx: &mut AsyncApp) {
+        // 色は描く時に全文から引くので、行の並べ直し（畳みの行数が決まる）は数チャンクに 1 回へ
+        // まとめ、最後のチャンクで必ず行う。
+        let count = self.diff.files.len();
+        let generation = self.generation;
+        let mut rebuilt_at: Option<Instant> = None;
+        for start in (self.first..count).step_by(SYNTAX_CHUNK) {
+            if self.cancel.is_cancelled() {
+                break;
+            }
+            let end = (start + SYNTAX_CHUNK).min(count);
+            let last_chunk = end == count;
+            let host = self.host.clone();
+            let diff = self.diff.clone();
+            let budget = self.budget.clone();
+            let cancel = self.cancel.clone();
+            let loaded = cx
+                .background_executor()
+                .spawn(
+                    async move { load_syntax(host.as_ref(), &diff, start..end, &budget, &cancel) },
+                )
+                .await;
+            let current = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return false;
+                }
+                // 取り消されたチャンクは読めた分だけ（残りは続きを読む時に読む）。
+                let finished = last_chunk && loaded.len() == end - start;
+                for (offset, (file_syntax, bytes)) in loaded.into_iter().enumerate() {
+                    if let Some(slot) = this.syntax.get_mut(start + offset) {
+                        *slot = Some(Arc::new(file_syntax));
+                        this.syntax_text_bytes += bytes;
+                    }
+                }
+                if finished {
+                    this.syntax_loader = None;
+                }
+                let due =
+                    finished || rebuilt_at.is_none_or(|at| at.elapsed() >= ROW_REBUILD_INTERVAL);
+                if due {
+                    // 全文が届いた = diff の外の行（開いた畳みの行）も確かめられる。
+                    this.reconcile_notes(cx);
+                    this.rebuild_rows();
+                    rebuilt_at = Some(Instant::now());
+                }
+                cx.notify();
+                true
+            });
+            if !matches!(current, Ok(true)) {
+                break;
+            }
+        }
+    }
+}
+
+/// 背景スレッドで全文を読んでハイライトする（`range` のファイルだけ）。`budget` はレビュー全体で
+/// 全文に使える残りのバイト（R02）で、差し引けなかったファイルは全文を持たない（色無し・畳みは
+/// 開けない。差分の行はそのまま見える）。戻り値はファイルごとの全文と、それに使ったバイト。
+/// `cancel` が立ったらそこで止め、読み終えたファイルの分だけ返す（読みかけの 1 件は持たない）。
 fn load_syntax(
     host: &dyn Host,
     diff: &ReviewDiff,
     range: Range<usize>,
     budget: &AtomicUsize,
-) -> Vec<FileSyntax> {
-    diff.files[range]
-        .iter()
-        .map(|file| {
-            if budget.load(Ordering::Relaxed) == 0 {
-                return FileSyntax::default();
-            }
-            let texts =
-                project::review::review_file_texts_on(host, &diff.repo_root, &diff.base_oid, file);
-            let bytes = texts.old.as_ref().map_or(0, String::len)
-                + texts.new.as_ref().map_or(0, String::len);
-            let reserved = budget
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
-                    left.checked_sub(bytes)
-                })
-                .is_ok();
-            if !reserved {
-                return FileSyntax::default();
-            }
+    cancel: &ReviewCancel,
+) -> Vec<(FileSyntax, usize)> {
+    let mut loaded = Vec::new();
+    for file in &diff.files[range] {
+        if cancel.is_cancelled() {
+            break;
+        }
+        if budget.load(Ordering::Relaxed) == 0 {
+            loaded.push((FileSyntax::default(), 0));
+            continue;
+        }
+        let Ok(texts) = project::review::review_file_texts_on(
+            host,
+            &diff.repo_root,
+            &diff.base_oid,
+            file,
+            cancel,
+        ) else {
+            // 読んでいる間に取り消された（旧側の git も止めている）。
+            break;
+        };
+        // ハイライト（解析）の前にも見る。取り消した読み込みの全文は解析しない。
+        if cancel.is_cancelled() {
+            break;
+        }
+        let bytes =
+            texts.old.as_ref().map_or(0, String::len) + texts.new.as_ref().map_or(0, String::len);
+        let reserved = budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                left.checked_sub(bytes)
+            })
+            .is_ok();
+        if !reserved {
+            loaded.push((FileSyntax::default(), 0));
+            continue;
+        }
+        loaded.push((
             FileSyntax {
                 old: texts
                     .old
@@ -1005,9 +1158,11 @@ fn load_syntax(
                 new: texts
                     .new
                     .map(|text| highlight_text(Path::new(&file.path), &text)),
-            }
-        })
-        .collect()
+            },
+            bytes,
+        ));
+    }
+    loaded
 }
 
 /// 行の本文を色付きの StyledText にする（タブは空白に開き、色の範囲も合わせてずらす）。
@@ -2061,6 +2216,8 @@ fn error_label(error: &ReviewError) -> String {
         ReviewError::NotRepository => i18n::t!("review.error_not_repo"),
         ReviewError::UnknownBase(base) => i18n::t!("review.error_unknown_base", "base" => base),
         ReviewError::Git(message) => i18n::t!("review.error_git", "message" => message),
+        // 取り消した読み込みの結果は世代で捨てるので、ここへは来ない。
+        ReviewError::Cancelled => i18n::t!("review.loading"),
     }
 }
 
@@ -2300,21 +2457,324 @@ mod tests {
         let Some(dir) = temp_repo("text_budget") else {
             return;
         };
-        let diff = project::review::review_diff_on(
-            host::LocalHost::shared().as_ref(),
-            &dir,
-            &ReviewBase::Head,
-            false,
-        )
-        .expect("差分を読める");
+        let host = host::LocalHost::shared();
+        let idle = ReviewCancel::new();
+        let diff =
+            project::review::review_diff_on(host.as_ref(), &dir, &ReviewBase::Head, false, &idle)
+                .expect("差分を読める");
         let empty = AtomicUsize::new(0);
-        let starved = load_syntax(host::LocalHost::shared().as_ref(), &diff, 0..1, &empty);
-        assert!(starved[0].new.is_none() && starved[0].old.is_none());
+        let starved = load_syntax(host.as_ref(), &diff, 0..1, &empty, &idle);
+        assert!(starved[0].0.new.is_none() && starved[0].0.old.is_none());
         let plenty = AtomicUsize::new(project::review::MAX_TOTAL_TEXT_BYTES);
-        let loaded = load_syntax(host::LocalHost::shared().as_ref(), &diff, 0..1, &plenty);
-        assert!(loaded[0].new.is_some() && loaded[0].old.is_some());
+        let loaded = load_syntax(host.as_ref(), &diff, 0..1, &plenty, &idle);
+        assert!(loaded[0].0.new.is_some() && loaded[0].0.old.is_some());
         let used = project::review::MAX_TOTAL_TEXT_BYTES - plenty.load(Ordering::Relaxed);
         assert!(used > 0, "読んだ分だけ予算が減る");
+        assert_eq!(
+            loaded[0].1, used,
+            "使ったバイトを返す（続きから読む時の予算）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 呼び出しを数える host（中身は LocalHost）。取り消しで「読む処理そのものが減る」ことを
+    /// ビューの経路で確かめる（R02・結果を捨てるだけの実装と区別する）。`gpui::Result` は
+    /// `anyhow::Result` の再公開（この crate は anyhow に直接は依存しない）。
+    #[derive(Default)]
+    struct CountingHost {
+        /// git などの command を頼まれた数（取り消せる経路も含む）。
+        commands: AtomicUsize,
+        /// ファイルを読んだ数。
+        reads: AtomicUsize,
+        /// 読んだ数がこれに届いたら立てる印（読んだ中身はそのまま返す）。
+        cancel_at_read: std::sync::Mutex<Option<(usize, ReviewCancel)>>,
+    }
+
+    impl CountingHost {
+        /// (command の数, 読んだ数)。
+        fn counts(&self) -> (usize, usize) {
+            (
+                self.commands.load(Ordering::SeqCst),
+                self.reads.load(Ordering::SeqCst),
+            )
+        }
+
+        fn cancel_at_read(&self, limit: usize, cancel: ReviewCancel) {
+            if let Ok(mut slot) = self.cancel_at_read.lock() {
+                *slot = Some((limit, cancel));
+            }
+        }
+    }
+
+    impl Host for CountingHost {
+        fn id(&self) -> &str {
+            "counting"
+        }
+        fn display_name(&self) -> &str {
+            "counting"
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn host_for_project(&self, path: &Path) -> gpui::Result<Arc<dyn Host>> {
+            host::LocalHost.host_for_project(path)
+        }
+        fn canonicalize(&self, path: &Path) -> gpui::Result<PathBuf> {
+            host::LocalHost.canonicalize(path)
+        }
+        fn metadata(&self, path: &Path) -> gpui::Result<host::HostMetadata> {
+            host::LocalHost.metadata(path)
+        }
+        fn read_dir(&self, path: &Path) -> gpui::Result<Vec<host::HostEntry>> {
+            host::LocalHost.read_dir(path)
+        }
+        fn read_file(&self, path: &Path) -> gpui::Result<host::FileContent> {
+            let count = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Ok(slot) = self.cancel_at_read.lock() {
+                if let Some((limit, cancel)) = slot.as_ref() {
+                    if count >= *limit {
+                        cancel.cancel();
+                    }
+                }
+            }
+            host::LocalHost.read_file(path)
+        }
+        fn write_file(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            condition: host::WriteCondition,
+        ) -> gpui::Result<host::FileRevision> {
+            host::LocalHost.write_file(path, bytes, condition)
+        }
+        fn list_files(&self, root: &Path, limit: usize) -> gpui::Result<Vec<PathBuf>> {
+            host::LocalHost.list_files(root, limit)
+        }
+        fn search_project(
+            &self,
+            root: &Path,
+            spec: &host::TextSearchSpec,
+            file_limit: usize,
+        ) -> gpui::Result<Vec<host::TextSearchHit>> {
+            host::LocalHost.search_project(root, spec, file_limit)
+        }
+        fn run_command(&self, spec: &host::CommandSpec) -> gpui::Result<host::CommandOutput> {
+            self.commands.fetch_add(1, Ordering::SeqCst);
+            host::LocalHost.run_command(spec)
+        }
+        fn run_command_cancellable(
+            &self,
+            spec: &host::CommandSpec,
+            cancel: &std::sync::atomic::AtomicBool,
+        ) -> gpui::Result<Option<host::CommandOutput>> {
+            self.commands.fetch_add(1, Ordering::SeqCst);
+            host::LocalHost.run_command_cancellable(spec, cancel)
+        }
+        fn spawn_process(&self, spec: &host::CommandSpec) -> gpui::Result<host::HostProcess> {
+            host::LocalHost.spawn_process(spec)
+        }
+        fn terminal_launch(&self, cwd: &Path) -> gpui::Result<Option<host::TerminalLaunch>> {
+            host::LocalHost.terminal_launch(cwd)
+        }
+    }
+
+    fn counting_context(dir: &Path, host: Arc<CountingHost>) -> ReviewContext {
+        ReviewContext {
+            host,
+            root: dir.to_path_buf(),
+            task_base: None,
+            accent: Theme::dark().fg1,
+            storage: None,
+            scope: "test".into(),
+        }
+    }
+
+    /// 差分と全文を全部読み終えた。
+    fn loaded_fully(view: &ReviewView) -> bool {
+        view.load == Load::Ready && view.syntax.iter().all(Option::is_some)
+    }
+
+    /// 背景の読み込み（git・全文）が `done` になるまで回す。
+    fn run_until(
+        view: &Entity<ReviewView>,
+        cx: &mut gpui::TestAppContext,
+        done: impl Fn(&ReviewView) -> bool,
+    ) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| done(view)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("変更レビューの読み込みが終わらない");
+    }
+
+    /// `files` 個の Rust ファイル（各 30 行）を commit し、全部の 1 行目を書き換えた一時 repo。
+    fn many_files_repo(tag: &str, files: usize) -> Option<PathBuf> {
+        let dir =
+            std::env::temp_dir().join(format!("necoder_review_view_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+        };
+        if !git(&["init", "-q", "-b", "main"]).is_ok_and(|output| output.status.success()) {
+            return None;
+        }
+        let body: String = (1..=30)
+            .map(|line| format!("let x{line} = {line};\n"))
+            .collect();
+        for index in 0..files {
+            std::fs::write(dir.join(format!("f{index:02}.rs")), &body).ok()?;
+        }
+        git(&["add", "-A"]).ok()?;
+        git(&["commit", "-qm", "base"]).ok()?;
+        for index in 0..files {
+            let changed = body.replacen("let x1 = 1;", &format!("let y = {index};"), 1);
+            std::fs::write(dir.join(format!("f{index:02}.rs")), changed).ok()?;
+        }
+        Some(dir)
+    }
+
+    /// R02: 読み込み中に基準を変える・読み直すと、前の読み込みを取り消す。取り消した読み込みは
+    /// git も読み込みもしない（結果を捨てるだけなら、前の読み込みの分も git が走る）。
+    #[gpui::test]
+    fn changing_the_base_or_reloading_cancels_the_previous_load(cx: &mut gpui::TestAppContext) {
+        let Some(dir) = temp_repo("cancel_base") else {
+            return;
+        };
+        // 1 回だけ読んだ時の量。
+        let once = Arc::new(CountingHost::default());
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        view.update(cx, |view, cx| {
+            view.set_context(counting_context(&dir, once.clone()), cx);
+            view.activate(cx);
+        });
+        run_until(&view, cx, loaded_fully);
+        let single = once.counts();
+        assert!(single.0 > 0 && single.1 > 0, "{single:?}");
+
+        let host = Arc::new(CountingHost::default());
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        let (first, second) = view.update(cx, |view, cx| {
+            view.set_context(counting_context(&dir, host.clone()), cx);
+            view.activate(cx);
+            let first = view.load_cancel.clone();
+            view.select_base(ReviewBase::Commit("HEAD".into()), cx);
+            let second = view.load_cancel.clone();
+            view.reload(cx);
+            (first, second)
+        });
+        assert!(first.is_cancelled(), "基準を変えたら前の読み込みを止める");
+        assert!(second.is_cancelled(), "読み直したら前の読み込みを止める");
+        run_until(&view, cx, loaded_fully);
+        assert_eq!(
+            host.counts(),
+            single,
+            "3 回頼んだ読み込みのうち、git と読み込みが走ったのは最後の 1 回だけ"
+        );
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.base(), &ReviewBase::Commit("HEAD".into()));
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R02: 読み込みの途中でタブを閉じる（`deactivate`）と、残りの git も読み込みもしない。次に
+    /// 表示されたら読み直す。ビューを捨てた（session を閉じた）時も同じく止める。
+    #[gpui::test]
+    fn closing_stops_the_load_and_showing_again_reads_it(cx: &mut gpui::TestAppContext) {
+        let Some(dir) = temp_repo("cancel_close") else {
+            return;
+        };
+        let host = Arc::new(CountingHost::default());
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        let loading = view.update(cx, |view, cx| {
+            view.set_context(counting_context(&dir, host.clone()), cx);
+            view.activate(cx);
+            let loading = view.load_cancel.clone();
+            view.deactivate(cx);
+            assert_eq!(view.load, Load::Idle, "次に表示された時に読み直す");
+            loading
+        });
+        assert!(loading.is_cancelled(), "閉じたら読み込みを止める");
+        cx.run_until_parked();
+        assert_eq!(
+            host.counts(),
+            (0, 0),
+            "閉じた読み込みは git も読み込みもしない"
+        );
+        view.update(cx, |view, cx| view.activate(cx));
+        run_until(&view, cx, loaded_fully);
+        assert!(host.counts().0 > 0, "また表示したら読む");
+
+        let dropped = Arc::new(CountingHost::default());
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        let loading = view.update(cx, |view, cx| {
+            view.set_context(counting_context(&dir, dropped.clone()), cx);
+            view.activate(cx);
+            view.load_cancel.clone()
+        });
+        drop(view);
+        // 捨てたビューを片付ける（Drop が走る）。
+        cx.update(|_| {});
+        assert!(loading.is_cancelled(), "ビューを捨てたら読み込みを止める");
+        cx.run_until_parked();
+        assert_eq!(dropped.counts(), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R02: 全文の読み込みを途中で取り消すと、残りのファイルは読まない。閉じてまた表示したら、
+    /// 読み終えていないファイルから続きを読む（読み終えた全文は読み直さない・予算も続きから）。
+    #[gpui::test]
+    fn highlighting_stops_when_cancelled_and_resumes_where_it_stopped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let Some(dir) = many_files_repo("cancel_syntax", 20) else {
+            return;
+        };
+        let host = Arc::new(CountingHost::default());
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        view.update(cx, |view, cx| {
+            view.set_context(counting_context(&dir, host.clone()), cx);
+            view.activate(cx);
+            // 3 件目の全文を読んだところで取り消す（閉じた時と同じ印）。差分の読み込みは追跡済み
+            // だけなのでファイルを読まない = 読むのは全文だけ。
+            host.cancel_at_read(3, view.load_cancel.clone());
+        });
+        run_until(&view, cx, |view| {
+            view.load == Load::Ready && view.load_progress().1 >= 2
+        });
+        cx.run_until_parked();
+        assert_eq!(host.counts().1, 3, "取り消した後のファイルは読まない");
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.load_progress(),
+                ("ready", 2, 20),
+                "読みかけの 3 件目は持たない"
+            );
+        });
+        let held = view.read_with(cx, |view, _| view.syntax_text_bytes);
+        assert!(held > 0);
+
+        // タブを閉じて、また開いた。
+        view.update(cx, |view, cx| {
+            view.deactivate(cx);
+            view.activate(cx);
+        });
+        run_until(&view, cx, loaded_fully);
+        assert_eq!(
+            host.counts().1,
+            3 + 18,
+            "読み終えた 2 件は読み直さず、3 件目から続きを読む"
+        );
+        view.read_with(cx, |view, _| {
+            assert!(view.syntax_text_bytes > held, "予算は続きから数える");
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 

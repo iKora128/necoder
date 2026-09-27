@@ -39,7 +39,7 @@
 | `acp_client` / `agent_panel` | ACP セッション・transcript・composer | crates.io `agent-client-protocol` と necoder 固有 UI の独立実装 | M4 |
 | `lang` | tree-sitter ハイライト・LSP クライアント | 公開 LSP 仕様と tree-sitter crates 上の独立実装 | M7 |
 | `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
-| `review_view` | 変更レビュー（worktree の全変更を 1 画面で・可変高リスト・ツリー・畳み）。構造化 diff は `project::review`（git CLI の unified diff を解析）。`editor_view` は構文色の写像だけ借りる（コアは変更レビューを知らない） | GPUI の公開 API・Git CLI 上の独立実装（Orca の機能比較のみ） | parity O6 |
+| `review_view` | 変更レビュー（worktree の全変更を 1 画面で・可変高リスト・ツリー・畳み）。構造化 diff は `project::review`（git CLI の unified diff を解析・読み込みは `ReviewCancel` で取り消せる）。`editor_view` は構文色の写像だけ借りる（コアは変更レビューを知らない） | GPUI の公開 API・Git CLI 上の独立実装（Orca の機能比較のみ） | parity O6 |
 | `webview_view` | ローカル HTML プレビュー / artifact の隔離表示 / localhost の Web タブ | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱）。Web タブの移動判定を最上位だけに掛けるため、macOS は wry の navigation delegate を包む（`main_frame.rs`・objc2）。Design モードのピッカー（`design_picker.js`・初期化スクリプト）と IPC は Web タブの WebView にだけ付け、受けた知らせは `design.rs` が送り手・nonce・形・大きさで検め秘密を伏せる。要素の切り抜きは `snapshot.rs`（macOS=`takeSnapshotWithConfiguration` / Windows=`CapturePreview` + 切り抜き）。HTML ファイルを Web タブで開く**内蔵の配信**は `static_server.rs`（std の `TcpListener` だけ・`127.0.0.1`・token 付きの URL・Host 検査・使う Web タブがある間だけ動く） | M14 |
 | `graph_view` | worktree×commit の DAG・custom Element | Git CLI の出力を使う独立実装 | M14 |
 
@@ -366,6 +366,10 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
 - server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
 - wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、
   stream/event/cancel は watch・PTY の protocol 化と同時に追加する。
+- 途中で用が無くなる読み取り専用の command（変更レビューの `git diff` 等・`--no-optional-locks`）は
+  `Host::run_command_cancellable(spec, cancel)`（2026-09-27・R02）: local は子の出力を待つ間に印を見て、
+  立ったら子を止める。remote は 1 往復の途中で止める口が無いので、既定の実装が最後まで走らせてから結果を
+  捨てる（呼ぶ側は次の区切りで止まる。stream/cancel の protocol 化と一緒に直す）。
 - local implementation を先に `Host` へ移し、既存機能の回帰 test 後に SSH implementation を挿す。
 - security/performance/reliability の受入条件は
   [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) を正とする。

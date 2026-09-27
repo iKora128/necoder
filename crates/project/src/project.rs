@@ -19,6 +19,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// A project execution source. Host and root must stay paired so identical remote/local
@@ -525,6 +526,22 @@ where
     S: Into<String>,
 {
     run_git_as(host, dir, GitTrigger::Automatic, args, &[])
+}
+
+/// [`run_git`] の取り消せる版（変更レビューの読み込み。[`Host::run_command_cancellable`]）。
+/// `cancel` が立ったら `Ok(None)`。読み取り専用（`--no-optional-locks`）の git だけに使う。
+fn run_git_cancellable<I, S>(
+    host: &dyn Host,
+    dir: &Path,
+    args: I,
+    cancel: &AtomicBool,
+) -> Result<Option<CommandOutput>>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let spec = CommandSpec::new("git", dir).args(git_command_args(GitTrigger::Automatic, args));
+    host.run_command_cancellable(&spec, cancel)
 }
 
 /// 利用者が明示したコミット / push（[`GitTrigger::UserAction`]・フックを走らせる）。

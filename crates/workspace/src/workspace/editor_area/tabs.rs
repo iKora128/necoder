@@ -482,6 +482,10 @@ impl Workspace {
             self.close_hover(cx);
         }
         let tab = self.tabs.remove(index);
+        // 変更レビューは session が持ち続ける（Fleet の「変更」タブと共用）。閉じたら読み込みを止める（R02）。
+        if let TabContent::Review(review) = &tab.content {
+            self.review_tab_closed(review, cx);
+        }
         if !tab.transient {
             self.recently_closed_files.push(tab.path.clone());
             // 画像タブは didOpen していないので didClose も送らない。

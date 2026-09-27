@@ -6,15 +6,21 @@
 //! 追跡外のファイルは全行追加として足す。描画・畳み・注記は `review_view` crate が持つ
 //! （この crate は UI を知らない）。
 //!
-//! git の呼び出しは全て [`crate::run_git`] を通す（未信頼 repo の防御をそのまま効かせる）。
+//! git の呼び出しは全て [`crate::run_git`] か、その取り消せる版の [`crate::run_git_cancellable`] を
+//! 通す（未信頼 repo の防御をそのまま効かせる）。
 //! 出力の形は `--src-prefix` / `--dst-prefix` / `--no-ext-diff` / `--no-textconv` /
 //! `core.quotepath=false` で固定し、ユーザーの gitconfig（mnemonicPrefix・外部 diff 等）に左右されない。
+//!
+//! 読み込みは取り消せる（[`ReviewCancel`]・R02）。UI が基準を変えた・読み直した・画面を閉じた時に
+//! 立てると、背景の処理は区切り（git の呼び出しごと・ファイル 1 件ごと）で止まり、残りを読まない。
 
-use crate::{git_repo_root_on, run_git};
+use crate::{git_repo_root_on, run_git, run_git_cancellable};
 use host::Host;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// hunk の前後に付ける文脈の行数（`git diff -U3` と同じ）。
 pub const CONTEXT_LINES: u32 = 3;
@@ -37,6 +43,37 @@ pub const MAX_DIFF_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// 全文（ハイライト・畳みの展開用）をレビュー全体で持つ上限（R02）。超えた分のファイルは
 /// 色を付けず、畳みも開けない（差分の行はそのまま見える）。
 pub const MAX_TOTAL_TEXT_BYTES: usize = 24 * 1024 * 1024;
+
+/// 読み込みの取り消し（R02）。1 回の読み込みごとに作り、UI が基準を変えた・読み直した・画面を
+/// 閉じた時に立てる。背景の処理は区切り（git の呼び出しごと・追跡外のファイル 1 件ごと・全文
+/// 1 件ごと）で見て止まる — 結果を捨てるだけでなく、残りの git・読み込み・解析をしない。
+/// 手元の git は走っている途中でも止める（[`host::Host::run_command_cancellable`]）。
+#[derive(Debug, Clone, Default)]
+pub struct ReviewCancel(Arc<AtomicBool>);
+
+impl ReviewCancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取り消す（何度呼んでもよい）。
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// 区切り: 取り消されていたら [`ReviewError::Cancelled`]。
+    fn checkpoint(&self) -> Result<(), ReviewError> {
+        if self.is_cancelled() {
+            Err(ReviewError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// 比較の基準（解決前）。UI が選び、[`resolve_review_base_on`] がコミットに解決する。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -202,6 +239,8 @@ pub enum ReviewError {
     UnknownBase(String),
     /// git の実行に失敗した（stderr の要約）。
     Git(String),
+    /// 読み込みを取り消した（[`ReviewCancel`]・結果は使われない）。
+    Cancelled,
 }
 
 impl std::fmt::Display for ReviewError {
@@ -210,6 +249,7 @@ impl std::fmt::Display for ReviewError {
             Self::NotRepository => write!(formatter, "git リポジトリではない"),
             Self::UnknownBase(rev) => write!(formatter, "比較の基準が見つからない: {rev}"),
             Self::Git(message) => write!(formatter, "git に失敗: {message}"),
+            Self::Cancelled => write!(formatter, "読み込みを取り消した"),
         }
     }
 }
@@ -264,18 +304,19 @@ pub fn git_merge_base_on(host: &dyn Host, dir: &Path, left: &str, right: &str) -
 }
 
 /// 任意の rev のファイル内容（`git show <rev>:<path>`・`path` はリポジトリルート相対）。
-/// そのコミットに無いファイル・失敗は `None`。textconv は通さない（生のバイト列）。
+/// そのコミットに無いファイル・失敗・取り消した（`cancel`）は `None`。textconv は通さない（生のバイト列）。
 pub fn git_show_file_on(
     host: &dyn Host,
     repo_root: &Path,
     rev: &str,
     path: &str,
+    cancel: &ReviewCancel,
 ) -> Option<Vec<u8>> {
     if rev.is_empty() || rev.starts_with('-') {
         return None;
     }
     let spec = format!("{rev}:{path}");
-    let output = run_git(
+    let output = run_review_git(
         host,
         repo_root,
         [
@@ -284,6 +325,7 @@ pub fn git_show_file_on(
             "--no-textconv",
             spec.as_str(),
         ],
+        cancel,
     )
     .ok()?;
     output.success().then_some(output.stdout)
@@ -341,6 +383,24 @@ fn diff_args(ignore_whitespace: bool) -> Vec<String> {
     args
 }
 
+/// 読み込みの git（取り消せる・[`run_git_cancellable`]）。途中で止めても何も壊れないよう、呼ぶ側は
+/// `--no-optional-locks` を付ける。取り消されたら [`ReviewError::Cancelled`]、起動できなければ
+/// [`ReviewError::Git`]。
+fn run_review_git<I, S>(
+    host: &dyn Host,
+    dir: &Path,
+    args: I,
+    cancel: &ReviewCancel,
+) -> Result<host::CommandOutput, ReviewError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    run_git_cancellable(host, dir, args, &cancel.0)
+        .map_err(|error| ReviewError::Git(error.to_string()))?
+        .ok_or(ReviewError::Cancelled)
+}
+
 fn git_failure(output: &host::CommandOutput) -> ReviewError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     ReviewError::Git(
@@ -355,6 +415,7 @@ fn git_failure(output: &host::CommandOutput) -> ReviewError {
 
 /// 基準コミットから作業ツリーまでの unified diff（`git diff <base> -- <pathspec>`）。
 /// `paths` が空ならリポジトリ全体、`exclude` はパッチに含めないパス（大きすぎる・バイナリ）。
+/// `cancel` が立ったら git を止めて [`ReviewError::Cancelled`]。
 pub fn git_diff_patch_on(
     host: &dyn Host,
     repo_root: &Path,
@@ -362,6 +423,7 @@ pub fn git_diff_patch_on(
     paths: &[String],
     exclude: &[String],
     ignore_whitespace: bool,
+    cancel: &ReviewCancel,
 ) -> Result<String, ReviewError> {
     if base_oid.starts_with('-') {
         return Err(ReviewError::UnknownBase(base_oid.to_string()));
@@ -382,17 +444,21 @@ pub fn git_diff_patch_on(
             .iter()
             .map(|path| format!(":(exclude,literal){path}")),
     );
-    let output =
-        run_git(host, repo_root, args).map_err(|error| ReviewError::Git(error.to_string()))?;
+    let output = run_review_git(host, repo_root, args, cancel)?;
     if !output.success() {
         return Err(git_failure(&output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// 追跡外のファイル（`git ls-files --others --exclude-standard`・ルート相対）。
-pub fn git_untracked_files_on(host: &dyn Host, repo_root: &Path) -> Vec<String> {
-    let output = run_git(
+/// 追跡外のファイル（`git ls-files --others --exclude-standard`・ルート相対）。git が失敗したら
+/// 空（追跡済みの差分だけでも出す）。取り消したら [`ReviewError::Cancelled`]。
+pub fn git_untracked_files_on(
+    host: &dyn Host,
+    repo_root: &Path,
+    cancel: &ReviewCancel,
+) -> Result<Vec<String>, ReviewError> {
+    let output = run_review_git(
         host,
         repo_root,
         [
@@ -404,18 +470,18 @@ pub fn git_untracked_files_on(host: &dyn Host, repo_root: &Path) -> Vec<String> 
             "--exclude-standard",
             "-z",
         ],
+        cancel,
     );
-    let Ok(output) = output else {
-        return Vec::new();
+    let output = match output {
+        Ok(output) if output.success() => output,
+        Err(ReviewError::Cancelled) => return Err(ReviewError::Cancelled),
+        Ok(_) | Err(_) => return Ok(Vec::new()),
     };
-    if !output.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .split('\0')
         .filter(|path| !path.is_empty() && !path.ends_with('/'))
         .map(str::to_string)
-        .collect()
+        .collect())
 }
 
 /// `--name-status -z` の 1 件。
@@ -496,11 +562,13 @@ fn parse_numstat_z(text: &str) -> HashMap<String, Option<(usize, usize)>> {
 /// 追跡済みは `git diff <base>`（staged / unstaged をまとめて）、追跡外は全行追加。
 /// 大きすぎるファイル（[`MAX_FILE_CHANGED_LINES`] / [`MAX_TOTAL_CHANGED_LINES`]）とバイナリは
 /// パッチを取らず、`too_large` / `binary` の印だけで並べる。`ignore_whitespace` は `git diff -w`。
+/// `cancel` が立ったら区切りで止まって [`ReviewError::Cancelled`] を返す（残りを読まない）。
 pub fn review_diff_on(
     host: &dyn Host,
     dir: &Path,
     base: &ReviewBase,
     ignore_whitespace: bool,
+    cancel: &ReviewCancel,
 ) -> Result<ReviewDiff, ReviewError> {
     review_diff_with_budgets_on(
         host,
@@ -508,6 +576,7 @@ pub fn review_diff_on(
         base,
         ignore_whitespace,
         &ReviewBudgets::default(),
+        cancel,
     )
 }
 
@@ -542,8 +611,12 @@ pub fn review_diff_with_budgets_on(
     base: &ReviewBase,
     ignore_whitespace: bool,
     budgets: &ReviewBudgets,
+    cancel: &ReviewCancel,
 ) -> Result<ReviewDiff, ReviewError> {
+    // 始める前に取り消されていれば git も叩かない。以後も git の呼び出しの間ごとに見る（R02）。
+    cancel.checkpoint()?;
     let repo_root = git_repo_root_on(host, dir).ok_or(ReviewError::NotRepository)?;
+    cancel.checkpoint()?;
     let base_oid = resolve_review_base_on(host, &repo_root, base)?;
     let listing = |extra: &str| -> Result<String, ReviewError> {
         let mut args = diff_args(ignore_whitespace);
@@ -551,8 +624,7 @@ pub fn review_diff_with_budgets_on(
         args.push("-z".to_string());
         args.push(base_oid.clone());
         args.push("--".to_string());
-        let output =
-            run_git(host, &repo_root, args).map_err(|error| ReviewError::Git(error.to_string()))?;
+        let output = run_review_git(host, &repo_root, args, cancel)?;
         if !output.success() {
             return Err(git_failure(&output));
         }
@@ -605,21 +677,22 @@ pub fn review_diff_with_budgets_on(
             .filter(|file| file.kind != FileChangeKind::Added)
             .map(|file| file.base_path().to_string())
             .collect();
-        let old_sizes = git_blob_sizes_on(host, &repo_root, &base_oid, &old_paths);
-        let oversized: Vec<String> = sized
-            .iter()
-            .filter(|file| {
-                let old = old_sizes.get(file.base_path()).copied().unwrap_or(0);
-                let new = if file.kind == FileChangeKind::Deleted {
-                    0
-                } else {
-                    host.metadata(&repo_root.join(&file.path))
-                        .map_or(0, |metadata| metadata.len)
-                };
-                old.max(new) > budgets.diff_file_bytes
-            })
-            .map(|file| file.path.clone())
-            .collect();
+        let old_sizes = git_blob_sizes_on(host, &repo_root, &base_oid, &old_paths, cancel)?;
+        let mut oversized = Vec::new();
+        for file in &sized {
+            // 作業ツリーの大きさは 1 件ずつ見る（SSH 先では 1 往復ずつ）。取り消したら残りは見ない。
+            cancel.checkpoint()?;
+            let old = old_sizes.get(file.base_path()).copied().unwrap_or(0);
+            let new = if file.kind == FileChangeKind::Deleted {
+                0
+            } else {
+                host.metadata(&repo_root.join(&file.path))
+                    .map_or(0, |metadata| metadata.len)
+            };
+            if old.max(new) > budgets.diff_file_bytes {
+                oversized.push(file.path.clone());
+            }
+        }
         for file in files
             .iter_mut()
             .filter(|file| oversized.contains(&file.path))
@@ -639,7 +712,10 @@ pub fn review_diff_with_budgets_on(
             &[],
             &exclude,
             ignore_whitespace,
+            cancel,
         )?;
+        // 取り消した読み込みの大きなパッチは解析しない。
+        cancel.checkpoint()?;
         let mut parsed: HashMap<String, FileDiff> = parse_unified_diff(&patch)
             .into_iter()
             .map(|file| (file.path.clone(), file))
@@ -680,8 +756,11 @@ pub fn review_diff_with_budgets_on(
     // 追跡外も、追跡済みの残りの行数・バイト数の予算の中で読む（R02・以前は全体の予算を減らさず、
     // 1MB × 1,000 件まで読めた）。予算を超えた分は並べるだけ。
     let mut line_budget = budget;
-    let untracked = git_untracked_files_on(host, &repo_root);
+    cancel.checkpoint()?;
+    let untracked = git_untracked_files_on(host, &repo_root, cancel)?;
     for (index, path) in untracked.into_iter().enumerate() {
+        // 追跡外は 1 件ずつ読む（最大 1,000 件）。取り消したら残りは読まない。
+        cancel.checkpoint()?;
         let absolute = repo_root.join(&path);
         let size = host.metadata(&absolute).map_or(0, |metadata| metadata.len);
         let oversized = index >= MAX_UNTRACKED_FILES
@@ -740,16 +819,17 @@ pub fn apply_patch_byte_budget(files: &mut [FileDiff], per_file: usize, remainin
 }
 
 /// 基準のツリーでのファイルの大きさ（`git ls-tree -l -z <base> -- <paths>`・R02 の事前確認）。
-/// 読めなかったものは入らない（呼び出し側は 0 とみなす）。
+/// 読めなかったものは入らない（呼び出し側は 0 とみなす）。取り消したら [`ReviewError::Cancelled`]。
 fn git_blob_sizes_on(
     host: &dyn Host,
     repo_root: &Path,
     base_oid: &str,
     paths: &[String],
-) -> HashMap<String, u64> {
+    cancel: &ReviewCancel,
+) -> Result<HashMap<String, u64>, ReviewError> {
     let mut sizes = HashMap::new();
     if paths.is_empty() || base_oid.is_empty() || base_oid.starts_with('-') {
-        return sizes;
+        return Ok(sizes);
     }
     let mut args: Vec<String> = [
         "-c",
@@ -765,12 +845,11 @@ fn git_blob_sizes_on(
     .map(str::to_string)
     .collect();
     args.extend(paths.iter().cloned());
-    let Ok(output) = run_git(host, repo_root, args) else {
-        return sizes;
+    let output = match run_review_git(host, repo_root, args, cancel) {
+        Ok(output) if output.success() => output,
+        Err(ReviewError::Cancelled) => return Err(ReviewError::Cancelled),
+        Ok(_) | Err(_) => return Ok(sizes),
     };
-    if !output.success() {
-        return sizes;
-    }
     // `<mode> SP <type> SP <oid> SP+ <size> TAB <path>`（size は右寄せの空白つき。tree は `-`）。
     for entry in String::from_utf8_lossy(&output.stdout).split('\0') {
         let Some((meta, path)) = entry.split_once('\t') else {
@@ -784,7 +863,7 @@ fn git_blob_sizes_on(
             sizes.insert(path.to_string(), size);
         }
     }
-    sizes
+    Ok(sizes)
 }
 
 /// ファイルツリーと同じ並び（各階層でディレクトリが先・名前順）。レビューの縦の並びとツリーを揃える。
@@ -879,15 +958,18 @@ pub fn untracked_file_diff(path: &str, bytes: &[u8]) -> FileDiff {
 }
 
 /// 旧側・新側の全文を読む（ハイライトと畳みの展開用）。バイナリ・大きすぎるもの・
-/// UTF-8 でないもの・[`MAX_TEXT_BYTES`] を超えるものは `None`。
+/// UTF-8 でないもの・[`MAX_TEXT_BYTES`] を超えるものは `None`。`cancel` が立っていたら読まずに
+/// （旧側の `git show` の途中なら止めて）[`ReviewError::Cancelled`]。
 pub fn review_file_texts_on(
     host: &dyn Host,
     repo_root: &Path,
     base_oid: &str,
     file: &FileDiff,
-) -> FileTexts {
+    cancel: &ReviewCancel,
+) -> Result<FileTexts, ReviewError> {
+    cancel.checkpoint()?;
     if file.binary || file.too_large {
-        return FileTexts::default();
+        return Ok(FileTexts::default());
     }
     // 新側が大きすぎるなら両側とも読まない（旧側もほぼ同じ大きさ・全文を持つとメモリを食う）。
     let new_path = repo_root.join(&file.path);
@@ -896,7 +978,7 @@ pub fn review_file_texts_on(
             .metadata(&new_path)
             .is_ok_and(|metadata| metadata.len > MAX_TEXT_BYTES as u64)
     {
-        return FileTexts::default();
+        return Ok(FileTexts::default());
     }
     let decode = |bytes: Vec<u8>| -> Option<String> {
         if bytes.len() > MAX_TEXT_BYTES || looks_binary(&bytes) {
@@ -906,8 +988,10 @@ pub fn review_file_texts_on(
     };
     let old = match file.kind {
         FileChangeKind::Added | FileChangeKind::Untracked => None,
-        _ => git_show_file_on(host, repo_root, base_oid, file.base_path()).and_then(decode),
+        _ => git_show_file_on(host, repo_root, base_oid, file.base_path(), cancel).and_then(decode),
     };
+    // 旧側を読む間に取り消されたら、新側は読まない。
+    cancel.checkpoint()?;
     let new = match file.kind {
         FileChangeKind::Deleted => None,
         _ => host
@@ -915,7 +999,7 @@ pub fn review_file_texts_on(
             .ok()
             .and_then(|content| decode(content.bytes)),
     };
-    FileTexts { old, new }
+    Ok(FileTexts { old, new })
 }
 
 // ── unified diff の解析 ──
@@ -1447,6 +1531,7 @@ mod tests {
             &ReviewBase::Head,
             false,
             &budgets,
+            &ReviewCancel::new(),
         )
         .expect("差分を読める");
         let file = |path: &str| {
@@ -1479,9 +1564,15 @@ mod tests {
             total_patch_bytes: 4,
             ..budgets
         };
-        let diff =
-            review_diff_with_budgets_on(&host::LocalHost, &root, &ReviewBase::Head, false, &tight)
-                .expect("差分を読める");
+        let diff = review_diff_with_budgets_on(
+            &host::LocalHost,
+            &root,
+            &ReviewBase::Head,
+            false,
+            &tight,
+            &ReviewCancel::new(),
+        )
+        .expect("差分を読める");
         let read = diff
             .files
             .iter()
@@ -1577,8 +1668,9 @@ mod tests {
         std::fs::write(dir.join("bin.dat"), b"\x00\x02").unwrap();
         std::fs::write(dir.join("new.txt"), "fresh\nfile").unwrap();
         let host = host::LocalHost;
+        let idle = ReviewCancel::new();
 
-        let diff = review_diff_on(&host, &dir, &ReviewBase::Commit(base.clone()), false)
+        let diff = review_diff_on(&host, &dir, &ReviewBase::Commit(base.clone()), false, &idle)
             .expect("base との差分");
         assert_eq!(diff.base_oid, base);
         let summary: Vec<(&str, FileChangeKind)> = diff
@@ -1610,10 +1702,11 @@ mod tests {
         assert!(new.hunks[0].lines[1].no_newline);
 
         // HEAD 基準 = 未コミットの分だけ（keep.txt のコミット済みの変更は出ない）。
-        let head = review_diff_on(&host, &dir, &ReviewBase::Head, false).expect("HEAD との差分");
+        let head =
+            review_diff_on(&host, &dir, &ReviewBase::Head, false, &idle).expect("HEAD との差分");
         assert!(head.files.iter().all(|file| file.path != "keep.txt"));
         // -w で空白だけの差を消す。
-        let ignoring = review_diff_on(&host, &dir, &ReviewBase::Head, true).expect("-w");
+        let ignoring = review_diff_on(&host, &dir, &ReviewBase::Head, true, &idle).expect("-w");
         assert!(ignoring.files.iter().all(|file| file.path != "space.txt"));
         // ブランチ = 分岐点（main の先へ進んでも task の変更だけを見る）。
         git(&dir, &["stash", "-q", "-u"]);
@@ -1622,21 +1715,34 @@ mod tests {
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-qm", "main moves on"]);
         git(&dir, &["switch", "-q", "task/x"]);
-        let branch = review_diff_on(&host, &dir, &ReviewBase::Branch("main".into()), false)
-            .expect("ブランチとの差分");
+        let branch = review_diff_on(
+            &host,
+            &dir,
+            &ReviewBase::Branch("main".into()),
+            false,
+            &idle,
+        )
+        .expect("ブランチとの差分");
         assert_eq!(branch.base_oid, base, "分岐点に解決する");
         assert!(branch.files.iter().all(|file| file.path != "main_only.txt"));
         assert!(branch.files.iter().any(|file| file.path == "keep.txt"));
         // git show と全文。
-        let texts = review_file_texts_on(&host, &dir, &base, file("keep.txt"));
+        let texts =
+            review_file_texts_on(&host, &dir, &base, file("keep.txt"), &idle).expect("全文");
         assert_eq!(texts.old.as_deref(), Some("one\ntwo\nthree\n"));
         assert_eq!(texts.new.as_deref(), Some("one\nTWO\nthree\n"));
         assert_eq!(
-            git_show_file_on(&host, &dir, &base, "gone.txt").as_deref(),
+            git_show_file_on(&host, &dir, &base, "gone.txt", &idle).as_deref(),
             Some(b"gone\n".as_slice())
         );
         assert!(matches!(
-            review_diff_on(&host, &dir, &ReviewBase::Branch("nope".into()), false),
+            review_diff_on(
+                &host,
+                &dir,
+                &ReviewBase::Branch("nope".into()),
+                false,
+                &idle
+            ),
             Err(ReviewError::UnknownBase(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1650,10 +1756,224 @@ mod tests {
             return;
         }
         std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
-        let diff = review_diff_on(&host::LocalHost, &dir, &ReviewBase::Head, false)
-            .expect("コミット前でも開ける");
+        let diff = review_diff_on(
+            &host::LocalHost,
+            &dir,
+            &ReviewBase::Head,
+            false,
+            &ReviewCancel::new(),
+        )
+        .expect("コミット前でも開ける");
         assert_eq!(diff.files.len(), 1);
         assert_eq!(diff.files[0].kind, FileChangeKind::Untracked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 呼び出しを数える host（中身は LocalHost）。取り消しで「読む処理そのものが減る」ことを
+    /// 確かめる（R02・結果を捨てるだけの実装と区別する）。
+    #[derive(Default)]
+    struct CountingHost {
+        /// git などの command を頼まれた数（取り消せる経路も含む）。
+        commands: std::sync::atomic::AtomicUsize,
+        /// ファイルを読んだ数。
+        reads: std::sync::atomic::AtomicUsize,
+        /// command の数がこれに届いたら、その command を流す前に取り消す。
+        cancel_at_command: Option<(usize, ReviewCancel)>,
+        /// 読んだ数がこれに届いたら取り消す（読んだ中身はそのまま返す）。
+        cancel_at_read: Option<(usize, ReviewCancel)>,
+    }
+
+    impl CountingHost {
+        fn commands(&self) -> usize {
+            self.commands.load(Ordering::SeqCst)
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+
+        fn count_command(&self) {
+            let count = self.commands.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some((limit, cancel)) = &self.cancel_at_command {
+                if count >= *limit {
+                    cancel.cancel();
+                }
+            }
+        }
+    }
+
+    impl Host for CountingHost {
+        fn id(&self) -> &str {
+            "counting"
+        }
+        fn display_name(&self) -> &str {
+            "counting"
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn host_for_project(&self, path: &Path) -> anyhow::Result<Arc<dyn Host>> {
+            host::LocalHost.host_for_project(path)
+        }
+        fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+            host::LocalHost.canonicalize(path)
+        }
+        fn metadata(&self, path: &Path) -> anyhow::Result<host::HostMetadata> {
+            host::LocalHost.metadata(path)
+        }
+        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<host::HostEntry>> {
+            host::LocalHost.read_dir(path)
+        }
+        fn read_file(&self, path: &Path) -> anyhow::Result<host::FileContent> {
+            let count = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some((limit, cancel)) = &self.cancel_at_read {
+                if count >= *limit {
+                    cancel.cancel();
+                }
+            }
+            host::LocalHost.read_file(path)
+        }
+        fn write_file(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            condition: host::WriteCondition,
+        ) -> anyhow::Result<host::FileRevision> {
+            host::LocalHost.write_file(path, bytes, condition)
+        }
+        fn list_files(&self, root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+            host::LocalHost.list_files(root, limit)
+        }
+        fn search_project(
+            &self,
+            root: &Path,
+            spec: &host::TextSearchSpec,
+            file_limit: usize,
+        ) -> anyhow::Result<Vec<host::TextSearchHit>> {
+            host::LocalHost.search_project(root, spec, file_limit)
+        }
+        fn run_command(&self, spec: &host::CommandSpec) -> anyhow::Result<host::CommandOutput> {
+            self.count_command();
+            host::LocalHost.run_command(spec)
+        }
+        fn run_command_cancellable(
+            &self,
+            spec: &host::CommandSpec,
+            cancel: &AtomicBool,
+        ) -> anyhow::Result<Option<host::CommandOutput>> {
+            self.count_command();
+            host::LocalHost.run_command_cancellable(spec, cancel)
+        }
+        fn spawn_process(&self, spec: &host::CommandSpec) -> anyhow::Result<host::HostProcess> {
+            host::LocalHost.spawn_process(spec)
+        }
+        fn terminal_launch(&self, cwd: &Path) -> anyhow::Result<Option<host::TerminalLaunch>> {
+            host::LocalHost.terminal_launch(cwd)
+        }
+    }
+
+    /// R02: 取り消したら残りを読まない（結果を捨てるだけではない）。取り消さなければ追跡外の 20 件を
+    /// 全部読み（捨てるだけの実装は取り消しても同じだけ読む）、3 件目で取り消すとそこで止まる。
+    /// 始める前に取り消されていれば git も叩かない。
+    #[test]
+    fn a_cancelled_review_stops_reading_the_rest() {
+        let dir = scratch("cancel_untracked");
+        if !git(&dir, &["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        for index in 0..20 {
+            std::fs::write(dir.join(format!("u{index:02}.txt")), "x\n").unwrap();
+        }
+        let whole = CountingHost::default();
+        let diff = review_diff_on(&whole, &dir, &ReviewBase::Head, false, &ReviewCancel::new())
+            .expect("差分");
+        assert_eq!(diff.files.len(), 20);
+        assert_eq!(whole.reads(), 20, "取り消さなければ全部読む");
+
+        let cancel = ReviewCancel::new();
+        let cut = CountingHost {
+            cancel_at_read: Some((3, cancel.clone())),
+            ..CountingHost::default()
+        };
+        assert_eq!(
+            review_diff_on(&cut, &dir, &ReviewBase::Head, false, &cancel),
+            Err(ReviewError::Cancelled)
+        );
+        assert_eq!(cut.reads(), 3, "取り消した後の 17 件は読まない");
+
+        let idle = CountingHost::default();
+        let early = ReviewCancel::new();
+        early.cancel();
+        assert_eq!(
+            review_diff_on(&idle, &dir, &ReviewBase::Head, false, &early),
+            Err(ReviewError::Cancelled)
+        );
+        assert_eq!(
+            (idle.commands(), idle.reads()),
+            (0, 0),
+            "始める前に取り消されていれば git も読み込みもしない"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R02: 追跡済みの差分も git の呼び出しの間で止まる。`--name-status` の最中に取り消すと、
+    /// `--numstat`・`ls-tree`・パッチ・追跡外の一覧を取りに行かない。全文の読み込みも、旧側の
+    /// `git show` の最中に取り消すと新側を読まない。
+    #[test]
+    fn a_cancelled_review_skips_the_remaining_git_calls() {
+        let dir = scratch("cancel_tracked");
+        if !git(&dir, &["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        for index in 0..5 {
+            std::fs::write(dir.join(format!("f{index}.txt")), "a\n").unwrap();
+        }
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-qm", "base"]);
+        for index in 0..5 {
+            std::fs::write(dir.join(format!("f{index}.txt")), "b\n").unwrap();
+        }
+        let whole = CountingHost::default();
+        let diff = review_diff_on(&whole, &dir, &ReviewBase::Head, false, &ReviewCancel::new())
+            .expect("差分");
+        assert_eq!(diff.files.len(), 5);
+        assert!(whole.commands() > 3, "{}", whole.commands());
+
+        // 1 = rev-parse --show-toplevel / 2 = HEAD の解決 / 3 = --name-status（ここで取り消す）。
+        let cancel = ReviewCancel::new();
+        let cut = CountingHost {
+            cancel_at_command: Some((3, cancel.clone())),
+            ..CountingHost::default()
+        };
+        assert_eq!(
+            review_diff_on(&cut, &dir, &ReviewBase::Head, false, &cancel),
+            Err(ReviewError::Cancelled)
+        );
+        assert_eq!(cut.commands(), 3, "残りの git は取りに行かない");
+
+        let texts = CountingHost::default();
+        let file = &diff.files[0];
+        assert!(
+            review_file_texts_on(&texts, &dir, &diff.base_oid, file, &ReviewCancel::new())
+                .expect("全文")
+                .new
+                .is_some()
+        );
+        assert_eq!(
+            (texts.commands(), texts.reads()),
+            (1, 1),
+            "旧側の git show と新側"
+        );
+        let cancel = ReviewCancel::new();
+        let cut = CountingHost {
+            cancel_at_command: Some((1, cancel.clone())),
+            ..CountingHost::default()
+        };
+        assert_eq!(
+            review_file_texts_on(&cut, &dir, &diff.base_oid, file, &cancel),
+            Err(ReviewError::Cancelled)
+        );
+        assert_eq!(cut.reads(), 0, "旧側の途中で取り消したら新側は読まない");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
