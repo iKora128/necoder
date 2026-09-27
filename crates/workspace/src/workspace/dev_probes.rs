@@ -35,6 +35,35 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: composer の `!`（シェルモード・#37）を offscreen で確かめる（`NECODER_SHELL_PROBE`）。
+    /// 本物の経路で見本のコマンドを走らせ、`!` の行・composer のヒント・添える予定のチップを写す。
+    /// `expanded` = 長い出力を開いておく / `chat` = フォルダの無いチャット（走らせずに理由を出す）/
+    /// `chat-folder` = 見本の会話でフォルダを作ったチャットで走らせる。
+    #[cfg(debug_assertions)]
+    pub fn debug_shell_probe(&mut self, mode: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match mode {
+            "chat" | "chat-folder" => {
+                self.set_chat_mode(true, window, cx);
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| {
+                        if mode == "chat-folder" {
+                            panel.debug_seed_chat(cx);
+                        }
+                        panel.debug_shell_probe(mode, window, cx);
+                    });
+                }
+            }
+            _ => {
+                if !self.chrome.show_right {
+                    self.chrome.show_right = true;
+                }
+                self.agent_panel
+                    .update(cx, |panel, cx| panel.debug_shell_probe(mode, window, cx));
+            }
+        }
+        cx.notify();
+    }
+
     /// 開発用: 使用量（O11）を offscreen で確かめる（`NECODER_USAGE_PROBE`・`;` 区切りで順に実行）。
     ///
     /// `limits` / `near` / `blocked` = いまのスレッドにレート制限を流す（本番と同じ `on_event`）/

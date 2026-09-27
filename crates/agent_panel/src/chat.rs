@@ -328,10 +328,9 @@ impl AgentPanel {
         }
         let dir = self.chat_dir(id);
         if let Some(index) = self.threads.iter().position(|thread| thread.id == id) {
-            if let Some(thread) = self.threads.get_mut(index) {
-                thread.command_tx = None; // エージェントを止める
-            }
-            self.threads.remove(index);
+            let mut removed = self.threads.remove(index);
+            removed.command_tx = None; // エージェントを止める
+            self.stop_shell_runs_of(&mut removed, cx); // `!` で走らせたコマンドも止める
             if self.threads.is_empty() {
                 self.threads
                     .push(new_chat_thread(self.next_chat_color(), cx));
@@ -601,6 +600,7 @@ fn chat_markdown(name: &str, entries: &[Entry]) -> String {
                 ));
             }
             Entry::Step { tool, .. } => markdown.push_str(&format!("\n> ⏺ {tool}\n")),
+            Entry::Shell(run) => markdown.push_str(&format!("\n> ! {}\n", run.command)),
             Entry::Thinking(_) | Entry::Checkpoint { .. } | Entry::Notice(_) => {}
         }
     }

@@ -1500,6 +1500,24 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_SHELL_PROBE=1|expanded で composer の `!`（シェルモード・#37）を
+                // 本物の経路で走らせ、`!` の行・ヒント・添える予定のチップを写す（2s 後）。
+                #[cfg(debug_assertions)]
+                if let Ok(mode) = std::env::var("NECODER_SHELL_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_shell_probe(&mode, window, cx);
+                            }) {
+                                eprintln!("NECODER_SHELL_PROBE: 窓が無い: {error:#}");
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 // 開発用: NECODER_USAGE_PROBE="limits;codex;seed;popover" で使用量（O11）の表示を組み立てる
                 // （2s 後）。レート制限はスレッドの on_event を通し、Codex は app-server を起こさずに値を置く。
                 // `seed` は NECODER_HOME で隔離している時だけ DB に書く。
