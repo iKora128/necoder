@@ -58,11 +58,20 @@ fn platform_summary(agent: &acp_client::registry::RegistryAgent) -> String {
     i18n::t!("settings.add_agent_os", "os" => parts.join(" · "))
 }
 
-/// このマシンでの見込みの注記（足す前に分かること）。`None` = 注記なし（そのまま使える）。
-fn plan_note(result: &Result<acp_client::LaunchPlan, acp_client::LaunchError>) -> Option<String> {
+/// このマシンでの見込みの注記（足す前に分かること）と、注意を引く文か（`true` = fg1 で出す）。
+/// binary は検証の値の有無を必ず出す（無い物は「検証の値がありません」・H2-b）。
+fn plan_note(
+    result: &Result<acp_client::LaunchPlan, acp_client::LaunchError>,
+) -> Option<(String, bool)> {
     match result {
+        Ok(acp_client::LaunchPlan::Binary { verified: true, .. }) => {
+            Some((i18n::t!("settings.add_agent_sha256"), false))
+        }
+        Ok(acp_client::LaunchPlan::Binary {
+            verified: false, ..
+        }) => Some((i18n::t!("settings.add_agent_no_sha256"), true)),
         Ok(_) => None,
-        Err(error) => Some(launch_problem_text(error)),
+        Err(error) => Some((launch_problem_text(error), true)),
     }
 }
 
@@ -79,6 +88,11 @@ pub(crate) fn launch_problem_text(error: &acp_client::LaunchError) -> String {
         acp_client::LaunchError::NeedsNode => i18n::t!("settings.custom_needs_node"),
         acp_client::LaunchError::NotSupportedYet(kind) => {
             i18n::t!("settings.custom_not_yet", "kind" => kind.as_str())
+        }
+        acp_client::LaunchError::BinaryOnRemote => i18n::t!("settings.custom_binary_on_remote"),
+        acp_client::LaunchError::NotDeployed => i18n::t!("settings.custom_not_deployed"),
+        acp_client::LaunchError::Deploy(error) => {
+            i18n::t!("settings.custom_deploy_failed", "reason" => error.to_string())
         }
     }
 }
@@ -381,11 +395,11 @@ impl SettingsView {
                     )
                     .when_some(
                         plan_note(&plan).filter(|_| builtin.is_none() && !unusable),
-                        |column, note| {
+                        |column, (note, notable)| {
                             column.child(
                                 div()
                                     .text_size(px(10.5))
-                                    .text_color(theme.fg1)
+                                    .text_color(if notable { theme.fg1 } else { theme.fg2 })
                                     .child(SharedString::from(note)),
                             )
                         },
@@ -667,6 +681,35 @@ mod tests {
             ]}"#,
         )
         .expect("見本を読める")
+    }
+
+    /// H2-b: binary は検証の値の有無を必ず出す（無い物は注意の色で「検証の値がありません」）。
+    #[test]
+    fn binaries_say_whether_they_can_be_checked() {
+        let verified = Ok(acp_client::LaunchPlan::Binary {
+            version: "0.9.0".to_string(),
+            deployed: false,
+            verified: true,
+        });
+        assert_eq!(
+            plan_note(&verified),
+            Some((i18n::t!("settings.add_agent_sha256"), false))
+        );
+        let unverified = Ok(acp_client::LaunchPlan::Binary {
+            version: "0.9.0".to_string(),
+            deployed: false,
+            verified: false,
+        });
+        assert_eq!(
+            plan_note(&unverified),
+            Some((i18n::t!("settings.add_agent_no_sha256"), true))
+        );
+        assert_eq!(
+            plan_note(&Ok(acp_client::LaunchPlan::Npx {
+                version: "1".to_string()
+            })),
+            None
+        );
     }
 
     /// 対応 OS の要約: binary は OS ごとにまとめ、片方の arch だけなら括弧で添える。npx は OS を問わない。

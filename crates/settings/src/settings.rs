@@ -2273,14 +2273,19 @@ impl SettingsView {
         let enabled = settings.agent_enabled(&custom.id);
         let is_default = settings.default_agent == custom.label;
         let is_captain = settings.captain_agent.as_deref() == Some(custom.label.as_str());
-        let (ready, status_text) = custom_agent_status(custom, self.registry.as_deref());
+        let status = custom_agent_status(custom, self.registry.as_deref());
+        let ready = status.tone != CustomStatusTone::Unavailable;
         let available = enabled && ready;
         let (dot_color, status_text) = if !enabled {
             (theme.fg2, i18n::t!("settings.agent_disabled"))
-        } else if ready {
-            (theme.ok, status_text)
         } else {
-            (theme.fg2, status_text)
+            let color = match status.tone {
+                CustomStatusTone::Ready => theme.ok,
+                // 使えるが注意の要る状態（検証の値が無い binary）は「利用可能」の色にしない。
+                CustomStatusTone::Caution => theme.fg1,
+                CustomStatusTone::Unavailable => theme.fg2,
+            };
+            (color, status.text)
         };
         let (logo, mono, brand) =
             acp_client::Agent::Custom(std::sync::Arc::new(custom.clone())).brand();
@@ -4220,29 +4225,75 @@ fn agent_logo(icon: Option<&'static str>, monogram: String, brand: u32) -> gpui:
 
 /// 足したエージェントの状態の 1 行と、いま起動できる見込みがあるか（PATH を見るだけ・子プロセスは
 /// 起こさない）。
+/// 足したエージェントの状態の 1 行の調子（色の出し分け）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomStatusTone {
+    /// 起動できる見込み。
+    Ready,
+    /// 起動できるが注意が要る（検証の値が無い binary）。
+    Caution,
+    /// 起動できない（理由を出す）。
+    Unavailable,
+}
+
+/// 足したエージェントの状態の 1 行。
+struct CustomStatus {
+    tone: CustomStatusTone,
+    text: String,
+}
+
+/// 足したエージェントの状態の 1 行と、いま起動できる見込みがあるか（PATH とファイルを見るだけ・
+/// 子プロセスは起こさない）。
 fn custom_agent_status(
     custom: &acp_client::CustomAgent,
     registry: Option<&acp_client::registry::Registry>,
-) -> (bool, String) {
+) -> CustomStatus {
     let command = match &custom.launch {
         acp_client::CustomLaunch::Command { command, .. } => command.as_str(),
         acp_client::CustomLaunch::Registry { .. } => "",
     };
-    match custom.plan(registry) {
+    let (tone, text) = match custom.plan(registry) {
         Ok(acp_client::LaunchPlan::Command { found: true }) => (
-            true,
+            CustomStatusTone::Ready,
             i18n::t!("settings.custom_command_ready", "command" => command),
         ),
         Ok(acp_client::LaunchPlan::Command { found: false }) => (
-            false,
+            CustomStatusTone::Unavailable,
             i18n::t!("settings.custom_command_missing", "command" => command),
         ),
         Ok(acp_client::LaunchPlan::Npx { version }) => (
-            true,
+            CustomStatusTone::Ready,
             i18n::t!("settings.custom_registry_npx", "version" => version),
         ),
-        Err(error) => (false, add_agent::launch_problem_text(&error)),
-    }
+        // キーは literal で並べる（動的に組むと locales の書き忘れに気づけない）。
+        Ok(acp_client::LaunchPlan::Binary {
+            version,
+            deployed,
+            verified,
+        }) => match (deployed, verified) {
+            (true, true) => (
+                CustomStatusTone::Ready,
+                i18n::t!("settings.custom_binary_ready", "version" => version),
+            ),
+            (true, false) => (
+                CustomStatusTone::Caution,
+                i18n::t!("settings.custom_binary_ready_unverified", "version" => version),
+            ),
+            (false, true) => (
+                CustomStatusTone::Ready,
+                i18n::t!("settings.custom_binary_download", "version" => version),
+            ),
+            (false, false) => (
+                CustomStatusTone::Caution,
+                i18n::t!("settings.custom_binary_download_unverified", "version" => version),
+            ),
+        },
+        Err(error) => (
+            CustomStatusTone::Unavailable,
+            add_agent::launch_problem_text(&error),
+        ),
+    };
+    CustomStatus { tone, text }
 }
 
 /// ブランド表示はカタログ（`acp_client::AgentKind`）が単一の出所。設定画面もタブも同じ値を引く。
@@ -4569,6 +4620,8 @@ mod tests {
                 .iter()
                 .any(|label| label.as_ref() == "DeepSeek Harness"));
             view.toggle_agent_enabled("dsh", cx);
+            // 使うに戻すとログインの確かめ（実の CLI）を予約する。テストでは起こさない。
+            view.availability_pending = false;
 
             // 起動を変えても name は残る。自分のコマンドの物には「環境変数を足す」の形が無い。
             view.open_launch_editor("dsh".into(), "DeepSeek Harness".into(), window, cx);

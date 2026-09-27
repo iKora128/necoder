@@ -73,6 +73,16 @@ agent:
   err_launch_no_distribution: "No build for this machine (%{platform})"
   err_launch_needs_node: Needs node (npx). Install node, then resume
   err_launch_not_yet: "This kind of build (%{kind}) cant start yet"
+  err_launch_binary_on_remote: This agent only ships a binary, so it can't start over SSH
+  err_launch_not_deployed: Not downloaded yet (it's downloaded and checked on first send)
+  err_deploy_download: "Couldnt download %{url}: %{reason}"
+  err_deploy_checksum: "The download doesnt match the registrys sha256, so it wasnt used (registry %{expected} / download %{actual})"
+  err_deploy_unsafe: "The archive has a path outside its folder (%{entry}), so it wasnt unpacked"
+  err_deploy_other: "Couldnt put the binary in place: %{reason}"
+  deploying: "Downloading %{agent} %{version} (binary, first time only)…"
+  deploy_verified: Checked against the registry's sha256
+  deploy_unverified: The registry has no sha256 for this binary, so it's used unchecked
+  deploy_fallback: "Couldnt download the new version (%{new}), so starting the one in place (%{version})"
   err_session_lost: Session ended. Send again to reconnect
   err_session_ended: The agent session ended (treated as interrupted)
   err_cancel_session_lost: Interrupted — the session stopped responding
@@ -653,6 +663,15 @@ settings:
   custom_no_distribution: "No build for this machine (%{platform})"
   custom_needs_node: Needs node (this build starts with npx)
   custom_not_yet: "This kind of build (%{kind}) cant start yet"
+  custom_binary_ready: "Registry %{version} · binary (in place, checked against sha256)"
+  custom_binary_ready_unverified: "Registry %{version} · binary (in place, no checksum to check)"
+  custom_binary_download: "Registry %{version} · binary (downloaded and checked against sha256 on first start)"
+  custom_binary_download_unverified: "Registry %{version} · binary (downloaded on first start, no checksum to check)"
+  custom_binary_on_remote: This agent only ships a binary, so it can't start over SSH
+  custom_not_deployed: Not downloaded yet (downloaded on first start)
+  custom_deploy_failed: "Couldnt put the binary in place: %{reason}"
+  add_agent_sha256: The binary is checked against the registry's sha256 after download
+  add_agent_no_sha256: No checksum in the registry (no sha256). The downloaded binary is used unchecked
   agents_add: + Add agent
   agents_add_hint: Pick from every agent in the ACP registry. For one that isn't listed, write your command in agent_servers in settings.json
   add_agent_title: Add agent

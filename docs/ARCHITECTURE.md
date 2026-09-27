@@ -221,14 +221,35 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 相手を覚えるので、レジストリのキャッシュの有無で名前が変わらないようにするため。
 
 - 起動の配布は **binary（このマシンの `<os>-<arch>` に完全一致）→ npx → uvx** の順で選ぶ
-  （`RegistryAgent::launch_for`）。リモートは binary を使わない（手元の配布の形なので）。いまは npx だけを
-  起動する（binary / uvx は `LaunchError::NotSupportedYet`）
+  （`RegistryAgent::launch_for`）。リモートは binary を使わない（手元の配布の形なので）。いまは npx と binary を
+  起動する（uvx は `LaunchError::NotSupportedYet`）
 - 組み込みのエージェントのレジストリの項目（`claude-acp` 等）は足させない（同じエージェントが別の起動で
   二重に並ぶ）。組み込みの起動（PATH / npx の版の解決）は変えない — binary / uvx の配備は足した物だけ
 - 起動できない理由は `acp_client::LaunchError`（レジストリに無い・このマシンの配布が無い・node が要る…）で
   型のまま UI へ渡し、設定の行と transcript の失敗の文で言葉にする（acp_client は i18n を持たない）
 - 設定の画面・追加の画面は**キャッシュを読むだけ**。取りに行くのは人が「取得する」「取り直す」を押した時と、
   既存の起動 12 秒後の背景の後追い（1 時間スロットル）だけ
+
+**binary の配備（H2-b・`acp_client::deploy`）— 外から落とした実行ファイルを走らせるので、ここを固定する**:
+
+- **落とす元**: レジストリの JSON の `distribution.binary.<os>-<arch>.archive` の URL **だけ**。necoder は URL を
+  組み立てない・書き換えない。`curl --proto =https --proto-redir =https`（リダイレクト先も https だけ）。
+  https でない URL は落とさない。止まった転送（1 KB/s 未満が 60 秒）は諦める
+- **置き場**: `<data>/external_agents/binary/<id>/<version>/<os>-<arch>/`（`deploy::binary_root`）。id・版・キーは
+  英数字と `._-+` だけ（置き場の外を指す名前を通さない）。版ごとに別のフォルダ＝更新で走っている版を書き換えない。
+  同じ版が置いてあれば落とし直さない（キャッシュ）。新しい版を置いたら 1 つ前の版だけ残して古い版を消す
+- **検証**: レジストリに `sha256` があれば、落とした書庫の sha256（`sha2` crate・64 KB ずつ読む）と照合し、
+  違えば展開せずに捨てる（代わりの版も使わない）。無い物は照合できない — 追加の画面・設定の行に「検証の値が
+  ありません」、起動時に transcript へ 1 行、完了の印（`.necoder-deployed.json` の `verified`）に残す
+- **展開**: 置き場の隣の一時フォルダ（`.staging-<pid>-<時刻>`）に落として、先に中身の名前を確かめる（絶対パス・
+  ドライブ名・`..` を含む書庫は展開しない）→ OS の `tar`（macOS / Windows の bsdtar は zip も）、Linux の zip だけ
+  `unzip` → 起動する `cmd` が置き場の中にあるか確かめて実行の権限を付ける → 印を書いて rename で公開。
+  印の無いフォルダは「置いていない」。書庫でない実行ファイル（拡張子なし・`.exe`）は `cmd` の名前で置く
+- **いつ落とすか**: 最初の起動（送信）の時に**背景で**（`Agent::needs_deploy` → `Agent::deploy_command`）。UI
+  スレッドの解決では落とさない。先張りはしない（見ただけのタブで黙って落とさない）。落としている間は
+  transcript に 1 行。新しい版を**落とせなかった**時だけ手元の一番新しい別の版で起こし、そう知らせる
+- 同じアプリの中で同時に初回が起きても落とすのは 1 回（プロセスの中の lock）。別のプロセスが先に同じ版を
+  置いたら、その完成品を使う
 
 ### 7.2 MCP サーバはクライアントが渡す（2026-09-10）
 

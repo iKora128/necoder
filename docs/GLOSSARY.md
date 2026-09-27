@@ -65,6 +65,7 @@
 | ↳ **足したエージェント**（組み込みの 7 件の外から一覧に足したエージェント。settings.json の `agent_servers.<新しい id>` に自分のコマンドを書いた物・issue #38 H1。表示名は `name`・無ければ id） | `acp_client::CustomAgent` / `acp_client::AgentCatalog` / `acp_client::Agent`（組み込みと共通の入口）/ `settings::agent_catalog` | 足したエージェント / 外す | Added agent / Remove |
 | ↳ **エージェントを追加**（ACP の公開レジストリの全件から選んで足す画面。足すと `agent_servers.<レジストリの id>` に `type: registry` と `name` を書く・issue #38 H2） | `settings::add_agent`（`AddAgentDialog`）/ `acp_client::registry::Registry::search` / `acp_client::CustomLaunch::Registry` | エージェントを追加 / 追加 / 追加済み / 組み込み / 取り直す | Add agent / Add / Added / Built in / Refresh |
 | ↳ **配布の形**（レジストリの項目の起動の仕方。このマシン向けの binary → npx → uvx の順で選ぶ） | `acp_client::registry::DistributionKind` / `RegistryAgent::launch_for` | binary / npx / uvx | binary / npx / uvx |
+| ↳ ↳ **binary の配備**（レジストリの URL から落とし、sha256 で照合して、版ごとの置き場に展開する。最初の起動の時に背景で） | `acp_client::deploy`（`BinaryTarget::deploy` / `binary_root`）/ `Agent::deploy_command` | 落としています / 検証の値がありません | Downloading / No checksum |
 | ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |

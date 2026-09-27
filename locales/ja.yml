@@ -74,6 +74,16 @@ agent:
   err_launch_no_distribution: "このマシン（%{platform}）向けの配布がありません"
   err_launch_needs_node: node（npx）が要ります。node を入れてから再開してください
   err_launch_not_yet: "この配布（%{kind}）はまだ起動できません"
+  err_launch_binary_on_remote: このエージェントは binary の配布しか無いので、リモート（SSH）では起動できません
+  err_launch_not_deployed: まだ落としていません（最初の送信で落として検証します）
+  err_deploy_download: "%{url} を落とせませんでした: %{reason}"
+  err_deploy_checksum: "落とした物の sha256 がレジストリの値と合わないので、使いませんでした（レジストリ %{expected} / 落とした物 %{actual}）"
+  err_deploy_unsafe: "書庫の中に置き場の外を指す名前（%{entry}）があるので、展開しませんでした"
+  err_deploy_other: "binary を置けませんでした: %{reason}"
+  deploying: "%{agent} %{version} を落としています（binary・最初の 1 回だけ）…"
+  deploy_verified: レジストリの sha256 と照合しました
+  deploy_unverified: レジストリに sha256 の値が無いので、照合せずに使います
+  deploy_fallback: "新しい版（%{new}）を落とせなかったので、手元の版（%{version}）で起動します"
   err_session_lost: セッションが切れました。もう一度送信してください
   err_session_ended: エージェントのセッションが終了しました（中断扱い）
   err_cancel_session_lost: セッションが応答しないため中断しました
@@ -654,6 +664,15 @@ settings:
   custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
   custom_needs_node: node が要ります（npx で起動する配布）
   custom_not_yet: "この配布（%{kind}）はまだ起動できません"
+  custom_binary_ready: "レジストリ %{version} · binary（置いてあります・sha256 で照合済み）"
+  custom_binary_ready_unverified: "レジストリ %{version} · binary（置いてあります・検証の値がありません）"
+  custom_binary_download: "レジストリ %{version} · binary（最初の起動で落として sha256 で照合します）"
+  custom_binary_download_unverified: "レジストリ %{version} · binary（最初の起動で落とします・検証の値がありません）"
+  custom_binary_on_remote: binary の配布しか無いので、リモート（SSH）では起動できません
+  custom_not_deployed: まだ落としていません（最初の起動で落とします）
+  custom_deploy_failed: "binary を置けませんでした: %{reason}"
+  add_agent_sha256: binary は落とした後にレジストリの sha256 で照合します
+  add_agent_no_sha256: 検証の値がありません（sha256 なし）。落とした binary を照合せずに使います
   agents_add: ＋ エージェントを追加
   agents_add_hint: ACP レジストリの全件から選んで足す。一覧に無い物は settings.json の agent_servers に自分のコマンドを書いて足せます
   add_agent_title: エージェントを追加

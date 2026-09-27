@@ -18,3 +18,4 @@ blocking.workspace = true
 futures.workspace = true
 host.workspace = true
 async-io.workspace = true
+sha2.workspace = true

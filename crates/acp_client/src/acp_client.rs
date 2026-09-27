@@ -8,6 +8,7 @@
 
 pub mod codex_limits;
 pub mod custom;
+pub mod deploy;
 pub mod history;
 pub mod mcp;
 pub mod preset;
@@ -29,7 +30,8 @@ use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 pub use custom::{
-    Agent, AgentCatalog, CustomAgent, CustomAgentSpec, CustomLaunch, LaunchError, LaunchPlan,
+    Agent, AgentCatalog, CustomAgent, CustomAgentSpec, CustomLaunch, DeployOutcome, LaunchError,
+    LaunchPlan,
 };
 
 /// 権限リクエストの選択肢の種類（UI のスタイル分け用。ACP `PermissionOptionKind` を簡約）。

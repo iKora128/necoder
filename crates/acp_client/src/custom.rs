@@ -15,6 +15,7 @@
 //! 既存の 7 件の id（`codex` など）を `agent_servers` に書いた物は、今までどおり**その起動の上書き**で、
 //! 新しいエージェントにはしない（`name` も読まない）。
 
+use crate::deploy::{BinaryTarget, DeployError, Deployed};
 use crate::registry::{DistributionKind, Launch, Registry, RegistryAgent};
 use crate::{
     bounded_npm_spec, find_in_path, find_on_remote, AgentCommand, AgentKind, AgentOverride, AGENTS,
@@ -54,6 +55,12 @@ pub enum LaunchError {
     NeedsNode,
     /// この配布の形はまだ起動できない。
     NotSupportedYet(DistributionKind),
+    /// binary の配布しか無いエージェントをリモートで起こそうとした（binary は手元に落として走らせる物）。
+    BinaryOnRemote,
+    /// binary をまだ落としていない（最初の起動で落とす・[`Agent::deploy_command`]）。
+    NotDeployed,
+    /// binary を置けなかった（落とせない・検証に落ちた・展開できない）。
+    Deploy(DeployError),
 }
 
 impl std::fmt::Display for LaunchError {
@@ -71,6 +78,11 @@ impl std::fmt::Display for LaunchError {
             LaunchError::NotSupportedYet(kind) => {
                 write!(formatter, "{} の配布はまだ起動できない", kind.as_str())
             }
+            LaunchError::BinaryOnRemote => {
+                write!(formatter, "binary の配布はリモートでは起動できない")
+            }
+            LaunchError::NotDeployed => write!(formatter, "binary をまだ落としていない"),
+            LaunchError::Deploy(error) => write!(formatter, "binary を置けない: {error}"),
         }
     }
 }
@@ -85,6 +97,24 @@ pub enum LaunchPlan {
     Command { found: bool },
     /// レジストリの版を npx が初回に取って起動する。
     Npx { version: String },
+    /// レジストリの binary を置いて起動する。`deployed` = この版を置いてある（無ければ最初の起動で
+    /// 落とす）。`verified` = sha256 を照合した / できる（`false` = レジストリに検証の値が無い）。
+    Binary {
+        version: String,
+        deployed: bool,
+        verified: bool,
+    },
+}
+
+/// binary を置いた結果（UI が知らせる）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployOutcome {
+    /// 使う版。
+    pub version: String,
+    /// sha256 を照合したか（`false` = レジストリに検証の値が無い）。
+    pub verified: bool,
+    /// 新しい版（この値）を落とせず、手元に置いてある `version` で起こした。
+    pub fallback_from: Option<String>,
 }
 
 /// 組み込みのエージェントのうち、レジストリの `id` の項目を持つ物（追加の画面で「組み込み」と出す・
@@ -108,6 +138,19 @@ fn registry_launch<'a>(
             platform: platform.map(str::to_string),
         })?;
     Ok((entry, launch))
+}
+
+/// 置いた binary を起こすコマンド（レジストリの引数と env に、設定の env を最後に足す）。
+fn binary_command(
+    command: PathBuf,
+    binary: &crate::registry::BinaryDistribution,
+    settings_env: &BTreeMap<String, String>,
+    cwd: PathBuf,
+) -> AgentCommand {
+    let mut resolved = AgentCommand::new(command, binary.args.clone(), cwd);
+    resolved.env = binary.env.clone();
+    resolved.env.extend(settings_env.clone());
+    resolved
 }
 
 /// npx でレジストリの版を起こすコマンド（組み込みと同じく版は上限つき範囲・`-y` で聞かずに取る）。
@@ -154,11 +197,20 @@ impl CustomAgent {
         self.plan_for(registry, crate::registry::platform_key())
     }
 
-    /// [`Self::plan`] の本体（プラットフォームを渡せる）。
+    /// [`Self::plan`] の本体（プラットフォームと binary の置き場を渡せる）。
     fn plan_for(
         &self,
         registry: Option<&Registry>,
         platform: Option<&str>,
+    ) -> std::result::Result<LaunchPlan, LaunchError> {
+        self.plan_in(registry, platform, crate::deploy::binary_root().as_deref())
+    }
+
+    fn plan_in(
+        &self,
+        registry: Option<&Registry>,
+        platform: Option<&str>,
+        binary_root: Option<&Path>,
     ) -> std::result::Result<LaunchPlan, LaunchError> {
         match &self.launch {
             CustomLaunch::Command { command, .. } => Ok(LaunchPlan::Command {
@@ -171,10 +223,106 @@ impl CustomAgent {
                         version: entry.version.clone(),
                     }),
                     Launch::Npx(_) => Err(LaunchError::NeedsNode),
+                    Launch::Binary {
+                        platform,
+                        distribution,
+                    } => {
+                        let installed = binary_root.and_then(|root| {
+                            BinaryTarget {
+                                id: &self.id,
+                                version: &entry.version,
+                                platform: &platform,
+                                distribution: &distribution,
+                            }
+                            .installed(root)
+                        });
+                        Ok(LaunchPlan::Binary {
+                            version: entry.version.clone(),
+                            deployed: installed.is_some(),
+                            verified: installed.map_or(distribution.sha256.is_some(), |deployed| {
+                                deployed.verified
+                            }),
+                        })
+                    }
                     other => Err(LaunchError::NotSupportedYet(other.kind())),
                 }
             }
         }
+    }
+
+    /// 手元で起こす前に binary を落として置く必要があるか（レジストリの binary で、この版をまだ
+    /// 置いていない）。ファイルを見るだけ。
+    pub fn needs_deploy(&self, registry: Option<&Registry>) -> bool {
+        matches!(
+            self.plan(registry),
+            Ok(LaunchPlan::Binary {
+                deployed: false,
+                ..
+            })
+        )
+    }
+
+    /// binary を落として検証・展開して置き、起動コマンドを返す（**blocking・ネットワーク**。背景で呼ぶ）。
+    /// 新しい版を**落とせなかった**時だけ、手元に置いてある一番新しい別の版で起こす（照合に落ちた・
+    /// 展開できない時は代わりを使わない＝壊れた・食い違った物を黙って走らせない）。
+    fn deploy_command(
+        &self,
+        cwd: PathBuf,
+        registry: Option<&Registry>,
+    ) -> std::result::Result<(AgentCommand, DeployOutcome), LaunchError> {
+        let root = crate::deploy::binary_root().ok_or(LaunchError::Deploy(DeployError::NoPlace))?;
+        self.deploy_command_in(&root, cwd, registry, |target| target.deploy(&root))
+    }
+
+    /// [`Self::deploy_command`] の本体（置き場と置き方を渡せる・テストはネットワークへ行かない）。
+    fn deploy_command_in(
+        &self,
+        root: &Path,
+        cwd: PathBuf,
+        registry: Option<&Registry>,
+        deploy: impl Fn(&BinaryTarget<'_>) -> std::result::Result<Deployed, DeployError>,
+    ) -> std::result::Result<(AgentCommand, DeployOutcome), LaunchError> {
+        let CustomLaunch::Registry { env } = &self.launch else {
+            return Err(LaunchError::NotDeployed);
+        };
+        let (entry, launch) = registry_launch(&self.id, registry, crate::registry::platform_key())?;
+        let Launch::Binary {
+            platform,
+            distribution,
+        } = launch
+        else {
+            return Err(LaunchError::NotDeployed);
+        };
+        let target = BinaryTarget {
+            id: &self.id,
+            version: &entry.version,
+            platform: &platform,
+            distribution: &distribution,
+        };
+        let (deployed, fallback_from) = match deploy(&target) {
+            Ok(deployed) => (deployed, None),
+            Err(DeployError::Download { url, reason }) => {
+                match crate::deploy::latest_other_installed(
+                    root,
+                    &self.id,
+                    &platform,
+                    &entry.version,
+                ) {
+                    Some(previous) => (previous, Some(entry.version.clone())),
+                    None => return Err(LaunchError::Deploy(DeployError::Download { url, reason })),
+                }
+            }
+            Err(error) => return Err(LaunchError::Deploy(error)),
+        };
+        let outcome = DeployOutcome {
+            version: deployed.version.clone(),
+            verified: deployed.verified,
+            fallback_from,
+        };
+        Ok((
+            binary_command(deployed.command, &distribution, env, cwd),
+            outcome,
+        ))
     }
 
     /// 起動コマンドを組む（ダウンロードはしない）。自分のコマンドは PATH から探し、見つからなければ
@@ -203,11 +351,41 @@ impl CustomAgent {
                 } else {
                     crate::registry::platform_key()
                 };
-                let (_, launch) = registry_launch(&self.id, registry, platform)?;
+                let (entry, launch) = match registry_launch(&self.id, registry, platform) {
+                    Ok(found) => found,
+                    // binary しか無い物はリモートで起こせない（「このマシンの配布が無い」と言わない）。
+                    Err(LaunchError::NoDistribution { .. })
+                        if host.is_remote()
+                            && registry
+                                .and_then(|registry| registry.agent(&self.id))
+                                .is_some_and(|entry| !entry.distribution.binary.is_empty()) =>
+                    {
+                        return Err(LaunchError::BinaryOnRemote.into())
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 match launch {
                     Launch::Npx(npx) => {
                         let npx_path = self.tool_on(host, &cwd, "npx")?;
                         Ok(npx_command(npx_path, &npx, env, cwd))
+                    }
+                    Launch::Binary {
+                        platform,
+                        distribution,
+                    } => {
+                        // ここではダウンロードしない（UI スレッドからも呼ばれる）。まだ置いていなければ
+                        // 呼び手が背景で [`Agent::deploy_command`] を使う。
+                        let installed = crate::deploy::binary_root().and_then(|root| {
+                            BinaryTarget {
+                                id: &self.id,
+                                version: &entry.version,
+                                platform: &platform,
+                                distribution: &distribution,
+                            }
+                            .installed(&root)
+                        });
+                        let deployed = installed.ok_or(LaunchError::NotDeployed)?;
+                        Ok(binary_command(deployed.command, &distribution, env, cwd))
                     }
                     other => Err(LaunchError::NotSupportedYet(other.kind()).into()),
                 }
@@ -296,6 +474,28 @@ impl Agent {
                 (icon, monogram.to_string(), color)
             }
             Agent::Custom(custom) => (None, monogram_for(&custom.label), CUSTOM_BRAND_COLOR),
+        }
+    }
+
+    /// 起こす前に binary を落として置く必要があるか（手元・レジストリから足した binary で、この版を
+    /// まだ置いていない）。ファイルを見るだけ。真なら呼び手は背景で [`Self::deploy_command`] を使う。
+    pub fn needs_deploy(&self, host: &dyn Host, registry: Option<&Registry>) -> bool {
+        match self {
+            Agent::Custom(custom) if !host.is_remote() => custom.needs_deploy(registry),
+            _ => false,
+        }
+    }
+
+    /// binary を落として検証・展開して置き、起動コマンドを返す（**blocking・ネットワーク**。背景で呼ぶ）。
+    /// 置く必要の無いエージェントには [`LaunchError::NotDeployed`]。
+    pub fn deploy_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        registry: Option<&Registry>,
+    ) -> Result<(AgentCommand, DeployOutcome)> {
+        match self {
+            Agent::Custom(custom) => Ok(custom.deploy_command(cwd.into(), registry)?),
+            Agent::Builtin(_) => Err(LaunchError::NotDeployed.into()),
         }
     }
 
@@ -680,6 +880,144 @@ mod tests {
                 platform: Some("linux-x86_64".to_string())
             })
         );
+    }
+
+    /// H2-b: binary の物は、置いていなければ「最初の起動で落とす」見込み（検証の値の有無つき）。置く時は
+    /// レジストリの引数と env に設定の env を足して起こす。新しい版を**落とせなかった**時だけ手元の古い版で
+    /// 起こし、照合に落ちた時は代わりを使わない。
+    #[test]
+    fn a_registry_binary_is_deployed_before_it_starts() {
+        let Some(platform) = crate::registry::platform_key() else {
+            return; // レジストリのキーの無いプラットフォームでは binary を選ばない
+        };
+        let registry = crate::registry::parse(&format!(
+            r#"{{"version":"1.0.0","agents":[
+              {{"id":"amp-acp","name":"Amp","version":"0.9.0","description":"amp",
+                "distribution":{{"binary":{{"{platform}":{{
+                  "archive":"https://example.invalid/amp-acp","cmd":"./amp-acp",
+                  "args":["acp"],"env":{{"FROM_REGISTRY":"1"}},"sha256":"{}"}}}}}}}}
+            ]}}"#,
+            "0".repeat(64)
+        ))
+        .expect("見本を読める");
+        let amp = CustomAgent {
+            id: "amp-acp".to_string(),
+            label: "Amp".to_string(),
+            launch: CustomLaunch::Registry {
+                env: [("AMP_API_KEY".to_string(), "k".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        };
+        let root = std::env::temp_dir().join(format!(
+            "necoder-custom-binary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        assert_eq!(
+            amp.plan_in(Some(&registry), Some(platform), Some(&root)),
+            Ok(LaunchPlan::Binary {
+                version: "0.9.0".to_string(),
+                deployed: false,
+                verified: true,
+            }),
+            "まだ置いていない・sha256 で照合できる"
+        );
+
+        // 置けたら、置いたコマンドにレジストリの引数と env・設定の env を付けて起こす。
+        let placed = root.join("placed-amp-acp");
+        std::fs::create_dir_all(&root).expect("置き場を作れる");
+        std::fs::write(
+            &placed,
+            "#!/bin/sh
+",
+        )
+        .expect("書ける");
+        let (command, outcome) = amp
+            .deploy_command_in(&root, PathBuf::from("/tmp"), Some(&registry), |target| {
+                assert_eq!(target.version, "0.9.0");
+                assert_eq!(target.platform, platform);
+                Ok(Deployed {
+                    command: placed.clone(),
+                    verified: true,
+                    version: "0.9.0".to_string(),
+                })
+            })
+            .expect("置ける");
+        assert_eq!(command.path, placed);
+        assert_eq!(command.args, vec!["acp".to_string()]);
+        assert_eq!(
+            command.env.get("FROM_REGISTRY").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            command.env.get("AMP_API_KEY").map(String::as_str),
+            Some("k")
+        );
+        assert_eq!(
+            outcome,
+            DeployOutcome {
+                version: "0.9.0".to_string(),
+                verified: true,
+                fallback_from: None,
+            }
+        );
+
+        // 新しい版を落とせない時は、手元に置いてある古い版で起こす。
+        let older = crate::registry::BinaryDistribution {
+            archive: "https://example.invalid/amp-acp".to_string(),
+            cmd: "./amp-acp".to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            sha256: None,
+        };
+        BinaryTarget {
+            id: "amp-acp",
+            version: "0.8.0",
+            platform,
+            distribution: &older,
+        }
+        .deploy_with(&root, |_url: &str, destination: &Path| {
+            std::fs::write(
+                destination,
+                "#!/bin/sh
+",
+            )
+            .map_err(|error| DeployError::Io(error.to_string()))
+        })
+        .expect("古い版を置ける");
+        let offline = |_: &BinaryTarget<'_>| {
+            Err(DeployError::Download {
+                url: "https://example.invalid/amp-acp".to_string(),
+                reason: "offline".to_string(),
+            })
+        };
+        let (command, outcome) = amp
+            .deploy_command_in(&root, PathBuf::from("/tmp"), Some(&registry), offline)
+            .expect("手元の版で起こす");
+        assert!(command.path.starts_with(root.join("amp-acp/0.8.0")));
+        assert_eq!(outcome.version, "0.8.0");
+        assert_eq!(outcome.fallback_from.as_deref(), Some("0.9.0"));
+        assert!(!outcome.verified, "古い版は検証の値が無かった");
+
+        // 照合に落ちた時は代わりを使わない（食い違った物を黙って走らせない）。
+        let mismatch = |_: &BinaryTarget<'_>| {
+            Err(DeployError::ChecksumMismatch {
+                expected: "a".to_string(),
+                actual: "b".to_string(),
+            })
+        };
+        match amp.deploy_command_in(&root, PathBuf::from("/tmp"), Some(&registry), mismatch) {
+            Err(LaunchError::Deploy(DeployError::ChecksumMismatch { .. })) => {}
+            Err(other) => panic!("照合の失敗のまま返す: {other:?}"),
+            Ok(_) => panic!("照合の失敗のまま返す（代わりを使わない）"),
+        }
+        if let Err(error) = std::fs::remove_dir_all(&root) {
+            eprintln!("テストの置き場を消せない: {error}");
+        }
     }
 
     /// 起動の本番の確かめ: 偽のエージェント（python の ACP サーバ）を「自分のコマンド」として足し、
