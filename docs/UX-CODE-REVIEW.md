@@ -277,9 +277,9 @@ main取り込み済みの履歴を区別し、独自変更の主要経路を静�
 - [ ] 大量履歴・一致なし・連続出力中でも、検索入力とPTY描画が目に見えて止まらない。
 - [ ] 日本語変換・貼付け・選択置換・カーソル移動を検索欄で確認する。
 
-- **対応（2026-09-27・`10e9082`）**: 2 つ目の確認条件（入力欄）。検索欄を `EditorView::plain`（1 行・12px・設定の検索欄と同じ作り）に替えた。⏎ / ⇧⏎ は欄が `editor::Newline` / `InsertNewline` を capture で先に受け（改行を入れない・変換中は何もしない）、esc は `editor::Cancel`、⌘V は 1 行目だけ。変換中は探さず確定で探す。端末の `on_key_down` は端末自身にフォーカスがある時だけ PTY へ送る。欄の `Editor` は `Terminal` より深く、全域の ⌘F / ⌘W が端末の束より先に当たるので、欄にフォーカスがある間は端末そのものの束（⌘F・⌘K・⌘T・⌘W・⌘\）を照合の前に受ける（`search.rs::intercept_terminal_keys`）。
+- **対応（2026-09-27・`10e9082` / `fd1b59b`）**: 2 つ目の確認条件（入力欄）。検索欄を `EditorView::plain`（1 行・12px・設定の検索欄と同じ作り）に替えた。⏎ / ⇧⏎ は欄が `editor::Newline` / `InsertNewline` を capture で先に受け（改行を入れない・変換中は何もしない）、esc は `editor::Cancel`、⌘V は 1 行目だけ。変換中は探さず確定で探す。端末の `on_key_down` は端末自身にフォーカスがある時だけ PTY へ送る。欄の `Editor` は `Terminal` より深く、全域の ⌘F / ⌘W が端末の束より先に当たるので、欄にフォーカスがある間は端末そのものの束（⌘F・⌘K・⌘T・⌘W・⌘\）を照合の前に受ける（`search.rs::intercept_terminal_keys`）。
   - 検証: gpui テスト（terminal_view 5 本: 打鍵・⌘A の置き換え・←・⌘V・⏎ / ⇧⏎ / esc・変換中は探さず進まず閉じない・欄の中の端末の束・⌘C。workspace 1 本: 既定 keymap で欄の中の ⌘F / ⌘W が裏のエディタに効かない）。各ガードを外すと該当テストが落ちることも確かめた。隔離 offscreen で前後を撮り比べ、高さ・枠・プレースホルダ・`n/m`・トグル・正規表現の誤りの色が同じ。変換中は下線が付き件数は変わらない（debug プローブ `find-mark` / `find-confirm`）。
-  - 未検証: 実機（mac）の IME での変換・確定・取り消し（テストと offscreen は `replace_and_mark_text_in_range` で代用）、Windows / Linux の IME。見た目の差: キャレットがほかの 1 行入力と同じ幅 2px・行の高さ（前は 1.5×14px）、空の欄ではキャレットが行頭でプレースホルダはその右。
+  - 未検証: 実機（mac）の IME での変換・確定・取り消し（テストと offscreen は `replace_and_mark_text_in_range` で代用）、Windows / Linux の IME。見た目の差: キャレットがほかの 1 行入力と同じ幅 2px・行の高さ（前は 1.5×14px・点滅しないのは前と同じ＝端末の idle 0% を保つ）、空の欄ではキャレットが行頭でプレースホルダはその右。
 
 ### R13 — 実行と表示の責務
 
