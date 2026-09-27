@@ -3473,6 +3473,8 @@
   #30 は作者が「Claude」で CLA を通らないので、中身を変えずに本人名義へ付け替えた版を取り込んだ。
   R04・R05・R06・R08 は個別 PR 側と #30 で二重に直していたので、#30 の版を土台に足りない所だけを移した。
   Remote control の WebKit の不安定な 3 本を直し、`necoder Dev.app`（`./scripts/bundle-mac.sh release dev`）を足した。
+  main に入った #31・#33・#36 を取り込み（#31 は統合側の同じ関数と 1 つに）、issue #37（composer の `!` で
+  シェルコマンドを走らせる）を入れた。
 - 学び/罠:
   - **テストで `.rs` を開くと本物の rust-analyzer が立つ**（手元に入っている機械だけ）。その読み取りスレッドが gpui の
     テストスケジューラを起こして「Your test is not deterministic」→ 別スレッドでのタスク破棄で abort し、
@@ -3496,10 +3498,14 @@
     CARGO_HOME=~/.cargo RUSTUP_HOME=~/.rustup cargo test --workspace` を流して、使い捨ての HOME に何ができるかを見る
     （cargo と rustup の置き場は本物を明示する）。直した後は Xcode の python のキャッシュしか残らない。新しいテストで
     ファイルやシェルを使う時はこれで確かめる。
+  - **背景スレッドから fork の経路で起こした子は、シグナルのブロックを継ぐ**（#37 の `!` で見つけた）: macOS の
+    GCD の worker は SIGTERM などをブロックしていて、`pre_exec` / `process_group` を付けた `Command`（fork + exec の
+    経路）の子はそのマスクを継ぐ。素の `Command`（posix_spawn の経路）は継がない。本番の子（ACP・端末の shell）は
+    `ps -o sigmask` で全部 0 と確かめた。fork の経路で子を起こす時は `pre_exec` でマスクを戻す（`Host::run_user_command`）。
   - **レビュー台帳の二重修正は確認条件で照合する**: R02 は #30 の版が条件 1〜3 だけで、4（取り消しで処理量も減る）は
     世代で結果を捨てるだけだった。R08 は条件 3（報告の無い値を 0 と言わない）が無かった。「同じ指摘を直した」で
     片方を捨てる前に、台帳の [ ] を 1 つずつ当てる。
-- 検証: 手元の `cargo test --workspace` 1031 件すべて通過・`cargo check --workspace --all-targets`（debug / release とも）警告 0。
+- 検証: 手元の `cargo test --workspace` 1049 件すべて通過・`cargo check --workspace --all-targets`（debug / release とも）警告 0。
   #21 の CI（CLA・audit-deps・Linux・Windows・Remote control の macOS / Windows・リモートサーバのビルド）。
 - 次: 本人が `necoder Dev.app` でチェックリストを回す。見つかった物は統合ブランチで直す。
   main の Captain の未コミット作業を先に main へ入れてもらい、統合ブランチ側で合わせてから #21 を main へ。
