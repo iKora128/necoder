@@ -691,7 +691,10 @@ impl Workspace {
     /// `open` = パレット「Git: 変更をレビュー」と同じ入口 / `expand` = 最初の畳みを 1 段開く /
     /// `menu` = 比較の基準のメニューを開く /
     /// `head` = 基準を HEAD に / `branch:<名前>` / `commit:<rev>` / `ws` = 空白を無視の切替 /
-    /// `state` = 基準とファイル数を出す。対象はアクティブな session の変更レビュー（Fleet でも同じ）。
+    /// `reload` = 読み直す（↻）/ `close` = 変更レビューのタブを × と同じ入口で閉じ、閉じた瞬間の様子を
+    /// 出す（R02・読み込みの取り消し）/ `state` = 基準・ファイル数・読み込みの状態・全文を読み終えた
+    /// ファイル数を出す（読み込みは始めない＝閉じた後の様子をそのまま見る）。対象はアクティブな session の
+    /// 変更レビュー（Fleet でも同じ）。
     #[cfg(debug_assertions)]
     pub fn debug_review_probe(
         &mut self,
@@ -700,11 +703,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let (name, argument) = command.split_once(':').unwrap_or((command, ""));
-        if name == "open" {
-            self.open_review_tab(&OpenReview, window, cx);
-            return;
-        }
         let index = self.project_sessions.active;
+        match name {
+            "open" => {
+                self.open_review_tab(&OpenReview, window, cx);
+                return;
+            }
+            "close" => {
+                match self.tabs.iter().position(EditorTab::is_review) {
+                    Some(tab) => self.close_tab_at(tab, window, cx),
+                    None => eprintln!("REVIEW_PROBE: 変更レビューのタブが無い"),
+                }
+                // 閉じた瞬間の様子（この後の `state` がこれから動かなければ、読み込みは止まっている）。
+                self.debug_print_review_state(index, "closed", cx);
+                return;
+            }
+            "state" => {
+                self.debug_print_review_state(index, "state", cx);
+                return;
+            }
+            _ => {}
+        }
         let Some(review) = self.activate_review(index, cx) else {
             eprintln!("REVIEW_PROBE: 変更レビューが無い session");
             return;
@@ -763,14 +782,32 @@ impl Workspace {
                 let ignore = !review.ignores_whitespace();
                 review.set_ignore_whitespace(ignore, cx);
             }
-            "state" => println!(
-                "review: base={:?} oid={:?} files={}",
-                review.base(),
-                review.base_oid(),
-                review.file_count()
-            ),
+            "reload" => review.reload(cx),
             other => eprintln!("REVIEW_PROBE: 未知のコマンド {other}"),
         });
+    }
+
+    /// 変更レビューの基準・ファイル数・読み込みの状態・全文を読み終えたファイル数を出す（REVIEW_PROBE の
+    /// `state` / `close`。読み込みは始めない）。
+    #[cfg(debug_assertions)]
+    fn debug_print_review_state(&self, index: usize, label: &str, cx: &App) {
+        let Some(review) = self
+            .project_sessions
+            .sessions
+            .get(index)
+            .and_then(|session| session.review.as_ref())
+        else {
+            eprintln!("REVIEW_PROBE: 変更レビューが無い session");
+            return;
+        };
+        let review = review.read(cx);
+        let (load, highlighted, files) = review.load_progress();
+        println!(
+            "review({label}): base={:?} oid={:?} files={} load={load} syntax={highlighted}/{files}",
+            review.base(),
+            review.base_oid(),
+            review.file_count()
+        );
     }
 
     /// 開発用: エクスプローラと検索の所作を offscreen で検証する（`NECODER_EXPLORER_PROBE`・

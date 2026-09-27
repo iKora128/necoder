@@ -15,7 +15,7 @@ use std::io::{BufRead as _, BufReader};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
@@ -310,6 +310,22 @@ pub trait Host: Send + Sync {
     fn run_command_retry_safe(&self, spec: &CommandSpec) -> Result<CommandOutput> {
         self.run_command(spec)
     }
+    /// `cancel` が立ったら結果を要らないものとして `Ok(None)` を返す command（変更レビューの
+    /// `git diff` のように、画面を閉じた・基準を変えたら用が無くなるもの）。**途中で止めても何も
+    /// 壊れない読み取り専用の command だけに使う**（git なら `--no-optional-locks` を付ける）。
+    /// local は子の出力を待つ間に `cancel` を見て、立ったら子を止める（残りを計算させない）。
+    /// 既定（remote）は daemon との 1 往復の途中で止める口が無いので、最後まで走らせてから見る。
+    fn run_command_cancellable(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+    ) -> Result<Option<CommandOutput>> {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let output = self.run_command(spec)?;
+        Ok((!cancel.load(Ordering::Acquire)).then_some(output))
+    }
     /// このホストで 1 行スクリプトを流す [`CommandSpec`] を組む。
     ///
     /// **分岐キーは「このホストの OS」であって `cfg!(target_os)` ではない**
@@ -499,6 +515,14 @@ impl Host for LocalHost {
 
     fn run_command(&self, spec: &CommandSpec) -> Result<CommandOutput> {
         run_command_local(spec)
+    }
+
+    fn run_command_cancellable(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+    ) -> Result<Option<CommandOutput>> {
+        run_command_cancellable_local(spec, cancel)
     }
 
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess> {
@@ -831,6 +855,101 @@ fn run_command_local(spec: &CommandSpec) -> Result<CommandOutput> {
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+/// 取り消しの印を見る間隔（[`run_command_cancellable_local`]）。出力が届けばすぐ起きるので、
+/// 普段の command はこの分だけ遅れることはない（黙って計算している間の見回りの間隔）。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// [`Host::run_command_cancellable`] の local 実装。stdout と stderr は別々のスレッドで読み切り
+/// （片方のパイプが埋まると子が止まる）、待つ間に `cancel` が立ったら子を止めて回収し `None` を返す。
+/// 読み手のスレッドは待たない（子が止まってパイプが閉じれば自然に終わる）。
+fn run_command_cancellable_local(
+    spec: &CommandSpec,
+    cancel: &AtomicBool,
+) -> Result<Option<CommandOutput>> {
+    if cancel.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let mut child = Command::new(&spec.program)
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .envs(&spec.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("process を起動できない: {}", spec.program))?;
+    let pipes = child
+        .stdout
+        .take()
+        .zip(child.stderr.take())
+        .context("process の stdout / stderr が無い");
+    let (sender, receiver) = mpsc::channel();
+    let started = pipes.and_then(|(stdout, stderr)| {
+        read_pipe_in_background(stdout, 0, sender.clone())?;
+        read_pipe_in_background(stderr, 1, sender)
+    });
+    if let Err(error) = started {
+        stop_child(&mut child);
+        return Err(error);
+    }
+    // [stdout, stderr]。両方が読み終わる（= 子が書き終えた）まで待つ。
+    let mut outputs: [Option<Vec<u8>>; 2] = [None, None];
+    while outputs.iter().any(Option::is_none) {
+        match receiver.recv_timeout(CANCEL_POLL_INTERVAL) {
+            Ok((slot, Ok(bytes))) => outputs[slot] = Some(bytes),
+            Ok((_, Err(error))) => {
+                stop_child(&mut child);
+                return Err(error).context("process の出力を読めない");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::Acquire) {
+                    stop_child(&mut child);
+                    return Ok(None);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stop_child(&mut child);
+                bail!("process の出力を読むスレッドが落ちた");
+            }
+        }
+    }
+    let status = child.wait().context("process の終了を待てない")?;
+    let [Some(stdout), Some(stderr)] = outputs else {
+        bail!("process の出力が揃わない");
+    };
+    Ok(Some(CommandOutput {
+        status_code: status.code(),
+        stdout,
+        stderr,
+    }))
+}
+
+/// パイプを最後まで読み、`slot`（0 = stdout / 1 = stderr）と一緒に `sender` へ渡すスレッドを立てる。
+fn read_pipe_in_background(
+    mut pipe: impl Read + Send + 'static,
+    slot: usize,
+    sender: mpsc::Sender<(usize, std::io::Result<Vec<u8>>)>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("necoder-command-output".to_string())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let read = pipe.read_to_end(&mut bytes).map(|_| bytes);
+            // 受け手が先に抜けていたら（取り消した）読んだ分は要らない。
+            let _unwanted = sender.send((slot, read));
+        })
+        .context("process の出力を読むスレッドを起動できない")?;
+    Ok(())
+}
+
+/// 取り消した子を止めて回収する（ゾンビを残さない）。すでに終わっていれば kill は失敗するが、それで良い。
+fn stop_child(child: &mut Child) {
+    let _already_exited = child.kill();
+    if let Err(error) = child.wait() {
+        eprintln!("止めた process を回収できない: {error}");
+    }
 }
 
 fn spawn_process_local(
@@ -4831,6 +4950,53 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+
+    /// 取り消せる command（local）: 取り消さなければ出力と終わり方を返す。待っている間に取り消すと
+    /// 子を止めてすぐ戻る（最後まで走らせない）。始める前に取り消されていれば起動もしない。
+    #[cfg(unix)]
+    #[test]
+    fn cancellable_command_stops_the_child_when_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let short = CommandSpec::new("sh", std::env::temp_dir())
+            .args(["-c", "printf abc; echo oops >&2; exit 3"]);
+        let output = LocalHost
+            .run_command_cancellable(&short, &cancel)
+            .expect("起動できる")
+            .expect("取り消していない");
+        assert_eq!(output.stdout, b"abc");
+        assert_eq!(output.stderr, b"oops\n");
+        assert_eq!(output.status_code, Some(3));
+
+        // 30 秒眠る子を 100ms 後に取り消す（`exec` = 止める相手が sleep そのもの）。
+        let flag = cancel.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let sleeper = CommandSpec::new("sh", std::env::temp_dir()).args(["-c", "exec sleep 30"]);
+        let output = LocalHost
+            .run_command_cancellable(&sleeper, &cancel)
+            .expect("起動できる");
+        assert!(output.is_none(), "取り消した結果は返さない");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "子を止めてすぐ戻る: {:?}",
+            started.elapsed()
+        );
+        canceller.join().expect("取り消し役のスレッド");
+
+        // 取り消し済みなら起動しない（印のファイルが作られない）。
+        let marker =
+            std::env::temp_dir().join(format!("necoder_cancelled_command_{}", std::process::id()));
+        let touch = CommandSpec::new("touch", std::env::temp_dir())
+            .args([marker.to_string_lossy().to_string()]);
+        let output = LocalHost
+            .run_command_cancellable(&touch, &cancel)
+            .expect("起動しないで戻る");
+        assert!(output.is_none());
+        assert!(!marker.exists(), "取り消した後の command は走らせない");
+    }
 
     #[test]
     fn host_watch_distinguishes_timeout_from_disconnection() {
