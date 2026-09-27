@@ -953,6 +953,12 @@ impl SettingsView {
         if self.cli_shim_busy {
             return; // 連打防止（ダイアログの多重表示を防ぐ）
         }
+        // Dev.app の `ne` は常用の necoder の `ne` と同じ /usr/local/bin を指すので、設置も削除もしない。
+        if paths::is_dev_bundle() {
+            self.cli_shim_error = Some(i18n::t!("settings.dev_bundle_shared_install").into());
+            cx.notify();
+            return;
+        }
         self.cli_shim_busy = true;
         self.cli_shim_error = None;
         cx.notify();
@@ -1126,6 +1132,13 @@ impl SettingsView {
     fn install_necoder_skill(&mut self, cx: &mut Context<Self>) {
         if self.skills_busy {
             return; // 連打防止
+        }
+        // skill の置き場（~/.claude など）は常用の necoder のエージェントも読む。Dev.app の実体を指す
+        // skill を置くと、常用のエージェントが Dev 版を呼び、Dev.app を消せば壊れた skill が残る。
+        if paths::is_dev_bundle() {
+            self.skills_error = Some(i18n::t!("settings.dev_bundle_shared_install").into());
+            cx.notify();
+            return;
         }
         let Some(snapshot) = &self.skills else {
             return;

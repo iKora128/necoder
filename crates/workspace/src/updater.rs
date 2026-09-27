@@ -89,6 +89,11 @@ pub enum UpdateAction {
 /// - Windows: Release ページを開くだけ（アプリ内適用は WINDOWS-PORT §W6 の残項目）。
 /// - それ以外（Linux 等）: **配布物が無い**ので確認自体をしない。
 fn platform_update_route() -> Option<UpdateRoute> {
+    // Dev.app は実行中の .app をリリース版で置き換えると LSEnvironment ごと消え、次の起動から常用の
+    // データを共有してしまう。自動の確認も About のボタンも、経路が無い OS と同じく出さない。
+    if paths::is_dev_bundle() {
+        return None;
+    }
     if cfg!(target_os = "macos") {
         Some(UpdateRoute::InAppDmg)
     } else if cfg!(target_os = "windows") {

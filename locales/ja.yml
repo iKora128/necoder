@@ -804,6 +804,7 @@ settings:
   cli_busy: 実行中…
   cli_admin_prompt: necoder の ne コマンドを /usr/local/bin にインストールします。
   cli_admin_prompt_remove: necoder の ne コマンドを /usr/local/bin から削除します。
+  dev_bundle_shared_install: necoder Dev.app からは変えません。この置き場は常用の necoder と共有しているので、常用の necoder から操作してください。
   save_unreadable: "%{file} を読めないので保存しませんでした（%{reason}）"
   save_failed: "設定を保存できませんでした（%{reason}）"
   skills_heading: Skills

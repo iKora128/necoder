@@ -126,6 +126,15 @@ pub fn runtime_socket() -> Option<PathBuf> {
 ///   on だと実体は `OneDrive\ドキュメント` へリダイレクトされていて、`%USERPROFILE%\Documents` の
 ///   決め打ちは外れる。この crate は依存ゼロなので Win32 を呼べない — 渡されなかった時だけ決め打ちに倒す
 ///
+/// 検証用の「necoder Dev.app」（`scripts/bundle-mac.sh release dev`・Info.plist の LSEnvironment が
+/// `NECODER_DEV_BUNDLE` を付ける）として動いているか。Dev 版は状態を `NECODER_HOME` に分けて常用の
+/// necoder と並べて動かすので、常用と共有している物には触れない: 自分自身のアップデート（実行中の
+/// .app をリリース版で置き換えると LSEnvironment ごと消え、次の起動から常用のデータを共有してしまう）・
+/// `ne` のシム（/usr/local/bin）・エージェントの skill の置き場。
+pub fn is_dev_bundle() -> bool {
+    real_var("NECODER_DEV_BUNDLE").is_some()
+}
+
 /// `NECODER_DOCUMENTS_DIR` で差し替え可（テストと隔離実行用）。`NECODER_HOME` には巻き込まない。
 pub fn documents_dir(windows_known_folder: Option<PathBuf>) -> Option<PathBuf> {
     documents_dir_on(

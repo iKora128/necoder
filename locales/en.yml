@@ -803,6 +803,7 @@ settings:
   cli_busy: Working…
   cli_admin_prompt: necoder installs the ne command into /usr/local/bin.
   cli_admin_prompt_remove: necoder removes the ne command from /usr/local/bin.
+  dev_bundle_shared_install: necoder Dev.app leaves this alone. This location is shared with your regular necoder, so change it from there.
   save_unreadable: "Couldn't read %{file}, so nothing was saved (%{reason})"
   save_failed: "Couldn't save the setting (%{reason})"
   skills_heading: Skills

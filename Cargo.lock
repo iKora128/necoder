@@ -6359,6 +6359,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "i18n",
+ "paths",
  "serde_json",
  "settings_core",
  "theme_core",

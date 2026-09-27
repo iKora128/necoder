@@ -9,9 +9,11 @@
 #
 # `dev` を付けると、常用の necoder と並べて動かす検証用の「necoder Dev.app」を作る。bundle ID が別
 # （dev.necoder.editor.dev）で、Info.plist の LSEnvironment が状態の置き場を ~/.necoder-dev へ向ける
-# （NECODER_HOME・GUI ソケット・書類フォルダ・アップデート確認の停止）。常用の設定・DB・ソケット・
-# 書類には触れないので、統合ブランチを実機で確かめる時に本体を止めずに済む。置き場は
-# NECODER_DEV_HOME で変えられる（絶対パス）。
+# （NECODER_HOME・GUI ソケット・書類フォルダ）。常用の設定・DB・ソケット・書類には触れないので、
+# 統合ブランチを実機で確かめる時に本体を止めずに済む。置き場は NECODER_DEV_HOME で変えられる（絶対パス）。
+# NECODER_DEV_BUNDLE=1 も付け、常用と共有する物には触れさせない（自分自身のアップデート・`ne` のシム・
+# エージェントの skill。`paths::is_dev_bundle`）。エージェントの版を決める ACP レジストリの取り直しは
+# 止めない（常用と同じ版のエージェントで試すため）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -46,7 +48,7 @@ if [ "$FLAVOR" = "dev" ]; then
     <key>NECODER_HOME</key><string>${DEV_HOME}</string>
     <key>NECODER_GUI_SOCK</key><string>${DEV_HOME}/gui.sock</string>
     <key>NECODER_DOCUMENTS_DIR</key><string>${DEV_HOME}/documents</string>
-    <key>NECODER_NO_UPDATE_CHECK</key><string>1</string>
+    <key>NECODER_DEV_BUNDLE</key><string>1</string>
   </dict>"
 elif [ -z "$FLAVOR" ]; then
     APP_NAME="necoder"
