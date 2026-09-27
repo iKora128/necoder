@@ -57,6 +57,17 @@ impl Workspace {
         }
         // タイプしたら hover は消す。
         self.close_hover(cx);
+        // Markdown の行頭の `/` = スラッシュメニュー（O29・見出し・一覧・コード・表などの形を選んで入れる）。
+        if text == "/" && self.session().completion.is_none() {
+            let starts_line = {
+                let view = editor.read(cx);
+                view.is_markdown() && view.line_before_caret().trim_start() == "/"
+            };
+            if starts_line {
+                self.show_slash_menu(window, cx);
+                return;
+            }
+        }
         let (before, word_start) = {
             let view = editor.read(cx);
             (
@@ -316,6 +327,7 @@ impl Workspace {
             || self.overlays.rail_menu.is_some()
             || self.overlays.add_project_dialog_open
             || self.chrome.task_renaming.is_some()
+            || self.chrome.terminal_renaming.is_some()
             || self.chrome.control_focus.is_focused(window)
             // レールにフォーカスがある間は着地先へ飛ばさない。飛ばすと 1 回目の ↑ でエディタへ抜け、
             // 2 回目の ↑ がキャレット移動になって連打できなくなる（2026-09-12）。

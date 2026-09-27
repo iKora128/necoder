@@ -21,23 +21,27 @@
 
 mod annotations;
 mod notes;
+mod positions;
 mod rows;
 mod syntax;
 
 pub use notes::{
-    format_prompt, DiffLinesTarget, ExcerptKind, ExcerptLine, NoteSide, NoteTarget, ReviewNote,
+    format_prompt, format_prompt_marking_lost, DiffLinesTarget, ExcerptKind, ExcerptLine, NoteSide,
+    NoteTarget, ReviewNote,
 };
+pub use positions::{locate, NotePosition};
 pub use rows::{
     build_rows, build_tree, expand_gap, file_gaps, Gap, GapExpansion, GapPosition, Notice, Row,
     RowInputs, RowNote, TreeEntry, EXPAND_STEP,
 };
 pub use syntax::{highlight_text, split_highlights, FileSyntax, HighlightedText};
 
+use annotations::NoteWrite;
 use editor_view::EditorView;
 use gpui::{
-    div, list, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, HighlightStyle, Hsla, KeyDownEvent, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText, Window,
+    div, list, prelude::*, px, App, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, FontWeight, HighlightStyle, Hsla, KeyDownEvent, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText, Window,
 };
 use host::Host;
 use project::review::{
@@ -46,13 +50,13 @@ use project::review::{
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use storage::{ReviewNoteState, Storage};
 use theme_core::Theme;
 use ui::Tooltip;
 
-/// コードの書体（エディタと同じ等幅）。
-const CODE_FONT: &str = "Guguru Sans Code";
 const CODE_FONT_SIZE: f32 = 12.5;
 const ROW_MIN_HEIGHT: f32 = 20.;
 const NUMBER_COLUMN_WIDTH: f32 = 42.;
@@ -67,6 +71,8 @@ const LINE_TINT: f32 = 0.12;
 const MENU_COMMITS: usize = 30;
 /// 全文とハイライトを一度に背景で計算するファイル数（届いた分から色が付く）。
 const SYNTAX_CHUNK: usize = 8;
+/// 全文が届くたびの行の並べ直しの間隔（R02・チャンクごとに全行を組み直さない）。
+const ROW_REBUILD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 /// 下端のトレイの帯の高さ。
 const TRAY_HEIGHT: f32 = 34.;
 
@@ -86,13 +92,55 @@ pub struct ReviewContext {
     pub scope: String,
 }
 
-/// 注記を送る宛先（一覧は Workspace が作る。このビューは添字をそのまま返すだけ）。
+/// 「見た」印の中身（R01）。見た時の比較の基準と、その時のファイルの差分の指紋。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewedMark {
+    base: String,
+    fingerprint: u64,
+}
+
+/// ファイルの差分の指紋（R01）。見た後で行が変わったかを見分けるためだけに使う（保存しない）。
+/// バイナリ・大きすぎるファイルは中身の行を持たないので、行数と種類の変化しか拾えない。
+fn file_fingerprint(file: &FileDiff) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    file.path.hash(&mut hasher);
+    file.old_path.hash(&mut hasher);
+    file.kind.letter().hash(&mut hasher);
+    (file.binary, file.too_large, file.mode_changed).hash(&mut hasher);
+    (file.additions, file.deletions).hash(&mut hasher);
+    for hunk in &file.hunks {
+        (
+            hunk.old_start,
+            hunk.old_count,
+            hunk.new_start,
+            hunk.new_count,
+        )
+            .hash(&mut hasher);
+        for line in &hunk.lines {
+            let kind: u8 = match line.kind {
+                DiffLineKind::Context => 0,
+                DiffLineKind::Added => 1,
+                DiffLineKind::Removed => 2,
+            };
+            (kind, line.no_newline).hash(&mut hasher);
+            line.text.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// 注記を送る宛先（一覧は Workspace が作る。このビューは選ばれたものをそのまま返すだけ）。
+///
+/// 宛先は**安定した id** で持つ（R07）。メニューを開いてから選ぶまでにスレッドが閉じられたり
+/// 並び替わったりしても、添字のずれで別のスレッドへ送らない。id から今の添字を引くのは
+/// 送る直前の Workspace で、引けなければ注記を送信済みにせず、メニューを開き直す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendTarget {
-    /// session のパネルの添字（Workspace が解釈する）。
-    pub panel: usize,
-    /// パネルの中のスレッドの添字。`None` = 新しいスレッドを作って送る。
-    pub thread: Option<usize>,
+    /// 宛先のパネル（AgentPanel の Entity id・Workspace が解釈する）。
+    pub panel: EntityId,
+    /// パネルの中のスレッドの永続 id。`None` = 新しいスレッドを作って送る。
+    pub thread: Option<SharedString>,
     pub label: SharedString,
     pub detail: SharedString,
     /// スレッド色（宛先のドット・UI-SPEC §1.3）。
@@ -110,10 +158,12 @@ pub enum ReviewEvent {
     /// `resend` = 未解決（送信済みを含む）をもう一度送る。
     SendMenuRequested { resend: bool },
     /// 注記を 1 通のプロンプトにまとめて送る。届いたら [`ReviewView::mark_notes_sent`] を呼ぶ。
+    /// `resend` は選んだメニューの種類（届かなかった時に同じ種類で開き直すため）。
     SendNotes {
         target: SendTarget,
         prompt: String,
         note_ids: Vec<String>,
+        resend: bool,
     },
 }
 
@@ -189,8 +239,13 @@ pub struct ReviewView {
     expansions: HashMap<(String, usize), GapExpansion>,
     collapsed_files: HashSet<String>,
     collapsed_dirs: HashSet<String>,
-    /// 「見た」印（パス）。読み直しても残す。
-    reviewed: HashSet<String>,
+    /// 「見た」印（パス → 見た時の比較の基準と差分の指紋）。読み直しても残し、見た後で中身が
+    /// 変わったら外す（R01: 印を「見た時の版」に結び付ける。基準を切り替えただけなら残す）。
+    reviewed: HashMap<String, ReviewedMark>,
+    /// 見た後で中身が変わったファイル（「見た後に変更あり」を出す・見直して印を付けたら消える）。
+    reviewed_stale: HashSet<String>,
+    /// `diff.files` と同じ添字の差分の指紋（読み込みと同じ背景で計算する）。
+    fingerprints: Vec<u64>,
     show_tree: bool,
     /// ファイルツリーで選んだファイル（押した直後はスクロール位置より優先して光らせる）。
     picked_file: Option<usize>,
@@ -203,6 +258,8 @@ pub struct ReviewView {
     notes: Vec<ReviewNote>,
     /// `notes` を読んだ単位（切り替わったら読み直す）。
     notes_scope: Option<String>,
+    /// 位置が変わった注記の id（R01・行に付けず、ファイルの見出しの直後に元の抜粋つきで出す）。
+    lost_notes: HashSet<String>,
     selection: Option<LineSelection>,
     /// ドラッグで範囲を選んでいる最中。
     selecting: bool,
@@ -210,6 +267,13 @@ pub struct ReviewView {
     /// 下端のトレイの一覧を開いているか。
     tray_open: bool,
     send_menu: Option<SendMenu>,
+    /// 注記の書き込みを順に流す列（R03・初めて書く時に作る）。書き込みごとに別の背景タスクへ
+    /// 投げると、DB に届く順が入れ替わり、古い本文への巻き戻りや消した注記の復活が起きうる。
+    note_writes: Option<futures::channel::mpsc::UnboundedSender<NoteWrite>>,
+    /// 保存できなかった書き込み（トレイに出して再試行できる。本文はここに残る）。
+    failed_note_writes: Vec<NoteWrite>,
+    /// このビューで消した注記の id（再試行で消した注記を書き戻さない）。
+    deleted_note_ids: HashSet<String>,
 }
 
 impl EventEmitter<ReviewEvent> for ReviewView {}
@@ -239,7 +303,9 @@ impl ReviewView {
             expansions: HashMap::new(),
             collapsed_files: HashSet::new(),
             collapsed_dirs: HashSet::new(),
-            reviewed: HashSet::new(),
+            reviewed: HashMap::new(),
+            reviewed_stale: HashSet::new(),
+            fingerprints: Vec::new(),
             show_tree: true,
             picked_file: None,
             outdated: false,
@@ -247,11 +313,15 @@ impl ReviewView {
             generation: 0,
             notes: Vec::new(),
             notes_scope: None,
+            lost_notes: HashSet::new(),
             selection: None,
             selecting: false,
             draft: None,
             tray_open: false,
             send_menu: None,
+            note_writes: None,
+            failed_note_writes: Vec::new(),
+            deleted_note_ids: HashSet::new(),
         }
     }
 
@@ -285,6 +355,8 @@ impl ReviewView {
             self.expansions.clear();
             self.collapsed_files.clear();
             self.reviewed.clear();
+            self.reviewed_stale.clear();
+            self.fingerprints.clear();
             self.outdated = false;
             self.base_menu = None;
             self.selection = None;
@@ -394,6 +466,10 @@ impl ReviewView {
                 .background_executor()
                 .spawn(async move {
                     project::review::review_diff_on(host.as_ref(), &root, &base, ignore_whitespace)
+                        .map(|diff| {
+                            let fingerprints = diff.files.iter().map(file_fingerprint).collect();
+                            (diff, fingerprints)
+                        })
                 })
                 .await;
             let loaded = this.update(cx, |this, cx| {
@@ -401,9 +477,9 @@ impl ReviewView {
                     return None;
                 }
                 match result {
-                    Ok(diff) => {
+                    Ok((diff, fingerprints)) => {
                         let diff = Arc::new(diff);
-                        this.apply_diff(diff.clone(), cx);
+                        this.apply_diff(diff.clone(), fingerprints, cx);
                         Some(diff)
                     }
                     Err(error) => {
@@ -416,14 +492,22 @@ impl ReviewView {
             let Ok(Some(diff)) = loaded else {
                 return;
             };
-            // 全文とハイライトは届いた分から色を付ける（最初の表示を待たせない）。
+            // 全文とハイライトは届いた分から色を付ける（最初の表示を待たせない）。全文はレビュー全体の
+            // 予算の中でだけ持つ（R02）。色は描く時に全文から引くので、行の並べ直し（畳みの行数が
+            // 決まる）は数チャンクに 1 回へまとめ、最後のチャンクで必ず行う。
+            let text_budget = Arc::new(AtomicUsize::new(project::review::MAX_TOTAL_TEXT_BYTES));
+            let mut rebuilt_at: Option<Instant> = None;
             for start in (0..diff.files.len()).step_by(SYNTAX_CHUNK) {
                 let end = (start + SYNTAX_CHUNK).min(diff.files.len());
+                let last_chunk = end == diff.files.len();
                 let chunk_diff = diff.clone();
                 let host = context.host.clone();
+                let budget = text_budget.clone();
                 let syntax = cx
                     .background_executor()
-                    .spawn(async move { load_syntax(host.as_ref(), &chunk_diff, start..end) })
+                    .spawn(
+                        async move { load_syntax(host.as_ref(), &chunk_diff, start..end, &budget) },
+                    )
                     .await;
                 let current = this.update(cx, |this, cx| {
                     if this.generation != generation {
@@ -434,7 +518,14 @@ impl ReviewView {
                             *slot = Some(Arc::new(file_syntax));
                         }
                     }
-                    this.rebuild_rows();
+                    let due = last_chunk
+                        || rebuilt_at.is_none_or(|at| at.elapsed() >= ROW_REBUILD_INTERVAL);
+                    if due {
+                        // 全文が届いた = diff の外の行（開いた畳みの行）も確かめられる。
+                        this.reconcile_notes(cx);
+                        this.rebuild_rows();
+                        rebuilt_at = Some(Instant::now());
+                    }
                     cx.notify();
                     true
                 });
@@ -446,12 +537,20 @@ impl ReviewView {
         .detach();
     }
 
-    fn apply_diff(&mut self, diff: Arc<ReviewDiff>, cx: &mut Context<Self>) {
+    fn apply_diff(
+        &mut self,
+        diff: Arc<ReviewDiff>,
+        fingerprints: Vec<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let anchor = self.scroll_anchor();
+        self.refresh_reviewed_marks(&diff, &fingerprints);
+        self.fingerprints = fingerprints;
         self.syntax = vec![None; diff.files.len()];
         self.diff = Some(diff);
         self.load = Load::Ready;
         self.picked_file = None;
+        self.reconcile_notes(cx);
         self.rebuild_rows_at(anchor);
         cx.notify();
     }
@@ -489,7 +588,12 @@ impl ReviewView {
                 RowNote {
                     path: target.path.clone(),
                     side: target.side,
-                    line: target.end,
+                    // 位置が変わった注記（R01）は行に付けない。0 行目は無い = 見出しの直後に出る。
+                    line: if self.lost_notes.contains(&note.id) {
+                        0
+                    } else {
+                        target.end
+                    },
                     note: Some(index),
                 }
             })
@@ -639,23 +743,77 @@ impl ReviewView {
     }
 
     fn toggle_reviewed(&mut self, file: usize, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .diff
-            .as_ref()
-            .and_then(|diff| diff.files.get(file))
-            .map(|file| file.path.clone())
-        else {
+        let Some((path, base)) = self.diff.as_ref().and_then(|diff| {
+            let entry = diff.files.get(file)?;
+            Some((entry.path.clone(), diff.base_oid.clone()))
+        }) else {
+            return;
+        };
+        let Some(fingerprint) = self.fingerprints.get(file).copied() else {
             return;
         };
         // 見た = 畳んでおく（GitHub の Viewed と同じ手触り）。外したら開き直す。
-        if self.reviewed.remove(&path) {
+        if self.is_reviewed(file) {
+            self.reviewed.remove(&path);
             self.collapsed_files.remove(&path);
         } else {
-            self.reviewed.insert(path.clone());
+            self.reviewed
+                .insert(path.clone(), ReviewedMark { base, fingerprint });
+            self.reviewed_stale.remove(&path);
             self.collapsed_files.insert(path);
         }
         self.rebuild_rows();
         cx.notify();
+    }
+
+    /// このファイルを今の中身で「見た」か（見た後で変わっていれば `false`）。
+    pub(crate) fn is_reviewed(&self, file: usize) -> bool {
+        let (Some(diff), Some(fingerprint)) = (self.diff.as_ref(), self.fingerprints.get(file))
+        else {
+            return false;
+        };
+        diff.files.get(file).is_some_and(|entry| {
+            self.reviewed
+                .get(&entry.path)
+                .is_some_and(|mark| mark.base == diff.base_oid && mark.fingerprint == *fingerprint)
+        })
+    }
+
+    /// 見た後で中身が変わったか（「見た後に変更あり」を出す）。
+    pub(crate) fn is_reviewed_stale(&self, file: usize) -> bool {
+        self.diff
+            .as_ref()
+            .and_then(|diff| diff.files.get(file))
+            .is_some_and(|entry| self.reviewed_stale.contains(&entry.path))
+    }
+
+    /// 読み直した差分と「見た」印を突き合わせる（R01）。同じ基準で中身が変わったファイルは印を外し、
+    /// 畳みを開いて「見た後に変更あり」にする。差分から消えたファイルの印は捨てる。基準が違う印は
+    /// 触らない（基準を戻せば復活する）。
+    fn refresh_reviewed_marks(&mut self, diff: &ReviewDiff, fingerprints: &[u64]) {
+        let current: HashMap<&str, u64> = diff
+            .files
+            .iter()
+            .zip(fingerprints)
+            .map(|(file, fingerprint)| (file.path.as_str(), *fingerprint))
+            .collect();
+        let changed: Vec<String> = self
+            .reviewed
+            .iter()
+            .filter(|(path, mark)| {
+                mark.base == diff.base_oid && current.get(path.as_str()) != Some(&mark.fingerprint)
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in changed {
+            self.reviewed.remove(&path);
+            if current.contains_key(path.as_str()) {
+                self.collapsed_files.remove(&path);
+                self.reviewed_stale.insert(path);
+            }
+        }
+        self.reviewed_stale
+            .retain(|path| current.contains_key(path.as_str()));
     }
 
     fn open_file(&mut self, file: usize, cx: &mut Context<Self>) {
@@ -814,12 +972,32 @@ pub fn short_sha(oid: &str) -> String {
 }
 
 /// 背景スレッドで全文を読んでハイライトする（`range` のファイルだけ）。
-fn load_syntax(host: &dyn Host, diff: &ReviewDiff, range: Range<usize>) -> Vec<FileSyntax> {
+/// 全文を読んでハイライトする。`budget` はレビュー全体で全文に使える残りのバイト（R02）で、
+/// 差し引けなかったファイルは全文を持たない（色無し・畳みは開けない。差分の行はそのまま見える）。
+fn load_syntax(
+    host: &dyn Host,
+    diff: &ReviewDiff,
+    range: Range<usize>,
+    budget: &AtomicUsize,
+) -> Vec<FileSyntax> {
     diff.files[range]
         .iter()
         .map(|file| {
+            if budget.load(Ordering::Relaxed) == 0 {
+                return FileSyntax::default();
+            }
             let texts =
                 project::review::review_file_texts_on(host, &diff.repo_root, &diff.base_oid, file);
+            let bytes = texts.old.as_ref().map_or(0, String::len)
+                + texts.new.as_ref().map_or(0, String::len);
+            let reserved = budget
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(bytes)
+                })
+                .is_ok();
+            if !reserved {
+                return FileSyntax::default();
+            }
             FileSyntax {
                 old: texts
                     .old
@@ -1308,7 +1486,8 @@ impl ReviewView {
                 TreeEntry::File { file, label, depth } => {
                     let entry = &diff.files[file];
                     let selected = current == Some(file);
-                    let reviewed = self.reviewed.contains(&entry.path);
+                    let reviewed = self.is_reviewed(file);
+                    let stale = !reviewed && self.is_reviewed_stale(file);
                     div()
                         .id(("review-tree-file", index))
                         .flex_none()
@@ -1349,9 +1528,11 @@ impl ReviewView {
                             div()
                                 .flex_none()
                                 .text_size(px(10.5))
-                                .text_color(theme.fg2)
+                                .text_color(if stale { theme.warn } else { theme.fg2 })
                                 .child(SharedString::from(if reviewed {
                                     "✓".to_string()
+                                } else if stale {
+                                    format!("↻ {}", counts_label(entry))
                                 } else {
                                     counts_label(entry)
                                 })),
@@ -1489,7 +1670,8 @@ impl ReviewView {
         let theme = self.theme.clone();
         let entry = &diff.files[file];
         let collapsed = self.collapsed_files.contains(&entry.path);
-        let reviewed = self.reviewed.contains(&entry.path);
+        let reviewed = self.is_reviewed(file);
+        let stale = !reviewed && self.is_reviewed_stale(file);
         let (directory, name) = match entry.path.rsplit_once('/') {
             Some((directory, name)) => (format!("{directory}/"), name.to_string()),
             None => (String::new(), entry.path.clone()),
@@ -1584,6 +1766,16 @@ impl ReviewView {
                             .child(SharedString::from(format!("−{}", entry.deletions))),
                     ),
             )
+            // 見た後で中身が変わった（R01）。印は外れて畳みも開いている。見直したら印を付け直す。
+            .when(stale, |header| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.warn)
+                        .child(SharedString::from(i18n::t!("review.reviewed_stale"))),
+                )
+            })
             .child(
                 div()
                     .id(("review-file-reviewed", file))
@@ -1603,7 +1795,11 @@ impl ReviewView {
                     .child(if reviewed { "☑" } else { "☐" })
                     .child(SharedString::from(i18n::t!("review.reviewed")))
                     .tooltip(Tooltip::text(
-                        i18n::t!("review.reviewed_tip"),
+                        if stale {
+                            i18n::t!("review.reviewed_stale_tip")
+                        } else {
+                            i18n::t!("review.reviewed_tip")
+                        },
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -1700,7 +1896,7 @@ impl ReviewView {
                 gpui::transparent_black()
             })
             .when_some(tint, |row, tint| row.bg(tint))
-            .font_family(CODE_FONT)
+            .font_family(ui::code_font(cx))
             .text_size(px(CODE_FONT_SIZE))
             .line_height(px(ROW_MIN_HEIGHT))
             .on_mouse_down(
@@ -1839,7 +2035,7 @@ impl ReviewView {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .font_family(CODE_FONT)
+                        .font_family(ui::code_font(cx))
                         .child(SharedString::from(section)),
                 )
             })
@@ -2048,8 +2244,8 @@ mod tests {
             Some(&ReviewEvent::SendMenuRequested { resend: false })
         );
         let target = SendTarget {
-            panel: 0,
-            thread: Some(1),
+            panel: EntityId::from(7u64),
+            thread: Some("thread-2".into()),
             label: "スレッド2".into(),
             detail: "待機中".into(),
             color: Theme::dark().fg1,
@@ -2066,11 +2262,13 @@ mod tests {
             target: chosen,
             prompt,
             note_ids,
+            resend,
         }) = sent
         else {
             panic!("注記が送られていない: {sent:?}");
         };
         assert_eq!(chosen, target, "宛先は選んだものがそのまま返る");
+        assert!(!resend, "未送信だけを送るメニューから選んだ");
         assert!(prompt.starts_with("レビューコメント（1 件）— 比較: "));
         assert!(prompt.contains("1. a.rs:5\n```diff\n-line 5\n+LINE 5\n```\n大文字にしない"));
         view.update(cx, |view, cx| {
@@ -2093,6 +2291,221 @@ mod tests {
             view.delete_note(0, cx);
             assert_eq!(view.note_counts(), (0, 0));
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R02: 全文はレビュー全体の予算の中でだけ持つ。尽きたら、そのファイルは色無し（全文を持たない）。
+    #[test]
+    fn full_texts_stay_within_the_review_budget() {
+        let Some(dir) = temp_repo("text_budget") else {
+            return;
+        };
+        let diff = project::review::review_diff_on(
+            host::LocalHost::shared().as_ref(),
+            &dir,
+            &ReviewBase::Head,
+            false,
+        )
+        .expect("差分を読める");
+        let empty = AtomicUsize::new(0);
+        let starved = load_syntax(host::LocalHost::shared().as_ref(), &diff, 0..1, &empty);
+        assert!(starved[0].new.is_none() && starved[0].old.is_none());
+        let plenty = AtomicUsize::new(project::review::MAX_TOTAL_TEXT_BYTES);
+        let loaded = load_syntax(host::LocalHost::shared().as_ref(), &diff, 0..1, &plenty);
+        assert!(loaded[0].new.is_some() && loaded[0].old.is_some());
+        let used = project::review::MAX_TOTAL_TEXT_BYTES - plenty.load(Ordering::Relaxed);
+        assert!(used > 0, "読んだ分だけ予算が減る");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R01: 「見た」印と注記は、確かめた時の中身に結び付く。
+    /// - 上に行が挿入されたら、注記は同じ中身の行へ移り、「見た」印は外れて「見た後に変更あり」
+    /// - 注記を付けた行の中身が変わったら、無関係な行には付けず「位置が変わった注記」になる
+    #[gpui::test]
+    fn reviewed_marks_and_notes_follow_the_code_they_were_made_on(cx: &mut gpui::TestAppContext) {
+        let Some(dir) = temp_repo("r01") else {
+            return;
+        };
+        i18n::set_locale("ja");
+        let (view, cx) = cx.add_window_view(|_window, cx| ReviewView::new(Theme::dark(), cx));
+        open_review(&view, &dir, cx);
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 5, false, cx));
+            view.open_draft(window, cx);
+            view.set_draft_text("大文字にしない", cx);
+            view.save_draft(window, cx);
+            assert_eq!(view.note_counts(), (1, 1));
+            view.toggle_reviewed(0, cx);
+            assert!(view.is_reviewed(0));
+        });
+
+        // 上に 2 行挿入 → 注記は 7 行目へ移る。見た印は外れる。
+        let changed = std::fs::read_to_string(dir.join("a.rs")).unwrap();
+        std::fs::write(dir.join("a.rs"), format!("top 1\ntop 2\n{changed}")).unwrap();
+        view.update(cx, |view, cx| view.reload(cx));
+        wait_until_loaded(&view, cx);
+        view.read_with(cx, |view, _| {
+            let NoteTarget::DiffLines(target) = &view.notes[0].target;
+            assert_eq!((target.start, target.end), (7, 7), "同じ中身の行へ移る");
+            assert!(!view.is_note_lost(&view.notes[0].id));
+            assert!(!view.is_reviewed(0), "見た後で中身が変わった");
+            assert!(view.is_reviewed_stale(0), "「見た後に変更あり」になる");
+        });
+
+        // 注記を付けた行そのものを書き換える → どこにも付けない（見出しの直後に出す）。
+        let rewritten = std::fs::read_to_string(dir.join("a.rs"))
+            .unwrap()
+            .replace("LINE 5\n", "LINE FIVE\n");
+        std::fs::write(dir.join("a.rs"), rewritten).unwrap();
+        view.update(cx, |view, cx| view.reload(cx));
+        wait_until_loaded(&view, cx);
+        view.read_with(cx, |view, _| {
+            assert!(view.is_note_lost(&view.notes[0].id), "位置が変わった注記");
+            let header = view
+                .rows
+                .iter()
+                .position(|row| matches!(row, Row::FileHeader { file: 0 }))
+                .expect("見出しがある");
+            assert_eq!(
+                view.rows.get(header + 1),
+                Some(&Row::Note { file: 0, note: 0 }),
+                "無関係な行ではなく、見出しの直後に出る"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn wait_until_loaded(view: &Entity<ReviewView>, cx: &mut gpui::VisualTestContext) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            let ready = view.read_with(cx, |view, _| {
+                view.load == Load::Ready && view.syntax.iter().all(Option::is_some)
+            });
+            if ready {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("変更レビューが読み終わらない");
+    }
+
+    /// R03: 編集 → 解決 → 削除を続けて積んでも、DB に届く順は積んだ順（消した注記が復活しない）。
+    /// 背景タスクの実行順はシードごとに変わるので、何通りも回す。
+    #[gpui::test(iterations = 20)]
+    fn note_writes_reach_the_db_in_the_order_they_were_made(cx: &mut gpui::TestAppContext) {
+        // 回ごとに別の DB（同じプロセスで 20 回回る）。
+        static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "necoder_review_note_order_{}_{}",
+            std::process::id(),
+            RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("notes.db")).expect("DB を開ける");
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        let context = ReviewContext {
+            host: host::LocalHost::shared(),
+            root: dir.clone(),
+            task_base: None,
+            accent: Theme::dark().fg1,
+            storage: Some(storage.clone()),
+            scope: "order".into(),
+        };
+        view.update(cx, |view, cx| {
+            view.set_context(context, cx);
+            let note = ReviewNote {
+                id: "note-1".into(),
+                target: NoteTarget::DiffLines(DiffLinesTarget {
+                    path: "a.rs".into(),
+                    side: NoteSide::New,
+                    start: 5,
+                    end: 5,
+                    base: "abc".into(),
+                    excerpt: Vec::new(),
+                }),
+                body: "最初の本文".into(),
+                state: ReviewNoteState::Unsent,
+                sent_at: None,
+                created_at: 1,
+                updated_at: 1,
+            };
+            view.persist_note(&note, cx);
+            view.notes.push(note);
+            view.notes[0].body = "直した本文".into();
+            view.notes[0].updated_at = 2;
+            let edited = view.notes[0].clone();
+            view.persist_note(&edited, cx);
+            view.toggle_resolved(0, cx);
+            view.delete_note(0, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            storage.load_review_notes("order").unwrap().is_empty(),
+            "消した注記は、前の書き込みが後から届いても復活しない"
+        );
+        assert!(
+            view.read_with(cx, |view, _| view.notes.is_empty()),
+            "読み込みの結果からも復活しない"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.failed_note_write_count()),
+            0
+        );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R03: 保存できなかった書き込みはトレイに残り、再試行で書き直せる（本文を失わない）。
+    /// 消した注記の失敗した書き込みは、再試行で書き戻さない。
+    #[gpui::test]
+    fn failed_note_writes_can_be_retried(cx: &mut gpui::TestAppContext) {
+        use storage::ReviewNoteRecord;
+        let dir =
+            std::env::temp_dir().join(format!("necoder_review_note_retry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("notes.db")).expect("DB を開ける");
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        let record = |id: &str, body: &str| ReviewNoteRecord {
+            id: id.into(),
+            scope: "retry".into(),
+            target_kind: "diff_lines".into(),
+            target: "{}".into(),
+            body: body.into(),
+            state: ReviewNoteState::Unsent,
+            sent_at: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        view.update(cx, |view, cx| {
+            view.set_context(
+                ReviewContext {
+                    host: host::LocalHost::shared(),
+                    root: dir.clone(),
+                    task_base: None,
+                    accent: Theme::dark().fg1,
+                    storage: Some(storage.clone()),
+                    scope: "retry".into(),
+                },
+                cx,
+            );
+            // 2 件の保存が失敗した（DB が一時的に書けなかった）ことにする。
+            view.note_write_failed(NoteWrite::Upsert(record("kept", "残す本文")), cx);
+            view.note_write_failed(NoteWrite::Upsert(record("gone", "消す本文")), cx);
+            assert_eq!(view.failed_note_write_count(), 2);
+            // 片方はその後で消した（ビューの一覧に無い注記の id を消した扱いにする）。
+            view.deleted_note_ids.insert("gone".into());
+            view.failed_note_writes
+                .retain(|write| write.note_id() != "gone");
+            view.retry_note_writes(cx);
+            assert_eq!(view.failed_note_write_count(), 0);
+        });
+        cx.run_until_parked();
+        let saved = storage.load_review_notes("retry").unwrap();
+        assert_eq!(saved.len(), 1, "{saved:?}");
+        assert_eq!(saved[0].body, "残す本文");
+        drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

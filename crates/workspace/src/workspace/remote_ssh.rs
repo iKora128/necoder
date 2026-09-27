@@ -49,6 +49,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.picker_ssh_testing = false;
         let hosts = host::ssh_config_hosts();
         // 2階層: 上=最近のリモートプロジェクト（履歴・直接接続・#5）、下=config ホスト、末尾=手入力。
         let recent = self
@@ -100,6 +101,14 @@ impl Workspace {
             PickerItem::new(recent_count + hosts.len(), i18n::t!("ssh.manual_entry"))
                 .with_detail("ssh://user@host/path"),
         );
+        // その下に「＋ 接続先を登録…」（~/.ssh/config に Host を足す・O37・G01）。
+        items.push(
+            PickerItem::new(
+                recent_count + hosts.len() + 1,
+                i18n::t!("ssh.register_entry"),
+            )
+            .with_detail("~/.ssh/config"),
+        );
         self.picker_ssh_recent = recent_uris;
         self.picker_ssh_hosts = hosts;
         self.open_picker(
@@ -109,6 +118,57 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    /// パレット「SSH: 接続を確かめる…」（O37・G01）: 同じホストピッカーを「試すだけ」で開く。
+    pub(crate) fn open_ssh_test_picker(
+        &mut self,
+        _: &TestSshConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_ssh_host_picker(&RemoteSsh, window, cx);
+        self.picker_ssh_testing = true;
+    }
+
+    /// `uri` の接続を確かめる（開かない）。繋がれば掛かった時間、だめなら理由と次にすること
+    /// （[`Self::report_ssh_failure`]・接続に失敗した時と同じ案内）。
+    pub(crate) fn test_ssh_uri(&mut self, uri: String, cx: &mut Context<Self>) {
+        let project = match host::SshProject::parse(&uri) {
+            Ok(project) => project,
+            Err(error) => {
+                self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+                return;
+            }
+        };
+        let host_name = project.host.clone();
+        self.push_toast(
+            SharedString::from(i18n::t!("ssh.testing", "host" => host_name.clone())),
+            self.accent(),
+            cx,
+        );
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { host::test_ssh_connection(&project) })
+                .await;
+            let finished = workspace.update(cx, |workspace, cx| match result {
+                Ok(elapsed) => workspace.push_toast(
+                    SharedString::from(i18n::t!(
+                        "ssh.test_ok",
+                        "host" => host_name.clone(),
+                        "ms" => elapsed.as_millis()
+                    )),
+                    workspace.accent(),
+                    cx,
+                ),
+                Err(error) => workspace.report_ssh_failure(&host_name, &error, cx),
+            });
+            if let Err(error) = finished {
+                eprintln!("SSH の接続テストの結果を出せない: {error:#}");
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn close_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -234,16 +294,49 @@ impl Workspace {
                             );
                         }
                     }
-                    Err(error) => workspace.push_toast(
-                        SharedString::from(format!("{error:#}")),
-                        workspace.accent(),
-                        cx,
-                    ),
+                    Err(error) => {
+                        let host_name = last_path
+                            .as_ref()
+                            .map(|(host_name, _)| host_name.as_str())
+                            .unwrap_or_default();
+                        workspace.report_ssh_failure(host_name, &error, cx);
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// 接続に失敗した時の知らせ（O37）。OpenSSH の理由が分かれば、何をすればよいかを出す
+    /// （指紋・鍵と ssh-agent / Keychain・名前・拒否・応答なし…）。OpenSSH が書いた全文は
+    /// 「全文 ›」で読める。分からなければ今までどおり理由をそのまま出す。
+    pub(crate) fn report_ssh_failure(
+        &mut self,
+        host_name: &str,
+        error: &anyhow::Error,
+        cx: &mut Context<Self>,
+    ) {
+        let failure = error
+            .downcast_ref::<host::SshConnectError>()
+            .and_then(|connect| connect.failure);
+        let Some(failure) = failure else {
+            self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+            return;
+        };
+        let text = format!(
+            "{}\n{}",
+            i18n::t!("ssh.connect_failed", "host" => host_name),
+            ssh_failure_hint(failure, host_name)
+        );
+        self.push_failure_toast(
+            SharedString::from(text),
+            Some((
+                SharedString::from(i18n::t!("ssh.failure_details")),
+                format!("{error:#}"),
+            )),
+            cx,
+        );
     }
 
     /// SSH 入力バー（rename/goto と同型の中央上オーバーレイ）。
@@ -301,6 +394,43 @@ impl Workspace {
                 .into_any_element(),
         )
     }
+}
+
+/// OpenSSH の失敗の種類ごとの「次にすること」（O37・G02 / G04）。
+pub(crate) fn ssh_failure_hint(failure: host::SshFailure, host_name: &str) -> String {
+    use host::SshFailure;
+    let key = match failure {
+        SshFailure::HostKeyUnknown => "ssh.hint_host_key_unknown",
+        SshFailure::HostKeyChanged => "ssh.hint_host_key_changed",
+        SshFailure::Authentication => "ssh.hint_authentication",
+        SshFailure::TooManyKeys => "ssh.hint_too_many_keys",
+        SshFailure::UnknownHost => "ssh.hint_unknown_host",
+        SshFailure::Refused => "ssh.hint_refused",
+        SshFailure::TimedOut => "ssh.hint_timed_out",
+        SshFailure::BadPermissions => "ssh.hint_bad_permissions",
+        SshFailure::Negotiation => "ssh.hint_negotiation",
+    };
+    i18n::t!(key, "host" => host_name)
+}
+
+/// 鍵のパスフレーズを訊かれた時の「毎回訊かれないために」の一言（O37・G04）。OpenSSH の問いは
+/// `Enter passphrase for key '/Users/me/.ssh/id_ed25519': ` の形なので、その鍵で `ssh-add` の
+/// コマンドを組んで見せる（macOS は Keychain にも預ける `--apple-use-keychain`）。パスワードなど
+/// ほかの問いには出さない。ssh は手元で動くので、分岐は手元の OS でよい。
+pub(crate) fn passphrase_tip(prompt: &str) -> Option<String> {
+    let rest = prompt.split("passphrase for key").nth(1)?;
+    let key = rest.split('\'').nth(1).filter(|key| !key.is_empty())?;
+    let key = if key.contains(char::is_whitespace) {
+        format!("'{key}'")
+    } else {
+        key.to_string()
+    };
+    let command = if cfg!(target_os = "macos") {
+        format!("ssh-add --apple-use-keychain {key}")
+    } else {
+        format!("ssh-add {key}")
+    };
+    Some(i18n::t!("askpass.passphrase_tip", "command" => command))
 }
 
 // ── GUI askpass（ROADMAP「残: GUI askpass」） ──
@@ -584,9 +714,187 @@ impl Workspace {
                                 .text_size(px(10.5))
                                 .text_color(theme.fg2)
                                 .child(SharedString::from(hint)),
-                        ),
+                        )
+                        .children(passphrase_tip(&prompt.prompt).map(|tip| {
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(tip))
+                        })),
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::notifications::ToastAction;
+    use host::{SshConnectError, SshFailure};
+
+    #[test]
+    fn every_openssh_failure_has_its_own_hint() {
+        let failures = [
+            SshFailure::HostKeyUnknown,
+            SshFailure::HostKeyChanged,
+            SshFailure::Authentication,
+            SshFailure::TooManyKeys,
+            SshFailure::UnknownHost,
+            SshFailure::Refused,
+            SshFailure::TimedOut,
+            SshFailure::BadPermissions,
+            SshFailure::Negotiation,
+        ];
+        let hints: Vec<String> = failures
+            .iter()
+            .map(|failure| ssh_failure_hint(*failure, "devbox"))
+            .collect();
+        for hint in &hints {
+            assert!(!hint.starts_with("ssh."), "訳が無い: {hint}");
+        }
+        let mut distinct = hints.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), hints.len(), "種類ごとに違う案内");
+        assert!(
+            ssh_failure_hint(SshFailure::HostKeyChanged, "devbox").contains("ssh-keygen -R devbox")
+        );
+    }
+
+    #[test]
+    fn a_key_passphrase_prompt_offers_ssh_add() {
+        let tip = passphrase_tip("Enter passphrase for key '/Users/me/.ssh/id_ed25519': ")
+            .expect("鍵のパスフレーズ");
+        assert!(tip.contains("ssh-add"), "{tip}");
+        assert!(tip.contains("/Users/me/.ssh/id_ed25519"), "{tip}");
+        let spaced = passphrase_tip("Enter passphrase for key '/Users/me/my keys/id': ").unwrap();
+        assert!(
+            spaced.contains("'/Users/me/my keys/id'"),
+            "空白を含むパスは囲む: {spaced}"
+        );
+        assert_eq!(passphrase_tip("me@devbox's password: "), None);
+        assert_eq!(passphrase_tip("Enter passphrase for key '': "), None);
+    }
+
+    #[gpui::test]
+    fn the_test_picker_only_tests_and_the_normal_picker_opens(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_ssh_test_picker_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let folders = vec![root.clone()];
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(folders, Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_ssh_test_picker(&TestSshConnection, window, cx);
+            assert!(workspace.picker_ssh_testing);
+            assert!(workspace.overlays.picker_mode == PickerMode::SshHosts);
+            // 末尾の「手入力」を選んでも、試すだけの時は入力バーを開かない。
+            let manual = workspace.picker_ssh_recent.len() + workspace.picker_ssh_hosts.len();
+            let picker = workspace.overlays.picker.clone().expect("ピッカー");
+            workspace.on_picker_event(&picker, &PickerEvent::Confirmed(manual), window, cx);
+            assert!(!workspace.picker_ssh_testing, "1 回で外れる");
+            assert!(workspace.overlays.ssh_input.is_none(), "開かない");
+
+            // 普通に開けば試す印は付かない（手入力は入力バーを開く）。
+            workspace.open_ssh_host_picker(&RemoteSsh, window, cx);
+            assert!(!workspace.picker_ssh_testing);
+            let manual = workspace.picker_ssh_recent.len() + workspace.picker_ssh_hosts.len();
+            let picker = workspace.overlays.picker.clone().expect("ピッカー");
+            workspace.on_picker_event(&picker, &PickerEvent::Confirmed(manual), window, cx);
+            assert!(workspace.overlays.ssh_input.is_some(), "手入力は入力バー");
+
+            // その下の「＋ 接続先を登録…」は登録のダイアログ（O37・G01）。
+            workspace.open_ssh_host_picker(&RemoteSsh, window, cx);
+            let register = workspace.picker_ssh_recent.len() + workspace.picker_ssh_hosts.len() + 1;
+            let picker = workspace.overlays.picker.clone().expect("ピッカー");
+            workspace.on_picker_event(&picker, &PickerEvent::Confirmed(register), window, cx);
+            assert!(
+                workspace.chrome.ssh_registering.is_some(),
+                "登録のダイアログ"
+            );
+            workspace.cancel_ssh_register(cx);
+        });
+        workspace.update(cx, |workspace, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn a_rejected_key_is_explained_and_the_log_kept(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_ssh_failure_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let folders = vec![root.clone()];
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(folders, Theme::dark(), None, cx));
+        workspace.update(cx, |workspace, cx| {
+            let rejected = anyhow::Error::new(SshConnectError::new(
+                "exit status: 255",
+                "me@devbox: Permission denied (publickey).\n",
+            ))
+            .context("SSH ControlMaster の確立に失敗");
+            workspace.report_ssh_failure("devbox", &rejected, cx);
+            let toast = workspace.notifications.toasts.last().expect("知らせ");
+            assert!(
+                toast
+                    .text
+                    .starts_with(&i18n::t!("ssh.connect_failed", "host" => "devbox")),
+                "{}",
+                toast.text
+            );
+            assert!(
+                toast
+                    .text
+                    .contains(&ssh_failure_hint(SshFailure::Authentication, "devbox")),
+                "鍵の案内: {}",
+                toast.text
+            );
+            match &toast.action {
+                Some(ToastAction::OpenDetails { text, .. }) => {
+                    assert!(text.contains("Permission denied (publickey)"), "{text}")
+                }
+                _ => panic!("全文を読める"),
+            }
+
+            let unknown = anyhow::anyhow!("remote-server の配備に失敗: sh: 1: not found");
+            workspace.report_ssh_failure("devbox", &unknown, cx);
+            let toast = workspace.notifications.toasts.last().expect("知らせ");
+            assert_eq!(
+                toast.text.as_ref(),
+                "remote-server の配備に失敗: sh: 1: not found",
+                "分からない失敗は今までどおり"
+            );
+        });
+        workspace.update(cx, |workspace, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

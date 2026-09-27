@@ -173,10 +173,16 @@ impl Workspace {
             keymap_core::KeymapPlatform::current(),
         ))
         .unwrap_or_default();
+        let agent_settings = settings::get(cx);
         let items = COMMAND_REGISTRY
             .entries()
             .iter()
             .enumerate()
+            // 使わないエージェント（O16）の「新しいスレッド（…）」は出さない。
+            .filter(|(_, entry)| {
+                editor_area::agent_for_thread_action(entry.action_name)
+                    .is_none_or(|agent| settings::agent_label_enabled(&agent_settings, agent))
+            })
             .map(|(id, entry)| {
                 let mut item = PickerItem::new(id, i18n::t!(entry.label_key));
                 if let Some(keystrokes) = keymap_core::key_for_action(&sections, entry.action_name)
@@ -576,6 +582,8 @@ impl Workspace {
                     TabContent::Web { view, .. } => {
                         view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
                     }
+                    // 端末は session の `terminal_dock` の物（下でドックごと塗り直す）。
+                    TabContent::Terminal { .. } => {}
                 }
             }
             if let Some(review) = &session.review {
@@ -615,6 +623,14 @@ impl Workspace {
         }
         if let Some(picker) = &self.overlays.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
+        }
+        // どこからでも呼べる端末（O24・C13）はプロジェクトに属さないので、ここで塗り直す。
+        if let Some(floating) = &self.chrome.floating_terminal {
+            let accent = theme.fg2;
+            floating.dock.update(cx, |dock, cx| {
+                dock.set_theme(theme.clone(), cx);
+                dock.set_accent(accent, cx);
+            });
         }
         cx.notify();
     }
@@ -712,6 +728,8 @@ impl Workspace {
                 self.close_picker(window, cx);
                 match mode {
                     PickerMode::PreviewUrl => self.confirm_localhost_input(&query, window, cx),
+                    PickerMode::Fonts => self.commit_font(id, cx),
+                    PickerMode::Shells => self.commit_shell(id, cx),
                     PickerMode::Files => {
                         // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
                         // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。
@@ -779,6 +797,19 @@ impl Workspace {
                             }
                         }
                     }
+                    // 「接続を確かめる」で開いた時は、選んだ先を試すだけ（開かない・手入力の行は無視）。
+                    PickerMode::SshHosts if std::mem::take(&mut self.picker_ssh_testing) => {
+                        let uri = match self.picker_ssh_recent.get(id) {
+                            Some(uri) => Some(uri.clone()),
+                            None => self
+                                .picker_ssh_hosts
+                                .get(id - self.picker_ssh_recent.len())
+                                .map(|host| format!("ssh://{}", host.alias)),
+                        };
+                        if let Some(uri) = uri {
+                            self.test_ssh_uri(uri, cx);
+                        }
+                    }
                     PickerMode::SshHosts => {
                         // 前半 id = 最近のリモートプロジェクト（履歴・直接接続・#5）。
                         if let Some(uri) = self.picker_ssh_recent.get(id).cloned() {
@@ -804,6 +835,10 @@ impl Workspace {
                                             self.connect_ssh_and_open(format!("ssh://{alias}"), cx)
                                         }
                                     }
+                                }
+                                // 最後の「＋ 接続先を登録…」（O37・G01）。
+                                None if host_id > self.picker_ssh_hosts.len() => {
+                                    self.open_ssh_register(window, cx)
                                 }
                                 // 末尾の「手入力」= 空の ssh:// 入力バー。
                                 None => {

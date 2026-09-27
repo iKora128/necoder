@@ -43,11 +43,12 @@ impl Workspace {
             return;
         };
         let text = renaming.editor.read(cx).plain_text();
-        let name = text.trim();
+        // `:rocket:` は絵文字に（O20・A08）。
+        let name = ui::emoji::expand_shortcodes(text.trim());
         if !name.is_empty() {
             if let Some(slot) = self.project_sessions.projects.get_mut(renaming.index) {
-                slot.task_space.title = SharedString::from(name.to_string());
-                slot.name = SharedString::from(name.to_string());
+                slot.task_space.title = SharedString::from(name.clone());
+                slot.name = SharedString::from(name);
             }
             self.persist_task_space(renaming.index, cx);
         }

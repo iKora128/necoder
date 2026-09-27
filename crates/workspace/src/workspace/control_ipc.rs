@@ -124,6 +124,7 @@ fn record_json(record: &storage::TaskSpaceRecord) -> serde_json::Value {
         "head_oid": record.head_oid,
         "result_summary": record.result_summary,
         "depends_on": record.depends_on,
+        "parent": record.parent,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     })
@@ -659,6 +660,10 @@ impl Workspace {
                         .map(str::to_string),
                     result_summary: None,
                     depends_on: Vec::new(),
+                    parent: params
+                        .get("parent")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
                     created_at: params
                         .get("created_at")
                         .and_then(serde_json::Value::as_i64)
@@ -875,11 +880,18 @@ impl Workspace {
         }
     }
 
-    /// 全プロジェクトの端末（下ドックのタブ + Task カードに置いた端末）。PTY は起動しない。
+    /// 全プロジェクトの端末（下ドックのタブ + Task カードに置いた端末 + エディタ領域のタブの端末）。
+    /// PTY は起動しない。
     fn control_terminals(&self, cx: &App) -> Vec<ControlTerminal> {
         let mut terminals = Vec::new();
         for (session_index, session) in self.project_sessions.sessions.iter().enumerate() {
             let dock = session.terminal_dock.read(cx);
+            // エディタ領域のタブ（O24）もドックの id で持っているので、id で見分ける。
+            let editor_sessions: Vec<u64> = session
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.terminal().map(|(_, id)| id))
+                .collect();
             let (tabs, active_tab) = dock.tab_terminals();
             for (tab_index, terminal) in tabs.iter().enumerate() {
                 terminals.push(ControlTerminal {
@@ -891,11 +903,15 @@ impl Workspace {
                         && tab_index == active_tab,
                 });
             }
-            for (_, terminal) in dock.placed_terminals() {
+            for (id, terminal) in dock.placed_terminals() {
                 terminals.push(ControlTerminal {
                     session_index,
                     terminal,
-                    place: "task",
+                    place: if editor_sessions.contains(&id) {
+                        "editor"
+                    } else {
+                        "task"
+                    },
                     active: false,
                 });
             }
@@ -1374,6 +1390,26 @@ mod tests {
             serde_json::json!({ "task_id": "other" }),
         );
         assert_eq!(other["result"].as_array().map(Vec::len), Some(0));
+
+        // エディタ領域のタブの端末（O24）は `editor`（ドックの id で持っていても Task カードではない）。
+        let editor_terminal = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_terminal_tab(&NewTerminalTab, window, cx);
+            workspace
+                .tabs
+                .last()
+                .and_then(EditorTab::terminal)
+                .map(|(view, _)| view.clone())
+                .expect("端末のタブ")
+        });
+        let listed = request(&workspace, cx, "terminals", serde_json::json!({}));
+        let terminals = listed["result"].as_array().expect("配列");
+        assert_eq!(terminals.len(), 3);
+        let places: Vec<(&str, &str)> = terminals
+            .iter()
+            .filter_map(|entry| Some((entry["handle"].as_str()?, entry["place"].as_str()?)))
+            .collect();
+        assert!(places.contains(&(terminal_handle(&editor_terminal).as_str(), "editor")));
+        assert!(places.contains(&(terminal_handle(&card).as_str(), "task")));
         std::fs::remove_dir_all(&directory).expect("片付けられる");
     }
 

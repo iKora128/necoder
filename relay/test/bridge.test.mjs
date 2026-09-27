@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Bridge, leadingZeroBits, validateCommand, validSubscription } from '../host/bridge.mjs';
 import { random } from '../public/crypto.mjs';
 import { createHash } from 'node:crypto';
+import webpush from 'web-push';
 
 const device = () => ({ room: random(), tasks: ['project-a'] });
 const command = () => ({ type: 'request', id: random(), method: 'send_message', expires_at: Date.now() + 25000,
@@ -132,4 +133,35 @@ test('電源の実測は 30 秒に 1 回だけ', async () => {
   await bridge.refreshPower();
   assert.equal(reads, 2);
   bridge.stop();
+});
+test('走っていたスレッドが終わったら完了を 1 回だけ push・待ちは attention', async () => {
+  const sent = [];
+  const original = webpush.sendNotification;
+  webpush.sendNotification = async (_subscription, payload) => { sent.push(JSON.parse(payload).type); };
+  try {
+    const bridge = new Bridge({ origin: 'http://relay.test', vapid: { publicKey: 'p', privateKey: 'q' } }, [],
+      { persist: async () => {} });
+    const d = { ...device(), subscription: { endpoint: 'https://web.push.apple.com/abc' } };
+    const snapshot = (...threads) => ({ projects: [{ id: 'project-a', threads },
+      { id: 'project-b', threads: [{ id: 'other', running: false }] }] });
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: true }));
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: true }));
+    assert.deepEqual(sent, [], '走っている間は知らせない');
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: false }));
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: false }));
+    assert.deepEqual(sent, ['done'], '終わった時に 1 回だけ');
+    // 質問で止まった＝完了ではなく attention。答えて走り、終われば done。
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: true }));
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: true, blocked: true, question_pending: true }));
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: false, blocked: true, question_pending: true }));
+    assert.deepEqual(sent, ['done', 'attention']);
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: true }));
+    await bridge.maybeNotify(d, snapshot({ id: 't', running: false, session_lost: true }));
+    assert.deepEqual(sent, ['done', 'attention'], '切断は完了として知らせない');
+    // 共有していないプロジェクトのスレッドは見ない。
+    const shared = { ...device(), subscription: d.subscription };
+    await bridge.maybeNotify(shared, { projects: [{ id: 'project-b', threads: [{ id: 'x', running: true }] }] });
+    await bridge.maybeNotify(shared, { projects: [{ id: 'project-b', threads: [{ id: 'x', running: false }] }] });
+    assert.deepEqual(sent, ['done', 'attention']);
+  } finally { webpush.sendNotification = original; }
 });

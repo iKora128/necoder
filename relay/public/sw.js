@@ -16,11 +16,17 @@ self.addEventListener('fetch', event => {
     } catch { return await caches.match(event.request) || Response.error(); }
   })());
 });
+const NOTICES = {
+  attention: { body: 'エージェントが回答を待っています / Your agent needs attention', tag: 'necoder-attention' },
+  done: { body: 'エージェントが作業を終えました / Your agent finished', tag: 'necoder-done' },
+};
 self.addEventListener('push', event => {
   // 本文を信用してリンクやコマンドを作らない。通知は常に固定文・固定オリジン。
+  // 本文から読むのは種類だけで、知らない種類・読めない本文は attention として出す。
+  let type = 'attention';
+  try { if (Object.hasOwn(NOTICES, event.data?.json()?.type)) type = event.data.json().type; } catch { /* 固定文のまま */ }
   event.waitUntil(self.registration.showNotification('necoder', {
-    body: 'エージェントが回答を待っています / Your agent needs attention',
-    tag: 'necoder-attention', icon: '/icon-192.png', badge: '/icon-192.png',
+    ...NOTICES[type], icon: '/icon-192.png', badge: '/icon-192.png',
   }));
 });
 self.addEventListener('notificationclick', event => {

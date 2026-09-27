@@ -473,7 +473,7 @@ necoder {version} · この本文は {binary} が、この版の実装から出�
 
 ## 出力と失敗
 
-- fleet の結果は整形した JSON（標準出力）。Task の主な項目: `id` `root` `branch` `title` `phase` `result_summary` `depends_on`
+- fleet の結果は整形した JSON（標準出力）。Task の主な項目: `id` `root` `branch` `title` `phase` `result_summary` `depends_on` `parent`（この Task を切った元の Task の id）
 - 失敗すると標準エラーに理由を出し、終了コード 1
 ",
         open = crate::cli::OPEN_ARGUMENTS,
@@ -519,7 +519,7 @@ necoder {version} · この本文は {binary} が、この版の実装から出�
 
 ## 端末（`ne terminal …`）
 
-- 対象は、GUI の下ドックのタブの端末と、Fleet の Task カードに置いた端末。`<terminal>` は `ne terminal list` の `handle`（`t<番号>`）か `active`（選択中のプロジェクトの下ドックで前に出ている端末）
+- 対象は、GUI の下ドックのタブの端末と、エディタ領域のタブの端末と、Fleet の Task カードに置いた端末（`place` が `dock` / `editor` / `task`）。`<terminal>` は `ne terminal list` の `handle`（`t<番号>`）か `active`（選択中のプロジェクトの下ドックで前に出ている端末）
 - ハンドルは GUI が動いている間だけ有効。GUI を再起動したり端末を閉じたりしたら `list` で取り直す
 - `read` は今の画面を読む（人がスクロールで遡っていても関係ない）。送る前に読んで、端末が何を待っているかを確かめる
 - `send` は GUI の設定「CLI から端末へ入力を送る」が on の時だけ効く（既定 off）。off の時は失敗するので、人に頼む。`--` の後ろは全部文字として送る

@@ -179,7 +179,7 @@ impl Workspace {
                     .get(index % statuses.len().max(1))
                     .map(|status| (status.color, status.name.clone()))
                     .unwrap_or((self.theme.fg2, SharedString::from("Task")));
-                self.push_news(kind, color, title, text);
+                self.push_news(kind, color, title, text, None);
             }
         }
         cx.notify();
@@ -254,6 +254,7 @@ impl Workspace {
                 explorer: ExplorerProject::default(),
                 open_files: Vec::new(),
                 active_file: 0,
+                pinned_files: Vec::new(),
                 icon: None,
                 icon_image: None,
                 worktree_branch: Some(branch.to_string()),
@@ -291,6 +292,7 @@ impl Workspace {
                     news_color,
                     SharedString::from(title.to_string()),
                     text,
+                    None,
                 );
             }
         }

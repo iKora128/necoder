@@ -113,6 +113,9 @@ pub struct ToolCallInfo {
     pub output: Option<String>,
     /// 完了したか（Some(true)=成功 / Some(false)=失敗 / None=進行中・不明）。
     pub completed: Option<bool>,
+    /// サブエージェントの手順なら、それを走らせている親のツール呼び出しの相関 ID（O17）。
+    /// Claude は `_meta.claudeCode.parentToolUseId` に載せる（Task / Agent ツールの id）。
+    pub parent: Option<String>,
 }
 
 /// プラン 1 項目の状態（ACP `PlanEntryStatus` の写し）。
@@ -159,6 +162,52 @@ pub enum GoalStatus {
     Other,
 }
 
+/// 目標への操作（O17）。Codex は initialize の `_meta.goal` で操作の入口（`controlMethod`）と使える
+/// 操作（`actions`）を広告する。目標を立てる（set）のは `/goal <目的>` の prompt で足りるので扱わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalAction {
+    Pause,
+    Resume,
+    Clear,
+}
+
+impl GoalAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            GoalAction::Pause => "pause",
+            GoalAction::Resume => "resume",
+            GoalAction::Clear => "clear",
+        }
+    }
+
+    fn parse(action: &str) -> Option<Self> {
+        match action {
+            "pause" => Some(GoalAction::Pause),
+            "resume" => Some(GoalAction::Resume),
+            "clear" => Some(GoalAction::Clear),
+            _ => None,
+        }
+    }
+}
+
+/// initialize の `_meta.goal` から (操作の入口, 使える操作)。入口は拡張メソッド（`_` で始まる）だけ
+/// 受ける（広告を根拠に標準のメソッドを呼ばない）。使える操作が無ければ None。
+fn goal_controls(meta: Option<&v1::Meta>) -> Option<(String, Vec<GoalAction>)> {
+    let goal = meta?.get("goal")?;
+    let method = goal
+        .get("controlMethod")?
+        .as_str()
+        .filter(|method| method.starts_with('_'))?
+        .to_string();
+    let actions: Vec<GoalAction> = goal
+        .get("actions")?
+        .as_array()?
+        .iter()
+        .filter_map(|action| action.as_str().and_then(GoalAction::parse))
+        .collect();
+    (!actions.is_empty()).then_some((method, actions))
+}
+
 /// エージェントが追っている目標（`/goal <objective>` で立つ・O2）。composer の上に 1 行で出す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentGoal {
@@ -178,6 +227,11 @@ pub struct ElicitationField {
     pub options: Vec<ElicitationChoice>,
     /// 複数選択か（true = ACP の array プロパティ。応答は `StringArray` で返す）。
     pub multi: bool,
+    /// この質問に付いた自由入力の Other 欄のプロパティ名（O17）。あれば UI は選択肢の下に
+    /// 入力欄を出し、書いた文字を**この名前**で返す（選択と両方返してよい。どう読むかは
+    /// エージェント側: Claude の AskUserQuestion は、単一選択なら「選ばずに書いた = 答え」
+    /// 「選んで書いた = 選択に添えるメモ」、複数選択なら選択に足す）。
+    pub custom_answer: Option<String>,
 }
 
 /// Elicitation の 1 選択肢（ACP `EnumOption` / `enum` 値の簡約）。
@@ -256,10 +310,14 @@ pub enum AgentEvent {
     TitleChanged(Option<String>),
     /// 目標（`/goal`）が変わった（`SessionInfoUpdate._meta.goal`）。`None` = 目標が消えた。
     GoalChanged(Option<AgentGoal>),
+    /// このエージェントが受ける目標への操作（O17）。広告したエージェントだけ、セッションが開いた
+    /// 直後（SessionStarted の次）に 1 回。
+    GoalControls(Vec<GoalAction>),
     /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**選択式フィールドのみ対応**し、
     /// テキスト/数値/真偽を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
     /// `respond` に **(name, 選んだ値の並び) の群**を送ると Accept、`None` を送ると Decline。
-    /// 単一選択フィールドは要素 1 つ、複数選択は 0 個以上。drop で Cancel。
+    /// 単一選択フィールドは要素 1 つ、複数選択は 0 個以上。自由入力の答えは
+    /// `(field.custom_answer, [書いた文字])` として同じ群に入れる（O17）。drop で Cancel。
     ElicitationRequest {
         message: String,
         fields: Vec<ElicitationField>,
@@ -331,6 +389,9 @@ pub enum SessionCommand {
     SetMode(String),
     /// 設定オプション（モデル・思考レベル等）を変更する（`session/set_config_option`）。
     SetConfig { config_id: String, value_id: String },
+    /// 目標を一時停止 / 再開 / 取り消す（エージェントが広告した拡張メソッド・O17）。
+    /// ターン中でも待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
+    Goal(GoalAction),
 }
 
 /// ターンループが待つ 3 系統（エージェントからの更新 / UI からのコマンド / prompt 応答）。
@@ -637,7 +698,13 @@ pub fn cached_agent_auth_states() -> Vec<AgentAuthState> {
 
 /// CLI/config 判定に加え、必要な Agent はプロンプト無しの ACP session を短時間だけ開く。
 /// probe は並列・タイムアウト付きで、終了時に子プロセスを必ず kill/wait する。
-pub async fn refresh_agent_auth_states(cwd: impl Into<PathBuf>) -> Vec<AgentAuthState> {
+///
+/// `disabled`（設定の `disabled_agents`・`AgentKind::id`）のエージェントは子プロセスを起こさず、
+/// ファイルだけの軽い判定のまま返す（使わないと決めたものを確かめに行かない・O16）。
+pub async fn refresh_agent_auth_states(
+    cwd: impl Into<PathBuf>,
+    disabled: &[String],
+) -> Vec<AgentAuthState> {
     let cwd = cwd.into();
     let initial = detect_configured_agent_states();
     let probes = AGENTS
@@ -645,8 +712,9 @@ pub async fn refresh_agent_auth_states(cwd: impl Into<PathBuf>) -> Vec<AgentAuth
         .zip(initial.iter().copied())
         .map(|(agent, state)| {
             let cwd = cwd.clone();
+            let skip = disabled.iter().any(|id| id == agent.id);
             async move {
-                if !agent.cli_installed() {
+                if skip || !agent.cli_installed() {
                     return state;
                 }
                 // status コマンドは最大 2 秒掛かり得るので、この明示 refresh の背景処理にだけ置く。
@@ -1653,6 +1721,29 @@ pub async fn run_session_on(
                     resumable: can_load,
                 })
                 .ok();
+            // 目標への操作の入口（Codex の `_meta.goal`・O17）。広告した時だけ流す（UI は
+            // SessionStarted で前の操作を消すので、広告が無ければ操作は出ない）。
+            let goal_control = goal_controls(initialized.meta.as_ref());
+            if let Some((_, actions)) = goal_control.as_ref() {
+                event_tx
+                    .unbounded_send(AgentEvent::GoalControls(actions.clone()))
+                    .ok();
+            }
+            // 目標への操作を送る（応答は待たない・結果は `_meta.goal` の更新で届く）。
+            let session_id_text = session.session_id().to_string();
+            let send_goal_action = |action: GoalAction| {
+                let Some((method, _)) = goal_control.as_ref() else {
+                    return;
+                };
+                let params = serde_json::json!({
+                    "sessionId": session_id_text,
+                    "action": action.as_str(),
+                });
+                match acp::UntypedMessage::new(method, params) {
+                    Ok(message) => connection.send_request(message).detach(),
+                    Err(error) => eprintln!("目標の操作を組めない: {error}"),
+                }
+            };
 
             // エージェントが広告する権限モード一覧 + 現在モードを UI へ（セレクタを実モードで組む）。
             // 希望モードが広告に在れば**ここで**（初回 prompt より前に）set_mode し、UI へは
@@ -1796,6 +1887,10 @@ pub async fn run_session_on(
                     SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
+                    SessionCommand::Goal(action) => {
+                        send_goal_action(action);
+                        continue;
+                    }
                     SessionCommand::SetMode(mode_id) => {
                         connection
                             .send_request(v1::SetSessionModeRequest::new(
@@ -1872,6 +1967,11 @@ pub async fn run_session_on(
                             connection
                                 .send_notification(v1::CancelNotification::new(session_id.clone()))
                                 .ok();
+                            continue;
+                        }
+                        // 目標の操作は待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
+                        TurnEvent::Command(Some(SessionCommand::Goal(action))) => {
+                            send_goal_action(action);
                             continue;
                         }
                         // ターン中のモデル変更等は畳んでから処理する（取りこぼさない）。
@@ -2044,6 +2144,7 @@ fn session_update_events(update: v1::SessionUpdate, mut emit: impl FnMut(AgentEv
             diffs: tool_diffs(&tool_call.content),
             output: tool_output(&tool_call.content),
             completed: tool_completed(tool_call.status),
+            parent: subagent_parent(tool_call.meta.as_ref()),
         })),
         v1::SessionUpdate::ToolCallUpdate(update) => {
             let content = update.fields.content.as_deref().unwrap_or(&[]);
@@ -2060,6 +2161,7 @@ fn session_update_events(update: v1::SessionUpdate, mut emit: impl FnMut(AgentEv
                 diffs: tool_diffs(content),
                 output: tool_output(content),
                 completed: update.fields.status.and_then(tool_completed),
+                parent: subagent_parent(update.meta.as_ref()),
             }));
         }
         v1::SessionUpdate::UsageUpdate(update) => {
@@ -2388,17 +2490,26 @@ const CUSTOM_ANSWER_META_KEY: &str = "_askUserQuestionCustomAnswer";
 /// 例外は [`CUSTOM_ANSWER_META_KEY`] 印の Other 欄だけ。Claude Code の AskUserQuestion は
 /// 質問ごとに「選択肢 + Other 欄」の 2 プロパティを送るため、Other 欄を非対応扱いにすると
 /// **質問そのものが Decline されて UI に出ない**（＝エージェントの質問に答えられない）。
-/// 印つき Other 欄は任意入力なので、読み飛ばして選択欄だけ返す方が仕様に忠実。
+/// 印つき Other 欄は独立したフィールドにせず、付属先の選択欄の [`ElicitationField::custom_answer`]
+/// に結び付ける（O17・UI は選択肢の下に入力欄を出す）。付属先が見つからない Other 欄は任意入力
+/// なので読み飛ばす。
 fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<ElicitationField>> {
     if schema.properties.is_empty() {
         return None;
     }
     let mut fields = Vec::new();
+    // 付属先の質問（選択欄の名前）→ Other 欄の名前。プロパティは名前順に来るので、選択欄より
+    // 先に Other 欄が来ても結べるよう、最後にまとめて結ぶ。
+    let mut custom_answers = std::collections::BTreeMap::new();
     for (name, property) in &schema.properties {
         let (options, multi, title) = match property {
             v1::ElicitationPropertySchema::String(string_schema) => {
                 if is_custom_answer_field(string_schema) {
-                    continue; // 選択欄に付属する任意の Other 欄 — 出さないだけで非対応にはしない
+                    // 選択欄に付属する任意の Other 欄 — 独立した欄にはせず、非対応にもしない
+                    if let Some(question) = custom_answer_question(name, string_schema) {
+                        custom_answers.insert(question, name.clone());
+                    }
+                    continue;
                 }
                 let options = single_select_options(string_schema)?;
                 (options, false, string_schema.title.clone())
@@ -2417,13 +2528,31 @@ fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<Elici
             label: title.unwrap_or_else(|| name.clone()),
             options,
             multi,
+            custom_answer: None,
         });
     }
     // Other 欄だけを読み飛ばした結果 0 件＝選ばせるものが無いフォーム。非対応として Decline に回す。
     if fields.is_empty() {
         return None;
     }
+    for field in &mut fields {
+        field.custom_answer = custom_answers.remove(&field.name);
+    }
     Some(fields)
+}
+
+/// Other 欄がどの質問に付属するか。`_meta` の `questionId` を正とし、無ければ名前の
+/// `<質問>_custom` 形から引く（Claude のブリッジは両方付ける・印だけのブリッジもあり得る）。
+fn custom_answer_question(name: &str, schema: &v1::StringPropertySchema) -> Option<String> {
+    let from_meta = schema
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(CUSTOM_ANSWER_META_KEY))
+        .and_then(|marker| marker.get("questionId"))
+        .and_then(|question| question.as_str());
+    from_meta
+        .or_else(|| name.strip_suffix("_custom"))
+        .map(str::to_string)
 }
 
 /// 単一選択 string の選択肢（`oneOf` 優先・無ければ `enum`）。どちらも無い自由入力は `None`＝非対応。
@@ -2484,6 +2613,16 @@ fn is_custom_answer_field(schema: &v1::StringPropertySchema) -> bool {
         .meta
         .as_ref()
         .is_some_and(|meta| meta.contains_key(CUSTOM_ANSWER_META_KEY))
+}
+
+/// サブエージェントの手順の親（O17）: `_meta.claudeCode.parentToolUseId`。空文字は無いものとする。
+fn subagent_parent(meta: Option<&v1::Meta>) -> Option<String> {
+    meta?
+        .get("claudeCode")?
+        .get("parentToolUseId")?
+        .as_str()
+        .filter(|parent| !parent.is_empty())
+        .map(str::to_string)
 }
 
 /// `session/request_elicitation`（選択肢付き質問）を UI へ橋渡しして応答する。form かつ全フィールドが
@@ -2828,6 +2967,11 @@ mod tests {
         assert_eq!(fields[0].name, "question_0");
         assert_eq!(fields[0].label, "PDF の見せ方");
         assert_eq!(fields[0].options.len(), 2);
+        assert_eq!(
+            fields[0].custom_answer.as_deref(),
+            Some("question_0_custom"),
+            "Other 欄は付属先の質問に結ぶ（O17・自由入力欄を出す）"
+        );
 
         // 印が無いただの自由入力なら従来どおり非対応（返せない入力を勝手に握り潰さない）。
         let unmarked: v1::ElicitationSchema = serde_json::from_value(json!({
@@ -2863,6 +3007,11 @@ mod tests {
         let multi_fields = simplify_elicitation_form(&multi).expect("複数選択も対応");
         assert_eq!(multi_fields.len(), 1);
         assert!(multi_fields[0].multi, "複数選択として印を付ける");
+        assert_eq!(
+            multi_fields[0].custom_answer.as_deref(),
+            Some("question_0_custom"),
+            "questionId が無ければ名前の <質問>_custom 形で結ぶ"
+        );
         assert_eq!(multi_fields[0].label, "入れる機能");
         assert_eq!(multi_fields[0].options.len(), 2);
         assert_eq!(
@@ -2881,6 +3030,10 @@ mod tests {
         let plain = simplify_elicitation_form(&plain_multi).expect("items.enum も対応");
         assert!(plain[0].multi);
         assert_eq!(plain[0].options[2].title, "c");
+        assert!(
+            plain[0].custom_answer.is_none(),
+            "Other 欄の無い質問は入力欄を出さない"
+        );
 
         // Other 欄しか無い＝選ばせるものが無いので非対応。
         let only_custom: v1::ElicitationSchema = serde_json::from_value(json!({
@@ -2894,6 +3047,32 @@ mod tests {
         }))
         .expect("schema をパースできる");
         assert!(simplify_elicitation_form(&only_custom).is_none());
+    }
+
+    /// Other 欄の結び先（O17）: `questionId` を名前より優先し、名前順で選択欄より先に来ても結ぶ。
+    /// 付属先の無い Other 欄は捨てる（任意入力なので、読み飛ばしても答えは作れる）。
+    #[test]
+    fn custom_answer_fields_attach_to_their_question() {
+        use serde_json::json;
+        let schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "a_note": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"questionId": "z_pick"}}
+                },
+                "z_pick": {"type": "string", "enum": ["x", "y"]},
+                "other_custom": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"isCustomAnswer": true}}
+                }
+            }
+        }))
+        .expect("schema をパースできる");
+        let fields = simplify_elicitation_form(&schema).expect("選択欄が 1 つある");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "z_pick");
+        assert_eq!(fields[0].custom_answer.as_deref(), Some("a_note"));
     }
 
     /// 回帰テスト: `session/prompt` がエラー応答（例: API のストリーミング切断「Connection
@@ -3964,7 +4143,7 @@ for line in sys.stdin:
     #[ignore = "ローカルの vendor CLI / 資格情報を調べる"]
     fn live_auth_states() {
         let cwd = std::env::current_dir().expect("cwd");
-        let states = futures::executor::block_on(refresh_agent_auth_states(cwd));
+        let states = futures::executor::block_on(refresh_agent_auth_states(cwd, &[]));
         for (agent, state) in AGENTS.iter().zip(states) {
             println!("{}: {state:?}", agent.label);
         }
@@ -4064,6 +4243,9 @@ for line in sys.stdin:
                         }
                         AgentEvent::TitleChanged(title) => eprintln!("[title] {title:?}"),
                         AgentEvent::GoalChanged(goal) => eprintln!("[goal] {goal:?}"),
+                        AgentEvent::GoalControls(actions) => {
+                            eprintln!("[goal controls] {actions:?}")
+                        }
                         AgentEvent::ElicitationRequest {
                             message, fields, ..
                         } => eprintln!("[elicitation] {message} fields={}", fields.len()),
@@ -4100,6 +4282,83 @@ for line in sys.stdin:
         let mut events = Vec::new();
         session_update_events(update, |event| events.push(event));
         events
+    }
+
+    /// 目標への操作の広告（Codex の initialize `_meta.goal`・O17）: 入口は拡張メソッドだけ受け、
+    /// 知らない操作（set など）は捨てる。操作が 1 つも無ければ出さない。
+    #[test]
+    fn goal_controls_come_from_the_initialize_meta() {
+        let meta = |value: serde_json::Value| -> v1::Meta {
+            serde_json::from_value(value).expect("オブジェクト")
+        };
+        let codex = meta(json!({"goal": {
+            "version": 1,
+            "controlMethod": "_session/goal",
+            "actions": ["set", "pause", "resume", "clear"]
+        }}));
+        assert_eq!(
+            goal_controls(Some(&codex)),
+            Some((
+                "_session/goal".to_string(),
+                vec![GoalAction::Pause, GoalAction::Resume, GoalAction::Clear]
+            ))
+        );
+        let standard =
+            meta(json!({"goal": {"controlMethod": "session/prompt", "actions": ["pause"]}}));
+        assert_eq!(
+            goal_controls(Some(&standard)),
+            None,
+            "標準のメソッドは呼ばない"
+        );
+        let only_set =
+            meta(json!({"goal": {"controlMethod": "_session/goal", "actions": ["set"]}}));
+        assert_eq!(goal_controls(Some(&only_set)), None);
+        assert_eq!(goal_controls(None), None);
+        assert_eq!(GoalAction::Pause.as_str(), "pause");
+    }
+
+    /// サブエージェントの手順（O17）: Claude が `_meta.claudeCode.parentToolUseId` に載せる親の id を
+    /// 開始にも更新にも写す。印の無い手順・空の id は親なし。
+    #[test]
+    fn subagent_steps_carry_their_parent_tool_call() {
+        let child: v1::ToolCall = serde_json::from_value(json!({
+            "toolCallId": "toolu_child",
+            "title": "Read src/lib.rs",
+            "kind": "read",
+            "_meta": {"claudeCode": {"parentToolUseId": "toolu_task", "toolName": "Read"}}
+        }))
+        .expect("ToolCall をパースできる");
+        let events = mapped(v1::SessionUpdate::ToolCall(child));
+        let [AgentEvent::ToolStarted(started)] = events.as_slice() else {
+            panic!("ToolStarted 1 つ: {events:?}");
+        };
+        assert_eq!(started.parent.as_deref(), Some("toolu_task"));
+
+        let update: v1::ToolCallUpdate = serde_json::from_value(json!({
+            "toolCallId": "toolu_child",
+            "status": "completed",
+            "_meta": {"claudeCode": {"parentToolUseId": "toolu_task"}}
+        }))
+        .expect("ToolCallUpdate をパースできる");
+        let events = mapped(v1::SessionUpdate::ToolCallUpdate(update));
+        let [AgentEvent::ToolUpdated(updated)] = events.as_slice() else {
+            panic!("ToolUpdated 1 つ: {events:?}");
+        };
+        assert_eq!(updated.parent.as_deref(), Some("toolu_task"));
+
+        for meta in [json!({}), json!({"claudeCode": {"parentToolUseId": ""}})] {
+            let top: v1::ToolCall = serde_json::from_value(json!({
+                "toolCallId": "toolu_top",
+                "title": "Task",
+                "_meta": meta
+            }))
+            .expect("ToolCall をパースできる");
+            let events = mapped(v1::SessionUpdate::ToolCall(top));
+            let [AgentEvent::ToolStarted(started)] = events.as_slice() else {
+                panic!("ToolStarted 1 つ: {events:?}");
+            };
+            assert!(started.parent.is_none(), "親の印が無ければ普通の手順");
+        }
     }
 
     /// `AvailableCommandsUpdate` は一覧まるごと（ヒント付き・ヒント無し）で `Commands` になる。
@@ -4393,8 +4652,11 @@ for line in sys.stdin:
             let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
             let collect = async move {
                 let mut seen = Vec::new();
+                // 上限は偽エージェント（python）の起動込み。テストが並んで重い Windows のランナーでは
+                // 起動だけで 10 秒近くかかり、届く前に打ち切っていた（PR #30 の check-windows）。
+                // 条件がそろえばすぐ抜けるので、長くしても通る時は遅くならない（固まった時の保険）。
                 let deadline =
-                    blocking::unblock(|| std::thread::sleep(Duration::from_secs(10))).fuse();
+                    blocking::unblock(|| std::thread::sleep(Duration::from_secs(60))).fuse();
                 futures::pin_mut!(deadline);
                 loop {
                     let next = event_rx.next().fuse();

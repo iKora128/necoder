@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+pub mod os_shortcuts;
+pub mod user_keymap;
+
 /// keymap の 1 セクション（1 つのコンテキスト述語に対する束）。
 ///
 /// `Serialize` は非 mac の既定 keymap を mac 版から機械変換して書き戻すために要る（§D4）。
@@ -315,6 +318,8 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-d": "editor::SelectNext",
       "alt-z": "editor::ToggleSoftWrap",
       "cmd-shift-v": "editor::ToggleRenderedMarkdown",
+      "cmd-k v": "editor::ToggleSidePreview",
+      "alt-cmd-k": "workspace::QuoteSelectionInThread",
       "ctrl-g": "workspace::GoToLine",
       "alt-cmd-up": "editor::AddCursorAbove",
       "alt-cmd-down": "editor::AddCursorBelow",
@@ -333,7 +338,9 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "context": "FleetControl",
     "bindings": {
-      "enter": "workspace::ControlNext"
+      "enter": "workspace::ControlNext",
+      "cmd-backspace": "workspace::CleanupTask",
+      "delete": "workspace::CleanupTask"
     }
   },
   {
@@ -352,9 +359,13 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-alt-f": "workspace::BufferReplace",
       "cmd-shift-f": "workspace::ProjectSearch",
       "cmd-shift-t": "workspace::RestoreClosedTab",
+      "cmd-alt-c": "workspace::CopyPathWithLine",
+      "cmd-k cmd-w": "workspace::CloseAllTabs",
+      "cmd-k shift-enter": "workspace::TogglePinTab",
       "cmd-k cmd-t": "workspace::ThemeSelector",
       "cmd-k cmd-c": "workspace::ProjectColor",
       "cmd-j": "workspace::ToggleTerminal",
+      "ctrl-`": "workspace::ToggleFloatingTerminal",
       "cmd-i": "workspace::InlineEdit",
       "cmd-\\": "workspace::SplitRight",
       "ctrl-shift-g": "workspace::ToggleGitPanel",
@@ -406,7 +417,10 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-c": "terminal::Copy",
       "cmd-f": "terminal::Find",
       "cmd-k": "terminal::Clear",
-      "cmd-v": "terminal::Paste"
+      "cmd-t": "terminal::NewTab",
+      "cmd-v": "terminal::Paste",
+      "cmd-w": "terminal::CloseTab",
+      "cmd-\\": "terminal::Split"
     }
   }
 ]"#;
@@ -803,6 +817,8 @@ mod windows_keymap_tests {
             ("ctrl-shift-a", "terminal::SelectAll"),
             ("ctrl-shift-f", "terminal::Find"),
             ("ctrl-shift-k", "terminal::Clear"),
+            ("ctrl-shift-t", "terminal::NewTab"),
+            ("ctrl-shift-w", "terminal::CloseTab"),
         ] {
             assert_eq!(
                 terminal.bindings.get(key).map(String::as_str),

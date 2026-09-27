@@ -30,8 +30,8 @@ fn image_format_for(path: &Path) -> Option<gpui::ImageFormat> {
     })
 }
 
-/// バイト数の人間向け表記（キャプション用）。
-fn human_size(bytes: usize) -> String {
+/// バイト数の人間向け表記（キャプション用・受け渡しのトーストでも使う）。
+pub(crate) fn human_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {

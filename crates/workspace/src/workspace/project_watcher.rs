@@ -230,6 +230,8 @@ impl Workspace {
                     // Web タブの鍵は URL なので、ファイルの変更がここへ来ることは無い
                     // （開発サーバの再読込はサーバ側の HMR が受け持つ）。
                     TabContent::Web { .. } => {}
+                    // 端末タブの鍵もファイルではない（O24）。
+                    TabContent::Terminal { .. } => {}
                 }
                 git_changed = true;
                 continue;

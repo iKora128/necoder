@@ -212,14 +212,100 @@ pub enum CodexRead {
     Failed(SharedString),
 }
 
-/// エージェント（ラベル）ごとの、最後に受け取ったレート制限（O11・gpui Global）。
+/// レート制限の値を分ける鍵（R08）。同じエージェントでも、動かしている場所（手元 / SSH 先）と
+/// 認証の置き場（設定の `agent_servers.<id>.env` の `CLAUDE_CONFIG_DIR` / `CODEX_HOME`）が違えば
+/// 別のアカウントかもしれないので、値を混ぜない。資格情報そのものは読まない（置き場のパスだけ）。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UsageKey {
+    pub agent: SharedString,
+    /// 動かしている場所（手元は空・SSH 先はホストの表示名）。
+    pub host: SharedString,
+    /// 認証の置き場（無ければ空 = 既定の置き場）。
+    pub profile: SharedString,
+}
+
+/// 使用量の鍵の「場所」: 手元は空、SSH 先はホストの表示名（R08）。Host を呼ぶので描画からは使わない。
+pub fn host_label(host: &dyn host::Host) -> SharedString {
+    if host.is_remote() {
+        SharedString::from(host.display_name().to_string())
+    } else {
+        SharedString::default()
+    }
+}
+
+/// 認証の置き場を表す env（値はディレクトリのパス。鍵やトークンの env は見ない）。
+const AUTH_PROFILE_ENV: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+
+impl UsageKey {
+    /// 手元・既定の認証の置き場。
+    pub fn local(agent: impl Into<SharedString>) -> Self {
+        Self {
+            agent: agent.into(),
+            host: SharedString::default(),
+            profile: SharedString::default(),
+        }
+    }
+
+    /// エージェントを動かしている場所（[`host_label`]）と、設定の認証の置き場から作る。
+    /// Host は呼ばない（描画からも呼ばれる）。
+    pub fn for_agent(agent: SharedString, host: SharedString, cx: &App) -> Self {
+        let profile = acp_client::AGENTS
+            .iter()
+            .find(|candidate| candidate.label == agent.as_ref())
+            .and_then(|candidate| crate::agent_server_override(candidate.id, cx))
+            .and_then(|agent_override| {
+                AUTH_PROFILE_ENV
+                    .iter()
+                    .find_map(|key| agent_override.env.get(*key).cloned())
+            })
+            .map(SharedString::from)
+            .unwrap_or_default();
+        Self {
+            agent,
+            host,
+            profile,
+        }
+    }
+
+    /// 見出し: `Claude Code` / `Claude Code · dev-box` / `Claude Code · ~/.claude-work`。
+    pub fn label(&self) -> SharedString {
+        let mut label = self.agent.to_string();
+        for part in [&self.host, &self.profile] {
+            if !part.is_empty() {
+                label.push_str(" · ");
+                label.push_str(part);
+            }
+        }
+        SharedString::from(label)
+    }
+
+    /// 手元・既定の置き場の Codex（`refresh_codex_limits` が読みに行くのはこれだけ）か。
+    pub fn is_local_codex(&self) -> bool {
+        self.agent.as_ref() == codex_label() && self.host.is_empty()
+    }
+}
+
+impl From<SharedString> for UsageKey {
+    fn from(agent: SharedString) -> Self {
+        Self::local(agent)
+    }
+}
+
+impl From<&str> for UsageKey {
+    fn from(agent: &str) -> Self {
+        Self::local(SharedString::from(agent.to_string()))
+    }
+}
+
+/// エージェントごと（[`UsageKey`] = エージェント + 動かしている場所 + 認証の置き場）の、最後に受け取った
+/// レート制限（O11・R08・gpui Global）。
 ///
-/// アカウント単位の値なので、同じエージェントならスレッド・プロセス・ウィンドウをまたいで 1 つを共有する。
+/// アカウント単位の値なので、同じ鍵ならスレッド・プロセス・ウィンドウをまたいで 1 つを共有する。
 /// 保存しない（古い値を再起動後に出さない。届くまで statusbar には何も出さない）。
 /// **読むときは `cx.try_global`**: `default_global` は観測者（statusbar の再描画）を起こす。
 #[derive(Debug, Default)]
 pub struct UsageLimits {
-    agents: BTreeMap<SharedString, AgentLimits>,
+    agents: BTreeMap<UsageKey, AgentLimits>,
     /// Codex の読み取りの状態（ポップオーバーに出す）。
     pub codex: CodexRead,
     /// codex が PATH に在るか（ポップオーバーを開いた時に確かめる。`None` = まだ見ていない）。
@@ -232,16 +318,24 @@ impl gpui::Global for UsageLimits {}
 
 impl UsageLimits {
     /// エージェントの知らせを重ねる。
-    pub fn record(&mut self, agent: SharedString, limits: RateLimits, now_ms: i64) {
-        self.agents.entry(agent).or_default().apply(limits, now_ms);
+    pub fn record(&mut self, key: impl Into<UsageKey>, limits: RateLimits, now_ms: i64) {
+        self.agents
+            .entry(key.into())
+            .or_default()
+            .apply(limits, now_ms);
     }
 
+    pub fn get(&self, key: &UsageKey) -> Option<&AgentLimits> {
+        self.agents.get(key)
+    }
+
+    /// 手元・既定の認証の置き場のエージェントの値。
     pub fn agent(&self, agent: &str) -> Option<&AgentLimits> {
-        self.agents.get(agent)
+        self.get(&UsageKey::from(agent))
     }
 
-    /// 値のあるエージェント（ラベル順）。
-    pub fn agents(&self) -> impl Iterator<Item = (&SharedString, &AgentLimits)> {
+    /// 値のある鍵（エージェント名 → 場所 → 置き場の順）。
+    pub fn agents(&self) -> impl Iterator<Item = (&UsageKey, &AgentLimits)> {
         self.agents.iter()
     }
 }
@@ -267,7 +361,9 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     if std::env::var_os("NECODER_USAGE_PROBE").is_some() {
         return;
     }
-    let codex = acp_client::find_in_path("codex");
+    // 使わないと決めた Codex（O16）は起こさない（未導入と同じ扱い＝使用量の行も出さない）。
+    let codex =
+        acp_client::find_in_path("codex").filter(|_| settings::get(cx).agent_enabled("codex"));
     let now = crate::now_unix_ms();
     let limits = cx.default_global::<UsageLimits>();
     limits.codex_installed = Some(codex.is_some());
@@ -290,14 +386,16 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = read.await;
         cx.update(|cx| {
+            // 読みに行ったのは手元の codex（設定の CODEX_HOME を渡した）。
+            let key = UsageKey::for_agent(
+                SharedString::from(codex_label()),
+                SharedString::default(),
+                cx,
+            );
             let limits = cx.default_global::<UsageLimits>();
             match result {
                 Ok(snapshot) => {
-                    limits.record(
-                        SharedString::from(codex_label()),
-                        snapshot,
-                        crate::now_unix_ms(),
-                    );
+                    limits.record(key, snapshot, crate::now_unix_ms());
                     limits.codex = CodexRead::Idle;
                 }
                 Err(error) => {
@@ -477,6 +575,51 @@ pub fn usd_label(amount: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R08: 同じエージェントでも、SSH 先・認証の置き場が違えば値を混ぜない。
+    #[test]
+    fn limits_are_kept_apart_per_host_and_profile() {
+        use acp_client::usage::WindowUsage;
+        let window = |percent: f64| RateLimits {
+            status: None,
+            windows: vec![WindowUsage {
+                window: LimitWindow::FiveHour,
+                used_percent: Some(percent),
+                resets_at: Some(9_999_999_999),
+            }],
+        };
+        let mut limits = UsageLimits::default();
+        let local = UsageKey::local("Claude Code");
+        let remote = UsageKey {
+            host: "dev-box".into(),
+            ..UsageKey::local("Claude Code")
+        };
+        let work = UsageKey {
+            profile: "~/.claude-work".into(),
+            ..UsageKey::local("Claude Code")
+        };
+        limits.record(local.clone(), window(10.0), 1);
+        limits.record(remote.clone(), window(90.0), 2);
+        limits.record(work.clone(), window(50.0), 3);
+        let percent = |key: &UsageKey| {
+            limits.get(key).expect("値がある").windows[0]
+                .used_percent
+                .expect("使用率")
+        };
+        assert_eq!(percent(&local), 10.0);
+        assert_eq!(percent(&remote), 90.0, "SSH 先の値は手元と混ぜない");
+        assert_eq!(percent(&work), 50.0, "別の認証の置き場も混ぜない");
+        assert_eq!(limits.agents().count(), 3);
+        assert_eq!(remote.label().as_ref(), "Claude Code · dev-box");
+        assert_eq!(work.label().as_ref(), "Claude Code · ~/.claude-work");
+        assert_eq!(
+            limits
+                .agent("Claude Code")
+                .map(|limits| limits.received_at_ms),
+            Some(1),
+            "名前だけで引くのは手元・既定の置き場"
+        );
+    }
     use acp_client::usage::WindowUsage;
 
     fn window(window: LimitWindow, percent: Option<f64>, resets_at: Option<i64>) -> WindowUsage {
@@ -550,7 +693,7 @@ mod tests {
     fn limits_merge_per_window_and_pick_the_headline() {
         let mut limits = UsageLimits::default();
         limits.record(
-            "Claude Code".into(),
+            "Claude Code",
             RateLimits {
                 status: Some(LimitStatus::Allowed),
                 windows: vec![
@@ -567,7 +710,7 @@ mod tests {
         );
         // 代表の窓だけの知らせ（5 時間枠）は、他の窓を消さない。
         limits.record(
-            "Claude Code".into(),
+            "Claude Code",
             RateLimits {
                 status: None,
                 windows: vec![window(LimitWindow::FiveHour, Some(44.0), None)],
@@ -593,7 +736,7 @@ mod tests {
 
         // その他の窓も 80% を超えれば出す。5 時間枠がリセット済みなら消える。
         limits.record(
-            "Claude Code".into(),
+            "Claude Code",
             RateLimits {
                 status: Some(LimitStatus::Warning),
                 windows: vec![window(
@@ -621,7 +764,7 @@ mod tests {
     fn a_rejection_lasts_until_the_window_resets() {
         let mut limits = UsageLimits::default();
         limits.record(
-            "Claude Code".into(),
+            "Claude Code",
             RateLimits {
                 status: Some(LimitStatus::Rejected),
                 windows: vec![window(LimitWindow::FiveHour, Some(100.0), Some(1_000))],
@@ -641,7 +784,7 @@ mod tests {
 
         // 次の期間の知らせ（リセット時刻が変わった・使用率はまだ無い）で古い 100% を残さない。
         limits.record(
-            "Claude Code".into(),
+            "Claude Code",
             RateLimits {
                 status: Some(LimitStatus::Allowed),
                 windows: vec![window(LimitWindow::FiveHour, None, Some(19_000))],

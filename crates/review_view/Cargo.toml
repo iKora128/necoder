@@ -23,6 +23,8 @@ editor_view.workspace = true
 keymap_core.workspace = true
 # 注記の保存（`review_notes`）。SQL はこの crate に漏らさない（storage の API だけ使う）。
 storage.workspace = true
+# 注記の書き込みを 1 本の列で順に流す（R03）。
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

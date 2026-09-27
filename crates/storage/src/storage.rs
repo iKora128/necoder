@@ -112,6 +112,9 @@ pub struct TaskSpaceRecord {
     /// この Task が待つ他 Task の id（P6・依存待ち）。DB は追加テーブル `task_deps`
     /// （既存 DB を migration なしで拡張するため列追加はしない）。
     pub depends_on: Vec<String>,
+    /// この Task を切った元の Task の id（O21・A07・親子）。DB は追加テーブル `task_parents`。
+    /// upsert は `Some` の時だけ書く（親を知らない書き手＝CLI の更新などが親子を消さない）。
+    pub parent: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -538,6 +541,7 @@ impl Storage {
                         head_oid: row.get_value(7)?.as_text().cloned(),
                         result_summary: row.get_value(8)?.as_text().cloned(),
                         depends_on: Vec::new(),
+                        parent: None,
                         created_at: *row.get_value(9)?.as_integer().context("task created_at")?,
                         updated_at: *row.get_value(10)?.as_integer().context("task updated_at")?,
                     });
@@ -556,6 +560,22 @@ impl Storage {
                     let depends_on = row.get_value(1)?.as_text().context("dep on")?.clone();
                     if let Some(record) = result.iter_mut().find(|record| record.id == task_id) {
                         record.depends_on.push(depends_on);
+                    }
+                }
+                // 親子（task_parents）も同じくメモリで結合（O21・A07）。
+                let mut parents = conn
+                    .query("SELECT task_id, parent_id FROM task_parents", ())
+                    .await
+                    .context("task_parents の読み出しに失敗")?;
+                while let Some(row) = parents
+                    .next()
+                    .await
+                    .context("task_parents 行の取得に失敗")?
+                {
+                    let task_id = row.get_value(0)?.as_text().context("parent task")?.clone();
+                    let parent = row.get_value(1)?.as_text().context("parent id")?.clone();
+                    if let Some(record) = result.iter_mut().find(|record| record.id == task_id) {
+                        record.parent = Some(parent);
                     }
                 }
                 Ok(result)
@@ -628,6 +648,35 @@ impl Storage {
                     .await
                     .context("task_deps の追加に失敗")?;
                 }
+                Ok(())
+            })
+        })
+    }
+
+    /// Task の親を置く / 外す（O21・A07）。`None` = 親なし（親の Task を消しても子は残るので、
+    /// 呼び手が外す時だけ使う）。
+    pub fn set_task_parent(&self, task_id: &str, parent: Option<&str>) -> Result<()> {
+        let task_id = task_id.to_string();
+        let parent = parent.map(str::to_string);
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                match &parent {
+                    Some(parent) => conn
+                        .execute(
+                            "INSERT INTO task_parents (task_id, parent_id) VALUES (?1, ?2)
+                             ON CONFLICT(task_id) DO UPDATE SET parent_id = ?2",
+                            (task_id.as_str(), parent.as_str()),
+                        )
+                        .await
+                        .context("task_parents の書き込みに失敗")?,
+                    None => conn
+                        .execute(
+                            "DELETE FROM task_parents WHERE task_id = ?1",
+                            (task_id.as_str(),),
+                        )
+                        .await
+                        .context("task_parents の削除に失敗")?,
+                };
                 Ok(())
             })
         })
@@ -1795,7 +1844,8 @@ impl Storage {
 
     // ── 変更レビューの注記（再起動しても残す・束ねる単位ごとに読む） ──
 
-    /// 注記を 1 件書く（同じ id なら上書き）。
+    /// 注記を 1 件書く（同じ id なら上書き）。**`updated_at` が今の行より古い書き込みは捨てる**
+    /// （R03: 書き込みが逆順で届いても、新しい本文・状態を古いもので巻き戻さない）。
     pub fn upsert_review_note(&self, note: &ReviewNoteRecord) -> Result<()> {
         let note = note.clone();
         self.run(move |conn| {
@@ -1806,7 +1856,8 @@ impl Storage {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                      ON CONFLICT(id) DO UPDATE SET
                         scope = ?2, target_kind = ?3, target = ?4, body = ?5, state = ?6,
-                        sent_at = ?7, updated_at = ?9",
+                        sent_at = ?7, updated_at = ?9
+                     WHERE review_notes.updated_at <= ?9",
                     (
                         note.id.as_str(),
                         note.scope.as_str(),
@@ -2371,6 +2422,16 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("task_deps 作成に失敗")?;
+    // Task の親子（O21・A07・どの Task から切ったか）。task_deps と同じく別テーブル＝無 migration。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_parents (
+            task_id TEXT PRIMARY KEY,
+            parent_id TEXT NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("task_parents 作成に失敗")?;
     // 変更レビューの注記（O7）。対象は JSON 1 列（diff の行・将来はページの要素）で、表を広げずに足せる。
     conn.execute(
         "CREATE TABLE IF NOT EXISTS review_notes (
@@ -2431,6 +2492,15 @@ async fn upsert_task_space_on(
     )
     .await
     .context("task_spaces の upsert に失敗")?;
+    if let Some(parent) = &task.parent {
+        conn.execute(
+            "INSERT INTO task_parents (task_id, parent_id) VALUES (?1, ?2)
+             ON CONFLICT(task_id) DO UPDATE SET parent_id = ?2",
+            (task.id.as_str(), parent.as_str()),
+        )
+        .await
+        .context("task_parents の書き込みに失敗")?;
+    }
     Ok(())
 }
 
@@ -2550,6 +2620,47 @@ mod tests {
         assert_eq!(
             ReviewNoteState::from_str_lossy("??"),
             ReviewNoteState::Unsent
+        );
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// R03: 更新が逆順で届いても、新しい `updated_at` の本文・状態が残る。
+    #[test]
+    fn review_note_updates_never_go_back_in_time() {
+        let path = temp_db("review_notes_order");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).expect("DB を開ける");
+        let version = |body: &str, state: ReviewNoteState, updated_at: i64| ReviewNoteRecord {
+            id: "a".to_string(),
+            scope: "task-1".to_string(),
+            target_kind: "diff_lines".to_string(),
+            target: "{}".to_string(),
+            body: body.to_string(),
+            state,
+            sent_at: None,
+            created_at: 1,
+            updated_at,
+        };
+        storage
+            .upsert_review_note(&version("新しい本文", ReviewNoteState::Resolved, 30))
+            .unwrap();
+        // 先に書いたはずの古い版が後から届く。
+        storage
+            .upsert_review_note(&version("古い本文", ReviewNoteState::Unsent, 20))
+            .unwrap();
+        let notes = storage.load_review_notes("task-1").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].body, "新しい本文");
+        assert_eq!(notes[0].state, ReviewNoteState::Resolved);
+        assert_eq!(notes[0].updated_at, 30);
+        // 同じ時刻の書き直しは通す（同じ ms の連続編集を落とさない）。
+        storage
+            .upsert_review_note(&version("同じ時刻の本文", ReviewNoteState::Resolved, 30))
+            .unwrap();
+        assert_eq!(
+            storage.load_review_notes("task-1").unwrap()[0].body,
+            "同じ時刻の本文"
         );
         drop(storage);
         let _ = std::fs::remove_file(&path);
@@ -3249,6 +3360,7 @@ mod tests {
             head_oid: None,
             result_summary: None,
             depends_on: Vec::new(),
+            parent: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -3287,6 +3399,75 @@ mod tests {
         let all = storage.load_task_spaces().unwrap();
         let restored = all.iter().find(|record| record.id == "space-main").unwrap();
         assert_eq!(restored.kind, SpaceKind::Integration);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// O21・A07: 親子は別テーブルに残り、親を知らない書き手（`parent: None` の upsert）は消さない。
+    #[test]
+    fn task_parents_survive_upserts_that_do_not_know_them() {
+        let path = temp_db("task_parents");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        let parent = TaskSpaceRecord {
+            id: "space-api".into(),
+            repository_id: "local:/repo/.git".into(),
+            root: PathBuf::from("/repo-worktrees/api"),
+            branch: Some("task/api".into()),
+            title: "API".into(),
+            kind: SpaceKind::Task,
+            phase: TaskPhase::Working,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            parent: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let child = TaskSpaceRecord {
+            id: "space-api-tests".into(),
+            root: PathBuf::from("/repo-worktrees/api-tests"),
+            branch: Some("task/api-tests".into()),
+            title: "API のテスト".into(),
+            parent: Some("space-api".into()),
+            ..parent.clone()
+        };
+        storage.upsert_task_space(&parent).unwrap();
+        storage.upsert_task_space(&child).unwrap();
+        let parent_of = |storage: &Storage, id: &str| {
+            storage
+                .load_task_spaces()
+                .unwrap()
+                .into_iter()
+                .find(|record| record.id == id)
+                .and_then(|record| record.parent)
+        };
+        assert_eq!(
+            parent_of(&storage, "space-api-tests").as_deref(),
+            Some("space-api")
+        );
+        assert_eq!(parent_of(&storage, "space-api"), None);
+        // CLI の更新のように親を知らない upsert は親子を消さない。
+        storage
+            .upsert_task_space(&TaskSpaceRecord {
+                parent: None,
+                phase: TaskPhase::ReviewReady,
+                ..child.clone()
+            })
+            .unwrap();
+        assert_eq!(
+            parent_of(&storage, "space-api-tests").as_deref(),
+            Some("space-api")
+        );
+        storage.set_task_parent("space-api-tests", None).unwrap();
+        assert_eq!(parent_of(&storage, "space-api-tests"), None);
+        storage
+            .set_task_parent("space-api-tests", Some("space-api"))
+            .unwrap();
+        assert_eq!(
+            parent_of(&storage, "space-api-tests").as_deref(),
+            Some("space-api")
+        );
         let _ = std::fs::remove_file(&path);
     }
 

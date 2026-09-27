@@ -406,7 +406,7 @@ impl Render for SearchPanel {
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .h(px(20.))
+                        .h(ui::row_height(cx, 20.))
                         .pl(px(28.))
                         .pr(px(10.))
                         .rounded(px(4.))

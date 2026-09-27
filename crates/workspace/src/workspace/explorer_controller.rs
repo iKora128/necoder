@@ -907,10 +907,27 @@ impl Workspace {
     fn add_worktree_to_rail(
         &mut self,
         worktree: Worktree,
-        task_space_preview: TaskSpace,
+        mut task_space_preview: TaskSpace,
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        // Fleet の「取り込む」で開いた worktree は、ブランチ名に関係なく Task にする（O21）。
+        let canonical =
+            |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let root = canonical(worktree.root());
+        let adopted = self
+            .chrome
+            .adopt_as_task
+            .iter()
+            .find(|path| canonical(path) == root)
+            .cloned();
+        if let Some(path) = &adopted {
+            self.chrome.adopt_as_task.remove(path);
+            task_space_preview.kind = SpaceKind::Task;
+            if task_space_preview.base_oid.is_none() {
+                task_space_preview.base_oid = task_space_preview.head_oid.clone();
+            }
+        }
         // リモートの `.necoder` はリモート側にあるので読まない（同名のローカルパスを拾わない）。
         let identity = if worktree.is_remote() {
             ProjectIdentity::default()
@@ -953,6 +970,7 @@ impl Workspace {
             explorer: ExplorerProject::default(),
             open_files: Vec::new(),
             active_file: 0,
+            pinned_files: Vec::new(),
             icon: identity.icon,
             icon_image: identity.icon_image,
             worktree_branch: branch,
@@ -978,6 +996,13 @@ impl Workspace {
         }
         // 決めた色を DB へ焼く（次に開くときも同じ色・並び順に依存しない）。
         self.persist_project_color(index);
+        if adopted.is_some() {
+            // 台帳に Task として残す（再起動してもブランチ名の判定で統合先へ戻らない）。
+            self.make_task_space(index, cx);
+        }
+        // レールの worktree が増えた = Fleet の worktree 一覧を読み直す（O21・作った直後の worktree を
+        // 「消えています」と見間違えない）。
+        self.forget_fleet_worktrees();
         self.update_agent_destination_for(index, cx);
         if is_remote {
             self.refresh_explorer_for(index, cx);
@@ -1036,6 +1061,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.overlays.rail_menu = None;
+        // レールの worktree が減った = Fleet の worktree 一覧を読み直す（O21）。
+        self.forget_fleet_worktrees();
         if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
                 SharedString::from(i18n::t!("rail.cannot_remove_last")),
@@ -1335,9 +1362,22 @@ impl Workspace {
         }
     }
 
-    /// ファイルを開く（⌘P・ツリークリック・検索ジャンプ・F12 等の対話経路）。
+    /// ファイルを開く（⌘P・ツリーのダブルクリック・検索ジャンプ・F12 等の対話経路）。
     /// **読み込みは背景スレッド**（remote は 30s ブロックしうる — ARCHITECTURE §9）。
+    /// プレビュータブで開いていたら普通のタブにする（開き直した＝そのファイルを使う意思）。
     pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_as(path, false, window, cx);
+    }
+
+    /// [`Self::open_file`] の本体。`preview` = プレビュータブで開く（エクスプローラの 1 回クリック・
+    /// `open_file_preview`）。
+    pub(crate) fn open_file_as(
+        &mut self,
+        path: PathBuf,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // 対話でファイルを開いたら設定ホームは退き、AI 全画面も畳む（起動復元の open_file_sync には
         // 入れない＝未オンボーディング時に settings を出しっぱなしにするゲートを壊さないため）。
         // 全画面のままだと中央が Agent なので、開いたタブが画面に出ない。
@@ -1351,8 +1391,17 @@ impl Workspace {
         self.note_recent_file(&path);
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+            if !preview {
+                self.keep_preview_tab(index, cx);
+            }
             self.select_tab(index, window, cx);
             return;
+        }
+        if preview {
+            self.pending_preview_tab = Some(path.clone());
+        } else if self.pending_preview_tab.as_ref() == Some(&path) {
+            // プレビューで読み込み中に普通に開き直された（ダブルクリック）＝普通のタブで開く。
+            self.pending_preview_tab = None;
         }
         let Some(host) = self.active_host() else {
             return;
@@ -1459,6 +1508,8 @@ impl Workspace {
             path: path.clone(),
             content,
             transient: false,
+            pinned: false,
+            preview: false,
         };
         let handle = tab.focus_handle(cx);
         window.focus(&handle, cx);
@@ -1474,8 +1525,28 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 読み込み済み内容からタブを開く（open_file / open_file_sync の合流点）。
+    /// 読み込み済み内容からタブを開く（open_file / open_file_sync の合流点）。プレビューで開こうと
+    /// していたファイルなら、新しいタブをプレビューにして前のプレビューを置き換える（O26）。
     pub(crate) fn open_loaded_file(
+        &mut self,
+        path: PathBuf,
+        content: host::FileContent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let as_preview = self.pending_preview_tab.as_ref() == Some(&path);
+        if as_preview {
+            self.pending_preview_tab = None;
+        }
+        let tab_count = self.tabs.len();
+        self.open_loaded_tab(path.clone(), content, window, cx);
+        if as_preview && self.tabs.len() == tab_count + 1 {
+            self.settle_preview_tab(&path, window, cx);
+        }
+    }
+
+    /// [`Self::open_loaded_file`] の本体（タブを 1 枚足してアクティブにする）。
+    fn open_loaded_tab(
         &mut self,
         path: PathBuf,
         content: host::FileContent,
@@ -1557,6 +1628,7 @@ impl Workspace {
         let input_subscription = cx.subscribe_in(&editor, window, Self::on_editor_typed);
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
         let link_subscription = cx.subscribe_in(&editor, window, Self::on_preview_link);
+        let blur_subscription = self.auto_save_on_blur(&editor, window, cx);
         self.tabs.push(EditorTab {
             path: path.clone(),
             content: TabContent::Editor {
@@ -1565,8 +1637,11 @@ impl Workspace {
                 _input_subscription: input_subscription,
                 _hover_subscription: hover_subscription,
                 _link_subscription: link_subscription,
+                _blur_subscription: blur_subscription,
             },
             transient: false,
+            pinned: false,
+            preview: false,
         });
         self.active_tab = self.tabs.len() - 1;
 
@@ -1659,6 +1734,7 @@ impl Workspace {
                     open_files: slot.open_files.clone(),
                     active_file: slot.active_file,
                     remote_uri: slot.worktree.host().project_uri(slot.worktree.root()),
+                    pinned_files: slot.pinned_files.clone(),
                 })
                 .collect(),
             active: self.project_sessions.active,
@@ -1672,6 +1748,13 @@ impl Workspace {
                 FleetCenterView::Graph => "graph",
             }
             .to_string(),
+            stage_pinned: self
+                .chrome
+                .stage_pinned
+                .iter()
+                .map(|space| space.as_str().to_string())
+                .collect(),
+            stage_columns: self.chrome.stage_columns,
         }
     }
 

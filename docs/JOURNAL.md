@@ -3237,3 +3237,233 @@
 - やったこと: `captain.prompt` を `captain.role` / `captain.facts` / `captain.event` に分割。役割 + 現況表（`captain_context`）を Captain スレッドの prompt context に入れ、⌘0 で開いた時・wake の時・人間が Captain に書いた後に差し替える。wake 本文はイベント行 + 溜めたイベントだけ。道具一覧に `fleet create . <title>` を追加。回帰 test `role_prompt_lists_task_creation_in_every_locale`
 - 学び/罠: `PanelEvent::HumanSend` は送信**後**に届く（emit は遅延）ので、その発話の中身は差し替えられない。今のターンは既存の context、HumanSend で次のターン用に現況を更新する形。prompt context はメモリのみ（再起動後は ⌘0 か次の wake まで無い）。規律はプロンプトだけでツール制限は無い（案2 = Captain スレッドの編集系 permission を拒否、は未着手）。prompt context を前置すると slash コマンド（`/clear` `/compact`）の先頭が `/` でなくなり認識されない → `/` 始まりの発話には context を付けない（test `prompt_context_is_not_prepended_to_slash_commands`）
 - 次: 実機で「目標 1 つ → Captain が Task を切る」を確認（F6 の実 e2e）
+
+## 2026-09-26 — worktree横断レビューの記録（実装なし）
+
+- 本人の依頼: ORCAとの差分・UX・Rustの性能/コードをレビューし、全worktreeも確認。その後「気になるところについては docs/ にどんどんと足して」。実装は待つ。
+- [UX・コードレビュー台帳](UX-CODE-REVIEW.md)を新設。15件の懸念にID・優先度・状態・対象版・根拠・影響・改善案・未実施の確認条件を付けた。
+- 初回は全16 worktreeを棚卸し。mainだけの評価を訂正し、別worktreeで実装済みのdiff基準・hooks・Git入力・裏スレッドキュー・Fleet内レビュー等を再実装対象から除外。
+- 重要点: レビュー済み/注記と内容の版、差分の総メモリ予算、非同期保存順序、複数窓のclose、Design Modeの宛先/世代、SSHのlocalhost、Captain承認後の復旧。
+- 初回統合版でproject/review_view/terminal_view/webview_viewのlib test計122件成功、更新後8277d4fで全workspace/all-targetsのcheck成功。実画面・長時間性能・SSH/Windows実機は未検証。
+- main未コミット差分と2c80f83を一時ファイル上で三者比較し、24ファイル重複・11ファイル競合。リポジトリにはマージしていない。
+- 文書化時には統合版6387091、17個目のhistory worktree、Explorer/言語/CLI/Skills/使用量/通知の進展を確認。初回の使用量UI未接続は既に対処されており、台帳で訂正。新しい差分全体は次回レビュー対象とし、以前の検証結果を流用しない。
+- 変更はdocsのみ。元の機能差分調査の冒頭から台帳へリンクし、古い「無」判定を現在の実装状況と混同しないよう注記した。
+
+## 2026-09-26 — クラウドで統合版の上にレビュー修正と O5 / O21 / O26 を積んだ
+
+- やったこと: `parity/integration` + 計画 + UX・コードレビュー台帳を `claude/sleepy-hamilton-gesxiq` に統合し、台帳の R01〜R08・R14 を修正（R11 は一部・R15 は表現）。続けて O5（手元の Ports）・O21 の一部（Fleet サイドバーの外部の worktree・取り込み・統合先の取り違え・消えた worktree）・O26 の一部（`path:行` のコピー・全部閉じる・外部アプリで開く）。記録は `UX-CODE-REVIEW.md` の各項目と `ORCA-PARITY.md` §7.1。
+- 学び/罠:
+  - **非同期の書き込み順は gpui のシードを回すと再現できる**。注記の保存を書き込みごとに別タスクへ投げる旧実装は、`#[gpui::test(iterations = 20)]` の seed 0 で「消した注記が復活」した（R03）。1 本の列に積む実装では全シードで通る。
+  - **描画中に Host を呼ばない規律はテストが守っている**（`local_and_remote_root_render_never_call_host`）。使用量の鍵を作るのに `dest_host.is_remote()` を描画中に呼んでいて捕まった（R08）。宛先が変わった時に控える形へ直した。
+  - git 2.43 の `core.bigFileThreshold` は `git diff` を止めない（大きいファイルもパッチが出る）。レビューのメモリの上限は、事前のサイズ確認（`git ls-tree -l`）とパッチ後のバイト上限で掛けた（R02）。
+  - Linux では `opening_a_pdf_gives_a_native_viewer_tab_not_a_text_buffer` と `localhost_urls_open_one_web_tab_that_steps_aside_for_overlays` が元から落ちる（ネイティブの PDF / WebView が無い）。CI の Linux ジョブはビルドだけなので表に出ていなかった。
+  - `TaskSpace` の統合先を「最後に見つかった物」で選ぶ所と「最初の物」で選ぶ所が混在していた。`task/` でない linked worktree を ⌘O で開くと、サイドバーの ⌂ だけがその worktree を指し得た（O21 で `integration_slot_for` に一本化・メインの作業ツリーを優先）。
+- 次: GitHub の書き込み権限（push が 403）。macOS 実機・隔離 offscreen での画面確認。O15・O18 の Mac の途中の分を push してもらって取り込む。PR へ切り出す。
+
+## 2026-09-26（続き）— O13 / O20 / O22 / O26 をクラウドで積んだ
+
+- やったこと（`claude/sleepy-hamilton-gesxiq`・項目ごとに 1 コミット）: 作業中はスリープさせない（`keep_awake`・mac は `caffeinate -i -w`・Windows は `SetThreadExecutionState`）/ 自動保存（`auto_save`・他へ移った時・手を止めた時）/ タブのピン留め / プレビュータブ（`preview_tabs`・既定 on）/ `.worktreeinclude` / 通知の履歴（titlebar のベル）/ 通知音の大きさ（`sound_volume`）/ リソース（メモリをプロジェクトごと・使っていないエージェントを止める）。記録は `ORCA-PARITY.md` §7。
+- 学び/罠:
+  - **gpui は窓が非アクティブになると、フォーカス中の要素に blur を送る**（描画時のフォーカスの道筋が「窓が非アクティブなら空」になる）。自動保存で「blur で保存」と「窓を離れたら全部保存」を両方掛けると、同じタブを 2 本同時に書き、後の方が読み込み時の revision で書こうとして「外で変わった」と断られた。`EditorView` の保存を 1 本ずつにし、書き込み中に来た保存は終わってからもう一度書くようにした（⌘S の連打も同じ事故だった）。`#[gpui::test(iterations = 10)]` で、仕組みを外すと落ちることを確かめた。
+  - **テストの窓は前に出ていない**ので、フォーカスの出入り（blur）が起きない。`window.activate_window()` してから試す。
+  - `.gitignore` の約束: ディレクトリごと（`secrets/`）に一致させると、中を否定（`!secrets/skip.json`）で戻せない。`.worktreeinclude` も同じ（戻すなら `secrets/*`）。テストの期待を間違えていた。
+  - アイコンを足したら `main.rs` の Assets の表にも載せる（`every_icon_file_is_registered`）。workspace の crate だけテストして通したため 1 コミット遅れて気づいた。アセットを触ったら `cargo test --workspace`。
+  - クラウドの枠（ディスク）が build の成果物で埋まった: turso の静的ライブラリ（1 本 350 MB）が機能の組み合わせごとに 5 版ずつ残っていた。成果物ごとに新しい 2 版だけ残して 7 GB 空いた。`incremental/` も消してよい。
+- 次: 実機（mac）で見た目と挙動を確かめる（ベルの件数・ピン・斜体のプレビュータブ・リソースの数字・caffeinate の着地は `pmset -g assertions`）。push の権限。
+
+
+## 2026-09-26（続き 2）— O13 / O14 / O16 / O17 / O20〜O23 / O27 をクラウドで積んだ
+
+- やったこと（`claude/sleepy-hamilton-gesxiq`・項目ごとに 1 コミット）: 準備スクリプトの skip / 失敗した Task の「準備をやり直す」「準備を飛ばして始める」（O20）/ fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べる・O23）/ アカウント切替（O14）/ ニュースの行から Task へ（O13）/ 片付け（O22）/ repo ごとのレシピ `.necoder/recipes/*.md` を `/` 補完へ（O16）/ **質問カードの自由入力**（Other 欄・PC とスマホ・O17）/ **サブエージェントの手順を親の Task の下に畳む**（O17）/ **設定の検索**（O27）/ **スマホへ完了の push**（relay の host・O13）/ Fleet サイドバーの **Task の絞り込み**・レールの**パス / ブランチ名のコピー**（O21）/ **repo ごとの既定の起点** `task_base`（O20）/ **表示言語をその場で切り替え**（O27）。
+- 学び/罠:
+  - Claude の AskUserQuestion のブリッジ（`@agentclientprotocol/claude-agent-acp` の `elicitation.js`）は、質問ごとに `question_<n>` + `question_<n>_custom` を送り、**何も required にしない**。答えの読み方もブリッジ側が決める: 単一選択は「選ばずに書いた = 答え」「選んで書いた = メモ（`annotations.notes`）」、複数選択は選択に足す。necoder は「Other 欄の名前で書いた文字を返す」だけでよい（`npm pack` で本体を読んで確かめた）。
+  - サブエージェントの手順は、既定の（transcript の拡張を広告しない）クライアントには**ツール呼び出しだけ**が `_meta.claudeCode.parentToolUseId` 付きで来る（本文・思考は来ない）。親の Step が transcript に居ない手順は普通の手順のまま出す（行が消えて見えなくなるのを避ける）。
+  - 入力欄がカードと一緒に消える操作（質問の Enter 確定）は、フォーカスを composer へ戻さないとキーが迷子になる。窓を持たない購読（`cx.subscribe`）からは `cx.active_window()` の `update` で戻せる（効果の flush 中は窓が借りられていない）。
+  - GPUI の `.hidden()`（`display: none`）はレイアウトから外れ、flex の gap も取らない。設定の検索は「当たらない行を hidden にし、当たった数を `Cell` で数えてページごと出し分ける」で、行を組む関数を書き直さずに済んだ。
+  - `git show HEAD:<file> | rustfmt --check` は当てにならない（標準入力だと差があっても通ることがある）。整形の基準はファイルのまま `rustfmt --check <file>` で確かめる。workspace.rs を標準入力で整形したら無関係の行（テスト・`mod` の並び）まで変わったので戻した。
+  - relay の node テストは `npm ci --omit=dev --ignore-scripts` だけで回る（wrangler / sharp を入れない）。`web-push` の `sendNotification` は既定 export のオブジェクトなので、テストで差し替えられる。
+- 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 824 通過・落ちるのは Linux で元から落ちる 2 件だけ（PDF のネイティブビューア・Web タブ）。relay の `node --test` 17 本。実画面・macOS 実機・iPhone の push・SSH は未確認。
+- 次: 実機（mac）で見た目を確かめる（質問カードの入力欄・サブエージェントの見出し `NECODER_SUBAGENT_PROBE=collapsed|expanded`・設定の検索・Fleet の絞り込み・表示言語）。iPhone で完了の push が届くか。push の権限。
+
+## 2026-09-26（続き 3）— O16 / O17 / O21 / O22 / O23 をクラウドで積んだ
+
+- やったこと（項目ごとに 1 コミット）: 舞台のピンと列数を窓セッションに残す（O21）/ Task の ⋯ に「休ませる」（静かなエージェントを止める・O21）/ fan-out のエージェントをログイン済みに絞る（O23）/ 片付けに worktree の大きさと「大きい順」（`project::disk_usage_on`・O22）/ **目標の一時停止・再開・取り消し**（Codex が initialize の `_meta.goal` で広告する `_session/goal`・O17）/ **エージェント別の新規スレッド**（`workspace::NewThreadCodex` 等・パレットと keymap.json・O16 / B28）/ **message rail**（transcript の右端に発話ごとの印・O17 / B20）。
+- 学び/罠:
+  - **偽エージェントのテストは事象の並びを見ている**（`SessionStarted` の次は `TurnStarted`）。目標の操作を広告しないエージェントにも空の `GoalControls` を流したら 2 本落ちた。acp_client を触ったら**絞らずに** `cargo test -p acp_client` を回す（絞ったテストだけ回して 1 コミット遅れて気づいた）。直し方は「広告した時だけ流し、UI は SessionStarted で前の操作を消す」。
+  - Claude / Codex のブリッジは、背景のタスクを止める `_session/async_task/stop` を共通で持つ。ただし `async_task_spawned` などの更新は **JetBrains AIR の拡張**（`_meta.jetbrains.air.capabilities: ["asyncTasks"]`）を名乗ったクライアントにだけ来る。ACP SDK が未知の sessionUpdate をどう扱うか（捨てる / 失敗する）を実機で確かめないまま名乗ると会話ごと壊しうるので、個別停止は見送った。
+  - パレットの行は action 名の文字列で引く（`cx.build_action(name, None)`）。打ち間違いは「押しても何も起きない行」になるので、全部の行が登録済みの action と訳のあるラベルを指すテストを足した（既存の行も全部通った）。
+  - 引数つきの action（`#[derive(Action)]`）は `schemars::JsonSchema` が要る（`no_json` だと keymap から引数を渡せない）。依存を増やさず、エージェントごとの引数なし action を 7 つ並べた。
+  - YAML の値に `: ` を含めるなら引用符で囲む（`並び: 作った順` はマップとして読まれる）。`i18n` の `both_locales_parse` が守っている。
+- 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 833 通過・落ちるのは Linux で元から落ちる 2 件だけ。実画面・macOS 実機・Codex の目標の操作（実エージェント）は未確認。
+- 次: 実機で目標の行のチップ（Codex で `/goal` → 一時停止 → 再開）・message rail の印の位置・片付けの大きさ（node_modules のある Task で du の時間）を確かめる。
+
+## 2026-09-26（続き 4）— #30 の CI を緑にし、O20 / O21 / O25 を積んだ
+
+- やったこと: push の権限が直り、1 本にまとめて **#30**（base `parity/integration`）を作った。CI の赤を順に
+  直した（下の学び）。その上に、＋ Task の**作成中の行**（段の表示・取り消し・やり直し・O20 / A03）・
+  ターミナルの**文字の大きさ / フォント / 遡れる行数 / カーソル**（設定と設定画面・開いている端末にもすぐ効く・O25）・
+  **シェルと引数**（`terminal_shell`・手元の端末だけ・O25）・Fleet サイドバーの**複数選択**（⌘ / ⇧ クリック →
+  まとめて休ませる・舞台に並べる・片付けへ・O21 / A11）・**統合で競合したら Task のエージェントに直させる**
+  （`MergeConflicts`・O19 / E15）・**UI とコードの書体**（`ui_font_family` / `code_font_family`・直書き 30 か所を
+  `ui::ui_font` / `ui::code_font` に・O27）・**CSV / TSV の表**（⌘⇧V・O29）・**Quick Commands**（`quick_commands`・
+  ターミナルの ▶・O25）・**sparse checkout**（`task_sparse`・O20）・**リモートのダウンロード / アップロード**
+  （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）・**SSH が繋がらない理由の案内**
+  （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）・**エディタへのドロップ**
+  （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）・Markdown の **front matter の表と
+  目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
+  **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
+  （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）・**端末タブの改名**（ダブルクリック・O24）・
+  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）・**自動命名ブランチの改名**（`task/task` → 最初のスレッドの名前から `task/<slug>`・O23 / A23）・**キー割り当ての画面**（⌘K ⌘S で押して変える・O27 / D23）・**接続先のポートの転送**（Ports・`-O forward`・O5 / G08）・**端末の横の分割**（⌘\\・O24 / C02）・**接続先の登録**（~/.ssh/config に足す・O37 / G01）・**エージェントの起動の上書きの画面**（O16 / B07）・**名前の絵文字**（`:rocket:` → 🚀・O20 / A08）・**行の間隔**（`density`・O27）・**エディタ領域のターミナル**（ファイルと同じタブ列・下ドックと止めずに行き来・O24 / C03）・**SSH のプロジェクトの localhost のリンクを転送してから開く**（R06 の続き・O5。Ports の転送済みの行の「開く」が SSH 先の localhost と読み違えて開かなかったのも直した）・**OS のショートカットとぶつかるキーの警告**（⌘K ⌘S の ⚠・O27 / H26）・**Task の親子**（別の Task のブランチから切ると子・サイドバーで親の下・休ませる / 片付けは子ごと・`task_parents`・O21 / A07）・**どこからでも呼べるターミナル**（⌃`・浮かべる・ホーム・O24 / C13）・**ヘルプ › ログのフォルダを開く / necoder のマニュアル**（O27 / H29）・**衝突の解決の帯とマージ / リベースの中止**（O19 / E05）・**タブのドラッグで右に並べる**（O24 / C03）・**更新の後の「変更点」**（O45 / H17）・**Ghostty から取り込む**（ターミナルの書体・大きさ・カーソル・配色・初回の画面にも・O45 / H14）・**共有フォルダ**（`task_shared`・統合先の `node_modules` などへのリンクを Task に置く・git が無視しないリンクは `info/exclude` で無視させ、無視できなければ残さない・O20 / A05）・**Fleet サイドバーの ⌘⌫ / Delete**（印を付けた片付けの画面へ・O21 / A26）・**接続先の登録に経由するホスト**（ProxyJump・O37 / G03）・**衝突を並べて見る**（今の側 / 元 / 入ってくる側・O19 / E05）・**シェルの区切り（OSC 133 / 633）を読む**（閉じる前の確認が Windows・SSH 先でも効く・zsh / bash の設定例・O25 / C20）・**衝突の結果の欄**（並べて見る 1 枚の下の普通のエディタ・今の側から始めて手で直し、⌘⏎ で印ごと置き換える・空なら衝突ごと消す・CRLF は CRLF で書く・O19 / E05）・**Warp のテーマの取り込み**（`terminal_colors` の YAML・O25 / C11）・**選んだ行をスレッドで引用**（⌥⌘K・`path:行` と抜粋を Agent の入力欄へ足して、その下に注記を書く・送るのは人・O29 / D04。変更レビューの注記＝保存するトレイとは別の軽い道）。
+- 学び/罠:
+  - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
+    `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
+    走らせないので、**1 つ直すと次の警告が出てくる**ことがある。
+  - **Windows を手元で確かめる**: `rustup target add x86_64-pc-windows-gnu` + `apt install gcc-mingw-w64-x86-64`
+    で `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu`（`RUSTFLAGS=-D warnings`）が通る。
+    turso の build.rs が素の `windres` を呼ぶので、`x86_64-w64-mingw32-windres` を `windres` の名前で PATH に置く。
+    テストは走らせられない（Wine も要る）ので、Windows だけ落ちるテストは CI で見る。
+  - **macOS の temp_dir は /var → /private/var のリンク**。消した後のフォルダはもう正規化できず元の綴りに戻るので、
+    レール（正規化済み）と比べるテストは作業フォルダを**最初に正規化**しておく。手元では `TMPDIR` をシンボリック
+    リンクにすると同じ失敗を再現できる。
+  - Windows のローカルは `has_posix_shell` が false で準備スクリプト（`worktree-setup.sh`）を流さない。流すテストは unix だけ。
+  - **偽エージェント（python）の起動込みで 10 秒の上限を持つテスト**が、統合してテストが増えると Windows のランナーで
+    上限に届いた（元の PR では通っていた）。上限の無い形（セッションが終わるまで待つ）か、条件がそろえばすぐ抜ける形で
+    長め（60 秒）に取る。
+  - relay の WebKit のカメラのテスト（`カメラが使えなければ…`）は main の v0.1.18〜v0.1.20 でも落ちていて、#30 でも
+    落ちたり通ったりする。押した時点で偽の getUserMedia が本物に戻っている（`stillFake:false`）。差し込みと押下を
+    1 回の `page.evaluate` で続けて行う案を #30 のコメントに書いた（この PR には入れていない）。
+  - CLA: クラウドのコミットの著者は `Claude <noreply@anthropic.com>`（GitHub のアカウントに紐付かない）で、
+    `cla.yml` の allowlist に無いので未署名扱いになる。エージェントは署名しない。本人の判断待ち。
+  - ディスク: `target/debug/deps` を成果物ごとに新しい 2 版だけ残して 5 GB、`incremental/` で 4 GB 空く。
+    途中で空きが 0 になり、コマンドの出力（`/tmp` の同じ枠）まで失われた。`cargo test --workspace` 1 回で
+    5〜7 GB 増えるので、全体のテストの前に毎回刈る。
+  - `#[cfg(feature = "…")]` の中の行は、その feature を付けないと型もパスも検査されない（settings の
+    `remote-preview` の中で、依存に無い `ui::` を書いても通ってしまった）。feature 付きの example は
+    `cargo check -p settings --features remote-preview --examples` で確かめる。
+  - 描画を伴うテストは `cx.update(|window, cx| window.draw(cx).clear(cx))` で 1 回描かせると、レイアウトで
+    落ちる類いの誤りを拾える（CSV の表で使った）。
+  - リモートとの受け渡しは Host の `read_file` / `write_file`（`WriteCondition::NotExists`）だけで組める。
+    ファイルを書けば daemon が親フォルダを作るので、作れないのは**空のフォルダだけ**（`mkdir -p` を
+    `run_command` で 1 回・argv 渡しなのでクォート不要）。接続先の SSH 実機が無くても、`is_remote` を
+    偽る wrapper（`workspace::tests::RenderAuditHost`）で手元のフォルダを「接続先」にしてテストできる。
+    gpui の保存ダイアログは `cx.simulate_new_path_selection` で答えられる。
+  - `Path::join("")` は末尾に区切りを足す（`/a/b/`）。空の相対パス = 根そのものは別に扱う。
+  - gpui の `on_drop` の listener は落とした位置を受け取らない。位置が要る時は `window.mouse_position()` を
+    読む（落とした瞬間のポインタ）。エディタの行へ入れるのは `EditorView::insert_dropped_text`（描画と同じ
+    ヒットテスト・本文より上ならキャレット）。
+  - `ScrollHandle::scroll_to_top_of_item(i)` は**スクロールする要素の直下の子**の i 番目にしか効かない。
+    Markdown のプレビューは 1 枚の列の中にブロックを並べていたので、ブロックを直下の子へ平らにした
+    （行長の max_w は子ごとに）。front matter の閉じの `---` は、front matter を切り出さずに読むと直前の行を
+    setext 見出し（h2）にする。
+  - 補完のポップアップの絞り込みは、`Typed` の**最後の 1 文字**だけを足す（1 打鍵 1 文字の前提）。テストで
+    `insert_text("co")` とまとめて打つと `o` だけが足されて閉じる。テストは 1 文字ずつ打つ。
+  - パネルのイベント（`cx.subscribe`）は窓を持たないので、そこで開く入力欄へは `window.focus` できない。
+    `chrome.focus_next_frame` に置いて、既にある `process_pending_shell_effects`（render が `window.defer` で
+    回す後処理・root Render で状態を変えない約束）で渡す（端末タブの改名で使った）。
+  - **`ssh -M -N -f` の stderr はパイプで読めない**: `-f` で背景に回った master がパイプの書き口を握り続け、
+    `output()` が master の終わりまで返らない。理由を読みたい時は `-E <ファイル>` でログへ書かせ、親の終わりを
+    待ってから読む（`-E` は追記なので試行の前に消す）。以前は stderr を継いでいたので、失敗のトーストは
+    `exit status: 255` しか言えなかった。
+  - locales の値に `: ` を含むなら必ず `"…"` で囲む（`test_ssh: SSH: 接続…` は i18n の解析が落ちる・CI で
+    3 本赤になる所だった）。パレットの項目は「領域: 動作」の形なので特に注意。
+  - **Task のブランチの「push 済み」は upstream の有無では決められない**: 起点に `origin/main` のような
+    リモートの追跡ブランチを渡すと、`git worktree add -b` が既定（`branch.autoSetupMerge`）で upstream を
+    付ける。push したかは `branch.<名前>.merge` が自分自身（`refs/heads/<名前>`）か、リモートに同じ名前が
+    あるかで見る。`git branch -m` は追跡の設定ごと運ぶ。
+  - **gpui のキーは、割り当て（keymap）の照合が `on_key_down` より先**。⌘P のような割り当て済みのキーを
+    画面で受けたい時は `cx.intercept_keystrokes`（照合の前に呼ばれる）で受けて `cx.stop_propagation()`。
+    止めた後は最初のノードの capture 相の listener だけが呼ばれ、`on_key_down`（bubble）は呼ばれない。
+    受け口の Subscription はコールバックの中で落としてよい（gpui の `SubscriberSet::retain` が扱う）。
+    テストは `cx.simulate_keystrokes` で受け口の道筋まで通る。
+  - **同じキーの書き方は 1 つではない**: `shift-alt-up` と `alt-shift-up` は gpui では同じキー。
+    重ねる・衝突を見る時は `Keystroke::parse` で読み直してから比べる（`keymap_core::user_keymap::canonical`）。
+    gpui の `unparse` はプラットフォームの修飾キーを Linux で `super-`・Windows で `win-` と書くので、
+    keymap の表示（`⌘` / `Win`）と合わない。necoder の書き方（`cmd-` …）は自前で組む。
+  - **keymap の読み直しは「全部捨てて張り直す」**（`cx.clear_key_bindings()` → 既定 → ユーザー）。上から
+    bind するだけでは、ファイルから消した束が残る（gpui は後から足した束が勝つだけで、前の束は消えない）。
+  - **`cx.observe_global` は張った effect の終わりから効く**（gpui は activate を defer する）。同じ
+    `cx.update` の中で監視を張ってから global を変えても呼ばれない。テストは張る update と変える update を
+    分ける（アプリは起動時に張るので困らない）。
+  - **rustfmt は edition 2021 で見る**（crate は 2021・CI に fmt の段は無い）。`--edition 2024` だと style edition
+    が変わり、`.shadow(vec![…])` などの折り方が違って、整っているファイルにも差分が出る。crate の根に
+    `rustfmt --check` をかけると子のモジュールも見るので、変える前（`git stash`）と後で「Diff in」の数を
+    ファイルごとに比べ、増えた所だけ直す。
+  - **端末のキーは「受けなければ次の束縛へ落ちる」**: gpui は同じキーに束縛が複数あれば、action を受ける
+    ハンドラが居なかった時に次の束縛を試す。Terminal コンテキストの ⌘W（`terminal::CloseTab`）をドックの外
+    （エディタ領域）で受けないと、全域の ⌘W（AI のスレッドを閉じる等）に化ける。端末を置く面ごとに受け口を
+    置く（エディタ領域は主ペインの `on_action`）。
+  - **PTY の持ち主は 1 つに**: エディタ領域の端末タブは、Fleet の Task に置いた端末と同じくドックの
+    `detached`（id → Entity）に入れた。テーマ・プロジェクト色・リンク・⌘Q の確認（`busy_terminal_count`）が
+    何も足さずに効く。タブを閉じる時は id を外す（Entity を最後に持つのがタブになり、落ちると止まる）。
+    下ドックへ戻す時は先に `attach_session` で `detached` から抜くので、タブを閉じても止まらない。
+  - **既定の keymap に OS とぶつかるキーがある**（H26 の表で見つけた・既定は変えていない・本人の判断待ち）:
+    mac の ⌃Space（補完）は入力ソースの切り替え（日本語の入力を足した mac では既定で有効）、⌘⇧3（ステージ 3）は
+    スクリーンショット。Linux の Ctrl+Alt+↑↓（複数カーソル・VS Code の Windows と同じ）と Ctrl+Alt+←→
+    （スレッド送り）は GNOME のワークスペースの切替。`os_shortcuts` のテストが既定の衝突の一覧を持っていて、
+    増えたら落ちる。
+  - **台帳に項目を足す時は「知らない書き手が消さない」形に**: Task の親子は `task_deps` と同じく別テーブル
+    （`task_parents`・無 migration）にし、upsert は `parent` が `Some` の時だけ書く。CLI の `fleet create` や
+    GUI の復元時の補完のように親を知らないまま upsert する経路があるので、`None` で消すと親子が黙って外れる。
+    外すのは `set_task_parent(id, None)` だけ。
+  - **⌃` は空いていた**: UI-SPEC の statusbar と Fleet の段に「⌃` = 下のターミナルの開閉」と書いてあったが、
+    keymap に束は無かった（下のターミナルは ⌘J）。どこからでも呼べる端末に使い、古い記述は ⌘J に直した。
+    VS Code では ⌃` が下のパネルの開閉なので、本人の判断に上げた（#30 の本文）。
+  - **gpui はドラッグ中の物の型を外から見られない**（`App::active_drag` は `pub(crate)`・`has_active_drag` だけ）。
+    特定の型だけの落とし先は「ドラッグ中なら置く・`drag_over::<T>` / `on_drop::<T>` で型を絞る」にする
+    （ほかの型のドラッグでは見えない透明な面になるだけで、下の要素の落とし先も効く）。
+  - **シンボリックリンクは git にはファイル**: `.gitignore` の `node_modules/`（末尾の `/` = フォルダだけ）は、
+    `node_modules` という名前のリンクに当たらない。Task に置いたリンクは `?? node_modules` と出て、
+    `git add -A` で commit される（`task_shared` で実際に確かめた）。無視させるのは共有の `info/exclude`
+    （`git rev-parse --path-format=absolute --git-common-dir` の下・linked worktree からも同じ物）に
+    `/node_modules`。ただし `.gitignore` の `!node_modules` は `info/exclude` より強いので、足した後に
+    `git check-ignore` で確かめ直し、無視されなければリンクを消す。無視されたリンクなら
+    `git worktree remove` は force なしで通り、リンク先の中身は消えない。
+  - **OSC 133 は EventLoop に手を入れずに読める**: alacritty の本物の解析器は OSC 133 を黙って捨てるが、
+    EventLoop は PTY の型に対して汎用なので、既にある読み口の包み（`pty_guard::GuardedPty`・kitty keyboard の
+    ガード）で同じバイト列を小さな状態機械に通せば拾える（ほかの OSC は中身を貯めずに読み飛ばす）。
+    分かるのは「いまコマンドが動いているか」と終了コードまで。**行の位置は分からない**（読み口が呼ばれる時は
+    EventLoop が Term の lock を持っていて、解析との順も塊ごとにずれる）ので、プロンプト間の移動は別の仕組みが要る。
+    zsh の precmd は、フックごとに `$?` をコマンドの終了コードへ戻してから呼ぶ（別のフックが先に `return 3` しても
+    `add-zsh-hook` で足した側に正しい値が届く＝実際の zsh 5.9 で確かめた）。bash は `PS0`（4.4 以降）で C、
+    `PROMPT_COMMAND` の先頭で D と A を出す。
+    **区切りは入れ子のプログラムからも届く**（レビューで見つけた）: 区切りを出さない手元の zsh から `ssh` した先の
+    シェルが出した C は、`exit` で抜けた後も D が来ないまま残り、以後の × と ⌘Q が毎回確かめていた（`cat` した
+    `script` の記録でも同じ）。手元のシェル（unix）は前面のプロセスグループだけで決め、区切りは前面を調べられない
+    端末（Windows の ConPTY・`ssh -tt` の接続先）にだけ使う。
+  - **SSH の host は開いた project の外を cwd にできない**（`RemoteHost::run_command` は cwd を根からの相対に
+    直す・書き込みも根の中だけ・metadata は根の中へ正規化してリンクをたどる）。Task の worktree は
+    `<repo>-worktrees/` にあって統合先の外なので、統合先の host で Task の中のコマンドを流すと必ず断られる。
+    `task_shared` だけでなく、`task_sparse` の `sparse-checkout` / `checkout` と準備スクリプトも同じ形で SSH の
+    repo では通っていなかった（レビューで見つけ、`host.host_for_project(target)` に揃えた）。根の外を断る手元の
+    host（`ScopedHost`・テスト）で Task の作成と準備を通すテストを足した。
+  - **Task の id は worktree の場所から決まる**（`stable_worktree_id_on`）。片付けた Task と同じフォルダ
+    （日本語の依頼の `task/task` など）に作り直すと同じ id になり、`task_parents` の古い行が新しい Task に付いて、
+    関係の無い Task が前の親の下に出る（休ませる・子ごと片付けるの対象にも入る）。upsert は親を知らない書き手の
+    ために `Some` の時だけ書くので、作った時だけは `set_task_parent(id, None)` まで書く（`persist_new_task_space`）。
+  - **整っていないファイルに足す時の rustfmt**: ファイルごと整えると他人の差分が混ざる。`src` を丸ごと
+    scratch に写して rustfmt をかけ、足した関数・テストの範囲だけを（前後の固有の行を目印に）写し戻す。
+    「Diff in」の数が変える前と同じになれば、足した所は整っている（project.rs は 12 のまま）。
+  - **前に来るタブが替わる経路は `select_tab` だけではない**（衝突の 1 枚のレビューで見つけた）: 新しく開く
+    （`open_loaded_tab` は `active_tab` を直に書く）・閉じる・プロジェクトの切替。タブに結び付いた重ね物は、
+    各経路で後始末するより、見せる側で「開いた時のエディタがまだ前か」を確かめて描かず、窓を持つ所
+    （`process_pending_shell_effects`）で閉じる方が漏れない。また、キャレットで対象を選ぶ操作（帯）と
+    写しで見せる画面（1 枚）は、キャレットだけが動くと食い違う（欄の中の F8 が本体のキャレットを動かす）。
+    画面のボタンは写しの物に効かせる。
+  - **GPUI のキーは束が先、`on_key_down` は後**: 押したキーはまず keymap の束（深い文脈から）でアクションになり、
+    誰も受けなかった時だけ `on_key_down`（capture → bubble）へ落ちる。重ねた画面の中に EditorView を置くと、
+    Esc は `editor::Cancel`（複数カーソルを畳む物が無ければ `propagate`）、⌘⏎ は `agent::SubmitPrompt`
+    （EditorView は受けない）のアクションとして上がってくるので、重ねた画面の側で `on_action` で受ける
+    （ソース管理パネルの入力欄と同じ形）。`on_key_down` の Esc は、欄の外（カード）にフォーカスがある時の受け口。
+  - relay の Remote control（WebKit）は、カメラの 2 本に加えて本体の `PWA: …` の 17 行目も落ちたり通ったりする。
+    `test/fixture.mjs` の transcript と送信の数を chromium と webkit が共有するので、2 番目の webkit では
+    前の回の同じ文で `toContainText` が先に通り、数を見る時に送信がまだ届いていない。#30 のコメントに
+    本文を project ごとに変えて `expect.poll` で待つ案を書いた（この PR には入れていない）。
+- 検証: Linux の `cargo check --workspace --all-targets`（`-D warnings`）と Windows 向けの同じ check は警告 0。
+  `cargo test --workspace` 845 通過・落ちるのは Linux で元から落ちる 2 件だけ。#30 の CI は 243152f で CLA 以外すべて緑。
+- 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯・書体の差し替え
+  （エディタのヒットテストがずれないか）・CSV の表（横スクロールと見出しの固定）・Quick Commands の帯・
+  SSH 実機でのアップロード / ダウンロード（大きいフォルダの所要時間）を確かめる。Ghostty の取り込みを本物の
+  設定（アプリ同梱のテーマの名前）で、`task_shared` を本物の `node_modules`（Finder・ファイルの見張り・
+  Windows は開発者モードの有無）で、サイドバーの ⌘⌫、登録の ProxyJump を実際の踏み台で。CLA の判断。
+  スマホから Task を作る（O38・G18）は、作った Task をその端末に共有する（`device.tasks` に足す）か・
+  準備スクリプトが長い時の応答（IPC の待ち）をどうするかが「限定共有」の設計に関わるので、本人に聞いてから。

@@ -4,8 +4,14 @@
 //! に載せる。Picker は項目 [`PickerItem`] のリストを持ち、確定/中止を [`PickerEvent`] で通知する
 //! （ホスト側が id を解釈する）。色は UI-SPEC §1.3 の許可位置のみ（選択面 = accent-dim）。
 
+/// 書体の設定（UI とコード・O27）。名前は直書きせずここから引く。
+mod density;
+pub mod emoji;
+pub mod fonts;
 /// 本文中のパス・URL 検出（`agent_panel` の transcript と `terminal_view` が共有する）。
 pub mod links;
+pub use density::{row_height, row_padding, RowDensity};
+pub use fonts::{code_font, ui_font, FontFamilies};
 
 use gpui::{
     div, ease_out_quint, hsla, prelude::*, px, Animation, AnimationExt, AnyView, App, BoxShadow,
@@ -444,7 +450,8 @@ impl Render for Picker {
                                         .items_center()
                                         .gap_2()
                                         .px_2()
-                                        .py_1()
+                                        // 行の詰め具合（O27・`density`）。
+                                        .py(row_padding(cx, 4.))
                                         .rounded(px(5.))
                                         .cursor_pointer()
                                         // マウスクリックで選択＋確定（キーボード ↑↓/Enter に加えて・全 Picker 共通）。

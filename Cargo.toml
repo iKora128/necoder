@@ -124,6 +124,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_Shell",
   "Win32_System_Com",
   "Win32_System_SystemInformation",
+  # エージェントの作業中はスリープさせない（keep_awake.rs・SetThreadExecutionState）
+  "Win32_System_Power",
 ] }
 
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）

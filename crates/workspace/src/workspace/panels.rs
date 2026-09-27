@@ -161,6 +161,9 @@ impl Workspace {
                 self.chrome.show_bottom = false
             }
             TerminalDockEvent::Dismissed => {}
+            TerminalDockEvent::RenameRequested(terminal) => {
+                self.start_terminal_rename(terminal.clone(), cx)
+            }
         }
         cx.notify();
     }
@@ -175,8 +178,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // localhost の開発サーバは necoder の Web タブで開く（それ以外は既定のブラウザ・`open_url` と同じ線引き）。
+        // SSH 先のプロジェクトの端末に出た localhost は SSH 先の物（R06）。
         if webview_view::localhost::normalize(url).is_some() {
-            self.open_url(url, cx);
+            self.open_url_from_session(session_index, url, cx);
             return;
         }
         if let Err(error) = crate::crash::open_url(url) {

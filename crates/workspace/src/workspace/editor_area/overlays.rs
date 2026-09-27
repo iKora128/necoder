@@ -128,7 +128,7 @@ impl Workspace {
 
     /// hover ポップアップ（LSP hover 結果・M10）。アンカーの上（入らなければ下）にコード字で出す。
     /// フォーカスは取らない。occlude なのでポップアップ上にマウスがある間は消えない。
-    pub(crate) fn render_hover(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_hover(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.hover.as_ref()?;
         let theme = self.theme.clone();
         const HOVER_LINE_HEIGHT: f32 = 17.0;
@@ -161,7 +161,7 @@ impl Workspace {
                 .blur_radius(px(16.))])
                 .flex()
                 .flex_col()
-                .font_family("Guguru Sans Code")
+                .font_family(ui::code_font(cx))
                 .text_size(px(11.5))
                 .text_color(theme.fg1)
                 .children(state.lines.iter().map(|line| {
