@@ -22,22 +22,25 @@ url.workspace = true
 
 # WebView エンジンは同梱しない。macOS は WKWebView、Windows は WebView2 を使う。
 # Linux で wry を有効にすると WebKitGTK/GTK が必要になるため、軽量性を守って対象外にする。
-# `devtools`: release ビルドでもプレビューの右クリック →「要素を検証」（Web Inspector）を使えるようにする。
+# `devtools`: release ビルドでもプレビューの右クリック →「要素の詳細を表示」と Web タブの `</>`（Web Inspector の
+# 開閉・`open_devtools` / `close_devtools` / `is_devtools_open`）を使えるようにする。
 # macOS では WKPreferences の私的キー `developerExtrasEnabled` を叩くため App Store 配布には不向きだが、
 # necoder は DMG/GitHub 配布なので採用（debug ビルドでは feature 無しでも常に有効）。
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 wry = { version = "=0.56.1", default-features = false, features = ["devtools"] }
 
 # macOS の Web タブ: wry の navigation delegate を包んで移動判定を最上位だけにする（`main_frame.rs`）・
-# Design Mode の切り抜き（WKWebView の takeSnapshotWithConfiguration → PNG・`snapshot.rs`）。
+# Design Mode の切り抜き（WKWebView の takeSnapshotWithConfiguration → PNG・`snapshot.rs`）・
+# Web Inspector を窓の中に付けない見張り（WKWebView の枠の通知・first responder・`inspector.rs`）。
 # 版は wry が引いている物に揃える（Cargo.lock の同じ版を共有して二重にビルドしない）。
 # feature は使う物だけ（既定の全部入りはビルドが重い）。wry は WKSnapshotConfiguration を有効にしていない。
+# NSView / NSWindow / NSResponder / NSNotification / NSGeometry は wry が既に有効にしている物（足しても再ビルドは増えない）。
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSResponder", "NSView", "NSWindow"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSObject", "NSString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSNotification", "NSObject", "NSString"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "block2",
@@ -59,3 +62,7 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
 webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
 windows-core = "0.61"
+
+[dev-dependencies]
+# Web Inspector の開閉の状態を gpui のテスト窓で確かめる（ネイティブの WebView は作らない）。
+gpui = { workspace = true, features = ["test-support"] }

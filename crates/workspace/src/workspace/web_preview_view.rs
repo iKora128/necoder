@@ -3,7 +3,7 @@
 //! 中身は `webview_view` の Web タブ（[`WebViewView::localhost`]）で、読み込める範囲の線引き
 //! （ループバックの http(s) だけ・外への移動と新しい窓は既定のブラウザへ）はそちらが持つ。
 //! この器が持つのは、エディタのパンくずの位置に置くツールバー（戻る / 進む / 再読込 / URL /
-//! ズーム / ビューポート幅 / DevTools / 既定のブラウザで開く）と、ビューポート幅を絞った時に
+//! ズーム / ビューポート幅 / Web Inspector の開閉 / 既定のブラウザで開く）と、ビューポート幅を絞った時に
 //! WebView の矩形を中央へ寄せることだけ。汎用ブラウザにはしない — 任意の URL を打つ欄は置かない
 //! （URL は表示だけ。開く入口はパレット「プレビュー: localhost を開く…」と、エージェントの
 //! transcript・Markdown プレビューのリンク = `Workspace::open_url`）。
@@ -688,10 +688,19 @@ impl WebPreviewView {
         }
     }
 
-    fn open_devtools(&self, cx: &App) {
+    /// Web Inspector を開く / 閉じる（ツールバーの `</>`）。macOS は別の窓で開く
+    /// （`webview_view` が WebView の中に付けない）。閉じる口の無い Windows では開くだけ。
+    pub(crate) fn toggle_devtools(&mut self, cx: &mut Context<Self>) {
         if let Some(viewer) = &self.viewer {
-            viewer.read(cx).open_devtools();
+            viewer.update(cx, |viewer, cx| viewer.toggle_devtools(cx));
         }
+    }
+
+    /// Web Inspector が開いているか（`</>` の点灯）。
+    pub(crate) fn is_devtools_open(&self, cx: &App) -> bool {
+        self.viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.read(cx).is_devtools_open())
     }
 
     /// いま見ている画面を既定のブラウザで開く。
@@ -758,12 +767,14 @@ impl WebPreviewView {
         }
     }
 
-    /// ツールバーの四角いアイコンボタン（19px・hover で bg2）。
+    /// ツールバーの四角いアイコンボタン（19px・hover で bg2）。`selected` は開いている間の点灯
+    /// （`Design` のチップと同じ中立の面 bg3 + fg0。識別色は使わない）。
     fn icon_button(
         &self,
         id: &'static str,
         icon: &'static str,
         enabled: bool,
+        selected: bool,
         tip: String,
     ) -> Stateful<Div> {
         let theme = &self.theme;
@@ -775,6 +786,7 @@ impl WebPreviewView {
             .justify_center()
             .size(px(19.))
             .rounded(px(5.))
+            .when(selected, |button| button.bg(theme.bg3))
             .when(enabled, |button| {
                 button.cursor_pointer().hover(|style| style.bg(theme.bg2))
             })
@@ -783,7 +795,9 @@ impl WebPreviewView {
                     .path(icon)
                     .size(px(12.))
                     .flex_none()
-                    .text_color(if enabled {
+                    .text_color(if selected {
+                        theme.fg0
+                    } else if enabled {
                         theme.fg1
                     } else {
                         theme.fg2.alpha(0.5)
@@ -843,6 +857,7 @@ impl WebPreviewView {
         let current = self.current_url(cx);
         let zoom = self.zoom(cx);
         let designing = self.design.is_some();
+        let devtools_open = self.is_devtools_open(cx);
         let mut viewport_chips = vec![self
             .text_chip(
                 "web-viewport-full",
@@ -897,6 +912,7 @@ impl WebPreviewView {
                     "web-back",
                     "icons/arrow-left.svg",
                     can_back,
+                    false,
                     i18n::t!("webtab.back_tip"),
                 )
                 .on_mouse_down(
@@ -912,6 +928,7 @@ impl WebPreviewView {
                     "web-forward",
                     "icons/arrow-right.svg",
                     can_forward,
+                    false,
                     i18n::t!("webtab.forward_tip"),
                 )
                 .on_mouse_down(
@@ -927,6 +944,7 @@ impl WebPreviewView {
                     "web-reload",
                     "icons/refresh-cw.svg",
                     true,
+                    false,
                     i18n::t!("webtab.reload_tip"),
                 )
                 .on_mouse_down(
@@ -1043,18 +1061,26 @@ impl WebPreviewView {
                         }),
                     ),
             )
+            // Web Inspector（自分の localhost のアプリを調べる開発者向け）。押すたびに開く / 閉じる。
+            // 開いている間は点灯し、tooltip が「閉じる」に替わる。
             .child(
                 self.icon_button(
                     "web-devtools",
                     "icons/code-xml.svg",
                     self.viewer.is_some(),
-                    i18n::t!("webtab.devtools_tip"),
+                    devtools_open,
+                    if devtools_open {
+                        i18n::t!("webtab.devtools_close_tip")
+                    } else {
+                        i18n::t!("webtab.devtools_tip")
+                    },
                 )
+                .debug_selector(|| "web-devtools".to_string())
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
-                        this.open_devtools(cx);
+                        this.toggle_devtools(cx);
                     }),
                 ),
             )
@@ -1063,6 +1089,7 @@ impl WebPreviewView {
                     "web-open-browser",
                     "icons/external-link.svg",
                     true,
+                    false,
                     i18n::t!("webtab.open_browser_tip"),
                 )
                 .on_mouse_down(

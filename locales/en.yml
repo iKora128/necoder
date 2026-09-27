@@ -1010,7 +1010,8 @@ webtab:
   viewport_full: Full
   viewport_full_tip: Fill the pane width
   viewport_tip: "Show at %{width}px wide"
-  devtools_tip: Open DevTools (Web Inspector)
+  devtools_tip: Open Web Inspector (separate window)
+  devtools_close_tip: Close Web Inspector
   open_browser_tip: Open in default browser
   unsupported: Web tabs aren't available here (macOS / Windows only)
   picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"

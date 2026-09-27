@@ -1011,7 +1011,8 @@ webtab:
   viewport_full: 全幅
   viewport_full_tip: ペインの幅いっぱいに表示
   viewport_tip: "幅 %{width}px で表示"
-  devtools_tip: DevTools（Web Inspector）を開く
+  devtools_tip: Web Inspector を開く（別の窓）
+  devtools_close_tip: Web Inspector を閉じる
   open_browser_tip: 既定のブラウザで開く
   unsupported: この環境では Web タブを表示できません（macOS / Windows のみ）
   picker_placeholder: "ポート番号か localhost の URL（例: 3000 / localhost:5173/app）"

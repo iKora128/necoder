@@ -22,8 +22,17 @@
 //! 同じ Web タブで見せる）。移動の線引きと IPC の有無は入口ごとに決まり、
 //! 混ぜない（artifact は IPC 無し・Web タブは最上位が localhost から出ず、IPC は Design Mode の
 //! 知らせだけ＝受け手が [`design::accept_message`] で検める）。
+//!
+//! **Web Inspector**（右クリックの「要素の詳細を表示」・Web タブの `</>`）は、macOS では WebView の中に
+//! 付けず**別の窓**で開く。WebKit は既定で Inspector を WebView の横に付け、その時 WKWebView を親ビュー
+//! （= GPUI の窓全体）の幅いっぱいに広げるので、necoder の UI が全部隠れて何も押せなくなる。付いたら
+//! 別の窓へ出し、WebKit が動かした枠を GPUI の置き場所へ戻す（`inspector`・`sync_devtools`）。
+//! 開閉の状態（`</>` の点灯）はこの view が持つ。Windows の WebView2 の DevTools は元から別の窓で、
+//! necoder から閉じる口が無いので開くだけ（[`can_close_devtools`]）。
 
 pub mod design;
+#[cfg(target_os = "macos")]
+mod inspector;
 pub mod localhost;
 #[cfg(target_os = "macos")]
 mod main_frame;
@@ -61,7 +70,7 @@ pub enum WebViewEvent {
     Message { sender: String, body: String },
 }
 
-/// wry のコールバック（主スレッド・`'static`）から GPUI の Entity へ渡す中継。
+/// wry / AppKit のコールバック（主スレッド・`'static`）から GPUI の Entity へ渡す中継。
 /// WebView を持たない OS（Linux）では積む側が居ない。
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 enum NativeEvent {
@@ -77,14 +86,55 @@ enum NativeEvent {
         sender: String,
         body: String,
     },
+    /// Web Inspector の開閉と WebView の枠を OS の側と合わせる合図（macOS だけが積む・Web タブに限らない）。
+    /// 積むのは: 枠が変わった（`inspector::FrameWatch`。WebKit が Inspector を付けた・付けたまま閉じた時も
+    /// 来る）/ 描き直しで開閉の食い違いを見つけた（窓の出入り＝ Inspector の窓が前に出た・閉じた後）。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    SyncDevtools,
 }
+
+/// wry / AppKit のコールバックが積む口と、それを Entity へ流す受け側。受け側は次の effect で
+/// `on_native_event` を呼ぶ＝コールバックの中（WebKit が枠を動かしている最中など）で WebKit や GPUI を
+/// 入れ子に触らない。WebView を作る時に用意する（Web タブは生成時）。
+struct NativeEvents {
+    sender: mpsc::UnboundedSender<NativeEvent>,
+    _pump: Task<()>,
+}
+
+/// Web Inspector（DevTools）の開閉。`open` は necoder の側の状態（ツールバーの `</>` の点灯）で、
+/// WebKit の側で起きたこと（Inspector の窓の閉じるボタン・右クリックの「要素の詳細を表示」）は
+/// `sync_devtools` が写し戻す。閉じる口の無い環境（WebView2）では使わない（[`can_close_devtools`]）。
+#[derive(Default)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct Devtools {
+    /// 開いている（開くよう頼んだ）。WebView がまだ無ければ、作った時に開く。
+    open: bool,
+    /// `show` を頼んだ時刻（まだ見えていない間だけ）。WebKit は Web プロセスへ頼んでから非同期に開くので、
+    /// この間に `close` しても後から開き直す＝見えた所で閉じる。
+    opening_since: Option<std::time::Instant>,
+    /// 開いている（開きかけの）間の見回り（`DEVTOOLS_WATCH_INTERVAL` ごとに `sync_devtools`）。
+    watch: Option<Task<()>>,
+}
+
+/// Web Inspector を necoder から閉じられるか（＝ `</>` を開閉のトグルにできるか）。macOS の WKWebView だけ。
+/// Windows の WebView2 の DevTools は元から別の窓で開くが、閉じる口も開いているかを知る口も無い
+/// （wry の `close_devtools` / `is_devtools_open` は何もしない）ので、開くだけにする。
+pub const fn can_close_devtools() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// Web Inspector を開くよう頼んでから見えるまで待つ上限。過ぎたら開かなかったものとして点灯を消す。
+#[cfg(target_os = "macos")]
+const DEVTOOLS_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Web Inspector が開いている（開きかけの）間の見回りの間隔。Inspector の窓の閉じるボタンで閉じたことは
+/// OS から知らせが来ないので、これで写す（開いている間だけ動く）。
+#[cfg(target_os = "macos")]
+const DEVTOOLS_WATCH_INTERVAL: Duration = Duration::from_millis(300);
 
 /// Web タブだけが持つ状態。WebView を持たない OS（Linux）では生成に使う欄が読まれない。
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 struct WebState {
-    /// wry のコールバックが積む口。受け側は `_pump` が Entity へ流す。
-    events: mpsc::UnboundedSender<NativeEvent>,
-    _pump: Task<()>,
     /// ページのズーム（WKWebView の pageZoom / WebView2 の ZoomFactor）。破棄→再生成でも保つ。
     zoom: f64,
     title: Option<String>,
@@ -138,8 +188,15 @@ pub struct WebViewView {
     sandbox_root: Option<PathBuf>,
     /// Web タブ（[`Self::localhost`]）の状態。`None` はファイルを見るプレビュー。
     web: Option<WebState>,
+    /// wry / AppKit のコールバックから知らせを受ける口（WebView を作る時・Web タブは生成時に用意）。
+    native_events: Option<NativeEvents>,
+    /// Web Inspector の開閉（`</>` の点灯・macOS のみ）。
+    devtools: Devtools,
     /// 非表示化で仕掛ける破棄タイマー。再表示（set_active(true)）で drop ＝キャンセル。
     _evict_task: Option<Task<()>>,
+    /// WebView の枠の見張り（WebKit が Web Inspector を付けたら別の窓へ出す・`inspector`）。WebView より先に外す。
+    #[cfg(target_os = "macos")]
+    frame_watch: Option<inspector::FrameWatch>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     webview: Option<WebView>,
     /// Web タブの移動判定を最上位だけに掛ける delegate（[`main_frame`]）。WebView と同じ寿命。
@@ -147,6 +204,14 @@ pub struct WebViewView {
     main_frame_delegate: Option<objc2::rc::Retained<main_frame::MainFrameOnlyDelegate>>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     last_bounds: Option<Bounds<Pixels>>,
+    /// necoder が最後に置いた WKWebView の枠（AppKit の座標のまま）。これと違っていたら WebKit が動かした
+    /// （Web Inspector を付けた・付けたまま閉じた）ので、GPUI の置き場所へ戻す。
+    #[cfg(target_os = "macos")]
+    applied_frame: Option<objc2_foundation::NSRect>,
+    /// この WebKit が wry の devtools の口と `detach` を持つか（WebView を作った時に確かめる・
+    /// `inspector::supports_devtools`）。持たなければ Inspector を開かない（送ると ObjC の例外で落ちる）。
+    #[cfg(target_os = "macos")]
+    devtools_supported: bool,
 }
 
 impl EventEmitter<WebViewEvent> for WebViewView {}
@@ -178,13 +243,21 @@ impl WebViewView {
             evict_after: default_evict_after(),
             sandbox_root: None,
             web: None,
+            native_events: None,
+            devtools: Devtools::default(),
             _evict_task: None,
+            #[cfg(target_os = "macos")]
+            frame_watch: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             webview: None,
             #[cfg(target_os = "macos")]
             main_frame_delegate: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             last_bounds: None,
+            #[cfg(target_os = "macos")]
+            applied_frame: None,
+            #[cfg(target_os = "macos")]
+            devtools_supported: false,
         }
     }
 
@@ -197,7 +270,25 @@ impl WebViewView {
             .is_none()
             .then(|| i18n::t!("webview.outside_localhost").to_string());
         let mut view = Self::with_source(PathBuf::from(url), normalized, error, theme);
-        let (events, mut receiver) = mpsc::unbounded::<NativeEvent>();
+        // 読み込み・タイトル・IPC の知らせを受ける口は生成時に用意する（WebView は最初の描画で作る）。
+        view.native_events(cx);
+        view.web = Some(WebState {
+            zoom: 1.0,
+            title: None,
+            loading: false,
+            failed: None,
+            initialization_scripts: Vec::new(),
+            ipc: false,
+        });
+        view
+    }
+
+    /// wry / AppKit のコールバックが積む口（無ければここで用意する）。
+    fn native_events(&mut self, cx: &mut Context<Self>) -> mpsc::UnboundedSender<NativeEvent> {
+        if let Some(events) = &self.native_events {
+            return events.sender.clone();
+        }
+        let (sender, mut receiver) = mpsc::unbounded::<NativeEvent>();
         let pump = cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.next().await {
                 if this
@@ -208,17 +299,11 @@ impl WebViewView {
                 }
             }
         });
-        view.web = Some(WebState {
-            events,
+        self.native_events = Some(NativeEvents {
+            sender: sender.clone(),
             _pump: pump,
-            zoom: 1.0,
-            title: None,
-            loading: false,
-            failed: None,
-            initialization_scripts: Vec::new(),
-            ipc: false,
         });
-        view
+        sender
     }
 
     /// Web タブの文書の頭で毎回走らせるスクリプトを足す（最上位の文書のみ・Design Mode のピッカー）。
@@ -314,12 +399,233 @@ impl WebViewView {
         }
     }
 
-    /// Web Inspector（DevTools）を開く。WebView がまだ無ければ何もしない。
-    pub fn open_devtools(&self) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(webview) = &self.webview {
-            webview.open_devtools();
+    /// Web Inspector が開いているか（ツールバーの `</>` の点灯）。necoder が開いた物と、右クリックの
+    /// 「要素の詳細を表示」で開いたのを見つけた物。Inspector の窓の閉じるボタンで閉じた分は見回りが写す。
+    /// 閉じる口の無い環境（[`can_close_devtools`]）では常に `false`。
+    pub fn is_devtools_open(&self) -> bool {
+        self.devtools.open
+    }
+
+    /// Web Inspector を開く / 閉じる（ツールバーの `</>`・パレット）。閉じる口の無い環境では開くだけ。
+    pub fn toggle_devtools(&mut self, cx: &mut Context<Self>) {
+        // Inspector の窓の閉じるボタンで閉じた直後（見回りがまだ写していない）でも、1 回押せば開く。
+        self.sync_devtools(cx);
+        if self.devtools.open {
+            self.close_devtools(cx);
+        } else {
+            self.open_devtools(cx);
         }
+    }
+
+    /// Web Inspector を開く。macOS は WebView の中に付けず**別の窓**で開く（付いたら `sync_devtools` が
+    /// 窓へ出す）。WebView がまだ無ければ、作った時に開く。閉じる口の無い環境（WebView2）では DevTools の
+    /// 窓を開くだけで、状態は持たない。
+    pub fn open_devtools(&mut self, cx: &mut Context<Self>) {
+        if !can_close_devtools() {
+            // WebView2 の DevTools は元から別の窓。開いているかを知れないので点灯もしない。
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let Some(webview) = &self.webview {
+                webview.open_devtools();
+            }
+            return;
+        }
+        if self.devtools.open {
+            return;
+        }
+        self.devtools.open = true;
+        #[cfg(target_os = "macos")]
+        self.show_devtools(cx);
+        cx.notify();
+    }
+
+    /// Web Inspector を閉じる（`</>`・Esc・パレット・Web タブを閉じる / 別のタブへ移る・Design を始める）。
+    /// 開いていなければ何もしない（描画のたびに呼ばれても知らせない）。
+    pub fn close_devtools(&mut self, cx: &mut Context<Self>) {
+        if !self.devtools.open && !self.native_devtools_visible() {
+            return;
+        }
+        self.devtools.open = false;
+        #[cfg(target_os = "macos")]
+        self.hide_devtools();
+        cx.notify();
+    }
+
+    /// OS の側で Web Inspector が見えているか（macOS のみ。他は `false`）。
+    fn native_devtools_visible(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(webview) = self.devtools_webview() {
+            return webview.is_devtools_open();
+        }
+        false
+    }
+
+    /// wry の devtools の口を呼んでよい WebView（この WebKit が私的メソッドを持つ時だけ）。
+    #[cfg(target_os = "macos")]
+    fn devtools_webview(&self) -> Option<&WebView> {
+        self.webview.as_ref().filter(|_| self.devtools_supported)
+    }
+
+    /// 頼まれた Web Inspector を WebKit に開かせ、見回りを始める（WebView がまだ無ければ何もしない＝
+    /// 作った時に `sync_native_view` がもう一度呼ぶ）。
+    #[cfg(target_os = "macos")]
+    fn show_devtools(&mut self, cx: &mut Context<Self>) {
+        if self.webview.is_none() {
+            return;
+        }
+        let Some(webview) = self.devtools_webview() else {
+            // この WebKit では開けない（作った時に `after_macos_build` が知らせた）。点灯を残さない。
+            self.devtools.open = false;
+            cx.notify();
+            return;
+        };
+        if !webview.is_devtools_open() && self.devtools.opening_since.is_none() {
+            webview.open_devtools();
+            self.devtools.opening_since = Some(std::time::Instant::now());
+        }
+        self.watch_devtools(cx);
+    }
+
+    /// 見えている Web Inspector を閉じ、WebKit が動かした枠を戻す。開きかけ（まだ見えていない）なら
+    /// 今は閉じない — WebKit は後から開き直すので、見えた所で見回り（`sync_devtools`）が閉じる。
+    #[cfg(target_os = "macos")]
+    fn hide_devtools(&mut self) {
+        let Some(webview) = self.devtools_webview() else {
+            return;
+        };
+        if webview.is_devtools_open() {
+            webview.close_devtools();
+            self.restore_frame_if_moved();
+        }
+    }
+
+    /// OS の側で起きたことを写し戻す: Inspector の窓の閉じるボタンで閉じた・右クリックの「要素の詳細を
+    /// 表示」で開いた・開くのを待つ間に閉じるよう頼まれていた。見えていれば別の窓へ出し
+    /// （`inspector::detach`）、WebKit が動かした WebView の枠を戻す。見回りを続けるか（WebView があって、
+    /// 開いている・開きかけ）を返す。
+    fn sync_devtools(&mut self, cx: &mut Context<Self>) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let was_open = self.devtools.open;
+            self.reconcile_devtools();
+            if self.devtools.open != was_open {
+                cx.notify();
+            }
+            let keep = self.webview.is_some()
+                && (self.devtools.open || self.devtools.opening_since.is_some());
+            if keep {
+                self.watch_devtools(cx);
+            } else {
+                self.devtools.watch = None;
+            }
+            keep
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = cx;
+            false
+        }
+    }
+
+    /// `sync_devtools` の本体（OS を読んで状態を合わせる・WebView の外へ出す・枠を戻す）。
+    #[cfg(target_os = "macos")]
+    fn reconcile_devtools(&mut self) {
+        use wry::WebViewExtMacOS as _;
+        if !self.devtools_supported {
+            return;
+        }
+        let Some(webview) = &self.webview else {
+            return;
+        };
+        let visible = webview.is_devtools_open();
+        let opening = self.devtools.opening_since;
+        if visible {
+            if opening.is_some() {
+                self.devtools.opening_since = None;
+                if !self.devtools.open {
+                    // 開くのを待つ間に閉じるよう頼まれていた（その時に閉じても WebKit は後から開き直す）。
+                    webview.close_devtools();
+                }
+            } else if !self.devtools.open {
+                // necoder が開いていない Inspector（右クリックの「要素の詳細を表示」）。開いている物として扱う。
+                self.devtools.open = true;
+            }
+            if self.devtools.open && !inspector::detach(&webview.webview()) {
+                // 別の窓へ出せない（`detach` が無い）なら、necoder の窓の上に残さず閉じる。
+                eprintln!("webview_view: Web Inspector を別の窓へ出せないので閉じる");
+                webview.close_devtools();
+                self.devtools.open = false;
+            }
+        } else if let Some(since) = opening {
+            if since.elapsed() >= DEVTOOLS_OPEN_TIMEOUT {
+                // 開かなかった（ページの Web プロセスが落ちた等）。点灯を消す。
+                self.devtools.opening_since = None;
+                self.devtools.open = false;
+            }
+        } else {
+            // Inspector の窓の閉じるボタンなどで閉じた。
+            self.devtools.open = false;
+        }
+        self.restore_frame_if_moved();
+    }
+
+    /// Web Inspector が開いている（開きかけの）間だけ、[`DEVTOOLS_WATCH_INTERVAL`] ごとに `sync_devtools`
+    /// を呼ぶ。閉じた（`sync_devtools` が `false`）ら止まる。
+    #[cfg(target_os = "macos")]
+    fn watch_devtools(&mut self, cx: &mut Context<Self>) {
+        if self.devtools.watch.is_some() {
+            return;
+        }
+        self.devtools.watch = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(DEVTOOLS_WATCH_INTERVAL)
+                .await;
+            let keep = this
+                .update(cx, |view, cx| view.sync_devtools(cx))
+                .unwrap_or(false);
+            if !keep {
+                break;
+            }
+        }));
+    }
+
+    /// WebKit が WebView の枠を動かしていたら（Web Inspector を付けた・付けたまま閉じた）、necoder が
+    /// 置いた場所（GPUI の矩形）へ戻す。
+    #[cfg(target_os = "macos")]
+    fn restore_frame_if_moved(&mut self) {
+        use wry::WebViewExtMacOS as _;
+        let (Some(webview), Some(bounds)) = (&self.webview, self.last_bounds) else {
+            return;
+        };
+        let wk_web_view = webview.webview();
+        if Some(wk_web_view.frame()) == self.applied_frame {
+            return;
+        }
+        // wry の `set_bounds` は窓が無いと panic する（窓を閉じる途中の知らせなど）。
+        if wk_web_view.window().is_none() {
+            return;
+        }
+        if let Err(error) = webview.set_bounds(rect(bounds)) {
+            eprintln!("webview_view: WebView の枠を戻せない: {error}");
+            return;
+        }
+        self.applied_frame = Some(wk_web_view.frame());
+    }
+
+    /// OS のキーボードフォーカス（macOS の first responder）がいまページ（WebView の中）にあるか。
+    /// [`Self::wants_key_focus`]（necoder の要求の記録）と違い、ページ内のクリックで AppKit が黙って
+    /// 移した分も含む。WebView が無ければ `false`。
+    pub fn page_has_key_focus(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(webview) = &self.webview {
+            use wry::WebViewExtMacOS as _;
+            return inspector::holds_first_responder(&webview.webview());
+        }
+        // WebView2 の OS のフォーカスは読まない（閉じる口が無いので Esc の判定にも使わない）。要求の記録で代える。
+        #[cfg(target_os = "windows")]
+        if self.webview.is_some() {
+            return self.key_focus;
+        }
+        false
     }
 
     /// ページの中でスクリプトを走らせる（結果は捨てる）。WebView がまだ無ければ `false`。
@@ -414,12 +720,19 @@ impl WebViewView {
         false
     }
 
-    /// wry のコールバックから届いた知らせを状態へ反映し、購読者へ流す。
+    /// wry / AppKit のコールバックから届いた知らせを状態へ反映し、購読者へ流す。
     fn on_native_event(&mut self, event: NativeEvent, cx: &mut Context<Self>) {
+        // Inspector の合図は Web タブに限らない（HTML プレビュー・artifact・PDF も右クリックで開ける）。
+        if matches!(event, NativeEvent::SyncDevtools) {
+            self.sync_devtools(cx);
+            return;
+        }
         let Some(web) = self.web.as_mut() else {
             return;
         };
         match event {
+            // 上で扱った。
+            NativeEvent::SyncDevtools => return,
             NativeEvent::PageLoad { url, finished } => {
                 web.loading = !finished;
                 if !finished {
@@ -551,16 +864,25 @@ impl WebViewView {
             if let Some(webview) = &self.webview {
                 Self::return_focus_to_parent(webview);
             }
+            // 枠の見張りは WebView より先に外す（手放す途中の枠の変化を知らせない）。
+            #[cfg(target_os = "macos")]
+            {
+                self.frame_watch = None;
+            }
             // wry の Drop が removeFromSuperview まで行う＝ここで None にするだけで
-            // ネイティブ子ビューと WebContent プロセスが解放される。
+            // ネイティブ子ビューと WebContent プロセスが解放される（開いていた Web Inspector も、
+            // ページを閉じる WebKit が一緒に閉じる）。
             self.webview = None;
             // 包んでいた delegate は WebView の後に手放す（先に外すと wry の delegate が外れる）。
             #[cfg(target_os = "macos")]
             {
                 self.main_frame_delegate = None;
+                self.applied_frame = None;
             }
             self.last_bounds = None;
         }
+        // Inspector は WebView と一緒に消えた（点灯を残さない・再表示で勝手に開き直さない）。
+        self.devtools = Devtools::default();
     }
 
     /// キーボードフォーカスをネイティブ子ビューから GPUI のウィンドウへ返す。
@@ -650,31 +972,36 @@ impl WebViewView {
         if !self.active || native_disabled() {
             return;
         }
-        let Some(url) = self.url.as_deref() else {
-            return;
-        };
         let native_bounds = rect(bounds);
         if self.webview.is_none() {
+            let Some(url) = self.url.clone() else {
+                return;
+            };
+            // Web タブの読み込み・IPC と、macOS の枠の見張り（全部の WebView）がこの口へ積む。
+            let events = self.native_events(cx);
             let mut builder = WebViewBuilder::new();
             if let Some(root) = self.sandbox_root.clone() {
                 builder = sandboxed_builder(builder, root);
             } else if let Some(web) = &self.web {
-                builder = localhost_builder(builder, web);
+                builder = localhost_builder(builder, web, &events);
             }
             match builder
                 .with_url(url)
                 .with_bounds(native_bounds)
                 .with_visible(true)
                 .with_back_forward_navigation_gestures(true)
-                // 右クリック →「要素を検証」で Web Inspector を開けるようにする（HTML を書く用途の
+                // 右クリック →「要素の詳細を表示」で Web Inspector を開けるようにする（HTML を書く用途の
                 // プレビューなので常時 ON。release で効かせるには wry の `devtools` feature が要る）。
+                // macOS では付いたら別の窓へ出す（`after_macos_build` の枠の見張り）。
                 .with_devtools(true)
                 .build_as_child(window)
             {
                 Ok(webview) => {
                     if let Some(web) = &self.web {
-                        self.after_web_build(&webview, web.zoom, web.events.clone());
+                        self.after_web_build(&webview, web.zoom, events.clone());
                     }
+                    #[cfg(target_os = "macos")]
+                    self.after_macos_build(&webview, events);
                     if self.focus_when_ready {
                         if let Err(error) = webview.focus() {
                             self.error = Some(error.to_string());
@@ -684,6 +1011,11 @@ impl WebViewView {
                     }
                     self.webview = Some(webview);
                     self.last_bounds = Some(bounds);
+                    // WebView を作る前に頼まれていた Inspector（パレット・破棄の後の再表示の前）。
+                    #[cfg(target_os = "macos")]
+                    if self.devtools.open {
+                        self.show_devtools(cx);
+                    }
                 }
                 Err(error) => {
                     self.error = Some(error.to_string());
@@ -699,13 +1031,58 @@ impl WebViewView {
                     cx.notify();
                     return;
                 }
+                #[cfg(target_os = "macos")]
+                {
+                    use wry::WebViewExtMacOS as _;
+                    self.applied_frame = Some(webview.webview().frame());
+                }
             }
             self.last_bounds = Some(bounds);
+        }
+        // 窓の出入り（Inspector の窓が前に出た・閉じた）で描き直した時に、OS の側の開閉と食い違って
+        // いれば合わせる（右クリックで別の窓に開いた Inspector の点灯など）。描画の中では WebKit を
+        // 触らず、合図を積んで次の effect で `sync_devtools` に任せる。
+        #[cfg(target_os = "macos")]
+        if let Some(webview) = self.devtools_webview() {
+            if self.devtools.opening_since.is_none()
+                && webview.is_devtools_open() != self.devtools.open
+            {
+                if let Some(events) = &self.native_events {
+                    events.sender.unbounded_send(NativeEvent::SyncDevtools).ok();
+                }
+            }
         }
     }
 }
 
 impl WebViewView {
+    /// macOS の WebView を作った直後の仕上げ（Web タブに限らない）: 枠の見張りを付け、置いた枠を覚える。
+    /// WebKit が Web Inspector を WebView の横に付けると枠が動くので、知らせを受けて別の窓へ出す
+    /// （`sync_devtools`）。
+    #[cfg(target_os = "macos")]
+    fn after_macos_build(&mut self, webview: &WebView, events: mpsc::UnboundedSender<NativeEvent>) {
+        use wry::WebViewExtMacOS as _;
+        let wk_web_view = webview.webview();
+        self.frame_watch = inspector::FrameWatch::install(
+            &wk_web_view,
+            Box::new(move || {
+                // 枠を変えた呼び出しの中（WebKit が Inspector を付けている最中など）なので積むだけ。
+                // 受け側（この view）が先に消えていれば届け先は無い。それで困る物は無い。
+                events.unbounded_send(NativeEvent::SyncDevtools).ok();
+            }),
+        );
+        if self.frame_watch.is_none() {
+            eprintln!("webview_view: WebView の枠を見張れない（主スレッドでない）");
+        }
+        self.applied_frame = Some(wk_web_view.frame());
+        self.devtools_supported = inspector::supports_devtools(&wk_web_view);
+        if !self.devtools_supported {
+            eprintln!(
+                "webview_view: この WebKit は Web Inspector の私的メソッドを持たない（開かない）"
+            );
+        }
+    }
+
     /// Web タブの WebView を作った直後の仕上げ: 移動判定を最上位だけにする（macOS）・ズームを戻す。
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn after_web_build(
@@ -906,10 +1283,14 @@ fn sandboxed_builder(builder: WebViewBuilder<'_>, root: PathBuf) -> WebViewBuild
 /// ブラウザへ（[`localhost`]）。読み込み・タイトル・（付けた時だけ）IPC は GPUI 側へ中継する。
 /// iframe の中の移動はここを通さない（macOS は [`main_frame`]・WebView2 は元から最上位だけ）。
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn localhost_builder<'a>(builder: WebViewBuilder<'a>, web: &WebState) -> WebViewBuilder<'a> {
+fn localhost_builder<'a>(
+    builder: WebViewBuilder<'a>,
+    web: &WebState,
+    events: &mpsc::UnboundedSender<NativeEvent>,
+) -> WebViewBuilder<'a> {
     // 受け側（view）が先に消えた後の送信は届け先が無いだけ（`.ok()`）。
-    let page_events = web.events.clone();
-    let title_events = web.events.clone();
+    let page_events = events.clone();
+    let title_events = events.clone();
     let mut builder = builder
         .with_navigation_handler(|url| match localhost::navigation(&url) {
             localhost::Navigation::Allow => true,
@@ -939,7 +1320,7 @@ fn localhost_builder<'a>(builder: WebViewBuilder<'a>, web: &WebState) -> WebView
     }
     // IPC は Web タブにだけ付ける（artifact は `sandboxed_builder` で付けないまま）。中身の検証は受け手。
     if web.ipc {
-        let message_events = web.events.clone();
+        let message_events = events.clone();
         builder = builder.with_ipc_handler(move |request| {
             let sender = request.uri().to_string();
             let body = request.into_body();
@@ -1016,6 +1397,83 @@ mod tests {
         view.set_key_focus(false);
         assert!(!view.focus_when_ready, "返したら予約も消える");
         assert!(!view.wants_key_focus());
+    }
+
+    fn preview(cx: &mut gpui::TestAppContext) -> gpui::Entity<WebViewView> {
+        cx.new(|_| WebViewView::local_file(std::env::temp_dir().join("a.html"), Theme::dark()))
+    }
+
+    /// `</>` は押すたびに Web Inspector を開く / 閉じる。WebView がまだ無ければ開く約束だけを覚え
+    /// （作った時に開く）、閉じれば約束も消える。
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn devtools_toggle_open_and_closed(cx: &mut gpui::TestAppContext) {
+        let view = preview(cx);
+        view.update(cx, |view, cx| {
+            assert!(!view.is_devtools_open());
+            view.toggle_devtools(cx);
+            assert!(view.is_devtools_open(), "押すと開く");
+            view.toggle_devtools(cx);
+            assert!(!view.is_devtools_open(), "もう一度押すと閉じる");
+            view.open_devtools(cx);
+            view.close_devtools(cx);
+            assert!(
+                !view.is_devtools_open(),
+                "閉じる口（Esc・タブの移動）でも閉じる"
+            );
+        });
+    }
+
+    /// 閉じる口の無い環境（WebView2）では `</>` は開くだけで、点灯しない（閉じたことを知れないため）。
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn devtools_only_open_where_they_cannot_be_closed(cx: &mut gpui::TestAppContext) {
+        let view = preview(cx);
+        view.update(cx, |view, cx| {
+            view.toggle_devtools(cx);
+            assert!(!view.is_devtools_open());
+        });
+    }
+
+    /// 閉じている時の `close_devtools` は何も知らせない。`Workspace` は描画のたびに、見えていない
+    /// Web タブへこれを呼ぶ（知らせると描き直しが止まらない）。
+    #[gpui::test]
+    fn closing_closed_devtools_does_not_notify(cx: &mut gpui::TestAppContext) {
+        let view = preview(cx);
+        let notified = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = notified.clone();
+        let _subscription =
+            cx.update(|cx| cx.observe(&view, move |_, _| counter.set(counter.get() + 1)));
+        view.update(cx, |view, cx| view.close_devtools(cx));
+        cx.run_until_parked();
+        assert_eq!(notified.get(), 0);
+    }
+
+    /// 非表示のまま WebView を破棄したら Inspector も消えた扱い（点灯を残さない・再表示で勝手に
+    /// 開き直さない）。
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn evicting_the_web_view_forgets_the_devtools(cx: &mut gpui::TestAppContext) {
+        let view = preview(cx);
+        view.update(cx, |view, cx| {
+            view.open_devtools(cx);
+            assert!(view.is_devtools_open());
+            view.evict_if_hidden();
+            assert!(!view.is_devtools_open());
+        });
+    }
+
+    /// WebView が無ければ、ページが OS のキーを持つことは無い（Esc は GPUI の物）。
+    #[test]
+    fn a_page_without_a_web_view_never_holds_the_keys() {
+        let mut view = WebViewView::local_file(std::env::temp_dir().join("a.html"), Theme::dark());
+        view.active = true;
+        view.set_key_focus(true);
+        assert!(view.wants_key_focus(), "要求は覚える");
+        assert!(
+            !view.page_has_key_focus(),
+            "OS の真実は WebView が無ければ持たない"
+        );
     }
 
     /// IPC の送り手は wry が `http::Uri` に通してから渡す。localhost の文書の URL はその形でも
