@@ -486,6 +486,11 @@ impl Workspace {
         if let TabContent::Review(review) = &tab.content {
             self.review_tab_closed(review, cx);
         }
+        // Web タブの Web Inspector（別の窓）を取り残さない。WebView を手放せば WebKit も閉じるが、
+        // view を他が握っていても閉じるよう、ここで明示的に閉じる。
+        if let Some(web) = tab.web() {
+            web.update(cx, |web, cx| web.close_devtools(cx));
+        }
         if !tab.transient {
             self.recently_closed_files.push(tab.path.clone());
             // 画像タブは didOpen していないので didClose も送らない。

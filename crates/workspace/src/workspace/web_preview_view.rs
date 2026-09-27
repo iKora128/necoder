@@ -19,6 +19,11 @@
 //! 切り抜き（PNG）をアクティブなスレッドの composer へ添える（送信はしない）。ピッカーは生成時に
 //! 文書の頭へ入れておき（`webview_view::design`）、Design の間だけ nonce を渡して動かす。ページ →
 //! necoder の IPC は Web タブにだけ付き、Design 中かつ nonce が一致した物だけを受ける。
+//!
+//! **Web Inspector**（ツールバーの `</>`・パレット「プレビュー: Web Inspector を開く / 閉じる」）は、
+//! 自分の localhost のアプリを調べる開発者向け。Design は使わない。開閉の状態は `webview_view` が持ち
+//! （macOS は WebView の中に付けず別の窓で開く）、この器は Esc と「Design を始める時に閉じる」を足す。
+//! タブを閉じる・別のタブへ移る時に閉じるのは `Workspace`（`close_tab_now` / 可視性の同期）。
 
 use crate::workspace::*;
 use webview_view::{design, localhost, static_server, WebViewEvent, WebViewView};
@@ -314,6 +319,9 @@ impl WebPreviewView {
         if viewer.read(cx).load_failure().is_some() {
             return false;
         }
+        // Design は Web Inspector を使わない（切り抜き・計算済みスタイルはページに入れたスクリプトが取る）。
+        // 開いたままにしない（Inspector の要素選択と Design の選択が並ぶと、どちらで選んだかを取り違える）。
+        viewer.update(cx, |viewer, cx| viewer.close_devtools(cx));
         let nonce = design::new_nonce();
         if !viewer
             .read(cx)
@@ -688,11 +696,19 @@ impl WebPreviewView {
         }
     }
 
-    /// Web Inspector を開く / 閉じる（ツールバーの `</>`）。macOS は別の窓で開く
+    /// Web Inspector を開く / 閉じる（ツールバーの `</>`・パレット）。macOS は別の窓で開く
     /// （`webview_view` が WebView の中に付けない）。閉じる口の無い Windows では開くだけ。
     pub(crate) fn toggle_devtools(&mut self, cx: &mut Context<Self>) {
         if let Some(viewer) = &self.viewer {
             viewer.update(cx, |viewer, cx| viewer.toggle_devtools(cx));
+        }
+    }
+
+    /// Web Inspector を閉じる（Esc・Web タブを閉じる / 別のタブへ移る・Design を始める）。
+    /// 開いていなければ何もしない（`Workspace` が描画のたびに呼ぶ）。
+    pub(crate) fn close_devtools(&mut self, cx: &mut Context<Self>) {
+        if let Some(viewer) = &self.viewer {
+            viewer.update(cx, |viewer, cx| viewer.close_devtools(cx));
         }
     }
 
@@ -701,6 +717,13 @@ impl WebPreviewView {
         self.viewer
             .as_ref()
             .is_some_and(|viewer| viewer.read(cx).is_devtools_open())
+    }
+
+    /// OS のキーボードフォーカスがいまページ（WebView の中）にあるか（Esc をページの物として残す判定）。
+    fn page_has_key_focus(&self, cx: &App) -> bool {
+        self.viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.read(cx).page_has_key_focus())
     }
 
     /// いま見ている画面を既定のブラウザで開く。
@@ -1078,9 +1101,10 @@ impl WebPreviewView {
                 .debug_selector(|| "web-devtools".to_string())
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| {
+                    cx.listener(|_this, _, window, cx| {
                         cx.stop_propagation();
-                        this.toggle_devtools(cx);
+                        // パレットと同じ入口（action）を通す。
+                        window.dispatch_action(Box::new(ToggleWebInspector), cx);
                     }),
                 ),
             )
@@ -1192,9 +1216,20 @@ impl Render for WebPreviewView {
             // Design 中に GPUI 側（ツールバー等）へキーが来ている時の Esc。ページの中の Esc は
             // ピッカーが受けて知らせてくる。
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "escape" && this.design.is_some() {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                if this.design.is_some() {
                     cx.stop_propagation();
                     this.stop_design(cx);
+                    return;
+                }
+                // GPUI 側（ツールバー等）にキーがある時の Esc で Web Inspector を閉じる。ページが OS の
+                // キーを持っている時の Esc はページの物（ページが使わなかった Esc も responder chain を
+                // 上ってここへ来る。モーダルを Esc で閉じるアプリを調べている最中に Inspector まで閉じない）。
+                if this.is_devtools_open(cx) && !this.page_has_key_focus(cx) {
+                    cx.stop_propagation();
+                    this.close_devtools(cx);
                 }
             }))
             .size_full()

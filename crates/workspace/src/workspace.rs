@@ -320,6 +320,8 @@ actions!(
         OpenLocalhostPreview,
         // Web タブの Design Mode（⌘⇧D・要素を選んで composer へ添える）。
         ToggleDesignMode,
+        // Web タブの Web Inspector を開く / 閉じる（ツールバーの `</>`・パレット。macOS は別の窓で開く）。
+        ToggleWebInspector,
         // エクスプローラのファイル操作を 1 手戻す（⌘Z・Explorer コンテキストだけ・H30）。
         UndoFileOperation,
         // アクティブな HTML ファイルを内蔵の配信で Web タブに開く（Design Mode が使える）。
@@ -2121,10 +2123,10 @@ impl Workspace {
         let chat_active = self.project_sessions.chat_active;
         let active_session = self.project_sessions.active;
         // Chat は右のエディタ領域が常に出ている（Fleet / AI 全画面とは排他なので見なくてよい）。
-        let editor_surface_visible = (chat_active
+        let editor_area_shown = (chat_active
             || (!self.chrome.fleet_mode && !self.chrome.agent_full_screen))
-            && !self.chrome.show_settings
-            && !self.overlay_hides_native_view(cx);
+            && !self.chrome.show_settings;
+        let editor_surface_visible = editor_area_shown && !self.overlay_hides_native_view(cx);
         // OS の子ビューは GPUI の描画木から外れても残るので、**見えていない session の分も**
         // 明示的に隠す（Chat ⇄ プロジェクトの切替で、裏の session のプレビューが浮いて残らない）。
         let sessions = self
@@ -2148,7 +2150,17 @@ impl Workspace {
                     continue;
                 }
                 if let Some(web) = tab.web().cloned() {
-                    web.update(cx, |web, cx| web.set_surface_active(visible, false, cx));
+                    // 別のタブ・別のプロジェクト・Fleet / 設定などへ移った Web タブの Web Inspector
+                    // （別の窓）は閉じる（取り残さない）。オーバーレイで隠れている間は閉じない —
+                    // Inspector は別の窓なので覆わないし、パレットを開いただけで消えると困る。
+                    let shown =
+                        editor_area_shown && session_shown && tab_index == session.active_tab;
+                    web.update(cx, |web, cx| {
+                        web.set_surface_active(visible, false, cx);
+                        if !shown {
+                            web.close_devtools(cx);
+                        }
+                    });
                     continue;
                 }
                 if lang::language_for_path(&tab.path) != Some(lang::LanguageId::Html) {
@@ -2462,6 +2474,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_dialog_action))
             .on_action(cx.listener(Self::open_localhost_preview))
             .on_action(cx.listener(Self::toggle_design_mode))
+            .on_action(cx.listener(Self::toggle_web_inspector))
             .on_action(cx.listener(Self::open_html_in_web_tab))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
             .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))

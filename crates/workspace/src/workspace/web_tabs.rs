@@ -487,6 +487,23 @@ impl Workspace {
         }
     }
 
+    /// Web Inspector を開く / 閉じる（ツールバーの `</>`・パレット「プレビュー: Web Inspector を開く /
+    /// 閉じる」）。アクティブなタブが Web タブでなければ案内を出す。macOS は WebView の中に付けず別の窓で
+    /// 開く（necoder の UI を覆わない・`webview_view` の Web Inspector の注記）。
+    pub(crate) fn toggle_web_inspector(
+        &mut self,
+        _: &ToggleWebInspector,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.active_web_view(cx) else {
+            let color = self.accent();
+            self.push_toast(i18n::t!("webtab.devtools_needs_web_tab").into(), color, cx);
+            return;
+        };
+        view.update(cx, |view, cx| view.toggle_devtools(cx));
+    }
+
     /// Design Mode の知らせ。要素が選ばれた瞬間（`PickStarted`）に、その Web タブが居る session の
     /// アクティブなスレッドを宛先として控え、撮り終わったら（`ElementPicked`）**控えた宛先**の composer へ
     /// 切り抜き（画像の添付・チップ名は要素の呼び名）と説明の文章を足す。**送信はしない**。
@@ -693,7 +710,9 @@ impl Workspace {
     /// `picker:<入力>` = 入力欄を開いて文字を入れる（確定しない）/
     /// `viewport:<full|幅>` / `zoom:<+|-|0>` / `reload` / `eval:<式>` = ページで式を評価して結果を標準エラーへ /
     /// `menu` = タブの右クリックメニュー / `overlay` = ⌘⇧P（オーバーレイ中は WebView を隠す）/
-    /// `close-overlay` /
+    /// `close-overlay` / `devtools` = `</>` と同じ Web Inspector の開閉 /
+    /// `no-native` = 以後ネイティブの WebView を作らない（`devtools` の点灯を撮る時に、本物の Inspector の窓を
+    /// 画面に出さないため。最初の `open` より前に置く）/
     /// `state` = タブ列と WebView の状態を標準エラーへ。
     #[cfg(debug_assertions)]
     pub fn debug_web_preview_probe(
@@ -785,6 +804,10 @@ impl Workspace {
             }
             "overlay" => self.open_command_palette(&CommandPalette, window, cx),
             "close-overlay" => self.close_picker(window, cx),
+            "devtools" => self.toggle_web_inspector(&ToggleWebInspector, window, cx),
+            // テスト窓と同じ針（生成だけを止める）。offscreen の撮影でも Inspector は本物の窓を開くので、
+            // 点灯の見た目を撮る時はこれで WebView ごと作らない。
+            "no-native" => webview_view::disable_native_webviews_for_tests(),
             "state" => {
                 let tabs: Vec<String> = self
                     .tabs
@@ -798,6 +821,7 @@ impl Workspace {
                         web.current_url(cx),
                         web.tab_label(cx),
                         web.is_designing(),
+                        web.is_devtools_open(cx),
                         web.static_file().map(Path::to_path_buf),
                     )
                 });
@@ -1546,6 +1570,159 @@ mod tests {
             );
             stop_watchers(workspace);
         });
+    }
+
+    /// ツールバーの `</>` はパレットと同じ入口（action）で Web Inspector を開く / 閉じる。Web タブが
+    /// アクティブでなければ案内だけ出す。
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_inspector_button_opens_and_closes_the_web_inspector(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("inspector_button", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_url("http://localhost:5173/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            workspace.tabs[0].web().cloned().expect("Web タブ")
+        });
+        cx.run_until_parked();
+        let is_open = |cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, cx| view.is_devtools_open(cx))
+        };
+        assert!(!is_open(cx));
+        let button = cx
+            .debug_bounds("web-devtools")
+            .expect("Web タブのツールバーに `</>` が描かれている");
+        cx.simulate_mouse_down(button.center(), MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(is_open(cx), "押すと開く");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_web_inspector(&ToggleWebInspector, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!is_open(cx), "パレットの同じ action で閉じる");
+
+        // Web タブでないタブがアクティブなら案内だけ。
+        let file = fixture.project.join("a.txt");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file_sync(file, window, cx);
+            workspace.toggle_web_inspector(&ToggleWebInspector, window, cx);
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|toast| toast.text.as_ref() == i18n::t!("webtab.devtools_needs_web_tab")),
+                "Web タブが無ければ案内する"
+            );
+            stop_watchers(workspace);
+        });
+        assert!(!is_open(cx), "裏の Web タブの Inspector は開かない");
+    }
+
+    /// Web Inspector（別の窓）を取り残さない: 別のタブへ移る・Web タブを閉じると閉じる。オーバーレイ
+    /// （パレット）で WebView が隠れている間は閉じない（別の窓なので覆わない・開くたびに消えると困る）。
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_web_inspector_closes_when_its_tab_goes_away(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("inspector_tabs", cx);
+        let project = fixture.project.clone();
+        let file = fixture.project.join("a.txt");
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_file_sync(file, window, cx);
+            workspace.open_url("http://localhost:5173/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            assert_eq!(workspace.active_tab, 1, "Web タブが前に出る");
+            workspace.tabs[1].web().cloned().expect("Web タブ")
+        });
+        let is_open = |cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, cx| view.is_devtools_open(cx))
+        };
+        view.update(cx, |view, cx| view.toggle_devtools(cx));
+        cx.run_until_parked();
+        assert!(is_open(cx));
+
+        // ① パレットで隠れている間は閉じない。
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_command_palette(&CommandPalette, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            !view.read_with(cx, |view, cx| view.is_surface_active(cx)),
+            "WebView は隠れる"
+        );
+        assert!(is_open(cx), "オーバーレイでは Inspector を閉じない");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_picker(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(is_open(cx));
+
+        // ② 別のタブへ移ると閉じる（戻っても勝手には開き直さない）。
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_tab(0, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(!is_open(cx), "別のタブへ移ったら閉じる");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_tab(1, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(!is_open(cx));
+
+        // ③ Web タブを閉じると閉じる（view を他が握っていても）。
+        view.update(cx, |view, cx| view.toggle_devtools(cx));
+        cx.run_until_parked();
+        assert!(is_open(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_tab_at(1, window, cx);
+            stop_watchers(workspace);
+        });
+        cx.run_until_parked();
+        assert!(!is_open(cx), "タブを閉じたら閉じる");
+    }
+
+    /// Design を始める時は Web Inspector を閉じる（Design は Inspector を使わない）。GPUI 側にキーがある
+    /// 時の Esc でも閉じる。
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn design_and_escape_close_the_web_inspector(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("inspector_design", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_url("http://localhost:5173/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            workspace.tabs[0].web().cloned().expect("Web タブ")
+        });
+        let is_open = |cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, cx| view.is_devtools_open(cx))
+        };
+        view.update(cx, |view, cx| view.toggle_devtools(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_design_mode(&ToggleDesignMode, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!is_open(cx), "Design を始める時に閉じる");
+
+        view.update(cx, |view, cx| view.toggle_devtools(cx));
+        workspace.update_in(cx, |_workspace, window, cx| {
+            let handle = view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+        assert!(is_open(cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!is_open(cx), "Web タブにキーがある時の Esc で閉じる");
+        workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
     }
 
     /// パレットの入力欄は localhost しか通さない（任意の URL を開く欄にしない）。

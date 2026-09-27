@@ -291,6 +291,7 @@ cmd:
   split_right: "View: Split right"
   open_localhost_preview: "Preview: Open localhost…"
   toggle_design_mode: "Preview: Design mode (pick elements for the AI)"
+  toggle_web_inspector: "Preview: Open / close Web Inspector"
   open_html_in_web_tab: "Preview: Open HTML in a Web tab (for Design mode)"
   new_thread: "AI: New thread"
   new_thread_claude: "AI: New thread (Claude Code)"
@@ -1012,6 +1013,7 @@ webtab:
   viewport_tip: "Show at %{width}px wide"
   devtools_tip: Open Web Inspector (separate window)
   devtools_close_tip: Close Web Inspector
+  devtools_needs_web_tab: "Web Inspector works in a Web tab (for an HTML preview, right-click the page → Inspect Element)"
   open_browser_tip: Open in default browser
   unsupported: Web tabs aren't available here (macOS / Windows only)
   picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"
