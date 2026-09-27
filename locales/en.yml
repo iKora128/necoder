@@ -97,6 +97,8 @@ agent:
   attach_tip: Attach file as context
   compact: /compact
   compact_tip: Summarize and compact the context (/compact)
+  compact_queued_tip: "Running — /compact will be sent after this turn (queued)"
+  compact_none_tip: "No conversation yet"
   output_truncated: "… (%{n} lines hidden)"
   result_lines: "%{n} lines"
   file_write: "Write %{path}"
@@ -236,31 +238,61 @@ news:
   failed: "failed — %{detail}"
 captain:
   log: "Decision log"
-  tasks: "Tasks"
   human_gate: "Coordination only · Integration and approvals require a human"
   ledger_event: "Ledger event"
   title: Captain
-  appoint: Appoint a Captain (Settings › AI Agents)
+  appoint: "Not appointed — click to appoint"
+  appoint_tab: "Appoint a Captain"
+  tab_tip: "Go to the Captain (the coordinator living on main) · ⌘0"
+  appoint_title: "Appoint a Captain"
+  appoint_body: "The Captain is a coordinator that lives on main. Give it a goal and it splits the work into Tasks (worktrees), starts them, watches for done / failed / waiting, and reports back. It never writes code itself. Any agent can serve, and you can replace or dismiss it later in Settings."
+  appoint_no_agent: "No agent is available. Sign in under Settings → Agents."
+  log_empty: "No decisions yet. Give the Captain a goal and its decisions will be listed here."
   role: |
     You are the Captain of the necoder fleet.
-    Role: read the situation, decide the next move, and direct the fleet through the fleet CLI. When a human hands you a goal, split it into Tasks and start them.
-    Discipline: never write code, edit files, or do the work yourself (direct and delegate only). Even a single piece of work goes to a Task you create. Final approval for integrate belongs to a human — you go as far as checking the radar with `fleet review` and proposing.
-
-    Tools (run in the shell):
-    %{exe} fleet create . <title>   — create a Task (makes a worktree and branch; use the id it prints)
-    %{exe} fleet list .              — Tasks in this repository
-    %{exe} fleet digest <id>        — a Task's facts and digest (what it is doing right now)
-    %{exe} fleet events [since-id]  — ledger event diff
-    %{exe} fleet spawn-agent <id> [agent] [prompt...] — start an agent on a Task
-    %{exe} fleet send <id> <message...>               — follow-up instruction
-    %{exe} fleet status <id> <phase> [summary]        — report a phase transition
-    %{exe} fleet wait <id> <phase|activity> [seconds] — wait (phase=ledger / activity=live)
-    %{exe} fleet depend <id> <on...> / wait-deps <id> <phase> — declare and await dependencies
-    %{exe} fleet review <id>        — Conflict Radar (to merge_ready / changes_requested)
-
-    Start by reading the situation with `%{exe} fleet list .` and `digest`, run only the moves that are needed, and close with a 1-3 line summary of your judgement. If nothing needs doing, answer with just: standing by.
+    Role: read the situation, decide the next move, and direct the fleet with the fleet tools of the MCP server necoder. When a human hands you a goal, split it into Tasks and propose them.
+    Discipline:
+    - Never write code, edit files, or use the shell yourself. necoder refuses them in this seat.
+    - Propose new Tasks with fleet_propose_tasks. necoder creates branches and worktrees only for what the human approves. The approval or rejection arrives with the next update, so end this turn without waiting.
+    - For an approved Task, necoder starts the agent and sends the goal and done condition as its first instruction. Do not start it again (the Task would get two agents).
+    - Give every proposed row a goal and a done condition. Merge work whose areas overlap into one Task. Even a single piece of work becomes a Task you delegate.
+    - Following up on an existing Task (fleet_send) and adding an agent to it (fleet_spawn_agent) need no confirmation.
+    - Agents report their own phase; you never rewrite it. Integration belongs to the human — you go as far as checking the radar with fleet_review_task and proposing.
+    How to proceed: first read the situation with fleet_list_tasks and fleet_digest, make only the moves that are needed, and close with a 1-3 line summary of your judgement. If nothing needs doing, answer with just: standing by.
   facts: "Current state (Tasks in this repository · id | name | phase | digest):"
-  event: "Event: [%{event}] %{title}%{digest}"
+  recent: "Recent decisions (oldest first):"
+  wake_header: "New ledger events since last time (#seq Task-id title: what happened):"
+  wake_omitted: "(%{n} older events left out — read them with fleet_events)"
+  line_created: "Task created"
+  line_human_send: "the human instructed directly: “%{text}”"
+  line_approved: "proposal approved — necoder created the Tasks and started their agents (first instructions already sent). Created: %{approved} / left out: %{skipped}"
+  line_rejected: "proposal rejected (nothing was created)"
+  rotated: "── Conversation rotated. Continuing in a fresh conversation (the state and recent decisions come in the preamble)"
+  retired_name: "Captain (%{agent} · before the change)"
+  seat_denied: "⚑ Not allowed in the Captain seat, refused:"
+  seat_violation: "⚑ Edited without asking in the Captain seat, stopped:"
+  seat_violation_news: "Stopped an unapproved edit in the Captain seat (%{tool})"
+  proposal_title: "⚑ Captain's split · %{n} Tasks"
+  proposal_goal: "Goal: %{text}"
+  proposal_done_when: "Done when: %{text}"
+  proposal_scope: "Scope: %{text}"
+  proposal_approve: "Approve (create %{n})"
+  proposal_reject: "Reject"
+  proposal_pending_reply: "Waiting for the human's approval. Once approved, necoder creates the Tasks, starts their agents and sends their first instructions (you do not start them). The result arrives with the next update, so end this turn without waiting."
+  proposal_err_tasks: "List at least one Task in tasks (title / goal / done_when are required)"
+  proposal_err_too_many: "A proposal holds at most %{max} Tasks. Splitting too finely slows work down through sequential dependencies, so combine them"
+  proposal_err_field: "Row %{row} is missing %{field} (title / goal / done_when are required)"
+  proposal_err_agent: "Row %{row}: agent %{agent} is not available (available: %{known})"
+  proposal_err_no_integration: "The integration space (the main worktree) is not open, so the proposal cannot be handled"
+  proposal_err_resolve: "Could not resolve the proposal: %{detail}"
+  facts_proposal: "%{n} Tasks proposed by the Captain await approval"
+  delegation: |
+    %{title}
+
+    Goal: %{goal}
+    Done when: %{done_when}
+    When the done condition holds, finish by summarizing what you changed in 3 sentences.
+  delegation_scope: "Scope: %{scope}"
 fleet:
   new_task_worktree: "worktree: %{path}"
   new_task_setup_ready: "Setup script ✓ .necoder/worktree-setup.sh"
@@ -282,8 +314,14 @@ fleet:
   tab_diff: "Changes"
   tab_terminal: "Terminal"
   tab_files: "Files"
-  tab_add_thread: "+ Thread"
-  tab_add_terminal: "+ Terminal"
+  tab_add_thread: "Add a conversation (same worktree)"
+  tab_add_terminal: "Add a terminal"
+  side_tip: "Open beside the conversation (press again to close)"
+  diff_empty: "No changes from the base"
+  diff_files: "%{count} files"
+  tab_close_thread: "Close this conversation (⌘⇧T to restore)"
+  side_close: "Close"
+  files_hint: "Click to open in Editor"
   tasks_count: "%{n} Tasks"
   integration_row: "Integration · protected"
   integration_sub: "%{branched} branched · %{integrated} integrated today"
@@ -300,11 +338,12 @@ fleet:
   stage_two: Stage 2 columns
   stage_three: Stage 3 columns
   lineage: Lineage
+  formation: "Formation"
+  formation_tip: "Open / close the formation on the bridge (⌘⇧G)"
   graph_fan: Fan
   graph_tree: Tree
   graph_card: Card
   graph_hub: Hub
-  graph_collapse: Toggle graph
   graph_main: main
   graph_main_sub: IntegrationSpace
   graph_tree_caption: "base ・ %{count} agents running"
@@ -376,6 +415,8 @@ rail:
   fleet: Fleet mode
   git: Source control  ⌃⇧G
   todos: Todo board
+  threads: AI threads (all projects)
+  fleet_sidebar: Fleet sidebar (Tasks)
   agent: Toggle AI agent panel
   terminal: Terminal  ⌘J
   remote: Remote SSH
@@ -461,6 +502,9 @@ settings:
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
+  pref_tabs_position: Default tab position
+  tabs_position_top: Top
+  tabs_position_left: Left
   appearance_heading: Appearance
   appearance_sub: Themes apply the moment you click and are saved to settings.json.
   theme_label: Theme
@@ -849,47 +893,6 @@ key:
   hide_others: Hide others
   activate_project: Switch to project (rail order)
   quit: Quit necoder
-work:
-  repositories: Repositories / work
-  open_beside: Open beside
-  terminal: Terminal
-  agent: Agent
-  diff: Changes
-  add_worktree: ＋ Add worktree
-  add_worktree_tip: Open a worktree or create one from a branch
-  choose_worktree: Choose a worktree or type a new branch name
-  create_existing: Create a worktree for this branch
-  create_branch: Create worktree from current HEAD
-  empty: Choose a worktree from the sidebar to open it here
-  empty_pane: Use ＋ to open an agent, terminal, or file
-  unavailable: This worktree is not open. Reopen it from the sidebar.
-  columns: Columns
-  grid: Grid
-  toggle_layout: Switch between columns and grid
-  restore: Restore layout
-  close_column: Hide column (sessions keep running)
-  close_pane: Close pane (move tabs to the adjacent pane)
-  pane_menu: Add a tab or arrange this pane
-  terminal_stopped: Terminal is not running. Restoring a layout does not restart commands.
-  start_terminal: Start shell
-  open_file: Open file…
-  new_thread: New thread
-  new_terminal: New terminal
-  move_terminal: Move dock terminal here
-  split: Split below with a terminal
-  tabs_top: Tabs at top
-  tabs_left: Tabs on left
-  focus: Focus / restore pane
-  move_left: Move column left
-  move_right: Move column right
-  tab_previous: Move tab earlier
-  tab_next: Move tab later
-  hide_tab: Hide tab (keep session)
-  return_terminal: Move terminal to dock
-  stop_terminal: End terminal session
-  tabs_setting: Default tab position
-  top: Top
-  left: Left
 chat:
   destination: Chat
   new_chat: New chat

@@ -161,6 +161,51 @@ mod tests {
         let _ = std::fs::remove_file(settings_path);
     }
 
+    /// `/compact` は**いつでも**押せる: 弁が止めた後も（次の送信が `session/load` で引き継ぐ）、実行中も
+    /// （キューに積んでターン完了後に送る・二重には積まない）、トークン数を報告しないエージェントでも。
+    /// 押せないのは、送る先の会話が無い（id も送信路も無い＝一度も起こしていない）スレッドだけ。
+    #[gpui::test]
+    fn compact_is_always_available_once_a_conversation_exists(cx: &mut gpui::TestAppContext) {
+        let settings_path = settings_for_test(cx, "compact");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let long_ago = now_unix_ms() - 60 * 60_000;
+            let quiet = live_thread("quiet", long_ago);
+            let mut running = live_thread("running", long_ago);
+            running.running = true;
+            let mut no_usage = live_thread("no-usage", long_ago);
+            no_usage.tokens_used = 0;
+            let never_started = Thread::empty("never-started".to_string(), 0);
+            panel.threads = vec![quiet, running, no_usage, never_started];
+            panel.active = 0;
+
+            assert!(panel.threads[0].can_compact());
+            assert_eq!(panel.stop_idle_agents(cx), 2);
+            assert!(panel.threads[0].command_tx.is_none(), "弁が止めた");
+            assert!(
+                panel.threads[0].can_compact(),
+                "止めても id が残る＝次の送信が引き継ぐので /compact は出したまま"
+            );
+            assert!(panel.threads[2].can_compact(), "使用量を報告しないエージェントでも出す");
+            assert!(
+                !panel.threads[3].can_compact(),
+                "送信路も id も無い（一度も起こしていない）スレッドには出さない"
+            );
+
+            // 実行中に押すとキューへ（composer の送信と同じ）。2 度押しても 1 つ。
+            panel.active = 1;
+            assert!(panel.threads[1].can_compact(), "実行中でも押せる");
+            panel.compact_context(cx);
+            panel.compact_context(cx);
+            assert_eq!(
+                panel.threads[1].queued_prompts,
+                vec!["/compact".to_string()],
+                "実行中の /compact はターン完了後に送るキューへ・二重には積まない"
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
     #[gpui::test]
     fn zero_minutes_turns_the_valve_off(cx: &mut gpui::TestAppContext) {
         let path = std::env::temp_dir().join(format!(

@@ -79,6 +79,65 @@ impl SessionPreset {
     }
 }
 
+/// 決まった MCP サーバ**だけ**を持たせるセッションにする（FLEET-V2 §5.8・Captain の席）。
+/// 「他の MCP を持ち込ませない」やり方がエージェントごとに違うので、その違いをここに閉じ込める
+/// （agent_panel の席と、実機プローブ `probe_captain_seat` が同じ関数を使う＝試したものが本番になる）。
+///
+/// - **Codex**: codex-acp は Codex 自身の設定（`~/.codex/config.toml`）の MCP サーバをそのまま立ち上げ、
+///   ACP で渡したサーバは `mcp_servers` に丸ごと差し込む（同じキーに置いた「止める」指定は上書きで消える）。
+///   だから ACP の `mcpServers` は空にし、`CODEX_CONFIG` で「持たせるサーバ」と「止めるサーバ
+///   （`codex_servers` の名前・`enabled = false`）」を一緒に渡す。持たせるサーバは
+///   `default_tools_approval_mode = "approve"`（席の道具は necoder がもう選んである）。
+///   2026-09-25 に偽のサーバで確認: 塞ぐ前は起動され、塞いだ後は起動されず、necoder の道具は使えた。
+/// - **Claude Code**: `mcpServers` で渡し、`strict_mcp`（`.mcp.json`・ユーザー設定・プラグインの MCP を無視）+
+///   `setting_sources` を空（`~/.claude` の追加指示・hooks・**許可ルール**を持ち込まない＝Bash を黙って通す
+///   ルールがあっても効かない）+ claude.ai のコネクタを止める環境変数。組み込みの道具は絞らない
+///   （MCP の道具を読み込む `ToolSearch` まで消えうるので。書く道具と shell は権限の問いで断る）。
+/// - その他: `mcpServers` で渡すだけ（持ち込みの止め方が分からない）。
+pub fn restrict_mcp_to(
+    preferences: &mut crate::SessionPreferences,
+    agent_id: &str,
+    servers: Vec<crate::mcp::McpServerConfig>,
+    codex_servers: &[String],
+) {
+    match agent_id {
+        "codex" => {
+            let mut table = serde_json::Map::new();
+            for name in codex_servers {
+                table.insert(name.clone(), serde_json::json!({ "enabled": false }));
+            }
+            for server in &servers {
+                if let crate::mcp::McpTransport::Stdio { command, args, env } = &server.transport {
+                    table.insert(
+                        server.name.clone(),
+                        serde_json::json!({
+                            "command": command,
+                            "args": args,
+                            "env": env,
+                            "default_tools_approval_mode": "approve",
+                        }),
+                    );
+                }
+            }
+            preferences.mcp_servers = Vec::new();
+            preferences.preset.env.insert(
+                "CODEX_CONFIG".to_string(),
+                serde_json::json!({ "mcp_servers": table }).to_string(),
+            );
+        }
+        "claude" => {
+            preferences.mcp_servers = servers;
+            preferences.preset.strict_mcp = true;
+            preferences.preset.setting_sources = Some(Vec::new());
+            preferences.preset.env.insert(
+                "ENABLE_CLAUDEAI_MCP_SERVERS".to_string(),
+                "false".to_string(),
+            );
+        }
+        _ => preferences.mcp_servers = servers,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +184,52 @@ mod tests {
             meta,
             serde_json::json!({ "claudeCode": { "options": { "tools": [] } } })
         );
+    }
+
+    fn necoder_server() -> crate::mcp::McpServerConfig {
+        crate::mcp::McpServerConfig {
+            name: "necoder".to_string(),
+            source: crate::mcp::McpSource::Necoder,
+            enabled: true,
+            transport: crate::mcp::McpTransport::Stdio {
+                command: "/Applications/necoder.app/Contents/MacOS/necoder".to_string(),
+                args: vec!["mcp".to_string(), "--captain".to_string(), "/repo".to_string()],
+                env: BTreeMap::new(),
+            },
+        }
+    }
+
+    /// Codex は Codex 自身の設定の MCP サーバを立ち上げるので、席では止めて necoder の分と一緒に
+    /// `CODEX_CONFIG` で渡す（ACP の mcpServers に入れると「止める」指定が上書きで消える）。
+    #[test]
+    fn a_codex_seat_turns_off_its_own_servers_and_carries_necoder_in_codex_config() {
+        let mut preferences = crate::SessionPreferences::default();
+        restrict_mcp_to(
+            &mut preferences,
+            "codex",
+            vec![necoder_server()],
+            &["computer-use".to_string(), "node_repl".to_string()],
+        );
+        assert!(preferences.mcp_servers.is_empty());
+        let config: serde_json::Value =
+            serde_json::from_str(&preferences.preset.env["CODEX_CONFIG"]).unwrap();
+        assert_eq!(config["mcp_servers"]["computer-use"]["enabled"], false);
+        assert_eq!(config["mcp_servers"]["node_repl"]["enabled"], false);
+        assert_eq!(config["mcp_servers"]["necoder"]["args"][1], "--captain");
+        assert_eq!(config["mcp_servers"]["necoder"]["default_tools_approval_mode"], "approve");
+    }
+
+    /// Claude Code は mcpServers で渡し、他の MCP・ユーザー設定（許可ルール含む）・claude.ai のコネクタを閉じる。
+    /// 組み込みの道具は絞らない（ToolSearch まで消えうる）。
+    #[test]
+    fn a_claude_seat_is_strict_about_mcp_and_settings() {
+        let mut preferences = crate::SessionPreferences::default();
+        restrict_mcp_to(&mut preferences, "claude", vec![necoder_server()], &["x".to_string()]);
+        assert_eq!(preferences.mcp_servers, vec![necoder_server()]);
+        assert!(preferences.preset.strict_mcp);
+        assert_eq!(preferences.preset.setting_sources, Some(Vec::new()));
+        assert_eq!(preferences.preset.tools, None, "組み込みの道具は絞らない");
+        assert_eq!(preferences.preset.env["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
+        assert!(!preferences.preset.env.contains_key("CODEX_CONFIG"));
     }
 }

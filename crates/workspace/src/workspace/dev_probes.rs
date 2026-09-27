@@ -199,6 +199,8 @@ impl Workspace {
     /// 開発用: 編隊の片付け UI を offscreen で検証する（2026-07-27）。
     /// `menu` = セル 0 の ⋯ メニューを開く / `terminal` = 下段をターミナルタブへ /
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
+    /// 画面の組み立て（`;` 区切り）: `graph` / `formation` / `task:<n>` / `side:<diff|terminal|files>` /
+    /// `columns:<n>` / `pin` / `captain`。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -207,11 +209,133 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `;` 区切りで順に実行する（`graph;task:1;side:diff` のように 1 回の起動で画面を組み立てる）。
+        if command.contains(';') {
+            for part in command.split(';').filter(|part| !part.is_empty()) {
+                self.debug_fleet_probe(part, window, cx);
+            }
+            return;
+        }
+        let (command, argument) = command.split_once(':').unwrap_or((command, ""));
         match command {
+            // ブリッジの編隊図を開く / 閉じる（`NECODER_GRAPH=hub|tree|card` で表示を選ぶ）。
+            "formation" => self.toggle_formation(window, cx),
+            // n 本目の Task（統合先を除く・1 始まり）を舞台の選択にする。
+            "task" => {
+                let wanted = argument.parse::<usize>().unwrap_or(1).max(1);
+                let target = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| !slot.task_space.is_integration())
+                    .nth(wanted - 1)
+                    .map(|(index, _)| index);
+                if let Some(index) = target {
+                    self.switch_project(index, window, cx);
+                }
+            }
+            // 選択中の Task のサイドペインを開く（diff / terminal / files・それ以外は閉じる）。
+            "side" => {
+                let index = self.project_sessions.active;
+                let space = self.project_sessions.projects[index].task_space.id.clone();
+                match argument {
+                    "diff" => {
+                        self.refresh_git_status_for(index, cx);
+                        self.set_stage_side(index, Some(FleetPane::Diff { space }), cx);
+                    }
+                    "files" => self.set_stage_side(index, Some(FleetPane::Editor { space }), cx),
+                    "terminal" => self.add_terminal_to_selected_task(cx),
+                    _ => self.set_stage_side(index, None, cx),
+                }
+            }
+            "columns" => {
+                self.chrome.stage_columns = argument.parse::<usize>().unwrap_or(1).clamp(1, 3);
+                cx.notify();
+            }
+            "pin" => {
+                let index = self.project_sessions.active;
+                let space = self.project_sessions.projects[index].task_space.id.clone();
+                self.toggle_stage_pin(space, cx);
+            }
+            "captain" => self.focus_captain(&FocusCaptain, window, cx),
+            // Captain の分解案を 1 件、要対応に仕込む（FLEET-V2 §5.5 のカードの見た目・DB には書かない）。
+            // `proposal:<n>` で行数（既定 2・2 行目は印を外した状態）。
+            "proposal" => {
+                let rows = argument.parse::<usize>().unwrap_or(2).clamp(1, MAX_PROPOSED_TASKS);
+                let Some(integration) = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| slot.task_space.is_integration())
+                else {
+                    return;
+                };
+                let samples = [
+                    ("rope に置き換える", "buffer を rope に置き換え、undo を Transaction 単位にする", "cargo test -p editor_core が通る", Some("crates/editor_core"), Some("Claude Code")),
+                    ("README の誤字", "Calcurator を Calculator に直す", "grep で Calcurator が 0 件", Some("README.md"), Some("Codex")),
+                    ("割り算を足す", "calc.py に divide を足す（0 で割ったら ValueError）", "pytest が通る", None, None),
+                ];
+                let tasks: Vec<ProposedTask> = samples
+                    .iter()
+                    .cycle()
+                    .take(rows)
+                    .map(|(title, goal, done_when, scope, agent)| ProposedTask {
+                        title: title.to_string(),
+                        goal: goal.to_string(),
+                        done_when: done_when.to_string(),
+                        scope: scope.map(str::to_string),
+                        agent: agent.map(str::to_string),
+                    })
+                    .collect();
+                let mut selected = vec![true; tasks.len()];
+                if let Some(second) = selected.get_mut(1) {
+                    *second = false;
+                }
+                let slot = &self.project_sessions.projects[integration];
+                let record = storage::CaptainProposalRecord {
+                    id: new_proposal_id(),
+                    repository_id: slot.repository_key().to_string(),
+                    root: slot.worktree.root().to_path_buf(),
+                    note: Some("実装とテストは 1 本に束ねた。README は触る範囲が重ならないので別立て。".to_string()),
+                    tasks: serde_json::to_string(&tasks).unwrap_or_default(),
+                    status: storage::ProposalStatus::Pending,
+                    outcome: None,
+                    created_at: 0,
+                    resolved_at: None,
+                };
+                self.add_captain_proposal(
+                    super::captain_proposals::CaptainProposal {
+                        record,
+                        tasks,
+                        selected,
+                    },
+                    cx,
+                );
+            }
+            // 1 本目の Task に ⚑ 帰属を付ける（分解案の承認で作られた Task の行の見た目）。
+            "origin" => {
+                if let Some(slot) = self
+                    .project_sessions
+                    .projects
+                    .iter_mut()
+                    .find(|slot| !slot.task_space.is_integration())
+                {
+                    slot.task_space.captain_origin = true;
+                    cx.notify();
+                }
+            }
+            // Fleet から Editor へ戻る（titlebar の `Editor` と同じ道）。戻った後の左カラムを撮る用。
+            "editor" => {
+                if self.chrome.fleet_mode {
+                    self.toggle_fleet_mode(&ToggleFleet, window, cx);
+                }
+            }
+            // レールの「AI スレッド一覧」を押す（左カラムの herd ⇄ エクスプローラ）。
+            "threads" => self.toggle_herd_sidebar(cx),
             "menu" => self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx),
             // セル 0 を拡大してヘッダのタイトルを改名開始（Cell site で入力欄が出る／herd と二重描画しない）。
             "rename" => {
-                self.chrome.fleet_center_view = FleetCenterView::Graph;
                 self.seed_fleet_cells(cx);
                 if let Some(index) = self
                     .project_sessions
@@ -226,17 +350,13 @@ impl Workspace {
             // 中央をグリッド（系譜グラフ面）にして Task セルを seed する。CONTROL_PROBE の 5 slot が
             // セルヘッダで並ぶ（改名ダブルクリック・🗑 削除の描画検証用）。herd も左に出す。
             "graph" => {
-                self.chrome.fleet_center_view = FleetCenterView::Graph;
                 self.chrome.show_left = true;
                 self.chrome.show_herd = true;
                 self.seed_fleet_cells(cx);
-                // 系譜グラフを畳んでグリッドを主に（各セルヘッダの改名/🗑 を大きく撮る）。
-                self.chrome.graph_collapsed = true;
                 cx.notify();
             }
             // セルを 1 枚拡大（セルヘッダを最大サイズで撮る＝改名ダブルクリック/🗑 の確認）。
             "maximize" => {
-                self.chrome.fleet_center_view = FleetCenterView::Graph;
                 self.seed_fleet_cells(cx);
                 self.chrome.stage_columns = 1;
                 cx.notify();

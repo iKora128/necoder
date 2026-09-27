@@ -246,33 +246,21 @@ composer 下のピルは最初の送信まで空で押せない（0.1.14 の実�
 - **定期ポーリングはしない**。一覧の変化はセッション中に `ConfigOptionUpdate` で push される
 - `settings.agent_prewarm`（既定 on）で off にできる＝ idle メモリを優先する選択肢を残す
 
-### 7.4 作業面（Fleet の机）は「配置」しか持たない（2026-09-11）
+### 7.4 Fleet の描画の持ち場（作業面は 2026-09-20 に削除）
 
-Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs`・UI-SPEC §6.1）は、リポジトリ 1 つを
-机として開き、その worktree を列で並べる面。**2026-09-11 に既定から降格**し（実機で従来のグリッドより
-取り回しが悪かった・ROADMAP 参照）、**2026-09-16（FLEET-V2 F3）で中央タブ帯ごと描画経路から外れた**。
-コードは F7 で削除する（`work_layout.allocate()` が Task 内ターミナルの ID 割当に使われているので、
-それを移してから消す）。Fleet の描画は `fleet_view.rs`（枠・系譜・下段）+ `fleet_stage.rs`（舞台 / Task
-カード / Task タブ / 系譜の帯）+ `fleet_sidebar.rs`（Task 一覧・要対応・Captain バー）+ `new_task_dialog.rs`
-（＋Task）+ `captain.rs`（Captain カード・wake）の 5 枚。以下は削除までの間の境界:
+Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs` / `work_layout.rs`）は 2026-09-11 に既定から降格、
+2026-09-16（FLEET-V2 F3）で描画経路から外れ、**2026-09-20（F7）でコードごと削除した**。残したのは 2 点だけ:
 
-**`work_layout` は「どこに何を置いたか」しか持たない。** 会話・PTY・バッファの寿命は既存の
-`ProjectSession`（`agent_panel` / `terminal_dock` / `tabs`）が所有し続ける。
+- **端末の名札**: Task 内ターミナル（`FleetPane::Shell { id }`）の `id` は necoder が採番する名札で、PTY そのものではない。
+  `TerminalDock` が `detached: BTreeMap<u64, Entity<TerminalView>>` で名札 → 実体を持つ。採番は
+  `chrome.next_terminal_id`（プロセス内で単調増加・閉じた番号を使い回さない）。PTY は再起動を越えないので保存しない。
+- **窓の状態の復元**: `Workspace::restore_window_state`（`persisted_state` の対）。Fleet / Chat のどちらで閉じたか・
+  左ドック幅だけを戻す。保存形式から `work_layout` / `fleet_view` は外した（旧 payload の余分なキーは serde が無視する）。
 
-- 型は `work_layout.rs` に閉じる（`WorkLayoutState` → repository → `RepositoryLayout` → `WorkColumn`
-  → `WorkPane` → `WorkSurface`）。**全部 serde 可能な値**で、Entity も `SpaceId` 以外の参照も持たない。
-  だから窓セッション（`PersistedState::work_layout`）へそのまま載る
-- `WorkSurface::Terminal { id }` の `id` は **necoder が採番した端末の名札**で、PTY そのものではない。
-  `TerminalDock` が `detached: BTreeMap<u64, Entity<TerminalView>>` で名札 → 実体を持ち、作業面は
-  名札しか書かない。だから**配置の復元でシェルは起動しない**（停止中は「シェルを起動」を出す）し、
-  下ドック ⇄ 作業面の往復（`detach_active` / `attach_session`）で**同じ Entity が動く**＝走っている
-  プロセスも履歴も失われない
-- 列を閉じる = `hidden` へ退避（捨てない）。同じ worktree をまた開いたらタブ配置ごと戻る
-- **同じ Entity を 1 フレームに 2 回描かない**のが配置側の責任。`reveal` は既に居る面を探してから
-  足し、`sanitize` は 1 列の中で面の重複を落とす。だから Agent 面は 1 列に 1 つで、
-  「どのスレッドを映すか」は `AgentPanel` 側の active（作業ツリーが `focus_thread` で動かす）
-- 復元時に repository ID がまだ解決していない場合があるので、`ensure_work_layout` が
-  Space ID で作った仮の机を引き継ぐ（キーの張り替え 1 箇所に閉じ込める）
+Fleet の描画は `fleet_view.rs`（枠・系譜ヘッダ・編隊図の 4 表示・下段）+ `fleet_stage.rs`（舞台 / Task カード /
+ペインバー / サイドペイン / ブリッジ）+ `fleet_sidebar.rs`（Task 一覧・要対応・Captain バー）+ `new_task_dialog.rs`
+（＋Task）+ `captain.rs`（wake・任命の面・采配ログ）の 5 枚。**同じ Entity を 1 フレームに 2 回描かない**のは舞台側の責任
+（1 Task = 1 カード・会話ペインは 1 枚・`AgentPanel` の自前タブ行は `sync_embedded_panels` が Fleet 中だけ畳む）。
 
 ### 7.5 1 worktree に ACP は何本でも（Fleet グリッドの既定・2026-09-11）
 
@@ -283,7 +271,7 @@ Fleet 中央の既定（系譜グラフ＋セルのグリッド・UI-SPEC §6.1�
 `fleet_agents: Vec<Entity<AgentPanel>>` が全パネル（先頭 = その worktree を開いたときの初期パネル）を
 持ち、`agent_panel` は**いま操作している 1 枚**を指すだけの別名。`FleetPane::Agent { space, panel }` /
 `Shell { space, id }` はセル側の見え方で、**セルを閉じても実体は消えない**（会話も PTY も走り続け、
-herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さない。端末は §7.4 と同じ名札方式
+herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さない。端末は §7.4 の名札方式
 （`TerminalDock` が `id` → Entity を持つ）。
 
 **② 横断で読むときは `ProjectSession::agent_statuses` を通す。**

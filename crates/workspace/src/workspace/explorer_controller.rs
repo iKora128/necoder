@@ -1159,7 +1159,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_work_file(path.clone(), cx);
         // 読み込み中に同じファイルが開かれていたら切り替えるだけ。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
@@ -1331,17 +1330,28 @@ impl Workspace {
                 })
                 .collect(),
             active: self.project_sessions.active,
-            work_layout: self.chrome.work_layout.clone(),
             fleet_mode: self.chrome.fleet_mode,
             chat_mode: self.chat_mode(),
             chat_active: self.chrome.chat_shown.clone(),
             left_dock_width: self.chrome.explorer_width,
-            fleet_view: match self.chrome.fleet_center_view {
-                FleetCenterView::Work => "work",
-                FleetCenterView::Graph => "graph",
-            }
-            .to_string(),
         }
+    }
+
+    /// 窓セッションの payload から「面」の状態（Fleet / Chat・左ドック幅）を戻す。プロジェクト列とタブ列は
+    /// 起動時に別経路（`SavedProject`）で戻すので、ここは [`Self::persisted_state`] の残りの対。
+    pub fn restore_window_state(&mut self, payload: &str, cx: &mut Context<Self>) {
+        let Ok(saved) = serde_json::from_str::<PersistedState>(payload) else {
+            return;
+        };
+        self.chrome.fleet_mode = saved.fleet_mode && !saved.chat_mode;
+        // Chat へ入るには window が要る（フォーカスの付け直し）ので、次の描画で消化する。
+        self.chrome.pending_chat_mode = saved.chat_mode;
+        self.chrome.chat_restore = saved.chat_active;
+        if saved.left_dock_width >= 160.0 {
+            self.chrome.explorer_width = saved.left_dock_width.min(720.0);
+        }
+        self.chrome.show_herd |= saved.fleet_mode;
+        cx.notify();
     }
 
     /// 終了直前は background task に任せず、現時点の Workspace 列とタブ列を DB へ同期保存する。

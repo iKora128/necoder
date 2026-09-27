@@ -6,6 +6,7 @@
 //!
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
+mod install;
 pub mod mcp;
 pub mod preset;
 pub mod registry;
@@ -71,7 +72,7 @@ pub struct ConfigOption {
 }
 
 /// 権限リクエストに含まれるファイル編集の差分（accept/reject の diff レビュー用）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PermissionDiff {
     pub path: String,
     /// 変更前の内容（新規ファイルなら `None`）。
@@ -199,6 +200,12 @@ pub enum AgentEvent {
         /// 「何が実行されるか」を必ず可視化する（tool poisoning 対策・ACP #1979 / GHSA-f2g4）。
         raw_input: Option<String>,
         options: Vec<PermissionChoice>,
+        /// 許可を求めている道具の呼び出しの id（先に届いた `ToolStarted` と同じ）。題名の無い要求
+        /// （codex-acp の MCP の承認）は、これで先の呼び出しの題名を引く。
+        tool_call_id: String,
+        /// MCP の道具の呼び出しへの承認か（[`is_mcp_tool_request`]）。codex-acp はこれを種別「実行」で
+        /// 送ってくるので、種別だけでは shell と見分けられない。
+        mcp_tool: bool,
         respond: mpsc::UnboundedSender<usize>,
     },
     /// エージェントの実行プラン全量（`SessionUpdate::Plan`）。UI は常設チェックリストへ置換反映する。
@@ -292,6 +299,7 @@ enum TurnEvent {
 
 /// ACP エージェント（claude-agent-acp）の起動設定。
 pub struct AgentCommand {
+    managed_npm: Option<(String, String)>,
     pub path: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
@@ -308,6 +316,7 @@ impl AgentCommand {
     /// env 無しで組む（既存経路の短縮形）。
     fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
         Self {
+            managed_npm: None,
             path,
             args,
             cwd,
@@ -344,7 +353,7 @@ pub struct AgentKind {
     /// （necoder が検証した版。npm 外＝kimi は None）。
     package: Option<&'static str>,
     extra_args: &'static [&'static str],
-    /// セットアップ画面の「入れ方」でターミナルに流す導入コマンド（vendor の CLI 本体を入れる）。
+    /// セットアップ画面の「入れ方」で流す導入コマンド（CLI 本体と必要な ACP アダプタ）。
     pub install_cmd: &'static str,
     /// セットアップ画面の「ログイン」でターミナルに流す認証コマンド（vendor 自身のログイン導線）。
     /// necoder は鍵を持たず、CLI 側の認証にそのまま乗る（Zed の ACP と同じ流儀）。
@@ -381,7 +390,7 @@ pub const AGENTS: &[AgentKind] = &[
         registry_id: Some("claude-acp"),
         package: Some("@agentclientprotocol/claude-agent-acp@0.73.0"),
         extra_args: &[],
-        install_cmd: "npm i -g @anthropic-ai/claude-code",
+        install_cmd: "npm i -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp",
         login_cmd: "claude auth login",
         icon: Some("icons/brand-claude.svg"),
         brand_color: 0xd9_77_57,
@@ -395,7 +404,7 @@ pub const AGENTS: &[AgentKind] = &[
         registry_id: Some("codex-acp"),
         package: Some("@agentclientprotocol/codex-acp@1.8.0"),
         extra_args: &[],
-        install_cmd: "npm i -g @openai/codex",
+        install_cmd: "npm i -g @openai/codex @agentclientprotocol/codex-acp",
         login_cmd: "codex login",
         icon: None,
         brand_color: 0x10_a3_7f,
@@ -697,6 +706,18 @@ impl AgentKind {
             .and_then(|id| registry.and_then(|reg| reg.agent(id)))
         {
             if let Some(registry::Launch::Npx(npx)) = entry.launch() {
+                if npx.args.is_empty() {
+                    if let Some(mut resolved) = install::cached_command(
+                        &npx.package,
+                        self.bin,
+                        self.extra_args.iter().map(|arg| arg.to_string()).collect(),
+                        cwd.clone(),
+                    ) {
+                        resolved.env = npx.env.clone();
+                        resolved.env.extend(settings_env);
+                        return Some(resolved);
+                    }
+                }
                 // 同じ版が npx のキャッシュに在れば直接起こす（`npm exec` の親プロセスを持たない）。
                 // レジストリの起動引数が付いている時は npx の解釈に任せる（取り違えない）。
                 let cached = npm_npx_cache_root()
@@ -720,6 +741,9 @@ impl AgentKind {
                     let mut resolved = AgentCommand::new(npx_path, args, cwd);
                     resolved.env = npx.env.clone();
                     resolved.env.extend(settings_env);
+                    if npx.args.is_empty() {
+                        resolved.managed_npm = Some((npx.package.clone(), self.bin.to_string()));
+                    }
                     return Some(resolved);
                 }
             }
@@ -732,7 +756,7 @@ impl AgentKind {
     }
 
     /// このエージェントの起動コマンドを解決する（組み込みカタログのみ）。
-    /// 探索順: (1) PATH の単体バイナリ → (2) Zed の npx キャッシュ(.bin) → (3) `npx <package> <args>`。
+    /// 探索順: PATH → necoder の管理導入 → 既存 npm キャッシュ → 管理導入を予約した npx フォールバック。
     ///
     /// 設定とレジストリまで見るのは [`Self::resolve_command`]。
     pub fn command(&self, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
@@ -741,6 +765,11 @@ impl AgentKind {
         // 1) PATH の単体バイナリ
         if let Some(path) = find_in_path(self.bin) {
             return Some(AgentCommand::new(path, extra, cwd));
+        }
+        if let Some(command) = self.package.and_then(|package| {
+            install::cached_command(package, self.bin, extra.clone(), cwd.clone())
+        }) {
+            return Some(command);
         }
         // 2) Zed が展開済みの npx キャッシュ（ネット不要）
         if let Some(bin) = zed_cached_agent(self.bin) {
@@ -757,7 +786,9 @@ impl AgentKind {
         let npx = find_in_path("npx")?;
         let mut args = vec!["-y".to_string(), bounded_npm_spec(package)];
         args.extend(extra);
-        Some(AgentCommand::new(npx, args, cwd))
+        let mut command = AgentCommand::new(npx, args, cwd);
+        command.managed_npm = Some((package.to_string(), self.bin.to_string()));
+        Some(command)
     }
 
     /// ローカルでの導入状況（設定画面のステータス表示用）。認証状態までは見ない（＝CLI 任せ）。
@@ -1459,6 +1490,11 @@ pub async fn run_session_on(
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
+    let command = if !host.is_remote() && command.managed_npm.is_some() {
+        blocking::unblock(move || install::prepare(command)).await
+    } else {
+        command
+    };
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
         .envs(host::task_environment(host.as_ref(), &command.cwd)?)
@@ -2098,6 +2134,26 @@ fn tool_completed(status: v1::ToolCallStatus) -> Option<bool> {
     }
 }
 
+/// MCP の道具の呼び出しへの許可要求か。ACP には道具の出所の欄が無いので、アダプタが付ける印で見分ける:
+/// codex-acp は要求全体の `_meta.is_mcp_tool_approval`（題名を付けず、先の `tool_call` と id で結ぶ）と
+/// 呼び出し側の `_meta.is_mcp_tool_call`、rawInput の `server` + `tool`（codex-acp の MCP 呼び出しの形）。
+/// Claude Code は MCP の道具を `mcp__<server>__<tool>` の題名で問うので、こちらは題名で足りる。
+pub fn is_mcp_tool_request(request: &v1::RequestPermissionRequest) -> bool {
+    let flag = |meta: Option<&v1::Meta>, key: &str| {
+        meta.and_then(|meta| meta.get(key))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    };
+    flag(request.meta.as_ref(), "is_mcp_tool_approval")
+        || flag(request.tool_call.meta.as_ref(), "is_mcp_tool_call")
+        || request
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .is_some_and(|raw| raw.get("server").is_some() && raw.get("tool").is_some())
+}
+
 async fn handle_permission_request(
     request: v1::RequestPermissionRequest,
     responder: acp::Responder<v1::RequestPermissionResponse>,
@@ -2127,6 +2183,8 @@ async fn handle_permission_request(
         .collect();
     let kind = request.tool_call.fields.kind.map(map_tool_kind);
     let paths = permission_paths(&request.tool_call.fields, &diffs);
+    let tool_call_id = request.tool_call.tool_call_id.0.to_string();
+    let mcp_tool = is_mcp_tool_request(&request);
     // Diff の無いツール（Bash/Fetch/MCP）の実引数を承認前に必ず見せる（ACP #1979 / GHSA-f2g4）。
     // 編集系（Diff あり）は差分表示で内容が見えるので冗長回避のため省く。
     let raw_input = if diffs.is_empty() {
@@ -2163,6 +2221,8 @@ async fn handle_permission_request(
             diffs,
             raw_input,
             options,
+            tool_call_id,
+            mcp_tool,
             respond: respond_tx,
         })
         .ok();
@@ -3355,6 +3415,36 @@ for line in sys.stdin:
             ),
             "{events:?}"
         );
+    }
+
+    /// MCP の道具への承認の見分け（codex-acp の実際の形から）。codex-acp は題名を付けず、要求全体の
+    /// `_meta.is_mcp_tool_approval` と id だけを送る。shell は種別が同じ「実行」でも印が無い。
+    #[test]
+    fn mcp_tool_approvals_are_told_apart_from_the_shell() {
+        let request = |value: serde_json::Value| -> v1::RequestPermissionRequest {
+            serde_json::from_value(value).expect("ACP の許可要求として読める")
+        };
+        let codex_approval = request(serde_json::json!({
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "call-1", "kind": "execute", "status": "pending" },
+            "options": [],
+            "_meta": { "is_mcp_tool_approval": true }
+        }));
+        assert!(is_mcp_tool_request(&codex_approval));
+        let codex_standalone = request(serde_json::json!({
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "call-2", "kind": "execute",
+                          "rawInput": { "server": "necoder", "tool": "fleet_list_tasks", "arguments": {} } },
+            "options": []
+        }));
+        assert!(is_mcp_tool_request(&codex_standalone));
+        let shell = request(serde_json::json!({
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "call-3", "kind": "execute", "title": "ls",
+                          "rawInput": { "command": "ls" } },
+            "options": []
+        }));
+        assert!(!is_mcp_tool_request(&shell));
     }
 
     /// 偽エージェント: `session/new` で受け取った `mcpServers` をそのまま prompt 応答に載せる。

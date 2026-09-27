@@ -3210,6 +3210,69 @@
 - 学び/罠: ①**「人の手番」の線引きを間違えていた**。確かめたいのは OS の所作（ドラッグ・スクリーンショット・WebView の絵）ではなく **necoder の経路**で、そこを切り分ければ offscreen で通せる。ページが結果を `document.title` に書けば、隔離していても（＝外へ送れなくても）necoder 側で読める ②**チェックポイントは書き込みのたびに切られる**（自動で許可した時も）。だから「直前へ戻す」は最後の書き込みだけを取り消す。テストで「元に戻らない」と見えたのは**私の期待が間違っていて**、最初のチェックポイントへ戻したら元どおりだった。仕様を疑う前に、まず自分の期待を疑う ③長い絶対パスをそのままチップに出すと読めない（貼り付けた画像のキャッシュ名は機械の名前）。**offscreen の目視が無ければ気づけなかった** — テストは通っていた
 - 次: 残る人の手番は **OS の所作 3 つ**（実機の D&D・⌘⇧⌃4 → ⌘V・書類フォルダの TCC ダイアログ）と、release ビルドでのメモリ再計測
 
+
+## 2026-09-19 — 閉じた会話のメモリ解放と npm アダプタの管理導入
+- 確認した保持: `closed_threads: Vec<Thread>` が会話全文・ツール出力・差分を無制限に保持していた。閉じると Entry 全体を本人だけが読める一時ファイルへ直列化し、本文 Vec と描画キャッシュを解放する。⌘⇧T は全文を読み戻す。書けない場合はメモリに保持し、読めない場合は復元対象を残して再試行可能にする。既存 DB はツール出力を省略するため、DB の簡略履歴への置換はしない。
+- キャッシュ: Markdown・StyledText・リンクは各入力本文合計 512 KiB、構文強調の span は 2 MiB の上限を件数制限と併用。本文上限は解析木や GPUI レイアウトを含む実ヒープ量ではない。上限より大きい本文も表示するがキャッシュしない。
+- 起動: ローカルの固定版 npm アダプタを `external_agents/npm/` に `npm install --save-exact` で導入し、manifest の名前・版・bin を検証してから版別ディレクトリを公開する。導入は background executor、Node は PATH のものを使う。完成済み JS エントリは Node で直接起動。設定コマンド・SSH・Windows・範囲指定・特殊な npx 引数は従来経路。失敗時も npx にフォールバックする。Claude / Codex の手動 install_cmd に ACP アダプタを追加。
+- 検証: `cargo check -p necoder --offline`、`cargo test -p agent_panel -p acp_client -p necoder --offline`。一時ファイルの全文往復・復元失敗時の再試行・長文ストリームのキャッシュ上限・固定版とパス検証・模擬 npm による正常導入／失敗時の未公開をテスト。実 npm レジストリからの取得・実ベンダーとの通信・長時間稼働時 footprint の削減量は未検証。
+- 測定上の注意: 起動直後の RSS 122 MB と長時間使用後の footprint 1089 MB は直接比較できない。圧縮量だけではリークの所在を特定できない。開いた会話の履歴は引き続きメモリにあり、本修正だけで本体全体の問題を解消したとは扱わない。一時ファイルへの保存／復元は現状タブ操作時に同期実行するため、非常に大きい会話の操作時間も次の実測対象。
+
+## 2026-09-19 — Fleet の Task タブ行を mock に寄せた（`{count} 列` と `ターミナル 66`）
+
+- 発端: ドッグフーディング中の目視で「右上が `{count} 列` のまま」「`ターミナル 66` と出る」「変更・ファイルが
+  スレッドと同じ見た目のタブで並んでいて区別がつかない」。FLEET-V2 §3.5 と `mock/fleet-v2.html` と突き合わせた。
+- 直したもの:
+  - `fleet.stage_columns` の値が `"{count} 列"` だった。差し替えの綴りは `%{count}`。ja/en 両方。
+    parity テストは ja/en のキー集合しか見ないので、値の綴り間違いは素通りしていた。
+  - Task タブ行のターミナル番号が `work_layout.allocate()` の通し番号（Editor 側と共有のグローバル）だった。
+    Task 内の通番（1 から）に変えた。**内部 ID は UI に出さない**。
+  - スレッドタブにスレッド色の `●` を付け、スレッド群と 変更 / ターミナル / ファイル の間に縦の区切りを入れた。
+    選択は下線ではなく **上線 2px**（mock の `.ttabs .t.on` に合わせる）+ `bg1` + fg0。文字は 10px → 11px。
+    `＋ 会話` / `＋ 端末` はタブの並びに混ざらないよう右端へ寄せた（`ml_auto`）。
+- 再発防止: `i18n` に `placeholders_are_written_with_percent` を追加。`%` を落とした `{名前}` を弾く
+  （綴りを戻すと実際に落ちることを確認してから戻した）。
+- 残（FLEET-V2 §3.5 のうち未実装）: `変更 +N −M` の shortstat バッジ・`＋▾` のドロップダウン化。
+- 検証: `cargo check -p workspace` / `cargo test -p workspace -p i18n` green。**実機の目視は本人の手番**
+  （ドッグフーディング中なので窓を上げていない）。
+
+## 2026-09-19 — Task カードをペインバー + サイドペインに作り直した（仕様ごと）
+
+- 発端: 本人の目視で「上のタブの意味がわからない・`＋ 会話 ＋ 端末` が使いづらい・マルチプレクサらしくない」。原因は実装以前に
+  FLEET-V2 §3.5 の仕様で、*誰と話すか*（スレッド）と *何を見るか*（変更 / ターミナル / ファイル）を 1 本のタブに混ぜていた。
+  タブは排他なので、会話を見ながら diff や端末を横に置けなかった。
+- 直し方（文書 → mock → 実装の順）: §3.5 / §3.6 を書き換え、`mock/fleet-v2.html` を headless Chrome で 1 列 / 2 列とも目視。
+  左 = スレッドタブ + `＋`（会話を足すだけ）/ 右 = `◨ 変更 | ターミナル N | ファイル` のトグル。カード幅 900px 以上は
+  「会話 | サイドペイン 44%」の分割、未満は全面（スレッドタブで会話へ戻る）。端末の追加はターミナルペイン見出しの `1 2 ＋`。
+  ターミナルのトグルは 1 本も無ければその場で作る。Captain カードも同じ器にした（采配ログ / Task がサイドペイン）。
+- 実装: `fleet_stage.rs` に `render_pane_bar` / `render_side_pane` / `render_card_body` / `stage_side` / `conversation_panel` /
+  `set_stage_side`。状態は増やさず `stage_tabs` を読み替えた（Agent を指せばサイド無し）。i18n は `fleet.side_tip` /
+  `side_close` / `files_hint` を追加、`tab_add_*` はツールチップ文言に転用。
+- 検証: `cargo check --workspace --all-targets` 警告 0、`cargo test -p i18n -p workspace -p necoder` green
+  （`fleet_panes_keep_their_threads_and_remote_targets` にサイドペインの開閉と幅判定を追加）。**実機の目視は本人の手番**
+  （ドッグフーディング中は別インスタンスを立てない）。
+- 罠: `stage_width` は「viewport − レール − 左カラム」の概算で、カードの実幅ではない。900px の閾値はこの概算に対するもの。
+  AgentPanel の自前タブを畳む `sync_work_chrome` はまだ `workbench.rs` にある（F7 で消す前に移すこと）。
+- 残: `変更 +N −M`（shortstat キャッシュ）・サイドペイン幅のドラッグ・スレッドタブの ×・統合先カードのスレッド非表示。
+
+## 2026-09-19 — Task カードの残りを片付けた（`+N −M`・×・幅ドラッグ・列数トグルの同居）
+
+- `+N −M`: `project::git_shortstat_on`（`git diff --shortstat <base_oid>`・base 無しは HEAD）を `refresh_git_status_for` の
+  background に同乗させ `RepositoryController.shortstat` へ。変更トグル・変更ペイン見出し・サイドバーの Task 行が同じ値を読む
+  （F1 / F2 の両方の「残」を回収）。render 中に git は呼ばない。untracked は数えない（git の diff と同じ）。
+- スレッドタブの ×: 選択中だけ・最後の 1 本には出さない。`close_task_thread` が、空になった panel を一覧から外して会話を残りへ移す
+  （先頭 panel は Task の初期パネルなので残す）。
+- サイドペイン幅: 境をドラッグ（25〜65%・`chrome.side_pane_ratio`・既存の `on_resize_move` に相乗り）。永続化はしていない。
+- 列数トグル: 専用の 30px 行をやめ、系譜ヘッダの右へ（`▯ ▯▯ ▯▯▯`・ラベルはツールチップ）。畳んだ系譜は帯ごと 1 行にまとめ、
+  舞台の上の 3 段（94px）が 1 段（30px）になった。表示切替（扇形/ツリー…）は展開時だけ出す。
+- ファイルペイン: ▸/▾・hover・git の 1 文字と色（エクスプローラと同じ `git_tint` / `git_letter`）。
+- `sync_work_chrome` → `fleet_stage.rs::sync_embedded_panels` に移設（F7 で workbench を消しても二重タブにならない）。
+- 仕様の訂正: 統合先カードのスレッドは隠さない（main の panel は Editor で普段使う会話そのもの）。§3.2 / §3.4 / §3.5 に反映。
+- 検証: `cargo check --workspace --all-targets` 警告 0・`cargo test -p i18n -p project -p workspace -p necoder` green
+  （`shortstat_reads_both_signs_and_empty` を追加）。**実機の目視は本人の手番**。
+- 見送り: F7（workbench / work_layout の削除）は保存済み窓状態の形式と端末 ID の採番に絡むので別の一歩にする。
+
+
 ## 2026-09-19 — レールの ↑/↓ が「タブ復元」に宛先を奪われるのを直した
 - やったこと: `open_slot_files`（＋remote 版の継続）に `restore_rail_focus_after_tabs` を追加。復元前にレールがキーの宛先だったら、復元後にレールへ戻し `release_native_key_focus` も呼ぶ（`crates/workspace/src/workspace/project_session.rs`）。回帰テスト `restoring_a_projects_tabs_does_not_steal_the_rails_keys` を追加（修正前は落ちることを確認済み）。
 - 学び/罠: レール ↑/↓ の連打は「**その session の初回表示**」でだけ止まる。タブ復元は 1 枚ごとに `open_loaded_file` が `window.focus(エディタ)` し、最後の `select_tab` は rendered_html なら OS の first responder まで WebView に渡す。後者まで行くと素の ↑/↓ は WKWebView のスクロールに食われて GPUI に上がって来ない（⌘付きのショートカットだけ効く）ので、GPUI のフォーカスを戻すだけでは足りない。
@@ -3232,8 +3295,188 @@
 - 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す
 
 - PR #5 取り込み後の補足: 同一フレームに届く askpass 要求は先の要求を維持し、後の要求へ busy を返す（回帰テスト追加）。秘密入力のキー伝播も止める。#7 が指摘した README のテーマ選択キーを直し、#8 の project 設定優先をマニュアルへ追記。
+## 2026-09-20 — F7 掃除 + ブリッジ（Captain と編隊図を Fleet の家に戻した）
+
+- 発端 ①: release ビルドの警告 `variants Terminal, DockTerminal, … are never constructed`（`workbench.rs` の `WorkAction`）。
+  構築するのが `#[cfg(debug_assertions)]` のプローブだけなので **release でだけ**出ていた（dev の `--all-targets` は警告 0 のまま）。
+  `#[allow]` で隠さず F7 を完了させた: `workbench.rs` / `work_layout.rs` / `FleetCenterView` / `NECODER_WORKBENCH_PROBE` /
+  `work.*` の死キー 37 個を削除。名前に反して窓全体の復元だった `restore_work_layout` は `restore_window_state` に改名して
+  `persisted_state` の隣へ。保存形式から `work_layout` / `fleet_view` を外した（旧 payload の余分なキーは serde が無視）。
+  端末の名札は `chrome.next_terminal_id`。設定の 3 キーは `settings.pref_tabs_position` ほかへ移した。
+- 発端 ②: 本人「見た目はめっちゃ良くなったが、Captain モードなど Fleet らしさが消えた。どうすればいい？」。隔離 offscreen で
+  実画面を撮って原因が 3 つ分かった: (a) 本人の settings.json に `captain_agent` が無い = **未任命**で、しかも**任命する UI が
+  無かった**（Captain バーの文言が「settings.json の captain_agent」・押すと Captain 節の無い設定ホームへ飛ぶだけ）。
+  (b) Fleet らしい絵（ハブ / 扇形）は実装済みなのに**既定で畳まれ**、展開すると高さ 360px を取って Task カードが潰れる
+  （下段 290px と合わせて会話の面積がほぼ 0）＝実機では常に畳まれ、中央は「ただのチャット」に見えていた。
+  (c) main を選ぶと空の「スレッド1 待機中」が全面に出る。
+- 直し方（FLEET-V2 §3.3 / §3.6 / §5.7 を先に書き換え）: **統合先のカード = ブリッジ**。Captain は「main に住むスレッド」なので
+  ペインバー先頭の `⚑ Captain` タブに座らせ、別実装の Captain カードと `captain_space` / `captain_tab` を消した。
+  右のサイドペインに **編隊図**（既存の 4 表示をペインの中へ・何も選んでいない統合先は既定で開く・既定はハブで、任命済みなら
+  中心が `⚑ Captain`）と **采配ログ**。舞台の上は 1 行（系譜 + 帯 + 列数 + `⚑ 編隊図`）に固定し、縦の展開は廃止。
+  ⌘⇧G = ブリッジで編隊図を開く / 閉じる。未任命の ⌘0 / Captain バー / `⚑ Captain を任命` は会話ペインに**任命の面**
+  （役割の説明 + サインイン済みエージェントのボタン）を出す。交代・解任は 設定 → AI エージェント → 「Captain」
+  （「なし」はキーごと外す = `persist_user_value` は null を書かずに削除する）。
+- 実画面で見つかった既存バグ 2 件: ① **Fleet の「変更」は F2 以来ずっと中身が空だった**（`GitPanel` の Entity は `div()` しか
+  描かない。本体は active session だけを描く `render_git_panel`）。`project::git_diff_files_on`（`--numstat` + `--name-status`
+  を base に対して・untracked は status から足す）→ `RepositoryController.task_files` → `render_stage_changes`
+  （状態の 1 文字 + 名前 + フォルダ + `+N −M`・押すと diff を Editor に開く）に作り直し、昨日入れた shortstat はこの合計に置換。
+  ② サイドバーの Task 行で名前と `+N −M` が重なる → `+N −M` を独立の段にし、名前を縮められるようにした
+  （flex の gap は幅 0 の兄弟にも残るので、区切りはブランチ名の先頭の空白に寄せた）。
+- 罠: **同じ作業ディレクトリで別セッションが並行してコミットしている**（14:34 に `29fb452`）。その直後に `project` の
+  ビルド成果物だけが私の関数を含まない版に入れ替わり、`cannot find function git_shortstat_on` で落ちた（ソースは無傷・
+  mtime も変わらず）。`touch crates/project/src/project.rs` で作り直して解消。cargo の鮮度判定は mtime なので、
+  並行セッションが stash などで一瞬ファイルを戻すとこうなる。**ビルドが「ソースに在るはずの物が無い」と言ったら touch**。
+- 検証: `cargo check --workspace --all-targets` と `--release` の両方で警告 0・`cargo test -p workspace -p project
+  -p settings_core -p settings -p i18n -p necoder` green（`the_bridge_shows_the_formation_and_lets_you_appoint_a_captain` /
+  `numstat_and_name_status_parse_nul_separated_output` / `persist_user_value_with_null_removes_the_key` を追加）。
+  見た目は隔離 offscreen の実画面で確認（手順は FLEET-V2 §10.5・`NECODER_FLEET_PROBE` を `;` 区切りの組み立て命令に拡張）。
+  モック `mock/fleet-v2.html` も同じ形にした（`#bridge`）。
+- 残: 台帳イベントの灰色カード・承認の推薦（✳）・Captain 会話の空状態の案内・UI-SPEC §11 の全面置換・設定キー
+  `work_tabs_position` の改名（未決）・サイドペイン幅の永続化。
+
+## 2026-09-21 — 調査: Herdr / Orca と Captain 型の采配役、ゲームの類推（実装なし）
+
+- 本人の依頼: 「Herdr や ORCA をまず調べ、他のエージェントを統合する采配役（Captain）を研究してほしい。Captain と Fleet を
+  ゲームのアナロジーで分かりやすく見せるのはどうか」。6 本の並行調査（Herdr / Orca / 同種ツールの全体像 / 采配役の製品事例 /
+  マルチエージェント研究 / ゲームの類推と監督制御）→ レポート `docs/research/captain-orchestrators-2026-09.md`
+  （原本 `reports/`・生ノート 6 本は `research_notes/`・出典 74 件）。
+- 結論: ① **Captain の骨格は変えなくてよい**（書かない単一リード・台帳に置く状態・イベント駆動の wake・承認は推薦まで・
+  統合は人間）。Herdr は采配を core に入れないと決め、Orca は実験的な層を持つが **idle の coordinator を PTY 越しに起こせない**
+  問題を 4 か月解けていない。台帳イベントを ACP のターンとして渡せる necoder はこの問題を最初から持たない。
+  ② 直すのは理念と実装のずれ 3 つ（コードで確認済み）: Captain スレッドを同名で再利用し続けるのでコンテキストが単調増加 /
+  `captain_pending` がメモリ上の `HashMap` で再起動すると未配達の wake が消える / 「書かない」がプロンプト頼み。
+  §5.6 の 5 秒デバウンスも未実装。足すのは委任文の型・完了報告の契約・別コンテキストの検証 Task・necoder 側で強制する上限・
+  分解案の事前承認・stall の wake。避けるのは自律マージ・worker 同士の自由な連絡・LLM の見回り。
+  ③ **ゲームの類推は「仕掛けを借りる」なら良く、「衣装を着せる」のは悪い**。⌘⇧U・⌘1..9・要対応・トークン常時表示は
+  すでに RTS の HUD と同型。編隊図は概観として要るが、ハブは星型で所属しか語らない → ノードを 1 Task = 1 タイルの情報タイルに・
+  辺に depend を・Captain の発令キュー（何を出して何を待っているか）を足す、が押す方向。
+- 文書の訂正（Zenn の原文で裏取り済み）: 「herdr の 3 本上限」は herdr の仕様ではなく記事著者の自作 hook の設定値
+  （`MAX_COLUMNS=3` / `MIN_COLS=50`）。FLEET-V2 §3.4 と `fleet-ux-2026-09.md` に訂正注記を入れた（上限 3 の判断は変えない）。
+  herdr の状態は 5 値・ライセンスは 2026-07-22 に Apache-2.0 へ・「GUI 勢は誰もグリッドをやっていない」は言い過ぎ、も同じ注記に。
+- 罠: レポート作成の途中でセッションの利用上限に当たったが、ファイルは書き上がっていた（結論節まで・末尾を確認）。
+- 次: P0 の 3 件（Captain スレッドの交代 / wake の配達位置を台帳の連番に / 書かない規律を ACP クライアント側で強制）から。
+
+
+## 2026-09-24 — コミュニティ PR と作業中の Fleet 改修を統合
+- PR #5 / #7 / #8 / #9 と不具合修正 #10 は全 CI 通過後に main へ取り込んだ。元の未コミット作業は stash に保存してから復元。
+- Fleet のブリッジ内任命画面を維持し、設定の任命・交代・解任は PR #8 の行ボタンに統一。設定セグメントの重複だけを除いた。#9 の Task 入力フォーカス修正も維持。
+- 公開 main の検証: ローカル全テスト529件成功（11件 ignored）、Linux SSH 統合テスト10件成功。macOS / Windows / Linux / 依存監査 / 両 musl ビルドの CI 成功。IME の OS 操作はツールで検証窓を取得できず未確認。署名済み配布物の生成は次回リリース。
+- PR #12（Captain の役割を人間の発話にも前置・道具に `fleet create`・slash コマンド保護）も同じ手順で取り込んだ（stash → ff → pop）。衝突は ja/en の `captain:`（手元の任命 UI キー + PR の `prompt`→`role` 改名。両方残す）と JOURNAL 末尾のみ。`{count} 列` の `%` 落ち修正（b3029c1）も同日 main へ。
+
+## 2026-09-24 — `/compact` はいつでも押せるものにした（消える条件をやめた）
+
+- 本人報告: 「Compact button が今ない。ACP のところに表示されない」→ 直後に「compact はいつでもできるようにしないと」。
+- 消えていた原因: チップの表示条件が `command_tx.is_some()`（生きたセッション）かつ `!running` かつ `tokens > 0` だった。
+  2026-09-19 に入れた idle の弁（`idle.rs`・既定 15 分）が静かなスレッドのエージェントを止めると `command_tx = None` に
+  なり、**戻ってきてまず圧縮したい場面で消える**。再起動直後（送信路は初回送信まで無い）も同じ。どちらも次の送信が
+  `acp_session_id` で `session/load` して同じ会話を引き継ぐ（`start_session` の `resume:`）ので、送る先は在った。
+  条件が弁より古かった（bb91901）。
+- 直し（要件は「いつでも」）: `Thread::can_compact()` = 送る先の会話がある（生きた送信路 **または** 引き継ぐ id）。
+  チップは常に描き、押せないのは一度も起こしていないスレッドだけ（薄く・カーソル無し・「まだ会話がありません」）。
+  **実行中は押すとキューに積んで**ターン完了後に送る（composer の送信と同じ作法・二重には積まない・tooltip で予告）。
+  トークン数では判定しない（使用量を報告しないエージェントでも文脈は溜まる）。i18n: `agent.compact_queued_tip` /
+  `compact_none_tip`。
+- 検証: `cargo check -p agent_panel --all-targets` 警告 0・`cargo test -p agent_panel` green（`idle.rs` に
+  「弁の後 / 使用量なし / 実行中はキューへ 1 つだけ / 未起動は不可」のテスト）。実機は本人の再起動待ち（`./scripts/install-mac.sh`）。
+
+## 2026-09-24 — Remote control CI の WebKit フレーク修正（偽カメラの差し込み先）
+- やったこと: `relay/test/browser/control.spec.mjs` の `installFakeCamera` を `MediaDevices.prototype` 差し替えに変更（`navigator.mediaDevices` インスタンスの own property をやめた）。`expectFakeCamera` の診断に prototype 側の有無を追加。`.github/workflows/remote-control.yml` に失敗時の Playwright trace アップロードを追加。`relay/public/app.mjs` の「カメラ無しの機械では mediaDevices が生えない」コメントを訂正（正しくは secure context 以外や一部 WebView）
+- 学び/罠: **WebKit は `MediaDevices` の JS ラッパーを GC で回収して次のアクセスで作り直す**（IDL に `GenerateIsReachable` が無い。`Navigator` には `ReachableFromDOMWindow` がある）。ラッパーに載せた own property は消えるので、テストの偽 getUserMedia が「差し込み直後の検証は通るのにボタン押下時には本物」になり permission 待ちで固まる。relay 無変更のまま CI の WebKit だけ 1 勝 4 敗（v0.1.17〜v0.1.20 のタグ push・落ちるテストも回ごとに違う）。Chromium はラッパーを保持するので手元では出ない。手元の Playwright WebKit 26（rev 2248）で GC 圧をかけて再現し、prototype 側は残ることを確認。9/14 の「文書確定時に navigator を作り直す」は誤診（init script 版も同じ機構）。もう一つ: **GitHub はタグ push で `paths` フィルタを評価しない**ので、このワークフローは relay を触っていなくてもリリースのたびに走る（リリース時だけ落ちて見えた理由）
+- 次: PR の CI で webkit が緑になるのを確認（Release ワークフローとは独立・配布物には影響しない）
+
+## 2026-09-24 — レールに「AI スレッド一覧」を置いた（Fleet から戻ると左に残っていた一覧）
+- 本人: 「Fleet から戻ると左に全体の AI のタブがある。これを一番左のメニューのアイコンに乗せたい」。
+- 正体: Fleet に入ると `toggle_fleet_mode` が `show_herd = true` にし、戻る時は何も戻さない。Editor の左カラムは herd を最優先で描くので、全プロジェクトのスレッド一覧（`render_herd_sidebar`）が出たままになる。F0.5（2026-09-12）で単独の入口（`ToggleHerdSidebar`）を消していたので、開く道はこれしかなく、エクスプローラへ切り替えると戻れなかった。
+- やったこと: レールの Todo と Fleet の間に **AI スレッド一覧**（`icons/activity.svg`。旧 herd の絵で、同梱のまま使われていなかった）。`herd_view.rs` に `toggle_herd_sidebar` / `herd_column_visible`。Todo / git と排他・押し直すとエクスプローラ・Chat では不活性。Fleet 中は同じ枠が Fleet サイドバーなので名札を「Fleet サイドバー（Task 一覧）」に替え、エクスプローラへ切り替えた後の帰り道を兼ねる（これまでは Fleet を出入りし直すしかなかった）。設定 `rail.threads`（既定 on）・i18n `rail.threads` / `rail.fleet_sidebar`。
+- 変えていないこと: Fleet から戻ると一覧が出たままになる挙動（本人はそこで見つけている）。アイコンが点灯するので、何が出ているかは分かる。
+- 文書: UI-SPEC §2・FLEET-V2 §3.0（単独表示の廃止を撤回）・GLOSSARY（AI スレッド一覧）・§10.5 のプローブ `editor` / `threads`。
+- 検証: `cargo check -p workspace --all-targets` 警告 0・`cargo test -p workspace -p settings -p necoder -p i18n -p settings_core` green（`the_rail_threads_icon_switches_the_left_column` を追加）。隔離 offscreen で `graph;editor`（戻った直後に一覧が出てアイコンが点灯）と `graph;editor;threads`（エクスプローラに切り替わり、点灯もエクスプローラへ移る）を撮って目視。
 
 ## 2026-09-24 — Captain が人間の指示で自分で作業してしまう問題
 - やったこと: `captain.prompt` を `captain.role` / `captain.facts` / `captain.event` に分割。役割 + 現況表（`captain_context`）を Captain スレッドの prompt context に入れ、⌘0 で開いた時・wake の時・人間が Captain に書いた後に差し替える。wake 本文はイベント行 + 溜めたイベントだけ。道具一覧に `fleet create . <title>` を追加。回帰 test `role_prompt_lists_task_creation_in_every_locale`
 - 学び/罠: `PanelEvent::HumanSend` は送信**後**に届く（emit は遅延）ので、その発話の中身は差し替えられない。今のターンは既存の context、HumanSend で次のターン用に現況を更新する形。prompt context はメモリのみ（再起動後は ⌘0 か次の wake まで無い）。規律はプロンプトだけでツール制限は無い（案2 = Captain スレッドの編集系 permission を拒否、は未着手）。prompt context を前置すると slash コマンド（`/clear` `/compact`）の先頭が `/` でなくなり認識されない → `/` 始まりの発話には context を付けない（test `prompt_context_is_not_prepended_to_slash_commands`）
 - 次: 実機で「目標 1 つ → Captain が Task を切る」を確認（F6 の実 e2e）
+
+## 2026-09-24 — Captain の席・分解案の承認・台帳の未読・会話の交代（F6 の芯）
+- 発端: 本人「最高のベストな状態にしたい」。PR #12 の後も Captain は Bypass のまま shell を持ち（worktree を git で直接切る・main のブランチを切り替える・ファイルを書く抜け道）、Task を切る道具は確認なしで worktree を作り、未配達の知らせはメモリ上で再起動で消え、会話は膨らむ一方だった。
+- 先に実機で確かめた（`~/.claude/.../memory/captain-lab-harness.md` の手順・/tmp の練習用 repo・`claude -p` + `necoder mcp`・台帳とソケットを隔離・Opus 5）: MCP だけを持たせた Captain は 3 回とも道具だけで Task を切り、編集も shell も試さなかった。Bypass で全道具を持たせても止まった。一方、1 行の誤字にも迷わず worktree を切った ＝ 切る前の承認がいちばん効く gate。
+- やったこと（FLEET-V2 §5 を先に書き換え）:
+  - **Captain 用の MCP**: `necoder mcp --captain` は席の道具 12 個だけを出し（書く / 直接切る / phase / 待つ / integrate を出さない）、名前を知っていても呼べない。新しい道具 `fleet_propose_tasks`（目的・完了条件は必須＝委任文の型・上限 6 行）。GUI が居れば IPC、居なければ DB へ直接置く。
+  - **分解案カード**（`captain_proposals.rs`・DB `captain_proposals`）: 要対応の承認待ちの次に並び、titlebar のバッジにも数える。行ごとの ☑、承認で ＋ Task と同じ `create_task_in`（`create_prompted_task` を一般化）→ `⚑` 帰属（台帳 `captain_task`）。DB で裁きを確定してから切る（二度押し・別窓で二重に切らない）。
+  - **席**（`agent_panel/src/seat.rs`・`SeatPolicy`・Fleet を知らない汎用）: 権限モードを「聞いてくる」モードへ固定（Claude Code `default`・Codex `read-only`＝codex-acp README の `read-only`/`agent`/`agent-full-access`）、MCP は席のものだけ、問いには Chat と同じ作法で necoder が答える（今回だけ許可 / 拒否 + transcript に 1 行）、完了した編集・削除・移動は見張りがターンを止めて `PanelEvent::SeatViolation`。改名で席と前置きが外れる。席の有無とセッションの作り方が食い違ったら次の送信で立て直す（`session/load`）。
+  - **台帳の未読**（`captain_cursors`）: 起こす要求は 2 秒まとめ、読んだ位置より後の出来事（blocked / review_ready / changes_requested / merge_ready / failed / integrated / archived / 作られた Task / human_send / 承認・却下）を 1 通に。位置はターンが**正常に完了した時だけ**進める。起動時に未読があれば 1 回起こす。`captain_pending` は削除。
+  - **会話の交代**: 文脈が上限の 40% か 20 回で `rotate_thread_session`（送信路と会話 id を捨て DB の id も消す・区切りを 1 行）。前置きに直近の采配 5 件（リポジトリ別・メモリ）。Captain のエージェントを替えたら前の Captain を「Captain（前のエージェント・交代前）」に改名して退かせる。
+  - 知らせは表示中のタブを奪わない（`send_ledger_event_to`・`ensure_named_thread_quietly`）。役割文は道具の一覧を持たない（MCP の道具が説明を持つ）。
+- 学び/罠:
+  - **`AgentEvent::Failed` は `PanelEvent::TurnEnded` で通知される**（`TurnFailed` は `fail_turn` / `abandon_turn` だけ）。Captain が失敗したターンで読んだ位置を進めていた → `TurnEnded` に `completed` を足した。
+  - `ensure_named_thread` / `acquire_thread` / `add_thread` は必ず表示を切り替える。wake で使うと人間が見ている会話を奪う（空きタブの使い回しも奪う）。
+  - 実機で Captain が「承認が届いたら担当を起こします」と書いた → 承認で necoder が担当を起こすので二重になる。役割文・道具の返り値・承認の知らせの 3 か所で「起こし直さない」を明示し、2 ターン目で静観を確認。
+  - 要対応の欄は高さ 300px でスクロールする。分解案カードのボタンを行の下に置くと隠れる（隔離 offscreen の実画面で発見）→ 見出しの直下へ。
+  - `agent_servers.<id>` は `"type": "custom"` が要る。無いと設定全体が読めず、テストで Captain が未任命扱いになった。
+  - 席の見張りに shell を入れない: 安全な読み取りコマンドを聞かずに通すエージェントがあり、止めすぎる。shell は権限の問いで断る。
+- 検証: `cargo test -p storage -p agent_panel -p workspace -p necoder -p i18n -p settings -p settings_core -p acp_client` green（新規: 読んだ位置と分解案の往復・席の裁定 / モードと MCP / 付け替えと改名 / 交代 / 見張り・MCP の Captain 版・wake 行の選別・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`）。実機（/tmp・Opus 5）: 3 件の目標 → 2 本に束ねて提案 → 承認待ちで停止 → 承認の知らせで `fleet_digest` を読んで静観。隔離 offscreen（`NECODER_FLEET_PROBE="graph;proposal:2;origin"`）で分解案カードと `⚑` 行を目視。モックにも分解案カード。
+- 次: necoder 本体での実 e2e（本人の目視・小さい練習用 repo で ⌘0 から）。今の「Captain」スレッド（本人との設計相談をしていた会話）は、新しいビルドで席が付くと編集も shell も断られるので、使う前に改名する。残: 承認待ちへの推薦 ✳・台帳イベントの灰色カード・Captain のトークン表示・MCP の `fleet_digest` の台帳フォールバック。
+
+## 2026-09-25 — Codex を Captain にする実験と、Codex の席の直し
+- 発端: 本人「codex でも同じようなことができるか試せる？」。Claude Code で確かめた Captain（MCP の道具だけで分解案を出し、承認待ちで止まる）が Codex でも成り立つかを、CLI と、necoder が実際に使う ACP の両方で確かめた。
+- CLI（`codex exec` 0.144.6・既定のモデル・`--ignore-user-config`・`-s read-only`・necoder の MCP だけ）: 3 件の目標を 2 本に束ねて `fleet_propose_tasks`、承認待ちで停止。承認の知らせ（`codex exec resume`）では Task の様子を読んで静観し、担当を起こし直さなかった。shell も編集も使わなかった。
+- ACP（新しい実機プローブ `cargo run -p acp_client --example probe_captain_seat`・codex-acp 1.13.1 / codex 0.156.1・席のモード `read-only`・席と同じ裁定）: 同じく分解案を出して停止。
+- 見つけて直したもの:
+  - **Codex の MCP の承認を席が断っていた**。codex-acp は MCP の承認を「題名なし・種別 実行・要求全体の `_meta.is_mcp_tool_approval`」で送る（先に `tool_call` を題名 `mcp.necoder.<道具>` で出し、同じ id で問う）。席は種別「実行」を shell として一律に断るので、Codex の Captain は自分の道具を 1 つも使えなかった。→ acp_client の許可要求に `tool_call_id` と `mcp_tool`（`is_mcp_tool_request`）を足し、席は同じ id の呼び出しの題名で裁く。
+  - **Codex 自身の設定の MCP サーバが席に入っていた**。codex-acp は `~/.codex/config.toml` の MCP サーバ（本人の環境では computer-use / node_repl）も立ち上げる。偽のサーバ（起動すると印のファイルを残す）で確認。→ `acp_client::preset::restrict_mcp_to` を足し、Codex は ACP の mcpServers を空にして `CODEX_CONFIG` で necoder の分（approve）と「止める」指定を一緒に渡す。Claude Code は `strictMcpConfig` + `settingSources` 空 + claude.ai のコネクタを止める。席とプローブが同じ関数を使う。塞いだ後: 偽のサーバは起動されず、necoder の道具は使えた。Claude Code の ACP でも ToolSearch に出たのは necoder の道具だけだった。
+  - MCP の `fleet_digest` が GUI 不在で失敗すると、Codex が提案まで諦めた回があった → CLI と同じく台帳だけで答える `fleet::digest` に共通化。空の id は分かる文で断る。
+- 学び/罠:
+  - 本人の Codex 設定のモデル `gpt-6-astra` は、手元の CLI 0.144.6 と Zed のキャッシュの codex-acp 1.1.2（codex 0.144.3）では「新しい Codex が要る」で弾かれる。実験は Codex の既定のモデルで回した。
+  - **codex-acp 1.1.2 は MCP の承認が要る呼び出しを、クライアントに聞かずに断る**。necoder は公開レジストリで 1.13.1 を選ぶので本番は問題ないが、プローブで `NECODER_HOME` を丸ごと差し替えるとレジストリが見えず、Zed のキャッシュの古い版を拾う → 隔離は MCP の子プロセスだけ（`PROBE_NECODER_HOME` / `PROBE_GUI_SOCK`）。
+  - `codex exec` は標準入力が開いていると追加の入力を待って止まる（`stdin=DEVNULL`）。`codex exec resume` は `-s` を受けない（`-c sandbox_mode=...`）。MCP の承認は `mcp_servers.<名前>.default_tools_approval_mode = "approve"`。
+  - プローブの最中に necoder をビルドし直すと、MCP サーバの起動を取りこぼして「道具が接続されていない」になる。
+- 検証: `cargo test -p acp_client -p agent_panel -p necoder -p workspace -p storage -p i18n` green（新規: MCP の承認と shell の見分け・Codex 形の承認要求を id で裁く・エージェント別の絞り込み）。実機: 上の CLI 2 ターン、ACP の Codex（偽のサーバあり・塞ぐ前後）、ACP の Claude Code。
+- 次: Codex 以外のエージェント（Gemini / OpenCode ほか）の MCP の承認の形と持ち込みの止め方は未確認（席の決まりと見張りは効くが、持ち込みは止めていない）。
+
+## 2026-09-25 — 調査: Orca（stablyai/orca）との機能差分の全数調査（実装なし）
+
+- **本人の依頼**: 「ORCA にあって necoder に無い機能をあぶり出して。ORCA に負けるのが謎すぎる。普通に全部勝っててほしい」。その後、「証拠を残したうえで docs/ に残して」。
+- **成果物**:
+  - 結論・優先度・Design Mode の実装案・不具合・never とぶつかる項目・全 226 項目の要約表: `docs/research/orca-gap-2026-09.md`
+  - 全項目の証拠（Orca の出典・necoder の `file:line`・「無」の検索と件数・再現手順・不具合のコードの抜粋・引用の検査）: `docs/research/orca-gap-2026-09-evidence.md`
+  - 「無」の 100 項目の検索に使った正規表現: `docs/research/orca-gap-2026-09-searches.tsv`
+  - Orca の参照用クローン: `orca/`（`.gitignore` に `/orca/` を追加・`646e9a5` で固定）
+- **調べ方**:
+  - Orca の公式ドキュメント 55 ページを全部読み、安定版のリリースノート 74 本から `feat` 269 件を拾った。
+  - 8 領域の読み取り専用エージェントで necoder のコードを判定させ、主要な判定は書き手が確かめ直した。
+  - 「無」の検索は全件を流し直し、ヒットは中身まで見た。
+  - 引用 572 件は、存在と行の範囲を機械で検査し、中身も全件照合した。
+- **結論**: 集計は、有 17 / 一部 105 / 無 100 / 方式差 4。
+  - 負けているのはエディタではなく**エージェントの周り**だ。無いものは次の 6 つ。
+    1. diff の行に ＋ でコメントしてまとめて送る
+    2. worktree の差分レビュー画面
+    3. 内蔵ブラウザと Design Mode
+    4. 端末の基本と、閉じても走り続ける PTY
+    5. GitHub / Linear / Jira
+    6. 使用量とレート制限の表示
+  - 勝っているのは LSP・hunk・blame・⌘I、ACP の承認と checkpoint、Conflict Radar と人間の Integrate、軽さ、SSH の作り、テレメトリ無し。
+  - 本人は Design Mode を「確かに付け加えたい」と発言した。Chromium を同梱せず、既存の `webview_view`（wry）の localhost 限定プレビューに、注入スクリプト・IPC・OS のスナップショットを足せば作れる（調査 §2）。
+- **ついでに見つけた不具合（未修正・調査 §3）**:
+  - パネルからのコミットで pre-commit フックが走らない（`run_git` の `core.hooksPath=/dev/null`）。
+  - ソース管理パネルの行を押しても diff が開かない（`GitPanelEvent::OpenDiff` の送る側が無い）。
+  - Fleet の「変更」から開く diff が、エージェントがコミット済みだと空になる。
+  - コミット・push・pull の失敗が画面に出ない。
+  - コミット欄で ⌘V が効かない。
+  - MANUAL の「ファイル操作は取り消せる」と `density` が実装と合わない。
+  - ACP の `AvailableCommandsUpdate` を捨てているので、`/` の補完が作れない。
+- **学び / 罠**:
+  - エージェントの出力を書き写す時、隣の主張と引用を取り違えることがあった（B29 でミュートの根拠に `mark_done_seen` を当てていた）。全件を「主張の文」と「引用先の行」で並べて照合して直した。
+  - Orca の README は「changelog が本当の機能一覧」と書いている。docs に無い機能（message rail・会話の rewind・Agent map の追加と撤去など）は、リリースノートの `feat` 行から拾う。
+  - React 19 は fiber の `_debugSource` を廃止した。そのため、Orca の Design Mode は React 19 のアプリでソース位置が取れない。necoder が作るなら、ビルド時に属性を埋める方式か source map で取る。
+- **次**: 本人の判断待ち。FEATURES の never（ホスティング連携・汎用 webview 等）を見直すか、どこから着手するか。調査の推奨は、①不具合 3 件 → ②注記トレイ + diff の行コメント → ③Design Mode の順。
+
+## 2026-09-26 — worktree横断レビューの記録（実装なし）
+
+- 本人の依頼: ORCAとの差分・UX・Rustの性能/コードをレビューし、全worktreeも確認。その後「気になるところについては docs/ にどんどんと足して」。実装は待つ。
+- [UX・コードレビュー台帳](UX-CODE-REVIEW.md)を新設。15件の懸念にID・優先度・状態・対象版・根拠・影響・改善案・未実施の確認条件を付けた。
+- 初回は全16 worktreeを棚卸し。mainだけの評価を訂正し、別worktreeで実装済みのdiff基準・hooks・Git入力・裏スレッドキュー・Fleet内レビュー等を再実装対象から除外。
+- 重要点: レビュー済み/注記と内容の版、差分の総メモリ予算、非同期保存順序、複数窓のclose、Design Modeの宛先/世代、SSHのlocalhost、Captain承認後の復旧。
+- 初回統合版でproject/review_view/terminal_view/webview_viewのlib test計122件成功、更新後8277d4fで全workspace/all-targetsのcheck成功。実画面・長時間性能・SSH/Windows実機は未検証。
+- main未コミット差分と2c80f83を一時ファイル上で三者比較し、24ファイル重複・11ファイル競合。リポジトリにはマージしていない。
+- 文書化時には統合版6387091、17個目のhistory worktree、Explorer/言語/CLI/Skills/使用量/通知の進展を確認。初回の使用量UI未接続は既に対処されており、台帳で訂正。新しい差分全体は次回レビュー対象とし、以前の検証結果を流用しない。
+- 変更はdocsのみ。元の機能差分調査の冒頭から台帳へリンクし、古い「無」判定を現在の実装状況と混同しないよう注記した。

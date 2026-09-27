@@ -33,8 +33,6 @@ pub(crate) struct PersistedState {
     #[serde(default)]
     pub(crate) active: usize,
     #[serde(default)]
-    pub(crate) work_layout: crate::workspace::WorkLayoutState,
-    #[serde(default)]
     pub(crate) fleet_mode: bool,
     /// Chat モードで閉じたか（`docs/CHAT.md` §4.3「最後に居た面へ戻る」）。
     #[serde(default)]
@@ -46,8 +44,6 @@ pub(crate) struct PersistedState {
     /// `0` は未保存＝既定の幅。
     #[serde(default)]
     pub(crate) left_dock_width: f32,
-    #[serde(default)]
-    pub(crate) fleet_view: String,
 }
 
 #[derive(Debug, Clone)]

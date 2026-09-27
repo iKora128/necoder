@@ -57,9 +57,6 @@ mod explorer_view;
 mod fleet_stage;
 mod fleet_view;
 mod new_task_dialog;
-mod work_layout;
-mod workbench;
-pub(crate) use work_layout::{WorkLayoutState, WorkPane, WorkSurface};
 mod image_view;
 mod pdf_view;
 mod remote_control;
@@ -81,6 +78,10 @@ pub use control_ipc::control_socket_path;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
 mod captain;
+mod captain_proposals;
+pub use captain_proposals::{
+    new_proposal_id, validate_proposed_tasks, ProposedTask, CAPTAIN_MCP_TOOLS, MAX_PROPOSED_TASKS,
+};
 mod chat_view;
 pub(crate) use captain::is_captain_thread_name;
 mod fleet_sidebar;
@@ -920,6 +921,9 @@ pub struct TaskSpace {
     pub head_oid: Option<String>,
     pub result_summary: Option<SharedString>,
     pub created_at_ms: i64,
+    /// Captain の分解案を承認して作った Task か（サイドバー行の `⚑` 帰属・FLEET-V2 §5.2）。
+    /// 台帳の `captain_task` から起動時に戻す。
+    pub captain_origin: bool,
 }
 
 impl TaskSpace {
@@ -947,6 +951,7 @@ impl TaskSpace {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
+            captain_origin: false,
         }
     }
 
@@ -989,6 +994,7 @@ impl TaskSpace {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
+            captain_origin: false,
         }
     }
 
@@ -1041,6 +1047,14 @@ pub(crate) enum FleetPane {
     Tests {
         space: SpaceId,
     },
+    /// ブリッジ（統合先のカード）のサイドペイン: 編隊図（ハブ / 扇形 / ツリー / カード）。
+    Formation {
+        space: SpaceId,
+    },
+    /// ブリッジのサイドペイン: Captain の采配ログ。
+    CaptainLog {
+        space: SpaceId,
+    },
 }
 
 /// 系譜グラフの表示（M14 #4）。扇形＝base から放射状に分岐 / ツリー＝上から下へ枝分かれ /
@@ -1051,16 +1065,6 @@ pub(crate) enum GraphView {
     Tree,
     Card,
     Hub,
-}
-
-/// Fleet 中央の面。Graph = 系譜の帯 + 舞台（FLEET-V2 の 1 画面・唯一の描画経路）。
-/// Work（作業タブ）は 2026-09-11 に既定から降格し、F3（2026-09-16）で中央タブ帯ごと非表示に
-/// なった。`workbench.rs` / `work_layout.rs` の削除は F7 で行う（配置 ID の割当だけがまだ生きている）。
-/// 管制（Control）は F3 で削除 — 要対応キューはサイドバーへ移設済み（`control_view.rs`）。
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum FleetCenterView {
-    Work,
-    Graph,
 }
 
 /// 編隊下段のタブ（2026-07-27）。ニュース＝task_events の鏡 / ターミナル＝アクティブ Task の実シェル。
@@ -1093,10 +1097,11 @@ pub(crate) enum RenameSite {
 }
 
 struct ChromeState {
-    work_layout: WorkLayoutState,
-    work_menu: Option<(u64, Point<gpui::Pixels>)>,
-    /// `sync_work_chrome` が最後に適用した (埋め込みか, session 数)。毎 render の早期脱出用。
-    work_embedded: Option<(bool, usize)>,
+    /// `sync_embedded_panels` が最後に適用した (埋め込みか, session 数)。毎 render の早期脱出用。
+    embedded_synced: Option<(bool, usize)>,
+    /// Task のターミナル（`TerminalDock` の名札）に振る通番。プロセス内で単調増加＝閉じた番号を使い回さない
+    /// （`FleetPane::Shell { id }` が別の PTY を指さない）。PTY は再起動を越えないので保存しない。
+    next_terminal_id: u64,
     show_left: bool,
     show_right: bool,
     show_bottom: bool,
@@ -1125,13 +1130,19 @@ struct ChromeState {
     fleet_cells: Vec<FleetPane>,
     /// ＋ Task ダイアログ（Some の間はモーダル・FLEET-V2 §4.1）。
     new_task: Option<new_task_dialog::NewTaskDialog>,
-    /// Captain へまだ渡していない台帳イベント（リポジトリ別）。Captain スレッドが busy の間に
-    /// 溜め、手が空いた最初の wake でまとめて 1 通にする（ポーリング禁止・§5.3）。
-    captain_pending: HashMap<String, Vec<String>>,
-    /// 舞台に Captain カードを出している統合先の space（⌘0 で Some・Task 行クリックで None）。
-    captain_space: Option<SpaceId>,
-    /// Captain カードのタブ（0 = スレッド / 1 = 采配ログ / 2 = Task 一覧・§3.6）。
-    captain_tab: usize,
+    /// 要対応に出している Captain の分解案（FLEET-V2 §5.5）。DB（`captain_proposals`）の鏡。
+    captain_proposals: Vec<captain_proposals::CaptainProposal>,
+    /// いま Captain に渡している 1 通が含む台帳の末尾の通し番号（リポジトリ別）。Captain のターンが
+    /// 終わったらこの位置まで「読んだ」と DB に書く（途中で落ちたら同じ出来事をもう一度渡す・§5.3）。
+    captain_inflight: HashMap<String, i64>,
+    /// 起こす要求を 2 秒まとめている最中のリポジトリ（同じ Task の連続遷移を 1 通に畳む）。
+    captain_wake_scheduled: std::collections::HashSet<String>,
+    /// 前回の会話の交代から Captain を起こした回数（リポジトリ別・§5.6）。
+    captain_wakes_since_rotation: HashMap<String, u32>,
+    /// 直近の采配（リポジトリ別・新しい方が末尾・最大 5 件）。会話の交代の後も前置きで続きを渡す（§5.9）。
+    captain_recent: HashMap<String, std::collections::VecDeque<String>>,
+    /// ブリッジの会話ペインに「Captain を任命する」面を出しているか（未任命で ⌘0 / ⚑ タブを押した時）。
+    captain_appointing: bool,
     /// 舞台の列数 1..=3（⌘⇧1/2/3・§3.4）。幅が足りなければ描画時に落とす。
     stage_columns: usize,
     /// 中央の実幅（render で更新）。列数の上限 = 1 枚 420px を割らない範囲。
@@ -1148,8 +1159,6 @@ struct ChromeState {
     /// リポジトリを跨いだときに畳んでおく編隊（鍵 = `repository_key`）。戻ってきたら ＋/× の結果ごと
     /// 復元する（切替のたびに並べ直さない・閉じたセルは閉じたまま）。
     fleet_grids: HashMap<String, Vec<FleetPane>>,
-    /// 編隊中央のタブ（管制 / グラフ・P3）。
-    fleet_center_view: FleetCenterView,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。
     control_focus: FocusHandle,
     /// 編隊モードの herd で solo（Integration リポジトリ）のスレッド群を展開しているか。
@@ -1159,8 +1168,6 @@ struct ChromeState {
     task_renaming: Option<TaskRenaming>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
-    /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
-    graph_collapsed: bool,
     /// 編隊セルの ⋯ メニュー（片付けの 4 段を 1 枚に並べる・2026-07-27）。
     fleet_cell_menu: Option<FleetCellMenuState>,
     /// 編隊下段のタブ（ニュース / ターミナル・2026-07-27）。
@@ -1174,6 +1181,10 @@ struct ChromeState {
     /// 下段の高さ（px）。上縁ドラッグで変わる。ニュース/ターミナルで共有する（同じ 1 枚だから）。
     bottom_height: f32,
     resizing_bottom: bool,
+    /// Task カードのサイドペインが占める割合（会話との境をドラッグ・全カード共通）。
+    side_pane_ratio: f32,
+    /// サイドペインの境をドラッグ中か。`(開始時の割合, カード幅 px)`。
+    resizing_side: Option<(f32, f32)>,
     resize_start_y: f32,
     resize_start_height: f32,
     /// 相対時刻（開始/最終入力の「N分前」）を編隊・herd 表示中だけ更新する 30 秒時計が稼働中か
@@ -1672,11 +1683,7 @@ impl Workspace {
             self.open_thread_history(&ThreadHistory, window, cx);
         }
         if let Some(index) = self.overlays.pending_project_switch.take() {
-            if self.work_is_visible() {
-                self.open_work_space(index, true, window, cx);
-            } else {
-                self.switch_project(index, window, cx);
-            }
+            self.switch_project(index, window, cx);
         }
         if let Some((path, line, column)) = self.pending_navigation.take() {
             self.record_nav_position(cx);
@@ -1893,7 +1900,7 @@ impl Render for Workspace {
         self.sync_native_view_visibility(window, cx);
         // 作業面の出入りで Agent パネルの chrome を合わせる（面を切り替える入口が複数あるので、
         // 呼び出し側に配らず毎 render で 1 箇所に集める＝上の native view と同じ流儀）。
-        self.sync_work_chrome(cx);
+        self.sync_embedded_panels(cx);
 
         if self.has_pending_shell_effects() {
             let workspace = cx.entity();
@@ -1941,10 +1948,9 @@ impl Render for Workspace {
                     cx.notify();
                 }
             }))
-            .on_action(cx.listener(|this, _: &ToggleLineage, _, cx| {
+            .on_action(cx.listener(|this, _: &ToggleLineage, window, cx| {
                 if this.chrome.fleet_mode {
-                    this.chrome.graph_collapsed = !this.chrome.graph_collapsed;
-                    cx.notify();
+                    this.toggle_formation(window, cx);
                 }
             }))
             .on_action(cx.listener(Self::open_file_finder))
@@ -3699,6 +3705,59 @@ mod tests {
         });
     }
 
+    /// レールの「AI スレッド一覧」: Editor では左カラムを herd に切り替え、Todo / git とは排他、押し直すと
+    /// エクスプローラへ戻る。Fleet 中は同じアイコンが Fleet サイドバーへの帰り道になる。
+    #[gpui::test]
+    fn the_rail_threads_icon_switches_the_left_column(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_rail_threads_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            assert!(!workspace.herd_column_visible(cx));
+
+            // Todo が出ていても一覧が取って代わる（左カラムは排他）。
+            workspace
+                .todo_panel
+                .update(cx, |panel, cx| panel.set_open(true, cx));
+            workspace.toggle_herd_sidebar(cx);
+            assert!(workspace.herd_column_visible(cx));
+            assert!(!workspace.todo_panel.read(cx).open, "Todo は畳む");
+
+            // 押し直すとエクスプローラ（左カラムは開いたまま）。
+            workspace.toggle_herd_sidebar(cx);
+            assert!(!workspace.herd_column_visible(cx));
+            assert!(workspace.chrome.show_left && !workspace.chrome.show_herd);
+
+            // Fleet の既定は Fleet サイドバー。エクスプローラへ切り替えた後も同じアイコンで戻れる。
+            workspace.toggle_fleet_mode(&ToggleFleet, window, cx);
+            assert!(workspace.herd_column_visible(cx));
+            workspace.toggle_herd_sidebar(cx);
+            assert!(!workspace.herd_column_visible(cx), "エクスプローラへ");
+            workspace.toggle_herd_sidebar(cx);
+            assert!(workspace.herd_column_visible(cx), "Fleet サイドバーへ戻る");
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Chat のテスト用の窓。チャットの置き場は一時ディレクトリへ向ける（実ユーザーの書類を触らない）。
     fn chat_workspace<'a>(
         cx: &'a mut gpui::TestAppContext,
@@ -3905,7 +3964,7 @@ mod tests {
                 session._watch = None;
                 session._watch_pump = None;
             }
-            workspace.restore_work_layout(&payload, cx);
+            workspace.restore_window_state(&payload, cx);
             assert!(!workspace.chat_mode(), "window のある描画まで待つ");
             assert_eq!(
                 workspace.chrome.explorer_width, 312.0,
@@ -4024,6 +4083,313 @@ mod tests {
     }
 
     /// 独立 ACP を増やしても元の会話を置換せず、非表示・復帰・管制から同じ実体を扱う。
+    /// ブリッジ（統合先のカード）: Fleet の家に入ったら編隊図が見えていて、Captain は設定ファイルを
+    /// 手で書かなくても任命できる（FLEET-V2 §3.6 / §5.7）。
+    #[gpui::test]
+    fn the_bridge_shows_the_formation_and_lets_you_appoint_a_captain(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_fleet_bridge_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.fleet_mode = true;
+            workspace.chrome.stage_width = 1500.;
+            workspace.seed_fleet_cells(cx);
+            assert!(workspace.project_sessions.projects[0].task_space.is_integration());
+            let space = workspace.project_sessions.projects[0].task_space.id.clone();
+
+            // 何も選んでいない統合先は編隊図を開いている。閉じたら閉じたまま。
+            assert!(matches!(workspace.stage_side(&space), Some(FleetPane::Formation { .. })));
+            workspace.set_stage_side(0, None, cx);
+            assert!(workspace.stage_side(&space).is_none(), "× で閉じたら勝手に開き直さない");
+            // ⌘⇧G（系譜ヘッダの ⚑ 編隊図）で開く / もう一度で閉じる。
+            workspace.toggle_formation(window, cx);
+            assert!(matches!(workspace.stage_side(&space), Some(FleetPane::Formation { .. })));
+            workspace.toggle_formation(window, cx);
+            assert!(workspace.stage_side(&space).is_none());
+
+            // 未任命の ⌘0 は設定へ飛ばさず、ブリッジの会話ペインに任命の面を出す。
+            assert!(settings::get(cx).captain_agent.is_none());
+            workspace.focus_captain(&FocusCaptain, window, cx);
+            assert!(workspace.chrome.captain_appointing);
+            assert!(!workspace.chrome.show_settings, "設定画面へは行かない");
+
+            // 任命（面のボタンが書くのと同じ 1 キー）→ Captain スレッドが main の panel に座る。
+            settings::set_user_value(
+                cx,
+                "captain_agent",
+                serde_json::Value::String("Claude Code".to_string()),
+            );
+            workspace.chrome.captain_appointing = false;
+            workspace.focus_captain(&FocusCaptain, window, cx);
+            assert!(!workspace.chrome.captain_appointing);
+            let panel = workspace.project_sessions.sessions[0].fleet_agents[0].clone();
+            let statuses = panel.read(cx).statuses();
+            let captain_thread = statuses
+                .iter()
+                .position(|status| captain::is_captain_thread_name(&status.name))
+                .expect("Captain スレッドができる");
+            assert_eq!(panel.read(cx).active_thread(), captain_thread, "⌘0 は Captain の会話へ寄せる");
+            assert!(workspace.conversation_panel(0) == panel);
+
+            // 解任 = キーを外す（設定の「なし」と同じ経路）。
+            settings::set_user_value(cx, "captain_agent", serde_json::Value::Null);
+            assert!(settings::get(cx).captain_agent.is_none());
+        });
+        let written = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(!written.contains("captain_agent"), "解任で null を残さない: {written}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Captain のテスト用の一時ディレクトリと設定。エージェントの起動コマンドは存在しないパスへ向ける
+    /// （送信が本物のエージェントを起こさず、起動の失敗として畳まれる）。
+    fn captain_test_home(label: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_captain_{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"captain_agent":"Claude Code",
+                "agent_servers":{"claude":{"type":"custom","command":"/nonexistent/necoder-test-agent"}}}"#,
+        )
+        .unwrap();
+        (root, settings_path)
+    }
+
+    /// Captain に渡すのは台帳の未読（FLEET-V2 §5.3）: 途中経過だけなら起こさずに位置だけ進め、
+    /// 采配に要る出来事は 1 通で届ける。表示中のタブは奪わない。位置を進めるのはターンが成功して終わった時だけ。
+    #[gpui::test]
+    fn captain_wakes_deliver_the_unread_ledger_and_keep_the_cursor_until_the_turn_ends(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, settings_path) = captain_test_home("wake");
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let storage = storage::Storage::open(&root.join("necoder.db")).unwrap();
+        let persistence = WindowPersistence {
+            storage: Some(storage.clone()),
+            window_id: Some("w1".to_string()),
+        };
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), Some(persistence), cx)
+        });
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_secs(3));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        let repository = workspace.update(cx, |workspace, _| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.project_sessions.projects[0].repository_key().to_string()
+        });
+        storage
+            .upsert_task_space(&storage::TaskSpaceRecord {
+                id: "space-rope".into(),
+                repository_id: repository.clone(),
+                root: root.join("repo-worktrees/rope"),
+                branch: Some("task/rope".into()),
+                title: "rope 設計".into(),
+                kind: SpaceKind::Task,
+                phase: TaskPhase::Working,
+                base_oid: None,
+                head_oid: None,
+                result_summary: None,
+                depends_on: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        // 初めての任命: 位置はその時点の末尾から（過去の全履歴は渡さない）。
+        workspace.update(cx, |workspace, cx| workspace.request_captain_wake(&repository, cx));
+        settle(cx);
+        let start = storage.load_captain_cursor(&repository).unwrap();
+        assert!(start.is_some(), "初回に位置を作る");
+
+        // 途中経過だけなら起こさない（位置だけ進める）。
+        let working = storage
+            .append_task_event("space-rope", "phase_changed", r#"{"phase":"working"}"#)
+            .unwrap();
+        workspace.update(cx, |workspace, cx| workspace.request_captain_wake(&repository, cx));
+        settle(cx);
+        assert_eq!(storage.load_captain_cursor(&repository).unwrap(), Some(working));
+        let panel = workspace.update(cx, |workspace, _| {
+            workspace.project_sessions.sessions[0].fleet_agents[0].clone()
+        });
+        assert!(panel.read_with(cx, |panel, _| panel.seat_thread(captain::CAPTAIN_SEAT).is_none()));
+
+        // 采配に要る出来事は 1 通で届く。人間が別のスレッドを見ていても表示を奪わない。
+        let other = panel.update(cx, |panel, cx| panel.new_thread_index(cx));
+        let review = storage
+            .append_task_event(
+                "space-rope",
+                "phase_changed",
+                r#"{"phase":"review_ready","digest":"ropey に置き換えた"}"#,
+            )
+            .unwrap();
+        workspace.update(cx, |workspace, cx| workspace.request_captain_wake(&repository, cx));
+        settle(cx);
+        panel.read_with(cx, |panel, _| {
+            let seat = panel.seat_thread(captain::CAPTAIN_SEAT).expect("Captain が席に座る");
+            let delivered = panel.statuses()[seat].last_prompt.clone().unwrap_or_default();
+            assert!(
+                delivered.contains(&format!("#{review} space-rope rope 設計: → review_ready — ropey に置き換えた")),
+                "{delivered}"
+            );
+            assert!(!delivered.contains("working"), "途中経過は載せない: {delivered}");
+            assert_eq!(panel.active_thread(), other, "知らせは表示中のタブを奪わない");
+        });
+        // このテストの設定ではエージェントを起こせない＝ターンは失敗で終わる → 位置は進めない（次の wake で再送）。
+        assert_eq!(storage.load_captain_cursor(&repository).unwrap(), Some(working));
+
+        // 成功したターンの終わりで、渡した所まで「読んだ」と書く。
+        workspace.update(cx, |workspace, cx| {
+            workspace.chrome.captain_inflight.insert(repository.clone(), review);
+            workspace.finish_captain_turn(0, true, cx);
+        });
+        settle(cx);
+        assert_eq!(storage.load_captain_cursor(&repository).unwrap(), Some(review));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 分解案の承認（FLEET-V2 §5.5）: 印を付けた行だけが本物の worktree とブランチになり、`⚑` 帰属が付く。
+    /// 裁いた案は DB の pending から消え、台帳に `proposal_approved` と `captain_task` が積まれる。
+    #[gpui::test]
+    fn approving_a_proposal_creates_only_the_chosen_rows_as_marked_tasks(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (root, settings_path) = captain_test_home("approve");
+        let project = root.join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(project.join("calc.py"), "def add(a, b):\n    return a + b\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let storage = storage::Storage::open(&root.join("necoder.db")).unwrap();
+        let persistence = WindowPersistence {
+            storage: Some(storage.clone()),
+            window_id: Some("w1".to_string()),
+        };
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), Some(persistence), cx)
+        });
+        cx.run_until_parked();
+        let repository = workspace.update(cx, |workspace, _| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.project_sessions.projects[0].repository_key().to_string()
+        });
+        let tasks = vec![
+            ProposedTask {
+                title: "割り算を足す".into(),
+                goal: "calc.py に divide を足す".into(),
+                done_when: "pytest が通る".into(),
+                scope: Some("calc.py".into()),
+                agent: None,
+            },
+            ProposedTask {
+                title: "README を書く".into(),
+                goal: "使い方を書く".into(),
+                done_when: "README.md がある".into(),
+                scope: None,
+                agent: None,
+            },
+        ];
+        let record = storage::CaptainProposalRecord {
+            id: new_proposal_id(),
+            repository_id: repository.clone(),
+            root: project.clone(),
+            note: Some("独立した 2 本".into()),
+            tasks: serde_json::to_string(&tasks).unwrap(),
+            status: storage::ProposalStatus::Pending,
+            outcome: None,
+            created_at: 1,
+            resolved_at: None,
+        };
+        storage.insert_captain_proposal(&record).unwrap();
+        let proposal_id = record.id.clone();
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_captain_proposal(
+                captain_proposals::CaptainProposal::from_record(record).unwrap(),
+                cx,
+            );
+            assert_eq!(workspace.attention_badge_count(cx), 1, "Editor 画面のバッジにも数える");
+            assert!(workspace
+                .control_attention_queue(cx)
+                .iter()
+                .any(|item| matches!(&item.kind, control_view::AttentionKind::Proposal { rows: 2, .. })));
+            workspace.toggle_proposal_row(&proposal_id, 1, cx);
+            workspace.approve_captain_proposal(&proposal_id, cx);
+            assert!(workspace.chrome.captain_proposals.is_empty(), "二度押しできない");
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.run_until_parked();
+        assert!(storage.load_pending_captain_proposals().unwrap().is_empty());
+        let created = workspace.update(cx, |workspace, _| {
+            workspace
+                .project_sessions
+                .projects
+                .iter()
+                .filter(|slot| !slot.task_space.is_integration())
+                .map(|slot| {
+                    (
+                        slot.task_space.title.to_string(),
+                        slot.task_space.captain_origin,
+                        slot.task_space.id.0.clone(),
+                        slot.worktree.root().to_path_buf(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(created.len(), 1, "印を外した行は切らない: {created:?}");
+        let (title, captain_origin, task_id, worktree) = &created[0];
+        assert_eq!(title, "割り算を足す");
+        assert!(captain_origin, "⚑ 帰属");
+        assert!(worktree.join("calc.py").exists(), "本物の worktree");
+        assert!(storage
+            .load_task_ids_with_event("captain_task")
+            .unwrap()
+            .contains(task_id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[gpui::test]
     fn fleet_panes_keep_their_threads_and_remote_targets(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
@@ -4094,6 +4460,17 @@ mod tests {
             workspace.add_terminal_to_selected_task(cx);
             assert_eq!(workspace.chrome.fleet_cells.len(), cells_before + 1, "端末は fleet_cells に実体として残る");
             assert_eq!(workspace.stage_cards().len(), 1, "が、舞台のカードは 1 枚のまま");
+            // サイドペイン（§3.5）: 端末を足すと横に開く。開いても会話の相手は動かず、閉じれば会話に戻る。
+            let space = workspace.project_sessions.projects[0].task_space.id.clone();
+            assert!(matches!(workspace.stage_side(&space), Some(FleetPane::Shell { .. })));
+            assert!(workspace.conversation_panel(0) == added, "サイドペインを開いても操作先のまま");
+            workspace.chrome.stage_width = 1500.;
+            assert!(workspace.stage_card_is_wide(), "1 枚 1500px なら会話と分割できる");
+            workspace.chrome.stage_width = 800.;
+            assert!(!workspace.stage_card_is_wide(), "狭ければサイドペインが全面に出る");
+            workspace.set_stage_side(0, None, cx);
+            assert!(workspace.stage_side(&space).is_none());
+            assert!(workspace.conversation_panel(0) == added);
 
             let (sender, receiver) = std::sync::mpsc::channel();
             workspace.handle_remote_control("remote_snapshot", serde_json::json!({}), sender, cx);

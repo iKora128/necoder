@@ -664,7 +664,13 @@ impl SettingsView {
     }
 
     fn set_pref_string(&mut self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        // 空文字は「未設定」（`Option<String>` の設定を外す。例: Captain の解任）。
+        let value = if value.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(value.to_string())
+        };
+        set_user_value(cx, key, value);
         cx.notify();
     }
 
@@ -1727,10 +1733,10 @@ impl SettingsView {
             ))
             .child(self.segmented_row(
                 "work_tabs_position",
-                i18n::t!("work.tabs_setting"),
+                i18n::t!("settings.pref_tabs_position"),
                 &[
-                    ("top", i18n::t!("work.top")),
-                    ("left", i18n::t!("work.left")),
+                    ("top", i18n::t!("settings.tabs_position_top")),
+                    ("left", i18n::t!("settings.tabs_position_left")),
                 ],
                 &settings.work_tabs_position,
                 cx,

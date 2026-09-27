@@ -103,7 +103,9 @@ dependencies = [
  "futures",
  "host",
  "paths",
+ "serde",
  "serde_json",
+ "tempfile",
  "toml 0.8.23",
 ]
 
@@ -237,10 +239,12 @@ dependencies = [
  "markdown",
  "paths",
  "project",
+ "serde",
  "serde_json",
  "settings",
  "settings_core",
  "storage",
+ "tempfile",
  "theme_core",
  "ui",
 ]

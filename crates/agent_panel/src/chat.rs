@@ -695,6 +695,7 @@ impl AgentPanel {
                 summary: SharedString::default(),
                 digest: None,
                 muted: true,
+                completed: true,
             });
         }
         cx.notify();
@@ -800,6 +801,7 @@ impl AgentPanel {
             summary: SharedString::default(),
             digest: None,
             muted: true,
+            completed: true,
         });
         cx.notify();
     }
@@ -994,6 +996,8 @@ mod tests {
             diffs: Vec::new(), // 差分なし＝チェックポイントを挟まない同期応答の経路
             raw_input: None,
             options: choices(),
+            tool_call_id: String::new(),
+            mcp_tool: false,
             respond,
         };
         (event, answers)

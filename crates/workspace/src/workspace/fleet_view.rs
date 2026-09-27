@@ -111,7 +111,9 @@ pub(super) fn pane_space(pane: &FleetPane) -> &SpaceId {
         | FleetPane::Terminal { space }
         | FleetPane::Editor { space }
         | FleetPane::Diff { space }
-        | FleetPane::Tests { space } => space,
+        | FleetPane::Tests { space }
+        | FleetPane::Formation { space }
+        | FleetPane::CaptainLog { space } => space,
     }
 }
 
@@ -130,7 +132,6 @@ impl Workspace {
             self.chrome.fleet_mode = !self.chrome.fleet_mode;
         }
         if self.chrome.fleet_mode {
-            self.ensure_work_layout(cx);
             self.seed_fleet_cells(cx);
             // 編隊の左カラム既定は herd。以後はレールの エクスプローラ/git/Todo で切り替わる。
             self.chrome.show_left = true;
@@ -235,7 +236,8 @@ impl Workspace {
         let Some(index) = self.session_index_for_space(&space) else {
             return;
         };
-        let id = self.chrome.work_layout.allocate();
+        let id = self.chrome.next_terminal_id;
+        self.chrome.next_terminal_id += 1;
         self.project_sessions.sessions[index]
             .terminal_dock
             .update(cx, |dock, cx| {
@@ -479,6 +481,21 @@ impl Workspace {
                 })
             })
             .unwrap_or(self.project_sessions.active);
+        self.create_task_in(integration_index, prompt, None, None, cx);
+    }
+
+    /// ＋ Task と Captain の分解案の承認が共有する本体（FLEET-V2 §4.1 / §5.5）: 統合先から worktree と
+    /// ブランチを切り、準備スクリプトを回し、担当を起こして `prompt` を最初の指示として送る。
+    /// 1 行目が Task 名とブランチ名になる。`agent` = 担当エージェント（`None` = 既定）。
+    /// `proposal` = 承認した分解案の id（`⚑` 帰属・台帳の `captain_task`）。
+    pub(crate) fn create_task_in(
+        &mut self,
+        integration_index: usize,
+        prompt: String,
+        agent: Option<String>,
+        proposal: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(slot) = self.project_sessions.projects.get(integration_index) else {
             return;
         };
@@ -547,6 +564,9 @@ impl Workspace {
                             None,
                             cx,
                         );
+                        if let Some(proposal) = &proposal {
+                            workspace.mark_captain_task(space, proposal, cx);
+                        }
                     }
                     if let Some(index) = workspace
                         .project_sessions
@@ -563,7 +583,7 @@ impl Workspace {
                                 cx,
                             );
                         } else if !prompt.trim().is_empty() {
-                            workspace.ipc_spawn_into(index, None, Some(prompt), cx);
+                            workspace.ipc_spawn_into(index, agent, Some(prompt), cx);
                         }
                     }
                     workspace.hint_fleet_mode_once(cx);
@@ -1005,20 +1025,17 @@ impl Workspace {
                 self.chrome.fleet_cells.len() - 1
             }
         };
-        self.chrome
-            .stage_tabs
-            .insert(space_id, self.chrome.fleet_cells[index].clone());
+        // 広いカードで開いているサイドペイン（ブリッジの編隊図など）は閉じない — 会話の相手だけ寄せる。
+        if !self.stage_card_is_wide() || self.stage_side(&space_id).is_none() {
+            self.chrome
+                .stage_tabs
+                .insert(space_id, self.chrome.fleet_cells[index].clone());
+        }
         cx.notify();
     }
 
     fn set_graph_view(&mut self, view: GraphView, cx: &mut Context<Self>) {
         self.chrome.graph_view = view;
-        self.chrome.graph_collapsed = false;
-        cx.notify();
-    }
-
-    fn toggle_graph_collapse(&mut self, cx: &mut Context<Self>) {
-        self.chrome.graph_collapsed = !self.chrome.graph_collapsed;
         cx.notify();
     }
 
@@ -1108,7 +1125,6 @@ impl Workspace {
             center = center.child(div().flex_1().min_h_0().child(view));
         } else {
             center = center
-                .child(self.render_stage_toolbar(cx))
                 .child(self.render_lineage_graph(cx))
                 .child(self.render_fleet_grid(cx));
         }
@@ -1141,39 +1157,11 @@ impl Workspace {
 
     // ── 系譜グラフ（M14 #4・最重要ビジュアル・ネイティブ描画） ──
 
-    /// ヘッダ: 「系譜グラフ」 + 4 表示スイッチャー（扇形/リバー/ツリー/カード）+ ⌄ 折り畳み。
+    /// 舞台の上の 1 行: 「系譜」+ 帯（Task 名・クリックで舞台へ）+ 列数トグル + 編隊図（ブリッジ）への入口。
+    /// 編隊図そのもの（ハブ / 扇形 / ツリー / カード）はブリッジのサイドペインに住む — 舞台の上に縦に積むと
+    /// カードが潰れる（2026-09-20）。
     fn render_graph_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let accent = self.accent();
-        let current = self.chrome.graph_view;
-        let collapsed = self.chrome.graph_collapsed;
-        let views = [
-            (GraphView::Fan, i18n::t!("fleet.graph_fan")),
-            (GraphView::Tree, i18n::t!("fleet.graph_tree")),
-            (GraphView::Card, i18n::t!("fleet.graph_card")),
-            (GraphView::Hub, i18n::t!("fleet.graph_hub")),
-        ];
-        let mut switcher = div().flex().items_center().gap(px(2.));
-        for (index, (view, label)) in views.into_iter().enumerate() {
-            let on = view == current;
-            switcher = switcher.child(
-                div()
-                    .id(("graph-view", index))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .rounded(px(5.))
-                    .text_size(px(10.5))
-                    .when(on, |element| element.bg(theme.bg3))
-                    .text_color(if on { theme.fg0 } else { theme.fg2 })
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
-                    .child(SharedString::from(label))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| this.set_graph_view(view, cx)),
-                    ),
-            );
-        }
         div()
             .flex_none()
             .flex()
@@ -1181,6 +1169,8 @@ impl Workspace {
             .gap(px(10.))
             .h(px(30.))
             .px(px(12.))
+            .border_b_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .flex_none()
@@ -1189,37 +1179,88 @@ impl Workspace {
                     .text_color(theme.fg2)
                     .child(i18n::t!("fleet.lineage")),
             )
-            .child(div().flex_1())
-            .child(switcher)
             .child(
                 div()
-                    .id("graph-collapse")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(self.render_lineage_strip(cx)),
+            )
+            .child(self.render_stage_columns(cx))
+            .child(
+                div()
+                    .id("graph-open-formation")
                     .flex_none()
-                    .size(px(20.))
+                    .h(px(20.))
+                    .px(px(7.))
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .gap(px(4.))
                     .rounded(px(5.))
+                    .text_size(px(10.5))
                     .text_color(theme.fg2)
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
-                    .child(SharedString::from(if collapsed { "▸" } else { "⌄" }))
+                    .child("⚑")
+                    .child(SharedString::from(i18n::t!("fleet.formation")))
                     .tooltip(Tooltip::text(
-                        i18n::t!("fleet.graph_collapse"),
+                        i18n::t!("fleet.formation_tip"),
                         theme.clone(),
                     ))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.toggle_graph_collapse(cx)),
+                        cx.listener(|this, _, window, cx| this.toggle_formation(window, cx)),
                     ),
             )
-            // スイッチャーがプロジェクト色に馴染むよう、アクティブ表示だけ僅かに accent 寄せ（下線）。
-            .border_b_1()
-            .border_color(if collapsed {
-                theme.border
-            } else {
-                accent.alpha(0.0)
-            })
+    }
+
+    /// 編隊図の表示切替チップ（ハブ / 扇形 / ツリー / カード）。編隊ペインの見出しに並べる。
+    pub(super) fn render_graph_view_chips(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let theme = self.theme.clone();
+        let current = self.chrome.graph_view;
+        [
+            (GraphView::Hub, i18n::t!("fleet.graph_hub")),
+            (GraphView::Fan, i18n::t!("fleet.graph_fan")),
+            (GraphView::Tree, i18n::t!("fleet.graph_tree")),
+            (GraphView::Card, i18n::t!("fleet.graph_card")),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (view, label))| {
+            let on = view == current;
+            div()
+                .id(("graph-view", index))
+                .flex_none()
+                .px(px(7.))
+                .h(px(18.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .text_size(px(10.))
+                .when(on, |element| element.bg(theme.bg2))
+                .text_color(if on { theme.fg0 } else { theme.fg2 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
+                .child(SharedString::from(label))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| this.set_graph_view(view, cx)),
+                )
+                .into_any_element()
+        })
+        .collect()
+    }
+
+    /// 編隊図の本体（選んでいる表示）。ブリッジのサイドペインが呼ぶ。
+    pub(super) fn render_formation(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let lanes = self.fleet_lanes(cx);
+        match self.chrome.graph_view {
+            GraphView::Card => self.render_graph_cards(&lanes, cx),
+            GraphView::Hub => self.render_graph_hub(&lanes, cx),
+            GraphView::Tree => self.render_graph_scene(self.tree_scene(&lanes), cx),
+            GraphView::Fan => self.render_graph_scene(self.radial_scene(&lanes), cx),
+        }
     }
 
     /// 扇形（系譜）の版面。本流の分岐点から枝が出て、肘で水平化し、コミット bead を経て先端に至る。
@@ -1337,32 +1378,9 @@ impl Workspace {
     /// 系譜グラフ（M14 #4）。ヘッダのスイッチャーで扇形/ツリー/カード/ハブを切替・⌄ で畳む。
     /// 版面ごとに `render_graph_scene`（扇形/ツリー）・`render_graph_cards`・`render_graph_hub` へ委譲する。
     fn render_lineage_graph(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = self.theme.clone();
-        let header = self.render_graph_header(cx);
-        if self.chrome.graph_collapsed {
-            return div()
-                .flex_none()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(header)
-                .child(self.render_lineage_strip(cx))
-                .into_any_element();
-        }
-        let lanes = self.fleet_lanes(cx);
-        let body = match self.chrome.graph_view {
-            GraphView::Card => self.render_graph_cards(&lanes, cx),
-            GraphView::Hub => self.render_graph_hub(&lanes, cx),
-            GraphView::Tree => self.render_graph_scene(self.tree_scene(&lanes), cx),
-            GraphView::Fan => self.render_graph_scene(self.radial_scene(&lanes), cx),
-        };
         div()
             .flex_none()
-            .flex()
-            .flex_col()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(header)
-            .child(body)
+            .child(self.render_graph_header(cx))
             .into_any_element()
     }
 
@@ -1611,6 +1629,14 @@ impl Workspace {
                 )),
                 None => activity_label(branch.activity),
             };
+            // ツリーは先端が横一列に並ぶ。1 本あたりの幅が副ラベル（⎇ branch · 状態）より狭いと隣と重なるので、
+            // 狭いとき（ブリッジのペイン・Task が多いとき）は名前だけにする。状態は先端のグリフが言っている。
+            let lane_width = if self.stage_card_is_wide() {
+                self.stage_card_width() * self.chrome.side_pane_ratio
+            } else {
+                self.stage_card_width()
+            } / count.max(1) as f32;
+            let sub_fits = !scene.labels_below || lane_width >= 170.0;
             if scene.labels_below {
                 // ツリー: ノードの下に中央寄せ（[章 名前] ／ サブ）。クリックで focus。
                 body = body.child(
@@ -1641,13 +1667,15 @@ impl Workspace {
                                         .child(branch.name.clone()),
                                 ),
                         )
-                        .child(
-                            div()
-                                .text_size(px(9.5))
-                                .text_color(theme.fg2)
-                                .whitespace_nowrap()
-                                .child(sub),
-                        )
+                        .when(sub_fits, |label| {
+                            label.child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(theme.fg2)
+                                    .whitespace_nowrap()
+                                    .child(sub.clone()),
+                            )
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, window, cx| {
@@ -1708,11 +1736,19 @@ impl Workspace {
     fn render_graph_hub(&self, lanes: &[FleetLane], cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let accent = self.accent();
-        let body_h = 360.0_f32;
         let count = lanes.len().max(1);
         let center = (0.5_f32, 0.5_f32);
-        // パネルが横長なので楕円（横 rx・縦 ry。ともに body 割合）で配置する。横に伸びすぎないよう抑える。
-        let (rx, ry) = (0.19_f32, 0.38_f32);
+        // ブリッジのサイドペインいっぱいに描く（縦横とも割合座標）。横の半径は「ノードの外側にラベル
+        // （約 190px）が収まる」ところまでに抑える — ペインが狭いほど楕円を縦長にしてラベルの切れを防ぐ。
+        let pane_width = if self.stage_card_is_wide() {
+            self.stage_card_width() * self.chrome.side_pane_ratio
+        } else {
+            self.stage_card_width()
+        };
+        let rx = ((pane_width / 2.0 - 190.0) / pane_width.max(1.0)).clamp(0.10, 0.30);
+        let ry = 0.36_f32;
+        // Captain を任命していれば中心は Captain（采配の要）。未任命ならリポジトリ。
+        let captain = settings::get(cx).captain_agent.clone();
         let repo = self
             .active_worktree()
             .and_then(|worktree| {
@@ -1773,8 +1809,9 @@ impl Workspace {
 
         let mut body = div()
             .relative()
-            .flex_none()
-            .h(px(body_h))
+            .w_full()
+            .h_full()
+            .min_h(px(320.))
             .overflow_hidden()
             .child(edges);
 
@@ -1790,7 +1827,8 @@ impl Workspace {
                     .absolute()
                     .left(relative(nx))
                     .ml(px(-outer / 2.0))
-                    .top(px(ny * body_h - outer / 2.0))
+                    .top(relative(ny))
+                    .mt(px(-outer / 2.0))
                     .cursor_pointer()
                     .child(agent_panel::activity_dot(
                         ("hub-dot", index),
@@ -1830,7 +1868,8 @@ impl Workspace {
                     .absolute()
                     .left(relative(nx))
                     .ml(px(tip_d / 2.0 + 8.0))
-                    .top(px(ny * body_h - 15.0))
+                    .top(relative(ny))
+                    .mt(px(-15.0))
                     .flex()
                     .items_center()
                     .gap(px(7.))
@@ -1844,7 +1883,8 @@ impl Workspace {
                     .left(relative(nx))
                     .ml(px(-(168.0 + tip_d / 2.0 + 8.0)))
                     .w(px(168.))
-                    .top(px(ny * body_h - 15.0))
+                    .top(relative(ny))
+                    .mt(px(-15.0))
                     .flex()
                     .items_center()
                     .justify_end()
@@ -1874,9 +1914,10 @@ impl Workspace {
                 div()
                     .absolute()
                     .left(relative(center.0))
-                    .ml(px(-66.))
-                    .top(px(center.1 * body_h - 28.0))
-                    .w(px(132.))
+                    .ml(px(-78.))
+                    .top(relative(center.1))
+                    .mt(px(-28.0))
+                    .w(px(156.))
                     .h(px(56.))
                     .flex()
                     .flex_col()
@@ -1895,10 +1936,16 @@ impl Workspace {
                             .text_size(px(12.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.fg0)
-                            .child(SharedString::from(format!("⎇ {repo}"))),
+                            .child(SharedString::from(match &captain {
+                                Some(_) => format!("⚑ {}", i18n::t!("captain.title")),
+                                None => format!("⎇ {repo}"),
+                            })),
                     )
-                    .child(div().text_size(px(9.5)).text_color(theme.fg2).child(
-                        SharedString::from(i18n::t!("fleet.graph_hub_agents", "count" => count)),
+                    .child(div().max_w(px(142.)).overflow_hidden().whitespace_nowrap().text_size(px(9.5)).text_color(theme.fg2).child(
+                        SharedString::from(match &captain {
+                            Some(agent) => format!("{agent} · {}", i18n::t!("fleet.graph_hub_agents", "count" => lanes.len())),
+                            None => i18n::t!("fleet.graph_hub_agents", "count" => lanes.len()),
+                        }),
                     )),
             );
 
@@ -2177,14 +2224,7 @@ impl Workspace {
             .gap(px(8.))
             .p(px(10.));
         for (index, pane) in self.stage_cards() {
-            let space = pane_space(&pane);
-            if self.chrome.captain_space.as_ref() == Some(space) {
-                if let Some(session) = self.session_index_for_space(space) {
-                    stage = stage.child(self.render_captain_card(session, cx));
-                }
-            } else {
-                stage = stage.child(self.render_fleet_cell(index, pane, cx));
-            }
+            stage = stage.child(self.render_fleet_cell(index, pane, cx));
         }
         stage.into_any_element()
     }
@@ -2279,44 +2319,24 @@ impl Workspace {
             }));
         }
         if let Some(session_index) = session_index {
-            cell = cell.child(self.render_task_tabs(session_index, cx));
+            cell = cell.child(self.render_pane_bar(session_index, cx));
         }
-        let pane = self.chrome.stage_tabs.get(space).cloned().unwrap_or(pane);
         let body = session_index
-            .map(|session_index| match pane {
-                FleetPane::Agent { panel, .. } => panel
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
-                FleetPane::Shell { id, .. } => self.project_sessions.sessions[session_index]
-                    .terminal_dock
-                    .read(cx)
-                    .session(id)
-                    .map(|terminal| {
-                        terminal
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().into_any_element()),
-                FleetPane::Task { .. } => self.project_sessions.sessions[session_index]
-                    .fleet_agents[0]
-                    .clone()
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
-                FleetPane::Terminal { .. } => self.project_sessions.sessions[session_index]
-                    .terminal_dock
-                    .clone()
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
-                FleetPane::Editor { .. } => self.render_stage_files(session_index, cx),
-                FleetPane::Diff { .. } => self.project_sessions.sessions[session_index]
-                    .git_panel
-                    .clone()
-                    .into_any_element(),
-                FleetPane::Tests { .. } => self.project_sessions.sessions[session_index]
-                    .tests_dock
-                    .clone()
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
+            .map(|session_index| {
+                let appointing = self.chrome.captain_appointing
+                    && self.project_sessions.projects[session_index].task_space.is_integration()
+                    && settings::get(cx).captain_agent.is_none();
+                let conversation = if appointing {
+                    self.render_captain_appoint(cx)
+                } else {
+                    self.conversation_panel(session_index)
+                        .cached(StyleRefinement::default().flex().flex_col().size_full())
+                        .into_any_element()
+                };
+                let side = self
+                    .stage_side(space)
+                    .map(|side| self.render_side_pane(session_index, side, cx));
+                self.render_card_body(("task-side-resize", session_index), conversation, side, cx)
             })
             .unwrap_or_else(|| {
                 div()

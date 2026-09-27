@@ -28,9 +28,11 @@ mod chat;
 mod idle;
 mod remote;
 mod search;
+mod seat;
 pub mod sound;
 
 pub use chat::ChatRow;
+pub use seat::{seat_permission_mode, SeatPolicy};
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
 
@@ -145,6 +147,7 @@ struct SelectorChoice {
 }
 
 /// transcript の 1 エントリ（VSCode Claude Code 拡張のトランスクリプトを踏襲）。
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Entry {
     /// ユーザー発話（bg2 箱・左縁スレッド色）。
     User(SharedString),
@@ -344,6 +347,10 @@ fn content_cache_key(text: &str) -> ContentCacheKey {
     }
 }
 
+// 各描画キャッシュは件数に加えて入力本文の合計も制限する。解析木・レイアウトの
+// ヒープ実測値ではないが、ストリームの長い接頭辞を数百世代抱える増幅を防ぐ。
+const TRANSCRIPT_CACHE_SOURCE_BYTES: usize = 512 * 1024;
+
 /// CommonMark の解析結果を本文 hash で再利用する小さな LRU。ストリーム途中の断片も上限で
 /// 古いものから捨てるため、長いターンでもキャッシュが無制限に増えない。
 #[derive(Default)]
@@ -363,7 +370,13 @@ impl MarkdownBlockCache {
             }
         }
         let blocks = Arc::new(markdown::parse(text));
-        while self.order.len() >= Self::CAPACITY {
+        if text.len() > TRANSCRIPT_CACHE_SOURCE_BYTES {
+            return blocks;
+        }
+        while self.order.len() >= Self::CAPACITY
+            || self.order.iter().map(|key| key.len).sum::<usize>() + text.len()
+                > TRANSCRIPT_CACHE_SOURCE_BYTES
+        {
             if let Some(expired) = self.order.pop_front() {
                 self.blocks.remove(&expired);
             }
@@ -554,7 +567,20 @@ impl SyntaxHighlightCache {
             .get_mut(&language)
             .map(|highlighter| highlighter.highlight(text))
             .unwrap_or_default();
-        while self.order.len() >= Self::CAPACITY {
+        let span_bytes = spans.capacity() * std::mem::size_of::<lang::HighlightSpan>();
+        const SPAN_BYTES: usize = 2 * 1024 * 1024;
+        if span_bytes > SPAN_BYTES {
+            return spans;
+        }
+        while self.order.len() >= Self::CAPACITY
+            || self
+                .spans
+                .values()
+                .map(|spans| spans.capacity() * std::mem::size_of::<lang::HighlightSpan>())
+                .sum::<usize>()
+                + span_bytes
+                > SPAN_BYTES
+        {
             if let Some(expired) = self.order.pop_front() {
                 self.spans.remove(&expired);
             }
@@ -669,6 +695,11 @@ pub enum PanelEvent {
         thread: SharedString,
         text: String,
     },
+    /// 席のスレッドで決まりの漏れ（許可を求めずに編集された）を見つけ、ターンを止めた（FLEET-V2 §5.8-4）。
+    SeatViolation {
+        thread: SharedString,
+        tool: SharedString,
+    },
     /// prompt を ACP session へ送る直前。Fleet Task lifecycle の `working` 起点。
     TurnStarted {
         thread: SharedString,
@@ -682,6 +713,9 @@ pub enum PanelEvent {
         digest: Option<SharedString>,
         /// エージェント別ミュート中（P2）: workspace はトーストを出さない（ニュースには載せる）。
         muted: bool,
+        /// 正常に完了したか（中断・エージェント側の失敗は `false`）。Captain はこれが `true` の時だけ
+        /// 台帳の読んだ位置を進める（FLEET-V2 §5.3・途中で落ちたら同じ出来事をもう一度渡す）。
+        completed: bool,
     },
     TurnFailed {
         thread: SharedString,
@@ -970,9 +1004,28 @@ struct Thread {
     session_resumable: bool,
     /// エージェントが最後に働いた時刻（送信・ターン終了）。自動停止の起点。
     last_active_at_ms: i64,
+    /// 席の決まり（Fleet の Captain など・FLEET-V2 §5.8）。`Some` の間は道具と権限を necoder が決める。
+    seat: Option<SeatPolicy>,
+    /// いま握っているセッションを席の決まりで起こしたか。席の有無と食い違ったら次の送信で立て直す
+    /// （会話は `session/load` で引き継ぐ）。
+    session_seated: bool,
+    /// 席のスレッドで走っている道具（id → 種類と題名）。見張りは完了時に編集系かを判定し、
+    /// 題名の無い許可要求（codex-acp の MCP の承認）はここから題名を引く。
+    seat_tools: HashMap<String, seat::SeatToolCall>,
 }
 
 impl Thread {
+    /// `/compact` を送る先の会話があるか（生きたセッション、**または**次の送信で `session/load` が
+    /// 引き継ぐ id）。無いのは一度も起こしていないスレッドだけ＝圧縮する文脈が無い。
+    ///
+    /// **いつでも押せる**のが要件（2026-09-24 本人）。実行中は composer の送信と同じくキューに積んで
+    /// ターン完了後に送り、トークン数では判定しない（使用量を報告しないエージェントでも文脈は溜まる）。
+    /// 生きたセッションだけを条件にしていた頃は、idle の弁（`idle.rs`・既定 15 分）が止めた直後と
+    /// 再起動直後（送信路は初回送信まで無い）に消えていた。
+    pub(crate) fn can_compact(&self) -> bool {
+        self.command_tx.is_some() || self.acp_session_id.is_some()
+    }
+
     /// 現在の状態（herdr の 5 状態マップ・#）。Blocked（承認待ち）は Working（実行中）より優先で、
     /// これまで `running: bool` に埋もれていた「待ち」を分離する。Done は未確認ラッチ。
     fn activity(&self) -> ThreadActivity {
@@ -1035,6 +1088,9 @@ impl Thread {
             chat: None,
             session_resumable: false,
             last_active_at_ms: 0,
+            seat: None,
+            session_seated: false,
+            seat_tools: HashMap::new(),
         }
     }
 
@@ -1617,12 +1673,62 @@ fn new_thread_id() -> String {
     )
 }
 
+/// 閉じた会話の全文は匿名の一時領域へ退避する。DB の turn はツール出力や差分を
+/// 省略するため、⌘⇧T 用には Entry をそのまま保存する。書けなければメモリに残す。
+/// TempPath はファイル記述子を保持せず、復元時・パネル破棄時に自動削除される。
+struct ClosedThread {
+    thread: Thread,
+    transcript: Option<tempfile::TempPath>,
+}
+
+impl ClosedThread {
+    fn new(thread: Thread) -> Self {
+        let mut closed = Self {
+            thread,
+            transcript: None,
+        };
+        if let Err(error) = closed.spill_entries() {
+            eprintln!("閉じた会話の退避に失敗（メモリで保持）: {error:#}");
+        }
+        closed
+    }
+
+    fn spill_entries(&mut self) -> anyhow::Result<()> {
+        use std::io::Write;
+        if self.thread.entries.is_empty() {
+            return Ok(());
+        }
+        // tempfile は排他的に作成し、Unix では本人だけが読める権限にする。
+        let mut file = tempfile::NamedTempFile::new()?;
+        {
+            let mut writer = std::io::BufWriter::new(file.as_file_mut());
+            serde_json::to_writer(&mut writer, &self.thread.entries)?;
+            writer.flush()?;
+        }
+        self.transcript = Some(file.into_temp_path());
+        self.thread.entries = Vec::new();
+        self.thread.last_prompt = None;
+        Ok(())
+    }
+
+    fn restore_entries(&mut self) -> anyhow::Result<()> {
+        if let Some(path) = self.transcript.as_ref() {
+            let file = std::fs::File::open(path)?;
+            let entries: Vec<Entry> = serde_json::from_reader(std::io::BufReader::new(file))?;
+            self.thread.last_prompt = last_prompt_from_entries(&entries);
+            self.thread.entries = entries;
+            self.transcript = None;
+        }
+        Ok(())
+    }
+}
+
 /// エージェントパネル本体（右ドックまるごとを描く）。
 pub struct AgentPanel {
     threads: Vec<Thread>,
     active: usize,
     // ⌘W で閉じたスレッド（⌘⇧T で復元。会話履歴ごと戻す。新しいものが末尾）。
-    closed_threads: Vec<Thread>,
+    closed_threads: Vec<ClosedThread>,
     theme: Theme,
     /// 宛先（アクティブプロジェクトのコンテキスト）。workspace が [`Self::set_destination`] で更新する。
     dest_project: SharedString,
@@ -2852,8 +2958,14 @@ PYEOF"#;
                 selection: None,
                 layout: TextLayout::default(),
             });
+            if text.len() > TRANSCRIPT_CACHE_SOURCE_BYTES {
+                return styled;
+            }
             let mut cache = self.styled_text_cache.borrow_mut();
-            while cache.order.len() >= StyledTextEntityCache::CAPACITY {
+            while cache.order.len() >= StyledTextEntityCache::CAPACITY
+                || cache.order.iter().map(|key| key.content.len).sum::<usize>() + text.len()
+                    > TRANSCRIPT_CACHE_SOURCE_BYTES
+            {
                 if let Some(expired) = cache.order.pop_front() {
                     cache.items.remove(&expired);
                 }
@@ -2943,8 +3055,14 @@ PYEOF"#;
         }
         links.sort_by_key(|link| link.range.start);
         let links = Rc::new(links);
+        if text.len() > TRANSCRIPT_CACHE_SOURCE_BYTES {
+            return links;
+        }
         let mut cache = self.link_cache.borrow_mut();
-        while cache.order.len() >= TranscriptLinkCache::CAPACITY {
+        while cache.order.len() >= TranscriptLinkCache::CAPACITY
+            || cache.order.iter().map(|key| key.len).sum::<usize>() + text.len()
+                > TRANSCRIPT_CACHE_SOURCE_BYTES
+        {
             if let Some(expired) = cache.order.pop_front() {
                 cache.items.remove(&expired);
             }
@@ -3619,6 +3737,7 @@ PYEOF"#;
                     thread.command_tx = Some(command_tx);
                     thread.session_serial = serial;
                     thread.session_lost = false;
+                    thread.session_seated = thread.seat.is_some();
                     thread.session_note =
                         Some(SharedString::from(i18n::t!("agent.session_resuming")));
                 }
@@ -3697,6 +3816,7 @@ PYEOF"#;
             thread.session_serial = serial;
             thread.session_lost = false;
             thread.session_used = false;
+            thread.session_seated = thread.seat.is_some();
         }
         self.prewarm_order.retain(|id| id != thread_id);
         self.prewarm_order.push(thread_id.to_string());
@@ -3881,7 +4001,13 @@ PYEOF"#;
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
         closed.running = false;
         closed.turn_started_at = None;
-        self.closed_threads.push(closed);
+        closed.pending_permission = None;
+        closed.pending_elicitation = None;
+        closed.session_serial = 0;
+        self.closed_threads.push(ClosedThread::new(closed));
+        self.release_transcript_caches();
+        self.sync_running_registry(cx);
+        self.reset_transcript_list(true);
         // active を有効域へ寄せる。空になったら 0（描画は get(active)=None で空状態になる）。
         if self.threads.is_empty() {
             self.active = 0;
@@ -3917,11 +4043,18 @@ PYEOF"#;
 
     /// 直近に閉じたスレッドを復元する（⌘⇧T。会話履歴ごと戻し、末尾へ追加してアクティブに）。
     pub fn restore_closed_thread(&mut self, cx: &mut Context<Self>) {
-        if let Some(thread) = self.closed_threads.pop() {
+        if let Some(mut closed) = self.closed_threads.pop() {
+            if let Err(error) = closed.restore_entries() {
+                eprintln!("閉じたスレッドの復元に失敗（再試行可能）: {error:#}");
+                self.closed_threads.push(closed);
+                return;
+            }
+            let thread = closed.thread;
             self.save_active_draft(cx);
             self.unarchive(&thread.id);
             self.threads.push(thread);
             self.active = self.threads.len() - 1;
+            self.reset_transcript_list(true);
             let color = self.active_color();
             let draft = self.threads[self.active].draft.clone();
             self.composer.update(cx, |composer, cx| {
@@ -4114,9 +4247,17 @@ PYEOF"#;
         let text = editor.read(cx).plain_text();
         let name = text.trim();
         if !name.is_empty() {
+            let mut unseated = None;
             if let Some(thread) = self.threads.get_mut(index) {
                 thread.name = SharedString::from(name.to_string());
                 thread.name_is_custom = true; // 以後 AI 自動命名で上書きしない
+                // 席は名前ではなく席に付く（FLEET-V2 §5.8-5）。改名 = 席から降りる（前置きも外す）。
+                if thread.seat.take().is_some() {
+                    unseated = Some(thread.id.clone());
+                }
+            }
+            if let Some(id) = unseated {
+                self.prompt_context.remove(&id);
             }
             self.persist_thread(index);
         }
@@ -4456,6 +4597,15 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// 閉じた会話の本文・レイアウトをキャッシュ経由で握り続けない。
+    fn release_transcript_caches(&mut self) {
+        *self.markdown_cache.borrow_mut() = MarkdownBlockCache::default();
+        *self.syntax_cache.borrow_mut() = SyntaxHighlightCache::default();
+        *self.styled_text_cache.borrow_mut() = StyledTextEntityCache::default();
+        *self.link_cache.borrow_mut() = TranscriptLinkCache::default();
+        self.transcript_regions.borrow_mut().clear();
+    }
+
     /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。composer にも波及させる。
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
@@ -4668,6 +4818,18 @@ PYEOF"#;
     /// その agent の次スレッドがそれで開く。agent を跨いでも語彙が混ざらない。
     /// 既定を「動かさない」（§8＝default_agent）ことと「覚える」（per-agent sticky）の線をここで引いている。
     fn select_option(&mut self, selector: Selector, value: SharedString, cx: &mut Context<Self>) {
+        // 席のスレッドの権限モードとエージェントは necoder が決める（FLEET-V2 §5.8-2）。選ぶと決まりが
+        // 外れるので受けない。ユーザーの既定（sticky）にも書かない。
+        if matches!(selector, Selector::Mode | Selector::Agent)
+            && self
+                .threads
+                .get(self.active)
+                .is_some_and(|thread| thread.seat.is_some())
+        {
+            self.open_menu = None;
+            cx.notify();
+            return;
+        }
         if selector == Selector::Agent && self.agent_selector_locked() {
             self.open_menu = None;
             cx.notify();
@@ -5080,14 +5242,27 @@ PYEOF"#;
     }
 
     /// 文脈の圧縮（`/compact`）をエージェントへ依頼する（Claude Code の slash コマンドを turn として送る）。
-    /// 実行中は無視（ターンの最中には送らない）。トークンメーター横のボタンから呼ぶ。
+    /// 実行中はキューの末尾へ積み、ターン完了後に送る（composer の送信と同じ作法・二重には積まない）。
+    /// トークンメーター横のボタンから呼ぶ。
     fn compact_context(&mut self, cx: &mut Context<Self>) {
-        let running = self
-            .threads
-            .get(self.active)
-            .map(|thread| thread.running)
-            .unwrap_or(false);
-        if running {
+        let queued = {
+            let Some(thread) = self.threads.get_mut(self.active) else {
+                return;
+            };
+            if !thread.can_compact() {
+                return;
+            }
+            if !thread.running {
+                false
+            } else {
+                if !thread.queued_prompts.iter().any(|prompt| prompt == "/compact") {
+                    thread.queued_prompts.push("/compact".to_string());
+                }
+                true
+            }
+        };
+        if queued {
+            cx.notify();
             return;
         }
         self.send_prompt_text("/compact".to_string(), cx);
@@ -5107,15 +5282,26 @@ PYEOF"#;
     }
 
     pub fn send_ledger_event(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(prompt, true, cx);
+        self.send_prompt_entry(self.active, prompt, true, cx);
+    }
+
+    /// 表示中のタブを切り替えずに、指定のスレッドへ台帳イベントを送る（Captain の wake）。
+    /// 人間が統合先で別のスレッドと話している最中に、知らせが表示を奪わない。
+    pub fn send_ledger_event_to(&mut self, thread_index: usize, prompt: String, cx: &mut Context<Self>) {
+        self.send_prompt_entry(thread_index, prompt, true, cx);
     }
 
     pub fn send_prompt_text(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(prompt, false, cx);
+        self.send_prompt_entry(self.active, prompt, false, cx);
     }
 
-    fn send_prompt_entry(&mut self, prompt: String, ledger: bool, cx: &mut Context<Self>) {
-        let thread_index = self.active;
+    fn send_prompt_entry(
+        &mut self,
+        thread_index: usize,
+        prompt: String,
+        ledger: bool,
+        cx: &mut Context<Self>,
+    ) {
         // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
         // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
         let (images, image_paths) = self
@@ -5211,6 +5397,14 @@ PYEOF"#;
                 color: thread.color,
             });
         }
+        // 席を付けた / 外した後のセッションは、前の作り方（モード・MCP）のまま。立て直して決まりを
+        // 効かせる（会話は `session/load` で引き継ぐ・FLEET-V2 §5.8-6）。
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            if thread.command_tx.is_some() && thread.seat.is_some() != thread.session_seated {
+                thread.command_tx = None;
+                thread.session_serial = 0;
+            }
+        }
         // セッション未起動なら遅延起動（初回のみプロセスを立てる。以後は常駐＝文脈が続く）。
         let has_session = self
             .threads
@@ -5223,6 +5417,7 @@ PYEOF"#;
                         thread.command_tx = Some(command_tx);
                         thread.session_serial = serial;
                         thread.session_lost = false;
+                        thread.session_seated = thread.seat.is_some();
                     }
                 }
                 None => {
@@ -5359,6 +5554,8 @@ PYEOF"#;
         }
         // Chat のスレッドはセッションの作り方が違う（プリセット・権限モード固定・MCP なし）。
         let preferences = self.chat_session_preferences(thread_index, preferences, cx);
+        // 席のスレッドは権限モードと MCP を席の決まりで上書きする（FLEET-V2 §5.8）。
+        let preferences = self.seat_session_preferences(thread_index, preferences);
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
@@ -5471,6 +5668,7 @@ PYEOF"#;
         let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         let mut session_id_changed = false;
+        let mut seat_violation: Option<(SharedString, String)> = None;
         match event {
             AgentEvent::SessionStarted {
                 session_id,
@@ -5535,8 +5733,15 @@ PYEOF"#;
                 }
                 ensure_reveal = animate_visible_stream;
             }
-            AgentEvent::ToolStarted(info) => thread.entries.push(build_step_entry(info)),
+            AgentEvent::ToolStarted(info) => {
+                Self::seat_note_tool_started(thread, &info);
+                thread.entries.push(build_step_entry(info));
+            }
             AgentEvent::ToolUpdated(info) => {
+                // 席の見張り（FLEET-V2 §5.8-4）: 許可を求めずに編集された＝決まりの漏れ。
+                if let Some(tool) = Self::seat_check_tool_updated(thread, &info) {
+                    seat_violation = Some((thread.name.clone(), tool));
+                }
                 // 同 ID の直近 Step に、後追いの出力・差分・パスを反映する（Bash 出力や完了差分）。
                 for entry in thread.entries.iter_mut().rev() {
                     if let Entry::Step {
@@ -5698,10 +5903,14 @@ PYEOF"#;
                 diffs,
                 raw_input,
                 mut options,
+                tool_call_id,
+                mcp_tool,
                 respond,
             } => {
                 // Chat は「ファイルを渡す = 触ってよいと伝える」で裁く（`chat.rs`）。それ以外は `None`。
-                let chat_permission = Self::chat_permission(thread, kind, &paths);
+                let chat_permission = Self::chat_permission(thread, kind, &paths).or_else(|| {
+                    Self::seat_permission(thread, kind, &title, &tool_call_id, mcp_tool)
+                });
                 // checkpoint は**書かれる前**にここで切る（M12-2）。手動でも自動 Allow でも一本道。
                 // 変更前内容は**常にディスクから全文を読む**。diff の old_text は Edit ツールだと
                 // **置換ハンクの断片**であり、全文として保存すると restore がファイルを断片へ
@@ -5924,6 +6133,14 @@ PYEOF"#;
         if let Some((files, color)) = files_touched {
             cx.emit(PanelEvent::FilesTouched { files, color });
         }
+        if let Some((thread, tool)) = seat_violation {
+            // ターンを止めてから知らせる（止めないと同じ漏れが続く）。
+            self.cancel_turn(thread_index, cx);
+            cx.emit(PanelEvent::SeatViolation {
+                thread,
+                tool: SharedString::from(tool),
+            });
+        }
         if turn_finished {
             // 完了音（設定 on・成功時のみ）。
             if turn_succeeded {
@@ -5936,7 +6153,7 @@ PYEOF"#;
             if let Some(thread) = self.threads.get(thread_index) {
                 let elapsed = thread
                     .turn_started_at
-                    .map(|at| format!("{:.0}s", at.elapsed().as_secs_f32()))
+                    .map(|at| human_elapsed(at.elapsed().as_secs()))
                     .unwrap_or_default();
                 let summary = if thread.touched_files.is_empty() {
                     SharedString::from(i18n::t!("agent.done", "elapsed" => elapsed))
@@ -5951,6 +6168,7 @@ PYEOF"#;
                     summary,
                     digest: thread.digest.clone(),
                     muted: thread.muted,
+                    completed: turn_succeeded,
                 });
             }
         }
@@ -7022,10 +7240,8 @@ PYEOF"#;
             .map(|thread| (thread.tokens_shown, thread.tokens_max))
             .unwrap_or((0.0, 0));
         let used = shown.round().max(0.0) as u32; // 表示は補間値（カウントアップ演出）
-                                                  // コンパクト（/compact）: セッションがあり文脈が溜まっていて、実行中でない時だけ出す。
-        let has_session = thread
-            .map(|thread| thread.command_tx.is_some())
-            .unwrap_or(false);
+        // コンパクト（/compact）: 常に出す。押せないのは送る先の会話が無い（一度も起こしていない）時だけ。
+        let can_compact = thread.is_some_and(Thread::can_compact);
         let ratio = if max == 0 {
             0.0
         } else {
@@ -7091,7 +7307,7 @@ PYEOF"#;
                         .text_size(px(10.5))
                         .text_color(theme.fg2)
                         .font_family("Guguru Sans Code")
-                        .child(format!("{secs}s")),
+                        .child(human_elapsed(secs)),
                 )
             });
 
@@ -7147,11 +7363,19 @@ PYEOF"#;
                             .font_family("Guguru Sans Code")
                             .child(format!("{}/{}", human_tokens(used), human_tokens(max))),
                     )
-                    // コンパクト（/compact）ボタン: トークンの真横。文脈が溜まっていて実行中でない時だけ。
+                    // コンパクト（/compact）ボタン: トークンの真横に**常時**。実行中は押すとキューに積む
+                    // （composer の送信と同じ作法）。会話がまだ無いスレッドでは押せない形（薄く・カーソル無し）。
                     // アイコンではなく文字チップ。縮小アイコン（minimize.svg）は「何が起きるか」が
                     // 読めず不評だったため、送るコマンド名そのものを出す（送信待ちのチップと同じ様式）。
-                    .child(if has_session && !running && used > 0 {
+                    .child({
                         let theme = theme.clone();
+                        let tip = if !can_compact {
+                            i18n::t!("agent.compact_none_tip")
+                        } else if running {
+                            i18n::t!("agent.compact_queued_tip")
+                        } else {
+                            i18n::t!("agent.compact_tip")
+                        };
                         div()
                             .id("compact-context")
                             .flex()
@@ -7164,20 +7388,19 @@ PYEOF"#;
                             .border_1()
                             .border_color(theme.border)
                             .text_size(px(10.5))
-                            .text_color(theme.fg1)
+                            .text_color(if can_compact { theme.fg1 } else { theme.fg2 })
                             .font_family("Guguru Sans Code")
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
                             .child(SharedString::from(i18n::t!("agent.compact")))
-                            .tooltip(Tooltip::text(i18n::t!("agent.compact_tip"), theme.clone()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| this.compact_context(cx)),
-                            )
+                            .tooltip(Tooltip::text(tip, theme.clone()))
+                            .when(can_compact, |chip| {
+                                chip.cursor_pointer()
+                                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| this.compact_context(cx)),
+                                    )
+                            })
                             .into_any_element()
-                    } else {
-                        // 非表示でも同じ幅を占有し、猫とメーターの位置を不変にする。
-                        div().w(px(64.)).h(px(18.)).flex_none().into_any_element()
                     }),
             )
     }
@@ -9611,10 +9834,9 @@ PYEOF"#;
                                         .clone()
                                         .cached(StyleRefinement::default().size(px(15.))),
                                 )
-                                .child(SharedString::from(match running_elapsed {
-                                    Some(secs) => format!("{secs}s"),
-                                    None => String::new(),
-                                }))
+                                .child(SharedString::from(
+                                    running_elapsed.map(human_elapsed).unwrap_or_default(),
+                                ))
                                 // トークンは 0 のときは出さない（ターン開始直後の「0」は情報ゼロ）。
                                 // 上部 render_meta には used/max のメーターがあるのでそちらが正。
                                 .children(
@@ -10549,6 +10771,20 @@ pub fn human_tokens(count: u32) -> String {
     }
 }
 
+/// 経過秒を時・分付きで（`45` → `45s` / `83` → `1m 23s` / `3723` → `1h 2m 3s`）。
+fn human_elapsed(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = secs % 3600 / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 /// 初期スレッド群。先頭は mock v0.3 の会話例を種として持つ（ACP 配線までのプレースホルダ）。
 /// 設定の既定エージェント（`AGENT_LABELS` にある表示名。無効/未設定なら "Claude Code"）。
 fn default_agent_name(cx: &App) -> SharedString {
@@ -10738,6 +10974,9 @@ fn seed_threads() -> Vec<Thread> {
         chat: None,
         session_resumable: false,
         last_active_at_ms: 0,
+        seat: None,
+        session_seated: false,
+        seat_tools: HashMap::new(),
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
@@ -11227,6 +11466,82 @@ PYEOF"#;
     }
 
     #[test]
+    fn human_elapsed_adds_hours_and_minutes() {
+        assert_eq!(human_elapsed(45), "45s");
+        assert_eq!(human_elapsed(60), "1m 0s");
+        assert_eq!(human_elapsed(83), "1m 23s");
+        assert_eq!(human_elapsed(3600), "1h 0m 0s");
+        assert_eq!(human_elapsed(3723), "1h 2m 3s");
+    }
+
+    #[test]
+    fn closed_transcript_releases_entries_and_restores_full_tool_output() {
+        let mut thread = Thread::empty("退避", 0);
+        thread.entries = vec![
+            Entry::User("依頼".into()),
+            Entry::Step {
+                id: Some("call-1".into()),
+                tool: "Edit".into(),
+                args: "引数".into(),
+                result: Some("結果".repeat(100_000).into()),
+                result_lines: 100_000,
+                diffs: vec![PermissionDiff {
+                    path: "a.rs".into(),
+                    old_text: Some("前".into()),
+                    new_text: "後".into(),
+                }],
+            },
+        ];
+        let expected = serde_json::to_value(&thread.entries).unwrap();
+        let mut closed = ClosedThread::new(thread);
+        assert!(closed.thread.entries.is_empty());
+        assert_eq!(closed.thread.entries.capacity(), 0);
+        let path = closed.transcript.as_ref().unwrap().to_path_buf();
+        assert!(path.exists());
+        closed.restore_entries().unwrap();
+        assert_eq!(
+            serde_json::to_value(&closed.thread.entries).unwrap(),
+            expected
+        );
+        assert_eq!(closed.thread.last_prompt.as_deref(), Some("依頼"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failed_transcript_restore_keeps_retry_state() {
+        let mut thread = Thread::empty("退避", 0);
+        thread.entries.push(Entry::Agent("本文".into()));
+        let mut closed = ClosedThread::new(thread);
+        let path = closed.transcript.as_ref().unwrap().to_path_buf();
+        let contents = std::fs::read(&path).unwrap();
+        std::fs::write(&path, "broken").unwrap();
+        assert!(closed.restore_entries().is_err());
+        assert!(closed.transcript.is_some());
+        std::fs::write(&path, contents).unwrap();
+        closed.restore_entries().unwrap();
+        assert!(matches!(&closed.thread.entries[0], Entry::Agent(text) if text.as_ref() == "本文"));
+    }
+
+    #[test]
+    fn streaming_markdown_cache_bounds_source_bytes() {
+        let mut cache = MarkdownBlockCache::default();
+        let mut text = "a".repeat(32 * 1024);
+        for _ in 0..100 {
+            text.push('b');
+            cache.parse(&text);
+            assert!(
+                cache.order.iter().map(|key| key.len).sum::<usize>()
+                    <= TRANSCRIPT_CACHE_SOURCE_BYTES
+            );
+        }
+        assert!(cache.blocks.len() < MarkdownBlockCache::CAPACITY);
+        let count = cache.blocks.len();
+        let oversized = "x".repeat(TRANSCRIPT_CACHE_SOURCE_BYTES + 1);
+        assert!(!cache.parse(&oversized).is_empty());
+        assert_eq!(cache.blocks.len(), count);
+    }
+
+    #[test]
     fn tool_location_infers_language_with_line_and_quotes() {
         assert_eq!(
             infer_language_from_tool_argument("src/main.rs:42:7"),
@@ -11673,6 +11988,8 @@ PYEOF"#;
                             kind: PermissionKind::Allow,
                         },
                     ],
+                    tool_call_id: String::new(),
+                    mcp_tool: false,
                     respond: respond_tx,
                 },
                 cx,
@@ -11687,6 +12004,258 @@ PYEOF"#;
             Some(1),
             "Allow の添字で即応答する"
         );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    fn test_seat(mcp: Vec<acp_client::mcp::McpServerConfig>) -> SeatPolicy {
+        SeatPolicy {
+            id: "captain",
+            mcp_servers: mcp,
+            allowed_tools: vec!["fleet_list_tasks".into()],
+            denied_notice: "断った:".into(),
+            violation_notice: "漏れた:".into(),
+        }
+    }
+
+    fn two_choice_request(
+        title: &str,
+        kind: Option<acp_client::ToolCallKind>,
+        respond: mpsc::UnboundedSender<usize>,
+    ) -> AgentEvent {
+        mcp_approval(title, kind, "", false, respond)
+    }
+
+    fn mcp_approval(
+        title: &str,
+        kind: Option<acp_client::ToolCallKind>,
+        tool_call_id: &str,
+        mcp_tool: bool,
+        respond: mpsc::UnboundedSender<usize>,
+    ) -> AgentEvent {
+        AgentEvent::PermissionRequest {
+            title: title.into(),
+            kind,
+            paths: Vec::new(),
+            diffs: Vec::new(),
+            raw_input: None,
+            tool_call_id: tool_call_id.into(),
+            mcp_tool,
+            options: vec![
+                PermissionChoice {
+                    label: "拒否".into(),
+                    kind: PermissionKind::Reject,
+                },
+                PermissionChoice {
+                    label: "許可".into(),
+                    kind: PermissionKind::Allow,
+                },
+            ],
+            respond,
+        }
+    }
+
+    /// 席のスレッドの権限の問いは necoder が決まりで答える（FLEET-V2 §5.8-3）。人間には出さない。
+    /// Bypass を選んでいても、席に座れば「聞いてくる」モードに寄り、編集は断られる。
+    #[gpui::test]
+    fn a_seated_thread_answers_permissions_by_its_seat(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_permissions");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond_tx, mut respond_rx) = mpsc::unbounded::<usize>();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].permission_mode = "bypassPermissions".into();
+            panel.assign_seat(active, test_seat(Vec::new()), cx);
+            assert_eq!(panel.threads[active].permission_mode.as_ref(), "default");
+            panel.on_event(
+                active,
+                two_choice_request("Edit src/main.rs", Some(acp_client::ToolCallKind::Edit), respond_tx.clone()),
+                cx,
+            );
+            assert!(panel.threads[active].pending_permission.is_none(), "人間に聞かない");
+            assert!(panel.threads[active].entries.iter().any(
+                |entry| matches!(entry, Entry::Agent(text) if text.starts_with("断った:") && text.contains("Edit src/main.rs"))
+            ));
+            panel.on_event(
+                active,
+                two_choice_request("mcp__necoder__fleet_list_tasks", Some(acp_client::ToolCallKind::Other), respond_tx),
+                cx,
+            );
+            assert!(panel.threads[active].pending_permission.is_none());
+        });
+        assert_eq!(respond_rx.try_recv().ok(), Some(0), "編集は拒否");
+        assert_eq!(respond_rx.try_recv().ok(), Some(1), "席の道具は許可（今回だけ）");
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// Codex（codex-acp）の MCP の承認は、題名なし・種別「実行」・印つきで届き、先に届いた同じ id の
+    /// 呼び出し（`mcp.<server>.<tool>`）と結んで裁く。necoder の道具は許可、他のサーバの道具と shell は拒否。
+    #[gpui::test]
+    fn codex_style_mcp_approvals_are_judged_by_the_call_they_belong_to(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_codex");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond_tx, mut respond_rx) = mpsc::unbounded::<usize>();
+        let started = |id: &str, title: &str| {
+            AgentEvent::ToolStarted(acp_client::ToolCallInfo {
+                id: id.into(),
+                title: Some(title.into()),
+                kind: Some(acp_client::ToolCallKind::Execute),
+                locations: Vec::new(),
+                diffs: Vec::new(),
+                output: None,
+                completed: None,
+            })
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.assign_seat(active, test_seat(Vec::new()), cx);
+            let execute = Some(acp_client::ToolCallKind::Execute);
+            panel.on_event(active, started("call-1", "mcp.necoder.fleet_list_tasks"), cx);
+            panel.on_event(active, mcp_approval("ツールの実行許可", execute, "call-1", true, respond_tx.clone()), cx);
+            panel.on_event(active, started("call-2", "mcp.computer-use.click"), cx);
+            panel.on_event(active, mcp_approval("ツールの実行許可", execute, "call-2", true, respond_tx.clone()), cx);
+            panel.on_event(active, started("call-3", "echo fleet_list_tasks"), cx);
+            panel.on_event(active, mcp_approval("echo fleet_list_tasks", execute, "call-3", false, respond_tx), cx);
+            assert!(panel.threads[active].pending_permission.is_none(), "どれも人間に聞かない");
+        });
+        assert_eq!(respond_rx.try_recv().ok(), Some(1), "necoder の道具は許可");
+        assert_eq!(respond_rx.try_recv().ok(), Some(0), "他の MCP サーバの道具は拒否");
+        assert_eq!(respond_rx.try_recv().ok(), Some(0), "印の無い実行は shell として拒否");
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 席のセッションは席のモードと MCP だけで作る（ユーザーの Bypass と MCP サーバを持ち込まない）。
+    #[gpui::test]
+    fn seat_sessions_use_the_asking_mode_and_only_the_seat_tools(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_preferences");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let server = |name: &str| acp_client::mcp::McpServerConfig {
+            name: name.to_string(),
+            source: acp_client::mcp::McpSource::Necoder,
+            enabled: true,
+            transport: acp_client::mcp::McpTransport::Stdio {
+                command: "necoder".into(),
+                args: vec!["mcp".into(), "--captain".into()],
+                env: Default::default(),
+            },
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let user_choice = acp_client::SessionPreferences {
+                mode: Some("bypassPermissions".into()),
+                mcp_servers: vec![server("higgsfield")],
+                ..Default::default()
+            };
+            let unchanged = panel.seat_session_preferences(active, user_choice.clone());
+            assert_eq!(unchanged.mode.as_deref(), Some("bypassPermissions"), "席でなければ触らない");
+            panel.assign_seat(active, test_seat(vec![server("necoder")]), cx);
+            let seated = panel.seat_session_preferences(active, user_choice);
+            assert_eq!(seated.mode.as_deref(), Some("default"));
+            assert_eq!(seated.mcp_servers, vec![server("necoder")]);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 席は 1 つ（付け替えると前のスレッドは席と前置きを失う）。改名した席のスレッドは普通に戻る（§5.8-5）。
+    #[gpui::test]
+    fn a_seat_follows_the_seat_not_the_name(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_move");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            let second = panel.new_thread_index(cx);
+            panel.assign_seat(first, test_seat(Vec::new()), cx);
+            panel.set_prompt_context(first, "ROLE".into());
+            panel.assign_seat(second, test_seat(Vec::new()), cx);
+            assert!(panel.threads[first].seat.is_none());
+            assert!(!panel.prompt_context.contains_key(&panel.threads[first].id), "前置きも外す");
+            assert_eq!(panel.seat_thread("captain"), Some(second));
+
+            panel.set_prompt_context(second, "ROLE".into());
+            let theme = panel.theme.clone();
+            let color = panel.threads[second].color;
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::plain(theme, color, true, cx);
+                editor.set_plain_text("相談", cx);
+                editor
+            });
+            panel.renaming = Some((second, editor));
+            panel.confirm_rename(cx);
+            assert!(panel.threads[second].seat.is_none(), "改名 = 席から降りる");
+            assert!(!panel.prompt_context.contains_key(&panel.threads[second].id));
+            assert_eq!(panel.seat_thread("captain"), None);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 会話の交代（FLEET-V2 §5.6）: 送信路と会話 id を捨てて区切りを残す。実行中は交代しない。
+    #[gpui::test]
+    fn rotating_forgets_the_conversation_but_not_while_running(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_rotate");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, _command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.threads[active].acp_session_id = Some("old-session".into());
+            panel.threads[active].tokens_used = 90_000;
+            panel.threads[active].running = true;
+            assert!(!panel.rotate_thread_session(active, "── 交代".into(), cx));
+            assert!(panel.threads[active].acp_session_id.is_some());
+            panel.threads[active].running = false;
+            assert!(panel.rotate_thread_session(active, "── 交代".into(), cx));
+            let thread = &panel.threads[active];
+            assert!(thread.command_tx.is_none() && thread.acp_session_id.is_none());
+            assert_eq!(thread.tokens_used, 0);
+            assert!(matches!(thread.entries.last(), Some(Entry::LedgerEvent(text)) if text.as_ref() == "── 交代"));
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 見張り（FLEET-V2 §5.8-4）: 席で編集の道具が成功して終わったら、transcript に残してターンを止める。
+    /// 断られた編集（失敗で終わる）と、読むだけの道具は見張りに掛からない。
+    #[gpui::test]
+    fn the_seat_watch_catches_an_edit_that_ran_without_asking(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_watch");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let info = |id: &str, kind: Option<acp_client::ToolCallKind>, completed: Option<bool>| {
+            acp_client::ToolCallInfo {
+                id: id.into(),
+                title: Some(format!("tool {id}")),
+                kind,
+                locations: Vec::new(),
+                diffs: Vec::new(),
+                output: None,
+                completed,
+            }
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.assign_seat(active, test_seat(Vec::new()), cx);
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.threads[active].running = true;
+            let caught = |panel: &AgentPanel| {
+                panel.threads[active]
+                    .entries
+                    .iter()
+                    .filter(|entry| matches!(entry, Entry::Agent(text) if text.starts_with("漏れた:")))
+                    .count()
+            };
+            // 読むだけ・断られた編集は掛からない。
+            panel.on_event(active, AgentEvent::ToolStarted(info("r", Some(acp_client::ToolCallKind::Read), None)), cx);
+            panel.on_event(active, AgentEvent::ToolUpdated(info("r", None, Some(true))), cx);
+            panel.on_event(active, AgentEvent::ToolStarted(info("d", Some(acp_client::ToolCallKind::Edit), None)), cx);
+            panel.on_event(active, AgentEvent::ToolUpdated(info("d", None, Some(false))), cx);
+            assert_eq!(caught(panel), 0);
+            // 許可を求めずに成功した編集は掛かり、ターンを止める。
+            panel.on_event(active, AgentEvent::ToolStarted(info("e", Some(acp_client::ToolCallKind::Edit), None)), cx);
+            panel.on_event(active, AgentEvent::ToolUpdated(info("e", None, Some(true))), cx);
+            assert_eq!(caught(panel), 1);
+            assert!(
+                matches!(command_rx.try_recv(), Ok(SessionCommand::Cancel)),
+                "ターンを止める"
+            );
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 

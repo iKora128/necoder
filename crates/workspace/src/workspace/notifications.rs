@@ -27,6 +27,13 @@ impl Workspace {
                 }
                 self.record_human_send(session_index, thread, text, cx);
             }
+            agent_panel::PanelEvent::SeatViolation { thread, tool } => {
+                // 席の決まりの漏れ（許可を求めずに編集された・FLEET-V2 §5.8-4）。ターンは止めてある。
+                let text = SharedString::from(i18n::t!("captain.seat_violation_news", "tool" => tool.as_ref()));
+                let accent = self.accent();
+                self.push_news(NewsKind::Captain, accent, thread.clone(), text.clone());
+                self.push_toast(SharedString::from(format!("⚑ {thread} — {text}")), accent, cx);
+            }
 
             agent_panel::PanelEvent::TurnStarted { .. } => {
                 self.transition_task_space(
@@ -67,6 +74,7 @@ impl Workspace {
                 summary,
                 digest,
                 muted,
+                completed,
             } => {
                 self.project_sessions.sessions[session_index].waiting_thread = None;
                 let is_integration_slot = self
@@ -76,8 +84,10 @@ impl Workspace {
                     .is_some_and(|slot| slot.task_space.is_integration());
                 // Captain の采配は captain イベントとして監査（FLEET-V2 §5.6・ニュースは丸チップ）。
                 if is_integration_slot && is_captain_thread_name(thread.as_ref()) {
-                    self.record_captain_decision(*color, digest.as_ref(), summary, cx);
-                    self.wake_captain(session_index, "flush", thread.clone(), None, cx);
+                    if *completed {
+                        self.record_captain_decision(session_index, *color, digest.as_ref(), summary, cx);
+                    }
+                    self.finish_captain_turn(session_index, *completed, cx);
                 }
                 if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
                     if !slot.task_space.is_integration() {
@@ -104,13 +114,7 @@ impl Workspace {
                 self.transition_task_space(session_index, phase, reason, digest.as_deref(), cx);
                 // Captain wake（§5.3・Task の Done 遷移で即時・自分自身=integration は起こさない）。
                 if !is_integration_slot {
-                    let title = self
-                        .project_sessions
-                        .projects
-                        .get(session_index)
-                        .map(|slot| slot.task_space.title.clone())
-                        .unwrap_or_else(|| thread.clone());
-                    self.wake_captain(session_index, "done", title, digest.clone(), cx);
+                    self.wake_captain(session_index, cx);
                 }
                 if !muted {
                     self.push_toast(
@@ -149,13 +153,12 @@ impl Workspace {
                     Some(message),
                     cx,
                 );
-                // Captain wake（§5.3・Failed 遷移で即時）。
+                // Captain wake（§5.3・Failed 遷移で即時）。Captain 自身の失敗は読んだ位置を進めない。
                 let failed_slot = self.project_sessions.projects.get(session_index);
                 if failed_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
-                    let title = failed_slot
-                        .map(|slot| slot.task_space.title.clone())
-                        .unwrap_or_else(|| thread.clone());
-                    self.wake_captain(session_index, "failed", title, Some(message.clone()), cx);
+                    self.wake_captain(session_index, cx);
+                } else if is_captain_thread_name(thread.as_ref()) {
+                    self.finish_captain_turn(session_index, false, cx);
                 }
                 if !muted {
                     self.push_toast(
@@ -185,15 +188,7 @@ impl Workspace {
                 // Captain wake（§5.3・Blocked は 15s 閾値 = すぐ人間が許可したら起こさない）。
                 let blocked_slot = self.project_sessions.projects.get(session_index);
                 if blocked_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
-                    let task_title = blocked_slot
-                        .map(|slot| slot.task_space.title.clone())
-                        .unwrap_or_else(|| thread.clone());
-                    self.wake_captain_for_blocked(
-                        session_index,
-                        task_title,
-                        (!title.is_empty()).then(|| title.clone()),
-                        cx,
-                    );
+                    self.wake_captain_for_blocked(session_index, cx);
                 }
                 if !muted {
                     self.push_toast_linked(

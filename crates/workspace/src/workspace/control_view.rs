@@ -12,17 +12,17 @@
 use crate::workspace::*;
 
 /// 要対応キューの 1 項目。優先順は Blocked（経過時間降順）→ Failed → Review 系 → Done 未確認。
-struct AttentionItem {
+pub(super) struct AttentionItem {
     session_index: usize,
     panel: Entity<AgentPanel>,
     thread_index: usize,
     color: Hsla,
     title: SharedString,
     branch: Option<SharedString>,
-    kind: AttentionKind,
+    pub(super) kind: AttentionKind,
 }
 
-enum AttentionKind {
+pub(super) enum AttentionKind {
     /// 承認待ち（インライン許可/拒否。選択肢ラベルは ACP がエージェントから広告されたものをそのまま使う）。
     Permission(agent_panel::PermissionCard),
     /// Task が failed（没入して修正指示 / 破棄）。
@@ -41,6 +41,8 @@ enum AttentionKind {
         digest: Option<SharedString>,
         tier2: Option<SharedString>,
     },
+    /// Captain の分解案（承認した行だけ worktree とブランチを切る・FLEET-V2 §5.5）。
+    Proposal { proposal_id: String, rows: usize },
 }
 
 /// ✳ 総括に渡す件数（キュー収集と同じ 1 パスで数える）。
@@ -190,6 +192,9 @@ impl Workspace {
                 AttentionKind::DoneUnread { digest, .. } => {
                     i18n::t!("control.facts_done_unread", "digest" => digest.clone().unwrap_or_default())
                 }
+                AttentionKind::Proposal { rows, .. } => {
+                    i18n::t!("captain.facts_proposal", "n" => rows)
+                }
             };
             let branch = item
                 .branch
@@ -213,7 +218,7 @@ impl Workspace {
     }
 
     /// 要対応キューを組む（描画のたびに memory から再導出・状態は持たない＝台帳が記憶の原則）。
-    fn control_attention_queue(&self, cx: &App) -> Vec<AttentionItem> {
+    pub(super) fn control_attention_queue(&self, cx: &App) -> Vec<AttentionItem> {
         let mut blocked: Vec<(u64, AttentionItem)> = Vec::new();
         let mut failed = Vec::new();
         let mut review = Vec::new();
@@ -327,6 +332,7 @@ impl Workspace {
         // Blocked は待ち時間の長い順（mock: 経過時間順）。
         blocked.sort_by(|a, b| b.0.cmp(&a.0));
         let mut queue: Vec<AttentionItem> = blocked.into_iter().map(|(_, item)| item).collect();
+        queue.extend(self.proposal_attention_items(cx));
         queue.extend(failed);
         queue.extend(review);
         queue.extend(done);
@@ -352,8 +358,53 @@ impl Workspace {
             if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Failed {
                 count += 1;
             }
+            if slot.task_space.is_integration() {
+                count += self.captain_proposals_for(slot.repository_key()).count();
+            }
         }
         count
+    }
+
+    /// 分解案のカード（開いている統合先のリポジトリの分）。Captain の会話へ没入できるよう、
+    /// カードは統合先の panel と Captain の席のスレッドに結ぶ。
+    fn proposal_attention_items(&self, cx: &App) -> Vec<AttentionItem> {
+        let mut items = Vec::new();
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
+            if !slot.task_space.is_integration() {
+                continue;
+            }
+            let Some(panel) = self
+                .project_sessions
+                .sessions
+                .get(index)
+                .and_then(|session| session.fleet_agents.first())
+                .cloned()
+            else {
+                continue;
+            };
+            let thread_index = panel
+                .read(cx)
+                .seat_thread(captain::CAPTAIN_SEAT)
+                .unwrap_or_else(|| panel.read(cx).active_thread());
+            for proposal in self.captain_proposals_for(slot.repository_key()) {
+                items.push(AttentionItem {
+                    session_index: index,
+                    panel: panel.clone(),
+                    thread_index,
+                    color: slot.color,
+                    title: SharedString::from(i18n::t!(
+                        "captain.proposal_title",
+                        "n" => proposal.tasks.len()
+                    )),
+                    branch: None,
+                    kind: AttentionKind::Proposal {
+                        proposal_id: proposal.record.id.clone(),
+                        rows: proposal.tasks.len(),
+                    },
+                });
+            }
+        }
+        items
     }
 
     /// ヘッダの数字（キューと同じソースから 1 パス・render 内 memory 読みのみ）。
@@ -365,7 +416,9 @@ impl Workspace {
         };
         for item in queue {
             match &item.kind {
-                AttentionKind::Permission(_) | AttentionKind::Failed { .. } => stats.attention += 1,
+                AttentionKind::Permission(_)
+                | AttentionKind::Failed { .. }
+                | AttentionKind::Proposal { .. } => stats.attention += 1,
                 AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                     stats.done_unread += 1
                 }
@@ -403,9 +456,14 @@ impl Workspace {
         let session_index = item.session_index;
         let thread_index = item.thread_index;
         let focus_panel = item.panel.clone();
-        let urgent = matches!(item.kind, AttentionKind::Permission(_));
+        let urgent = matches!(
+            item.kind,
+            AttentionKind::Permission(_) | AttentionKind::Proposal { .. }
+        );
         let activity = match &item.kind {
-            AttentionKind::Permission(_) => agent_panel::ThreadActivity::Blocked,
+            AttentionKind::Permission(_) | AttentionKind::Proposal { .. } => {
+                agent_panel::ThreadActivity::Blocked
+            }
             AttentionKind::Failed { .. } => agent_panel::ThreadActivity::Done { interrupted: true },
             AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                 agent_panel::ThreadActivity::Done { interrupted: false }
@@ -769,6 +827,10 @@ impl Workspace {
                             ),
                         ),
                 )
+            }
+            AttentionKind::Proposal { proposal_id, .. } => {
+                let proposal_id = proposal_id.clone();
+                card.child(self.render_proposal_body(position, &proposal_id, cx))
             }
         };
         card.into_any_element()

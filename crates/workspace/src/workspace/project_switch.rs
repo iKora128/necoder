@@ -107,7 +107,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let index = self.work_switch_target(index);
         // Chat からプロジェクトを選んだら Chat を抜ける（同じプロジェクトでも「そこへ戻る」）。
         if self.chat_mode() {
             self.set_chat_mode(false, window, cx);
@@ -138,7 +137,6 @@ impl Workspace {
         let follow_focus = !self.chrome.fleet_mode && !self.chrome_owns_focus(window);
         self.project_sessions.active = active;
         self.load_active_slot(window, cx);
-        self.work_project_changed(cx);
         // 編隊は「このリポジトリの編隊」。跨いだらグリッドを行き先のものへ差し替える。
         if self.chrome.fleet_mode {
             self.seed_fleet_cells(cx);
