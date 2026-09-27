@@ -369,8 +369,16 @@ pub fn discover_in(home: &Path) -> Vec<McpServerConfig> {
 /// off のものも含めて全部返す。Captain の席（FLEET-V2 §5.8）は、codex-acp が Codex 自身の設定の MCP サーバも
 /// そのまま立ち上げる（2026-09-25 に偽のサーバで確認）ので、席のセッションだけこれらを止めるのに使う。
 pub fn codex_configured_server_names() -> Vec<String> {
-    let config = std::env::var_os("CODEX_HOME")
-        .map(std::path::PathBuf::from)
+    codex_configured_server_names_for(None)
+}
+
+/// [`codex_configured_server_names`] の置き場を指定する版。`codex_home` = そのセッションへ渡す `CODEX_HOME`
+/// （設定の `agent_servers.codex.env`・アカウントの切り替え）。`None` なら necoder の環境の `CODEX_HOME` →
+/// `~/.codex`。席が止めるのは、そのセッションの codex-acp が実際に読む設定のサーバでなければ意味が無い。
+pub fn codex_configured_server_names_for(codex_home: Option<&Path>) -> Vec<String> {
+    let config = codex_home
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from))
         .or_else(|| paths::home_dir().map(|home| home.join(".codex")))
         .map(|dir| dir.join("config.toml"));
     let Some(text) = config.and_then(|path| std::fs::read_to_string(path).ok()) else {
@@ -565,6 +573,30 @@ startup_timeout_sec = 120
             .iter()
             .find(|server| server.name == name)
             .unwrap_or_else(|| panic!("{name} が一覧に無い"))
+    }
+
+    #[test]
+    fn codex_server_names_follow_the_session_codex_home() {
+        let home = std::env::temp_dir().join(format!(
+            "necoder_codex_home_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&home).expect("一時フォルダを作れる");
+        std::fs::write(
+            home.join("config.toml"),
+            "[mcp_servers.work-only]\ncommand = \"x\"\n",
+        )
+        .expect("設定を書ける");
+        assert_eq!(
+            codex_configured_server_names_for(Some(&home)),
+            vec!["work-only".to_string()],
+            "アカウントの置き場（CODEX_HOME）の設定を読む"
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

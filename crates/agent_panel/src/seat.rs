@@ -233,6 +233,7 @@ impl AgentPanel {
         &self,
         thread_index: usize,
         mut preferences: acp_client::SessionPreferences,
+        cx: &App,
     ) -> acp_client::SessionPreferences {
         let Some(thread) = self.threads.get(thread_index) else {
             return preferences;
@@ -246,11 +247,15 @@ impl AgentPanel {
         let agent_id = acp_client::AgentKind::by_label(&thread.agent)
             .map(|kind| kind.id)
             .unwrap_or_default();
+        // Codex のアカウントを設定で切り替えていれば（`agent_servers.codex.env.CODEX_HOME`）、止めるのはその
+        // 置き場の設定のサーバ（そのセッションの codex-acp が読むのはそちら。necoder 自身の `~/.codex` ではない）。
+        let codex_home = crate::agent_server_override("codex", cx)
+            .and_then(|codex| codex.env.get("CODEX_HOME").map(std::path::PathBuf::from));
         acp_client::preset::restrict_mcp_to(
             &mut preferences,
             agent_id,
             seat.mcp_servers.clone(),
-            &acp_client::mcp::codex_configured_server_names(),
+            &acp_client::mcp::codex_configured_server_names_for(codex_home.as_deref()),
         );
         preferences
     }

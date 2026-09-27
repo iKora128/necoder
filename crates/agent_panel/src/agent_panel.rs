@@ -6932,7 +6932,7 @@ PYEOF"#;
         // Chat のスレッドはセッションの作り方が違う（プリセット・権限モード固定・MCP なし）。
         let preferences = self.chat_session_preferences(thread_index, preferences, cx);
         // 席のスレッドは権限モードと MCP を席の決まりで上書きする（FLEET-V2 §5.8）。
-        let preferences = self.seat_session_preferences(thread_index, preferences);
+        let preferences = self.seat_session_preferences(thread_index, preferences, cx);
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
@@ -14818,10 +14818,10 @@ PYEOF"#;
                 mcp_servers: vec![server("higgsfield")],
                 ..Default::default()
             };
-            let unchanged = panel.seat_session_preferences(active, user_choice.clone());
+            let unchanged = panel.seat_session_preferences(active, user_choice.clone(), cx);
             assert_eq!(unchanged.mode.as_deref(), Some("bypassPermissions"), "席でなければ触らない");
             panel.assign_seat(active, test_seat(vec![server("necoder")]), cx);
-            let seated = panel.seat_session_preferences(active, user_choice);
+            let seated = panel.seat_session_preferences(active, user_choice, cx);
             assert_eq!(seated.mode.as_deref(), Some("default"));
             assert_eq!(seated.mcp_servers, vec![server("necoder")]);
         });
