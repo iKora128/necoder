@@ -544,6 +544,15 @@ impl Workspace {
         if !self.todo_panel.read(cx).open {
             self.toggle_todo_board(&ToggleTodoBoard, window, cx);
         }
+        // `NECODER_TODOS_ADD=<文>` なら ＋ と同じ入口で追加欄を開き、文を入れる（issue #29 の描画検証）。
+        if let Ok(text) = std::env::var("NECODER_TODOS_ADD") {
+            self.todo_panel.update(cx, |panel, cx| {
+                panel.start_add(window, cx);
+                if let Some(editor) = panel.add_input.clone() {
+                    editor.update(cx, |editor, cx| editor.set_plain_text(&text, cx));
+                }
+            });
+        }
         if std::env::var("NECODER_TODOS_PLAN").is_ok_and(|value| value == "1") {
             self.run_daily_plan_for(self.project_sessions.active, cx);
         }
