@@ -808,8 +808,8 @@ impl TerminalView {
 
     /// 開発用（offscreen 検証・`NECODER_TERMINAL_PROBE`）: 端末への 1 コマンド。
     /// `type:<文>` = 文をタイプして ⏎ / `select:<行>,<列>-<行>,<列>` = 表示座標で選択 /
-    /// `find:<語>` = ⌘F を開いて語を入れる / `key:<キー>` = キーを 1 つ打つ（`shift-enter`）/
-    /// `menu:<x>,<y>` = 右クリックメニューを出す。
+    /// `find:<語>` = ⌘F を開いて語を入れる / `find-toggle:case|regex` = ⌘F バーの Aa / `.*` を押す /
+    /// `key:<キー>` = キーを 1 つ打つ（`shift-enter`）/ `menu:<x>,<y>` = 右クリックメニューを出す。
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn debug_probe(
@@ -854,6 +854,21 @@ impl TerminalView {
                 self.find(&actions::Find, window, cx);
                 if let Some(search) = self.search.as_mut() {
                     search.query = argument.to_string();
+                }
+                self.refresh_search(true, cx);
+            }
+            "find-toggle" => {
+                let Some(search) = self.search.as_mut() else {
+                    eprintln!("TERMINAL_PROBE: find-toggle の前に find で検索バーを開く");
+                    return;
+                };
+                match argument {
+                    "case" => search.case_sensitive = !search.case_sensitive,
+                    "regex" => search.is_regex = !search.is_regex,
+                    other => {
+                        eprintln!("TERMINAL_PROBE: find-toggle の対象が不明: {other:?}");
+                        return;
+                    }
                 }
                 self.refresh_search(true, cx);
             }
