@@ -6563,19 +6563,18 @@ PYEOF"#;
         let command = if host.is_remote() {
             None
         } else {
-            // local は探索が失敗しない（`Err` は remote だけ）。`Ok(None)` = 導入されていない。
-            Some(
-                agent
-                    .resolve_command_on(
-                        host.as_ref(),
-                        cwd.clone(),
-                        agent_override.as_ref(),
-                        registry.as_ref(),
-                    )
-                    .ok()
-                    .flatten()
-                    .ok_or_else(|| i18n::t!("agent.err_no_acp"))?,
-            )
+            // 組み込みの local は探索が失敗しない（`Ok(None)` = 導入されていない）。足したエージェントは
+            // 起動できない理由（node が要る・レジストリに無い等）を `Err` で返すので、その文を出す。
+            match agent.resolve_command_on(
+                host.as_ref(),
+                cwd.clone(),
+                agent_override.as_ref(),
+                registry.as_ref(),
+            ) {
+                Ok(Some(command)) => Some(command),
+                Ok(None) => return Err(i18n::t!("agent.err_no_acp")),
+                Err(error) => return Err(launch_error_text(&error)),
+            }
         };
         let no_acp = i18n::t!("agent.err_no_acp");
         // スレッドの希望（sticky/前タブのモード・モデル・思考量）を起動時に渡す＝初回 prompt 前に
@@ -6640,13 +6639,11 @@ PYEOF"#;
                             error_tx.unbounded_send(AgentEvent::Failed(no_acp)).ok();
                             return;
                         }
-                        // 探せなかった（SSH 再接続の失敗など）。「見つかりません」と言わず原因を出す。
+                        // 探せなかった（SSH 再接続の失敗など）・足したエージェントを起動できない。
+                        // 「見つかりません」と言わず原因を出す。
                         Err(error) => {
                             error_tx
-                                .unbounded_send(AgentEvent::Failed(i18n::t!(
-                                    "agent.err_agent_lookup",
-                                    "message" => &format!("{error:#}")
-                                )))
+                                .unbounded_send(AgentEvent::Failed(launch_error_text(&error)))
                                 .ok();
                             return;
                         }
@@ -12616,6 +12613,25 @@ fn default_agent_name(cx: &App) -> SharedString {
     }
 }
 
+/// エージェントを起動できない理由の文。足したエージェントの理由（[`acp_client::LaunchError`]）は
+/// 言葉にし、それ以外（SSH が切れていて探せない等）は「探せません: 原因」にする。
+fn launch_error_text(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<acp_client::LaunchError>() {
+        Some(acp_client::LaunchError::NotInRegistry { id }) => {
+            i18n::t!("agent.err_launch_not_in_registry", "id" => id)
+        }
+        Some(acp_client::LaunchError::NoDistribution { platform }) => i18n::t!(
+            "agent.err_launch_no_distribution",
+            "platform" => platform.as_deref().unwrap_or("?")
+        ),
+        Some(acp_client::LaunchError::NeedsNode) => i18n::t!("agent.err_launch_needs_node"),
+        Some(acp_client::LaunchError::NotSupportedYet(kind)) => {
+            i18n::t!("agent.err_launch_not_yet", "kind" => kind.as_str())
+        }
+        None => i18n::t!("agent.err_agent_lookup", "message" => &format!("{error:#}")),
+    }
+}
+
 /// `settings.json` の `agent_servers.<id>` を acp_client の言葉へ写す。
 ///
 /// 設定スキーマ（`type: custom` / `type: registry`）を知っているのはこの層まで。acp_client 側は
@@ -15286,6 +15302,23 @@ PYEOF"#;
             );
         });
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 足したエージェントを起動できない理由は言葉にして出す（型のまま acp_client から届く）。
+    /// それ以外の失敗（SSH が切れて探せない等）は従来どおり「探せません: 原因」。
+    #[test]
+    fn launch_problems_are_put_into_words() {
+        let needs_node = anyhow::Error::new(acp_client::LaunchError::NeedsNode);
+        assert_eq!(
+            launch_error_text(&needs_node),
+            i18n::t!("agent.err_launch_needs_node")
+        );
+        let missing = anyhow::Error::new(acp_client::LaunchError::NotInRegistry {
+            id: "pi-acp".to_string(),
+        });
+        assert!(launch_error_text(&missing).contains("pi-acp"));
+        let lookup = anyhow::anyhow!("ssh が切れた");
+        assert!(launch_error_text(&lookup).contains("ssh が切れた"));
     }
 
     /// Modes も同じ規律で mode_id 一本。新規タブは直前タブの権限モードを引き継ぐ。

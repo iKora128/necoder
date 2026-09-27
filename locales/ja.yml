@@ -70,6 +70,10 @@ agent:
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
   err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
+  err_launch_not_in_registry: "%{id} が ACP レジストリに見つかりません（設定 → AI エージェント → エージェントを追加 で取り直してください）"
+  err_launch_no_distribution: "このマシン（%{platform}）向けの配布がありません"
+  err_launch_needs_node: node（npx）が要ります。node を入れてから再開してください
+  err_launch_not_yet: "この配布（%{kind}）はまだ起動できません"
   err_session_lost: セッションが切れました。もう一度送信してください
   err_session_ended: エージェントのセッションが終了しました（中断扱い）
   err_cancel_session_lost: セッションが応答しないため中断しました
@@ -645,6 +649,32 @@ settings:
   agent_remove: 外す
   custom_command_ready: "自分のコマンドで起動（%{command}）"
   custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
+  custom_registry_npx: "レジストリ %{version} · npx（初回に取得）"
+  custom_not_in_registry: "レジストリに見つかりません（%{id}）。エージェントを追加 で取り直してください"
+  custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
+  custom_needs_node: node が要ります（npx で起動する配布）
+  custom_not_yet: "この配布（%{kind}）はまだ起動できません"
+  agents_add: ＋ エージェントを追加
+  agents_add_hint: ACP レジストリの全件から選んで足す。一覧に無い物は settings.json の agent_servers に自分のコマンドを書いて足せます
+  add_agent_title: エージェントを追加
+  add_agent_sub: "ACP レジストリの %{count} 件。足すと AI エージェントの一覧に並び、使う / 使わない・既定・起動の変更は組み込みと同じ行でできます"
+  add_agent_search: 名前・説明・配布の形（npx / binary / uvx）・OS で探す
+  add_agent_add: 追加
+  add_agent_added: 追加済み
+  add_agent_builtin: "組み込み（%{agent}）"
+  add_agent_unusable: このマシンでは使えません
+  add_agent_os_any: "対応: どの OS でも"
+  add_agent_os: "対応: %{os}"
+  add_agent_license: "ライセンス: %{license}"
+  add_agent_empty: 一致するエージェントはありません
+  add_agent_no_registry: ACP レジストリをまだ取得していません
+  add_agent_fetch: 取得する
+  add_agent_fetching: 取得しています…
+  add_agent_refresh: 取り直す
+  add_agent_fetch_failed: "取得できませんでした: %{reason}"
+  add_agent_custom_hint: 一覧に無いエージェントは settings.json の agent_servers に自分のコマンドを書いて足せます
+  add_agent_open_settings_json: settings.json を開く
+  add_agent_close: 閉じる
   launch_default: 起動は既定のまま（レジストリの版とコマンド）
   launch_env: "起動: 既定 + 環境変数（%{names}）"
   launch_custom: "起動: 自分のコマンド（%{command}）"

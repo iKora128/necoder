@@ -957,7 +957,8 @@ impl Workspace {
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
     /// チャットの行 / `edit:<文字>` = 成果物を書き換える（本番と同じ合図を出す）/ `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
-    /// `settings:<page>` / `find:<語>` / `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
+    /// `settings:<page>` / `settings-add:<語>` = 設定の「エージェントを追加」/ `find:<語>` /
+    /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (name, argument) = command.split_once(':').unwrap_or((command, ""));
@@ -1050,6 +1051,16 @@ impl Workspace {
                 self.chrome.chat_delete_confirm = self
                     .chat_panel()
                     .and_then(|panel| panel.read(cx).active_chat_id());
+            }
+            // 設定の「エージェントを追加」を開いて検索語を入れる（H2 の見た目を撮る・空なら全件）。
+            "settings-add" => {
+                self.set_chat_mode(false, window, cx);
+                self.chrome.show_settings = true;
+                self.refresh_settings_view(cx);
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| {
+                    view.debug_open_add_agent(argument, window, cx)
+                });
             }
             // 設定画面をページ指定で開く（Chat の設定・MCP のコネクタの見た目を撮る）。
             "settings" => {

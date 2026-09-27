@@ -20,6 +20,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use theme_core::Theme;
+mod add_agent;
 mod agent_launch;
 mod remote;
 
@@ -133,7 +134,12 @@ pub fn custom_agent_specs(settings: &Settings) -> Vec<acp_client::CustomAgentSpe
     settings
         .agent_servers
         .iter()
-        .filter_map(|(id, setting)| {
+        .filter(|(id, _)| {
+            !acp_client::AGENTS
+                .iter()
+                .any(|agent| agent.id == id.as_str())
+        })
+        .map(|(id, setting)| {
             let launch = match setting {
                 settings_core::AgentServerSetting::Custom {
                     command, args, env, ..
@@ -142,21 +148,33 @@ pub fn custom_agent_specs(settings: &Settings) -> Vec<acp_client::CustomAgentSpe
                     args: args.clone(),
                     env: env.clone(),
                 },
-                // レジストリから足した物は H2 で扱う。
-                settings_core::AgentServerSetting::Registry { .. } => return None,
+                // レジストリから足した物（H2）: id がレジストリの id。起動はレジストリの配布から。
+                settings_core::AgentServerSetting::Registry { env, .. } => {
+                    acp_client::CustomLaunch::Registry { env: env.clone() }
+                }
             };
-            Some(acp_client::CustomAgentSpec {
+            acp_client::CustomAgentSpec {
                 id: id.clone(),
                 name: setting.name().map(str::to_string),
                 launch,
-            })
+            }
         })
         .collect()
 }
 
-/// 設定から選べるエージェントの一覧を作る。
+/// 設定から選べるエージェントの一覧を作る。名前の無いレジストリの項目がある時だけレジストリの
+/// キャッシュを読む（名前を引くため・ネットワークへは行かない）。
 fn agent_catalog_for(settings: &Settings) -> acp_client::AgentCatalog {
-    acp_client::AgentCatalog::new(custom_agent_specs(settings))
+    let specs = custom_agent_specs(settings);
+    let needs_registry = specs.iter().any(|spec| {
+        spec.name.is_none() && matches!(spec.launch, acp_client::CustomLaunch::Registry { .. })
+    });
+    let registry = if needs_registry {
+        acp_client::registry::load_cached()
+    } else {
+        None
+    };
+    acp_client::AgentCatalog::new(specs, registry.as_ref())
 }
 
 /// 選べるエージェントの一覧（組み込み + 足した物）。設定を初期化していなければ組み込みだけ。
@@ -564,6 +582,11 @@ pub struct SettingsView {
     accounts: Vec<Vec<String>>,
     /// 起動の上書きを編んでいるダイアログ（O16・`agent_launch`）。
     launch_editor: Option<agent_launch::LaunchEditor>,
+    /// 「エージェントを追加」のダイアログ（H2・`add_agent`）。
+    add_agent: Option<add_agent::AddAgentDialog>,
+    /// ACP レジストリの手元の写し（足したエージェントの状態・追加の画面に使う）。描画のたびに
+    /// ファイルを読まないよう、開き直すたびに [`Self::refresh_lists`] で読む。
+    registry: Option<std::sync::Arc<acp_client::registry::Registry>>,
     /// Ghostty の設定ファイルがあるか（初回の画面で「Ghostty から取り込む」を出すか・O45 H14）。
     /// 描画で fs を見ないよう、[`Self::refresh_lists`] で見て持っておく。
     ghostty_config_present: bool,
@@ -686,6 +709,8 @@ impl SettingsView {
             mcp_filter_enabled_only: false,
             accounts: Vec::new(),
             launch_editor: None,
+            add_agent: None,
+            registry: None,
             ghostty_config_present: false,
             cli_shim_target: None,
             cli_shim_busy: false,
@@ -766,6 +791,7 @@ impl SettingsView {
         self.ghostty_config_present = settings_core::ghostty::config_candidates()
             .iter()
             .any(|path| path.is_file());
+        self.registry = acp_client::registry::load_cached().map(std::sync::Arc::new);
     }
 
     // ── アカウント切替（O14）─────────────────────────────────────────────────────
@@ -2247,7 +2273,7 @@ impl SettingsView {
         let enabled = settings.agent_enabled(&custom.id);
         let is_default = settings.default_agent == custom.label;
         let is_captain = settings.captain_agent.as_deref() == Some(custom.label.as_str());
-        let (ready, status_text) = custom_agent_status(custom);
+        let (ready, status_text) = custom_agent_status(custom, self.registry.as_deref());
         let available = enabled && ready;
         let (dot_color, status_text) = if !enabled {
             (theme.fg2, i18n::t!("settings.agent_disabled"))
@@ -2902,6 +2928,8 @@ impl SettingsView {
                             Some(i18n::t!("settings.agents_sub")),
                         ))
                         .child(self.agents_rows(settings, true, cx))
+                        // レジストリの全件から足す（H2）。初回の案内には出さない。
+                        .child(self.add_agent_row(cx))
                         .child(self.permission_default_rows(settings, cx)),
                 )
                 // 導入系（エージェント CLI）の直後に `ne` コマンドを並べる。
@@ -4141,6 +4169,7 @@ impl Render for SettingsView {
                     ),
             )
             .children(self.render_launch_editor(cx))
+            .children(self.render_add_agent(&settings, cx))
     }
 }
 
@@ -4191,21 +4220,28 @@ fn agent_logo(icon: Option<&'static str>, monogram: String, brand: u32) -> gpui:
 
 /// 足したエージェントの状態の 1 行と、いま起動できる見込みがあるか（PATH を見るだけ・子プロセスは
 /// 起こさない）。
-fn custom_agent_status(custom: &acp_client::CustomAgent) -> (bool, String) {
-    match &custom.launch {
-        acp_client::CustomLaunch::Command { command, .. } => {
-            if custom.command_found() {
-                (
-                    true,
-                    i18n::t!("settings.custom_command_ready", "command" => command),
-                )
-            } else {
-                (
-                    false,
-                    i18n::t!("settings.custom_command_missing", "command" => command),
-                )
-            }
-        }
+fn custom_agent_status(
+    custom: &acp_client::CustomAgent,
+    registry: Option<&acp_client::registry::Registry>,
+) -> (bool, String) {
+    let command = match &custom.launch {
+        acp_client::CustomLaunch::Command { command, .. } => command.as_str(),
+        acp_client::CustomLaunch::Registry { .. } => "",
+    };
+    match custom.plan(registry) {
+        Ok(acp_client::LaunchPlan::Command { found: true }) => (
+            true,
+            i18n::t!("settings.custom_command_ready", "command" => command),
+        ),
+        Ok(acp_client::LaunchPlan::Command { found: false }) => (
+            false,
+            i18n::t!("settings.custom_command_missing", "command" => command),
+        ),
+        Ok(acp_client::LaunchPlan::Npx { version }) => (
+            true,
+            i18n::t!("settings.custom_registry_npx", "version" => version),
+        ),
+        Err(error) => (false, add_agent::launch_problem_text(&error)),
     }
 }
 
@@ -4563,6 +4599,80 @@ mod tests {
                 get(cx).agent_servers.contains_key("codex"),
                 "上書きは触らない"
             );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// H2: 「エージェントを追加」はレジストリの全件を並べて検索でき、足すと settings.json の
+    /// `agent_servers.<レジストリの id>` に `{"type": "registry", "name": …}` を書く。足した物は一覧に並ぶ。
+    /// 組み込みのエージェントのレジストリの項目は「組み込み」で足せない。レジストリはキャッシュの写し
+    /// （テストは手元の JSON を渡す・ネットワークへは行かない）。
+    #[gpui::test]
+    fn registry_agents_are_added_from_the_dialog(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-add-agent-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{ "onboarded": true, "disabled_agents": ["pi-acp"] }"#,
+        )
+        .expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let registry = acp_client::registry::parse(
+            r#"{"version":"1.0.0","agents":[
+              {"id":"pi-acp","name":"pi ACP","version":"0.0.34","description":"ACP adapter for pi",
+               "license":"MIT","distribution":{"npx":{"package":"pi-acp@0.0.34"}}},
+              {"id":"amp-acp","name":"Amp","version":"0.9.0","description":"frontier coding agent",
+               "distribution":{"binary":{"darwin-aarch64":{"archive":"https://example.invalid/a.tar.gz",
+                                                           "cmd":"./amp-acp"}}}},
+              {"id":"claude-acp","name":"Claude Agent","version":"0.81.0","description":"",
+               "distribution":{"npx":{"package":"@agentclientprotocol/claude-agent-acp@0.81.0"}}}
+            ]}"#,
+        )
+        .expect("見本を読める");
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.registry = Some(std::sync::Arc::new(registry.clone()));
+            view.open_add_agent(window, cx);
+            let search = view.add_agent.as_ref().expect("開いている").search.clone();
+            search.update(cx, |search, cx| search.set_plain_text("npx pi", cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            let query = view.add_agent.as_ref().expect("開いている").query.clone();
+            assert_eq!(query, "npx pi", "打った語で絞る");
+            assert_eq!(
+                registry
+                    .search(&query)
+                    .iter()
+                    .map(|agent| agent.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["pi-acp"]
+            );
+            view.add_registry_agent("pi-acp", "pi ACP", cx);
+            assert_eq!(
+                get(cx).agent_servers.get("pi-acp"),
+                Some(&settings_core::AgentServerSetting::Registry {
+                    name: Some("pi ACP".to_string()),
+                    env: Default::default(),
+                })
+            );
+            assert!(
+                get(cx).disabled_agents.is_empty(),
+                "足した物は使うにする（使わないのまま一覧に並べない）"
+            );
+            assert!(agent_by_label(cx, "pi ACP").is_some(), "一覧に並ぶ");
+            assert!(view.add_agent.is_some(), "続けて足せるよう開いたまま");
+            // 組み込みのエージェントのレジストリの項目は足しても一覧を増やさない。
+            assert!(acp_client::custom::builtin_for_registry_id("claude-acp").is_some());
+            view.close_add_agent(cx);
+            assert!(view.add_agent.is_none());
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         std::fs::remove_file(&path).ok();

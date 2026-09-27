@@ -1,5 +1,7 @@
-//! custom — 設定で足したエージェント（H1）と、組み込みとまとめた「選べるエージェント」の一覧。
+//! custom — 設定で足したエージェント（H1・H2）と、組み込みとまとめた「選べるエージェント」の一覧。
 //!
+//! 足し方は 2 つ: 自分のコマンド（H1・`type: "custom"`）と、ACP の公開レジストリの項目（H2・
+//! `type: "registry"`・id がレジストリの id。設定の「エージェントを追加」が書く）。
 //! 組み込みの [`AgentKind`]（[`AGENTS`]）は necoder が検証した `const`。こちらは settings.json の
 //! `agent_servers.<新しい id>` から実行時に決まる。acp_client は設定のスキーマを知らない
 //! （依存の向き）ので、settings 層が [`CustomAgentSpec`] に写して [`AgentCatalog::new`] に渡す。
@@ -13,11 +15,14 @@
 //! 既存の 7 件の id（`codex` など）を `agent_servers` に書いた物は、今までどおり**その起動の上書き**で、
 //! 新しいエージェントにはしない（`name` も読まない）。
 
-use crate::{find_in_path, AgentCommand, AgentKind, AgentOverride, AGENTS};
+use crate::registry::{DistributionKind, Launch, Registry, RegistryAgent};
+use crate::{
+    bounded_npm_spec, find_in_path, find_on_remote, AgentCommand, AgentKind, AgentOverride, AGENTS,
+};
 use anyhow::Result;
 use host::Host;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// 足したエージェントのモノグラムの地の色（ブランド色を持たないので 1 色に揃える）。
@@ -33,6 +38,91 @@ pub enum CustomLaunch {
         args: Vec<String>,
         env: BTreeMap<String, String>,
     },
+    /// 公開レジストリの項目（`type: "registry"`・id がレジストリの id）。起動方法はレジストリの
+    /// distribution から決め、設定の `env` を最後に足す（H2）。
+    Registry { env: BTreeMap<String, String> },
+}
+
+/// 足したエージェントを起動できない理由（UI が言葉にする・acp_client は i18n を持たない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchError {
+    /// レジストリにこの id が無い（まだ取得していない・レジストリから消えた）。
+    NotInRegistry { id: String },
+    /// このマシン（OS / arch）で使える配布が無い。`platform` は手元のキー（分からなければ `None`）。
+    NoDistribution { platform: Option<String> },
+    /// npx が無い（node を入れると使える）。
+    NeedsNode,
+    /// この配布の形はまだ起動できない。
+    NotSupportedYet(DistributionKind),
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LaunchError::NotInRegistry { id } => {
+                write!(formatter, "{id} が ACP レジストリに無い")
+            }
+            LaunchError::NoDistribution { platform } => write!(
+                formatter,
+                "このマシン（{}）向けの配布が無い",
+                platform.as_deref().unwrap_or("?")
+            ),
+            LaunchError::NeedsNode => write!(formatter, "npx が無い（node が要る）"),
+            LaunchError::NotSupportedYet(kind) => {
+                write!(formatter, "{} の配布はまだ起動できない", kind.as_str())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LaunchError {}
+
+/// 手元での起動の見込み（設定画面の状態と、起動前の判断に使う・PATH を見るだけで子プロセスは
+/// 起こさない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchPlan {
+    /// 自分のコマンド。`found` = PATH（か絶対パス）で見つかる。
+    Command { found: bool },
+    /// レジストリの版を npx が初回に取って起動する。
+    Npx { version: String },
+}
+
+/// 組み込みのエージェントのうち、レジストリの `id` の項目を持つ物（追加の画面で「組み込み」と出す・
+/// レジストリから同じエージェントを二重に足させない）。
+pub fn builtin_for_registry_id(id: &str) -> Option<&'static AgentKind> {
+    AGENTS.iter().find(|agent| agent.registry_id == Some(id))
+}
+
+/// レジストリの項目と、`platform` で使う配布を引く。
+fn registry_launch<'a>(
+    id: &str,
+    registry: Option<&'a Registry>,
+    platform: Option<&str>,
+) -> std::result::Result<(&'a RegistryAgent, Launch), LaunchError> {
+    let entry = registry
+        .and_then(|registry| registry.agent(id))
+        .ok_or_else(|| LaunchError::NotInRegistry { id: id.to_string() })?;
+    let launch = entry
+        .launch_for(platform)
+        .ok_or_else(|| LaunchError::NoDistribution {
+            platform: platform.map(str::to_string),
+        })?;
+    Ok((entry, launch))
+}
+
+/// npx でレジストリの版を起こすコマンド（組み込みと同じく版は上限つき範囲・`-y` で聞かずに取る）。
+fn npx_command(
+    npx_path: PathBuf,
+    npx: &crate::registry::NpxDistribution,
+    settings_env: &BTreeMap<String, String>,
+    cwd: PathBuf,
+) -> AgentCommand {
+    let mut args = vec!["-y".to_string(), bounded_npm_spec(&npx.package)];
+    args.extend(npx.args.iter().cloned());
+    let mut resolved = AgentCommand::new(npx_path, args, cwd);
+    resolved.env = npx.env.clone();
+    resolved.env.extend(settings_env.clone());
+    resolved
 }
 
 /// 設定側から受け取る 1 件（settings 層が `agent_servers` から写す）。
@@ -55,17 +145,47 @@ pub struct CustomAgent {
 }
 
 impl CustomAgent {
-    /// 自分のコマンドが手元で見つかるか（設定画面の説明用・PATH を見るだけで子プロセスは起こさない）。
-    /// 絶対パスもここで当たる（PATH の各ディレクトリと join すると絶対パスはそのまま残る）。
-    pub fn command_found(&self) -> bool {
+    /// 手元での起動の見込み（[`LaunchPlan`]）。起動できない時はその理由。
+    /// 絶対パスのコマンドもここで当たる（PATH の各ディレクトリと join すると絶対パスはそのまま残る）。
+    pub fn plan(
+        &self,
+        registry: Option<&Registry>,
+    ) -> std::result::Result<LaunchPlan, LaunchError> {
+        self.plan_for(registry, crate::registry::platform_key())
+    }
+
+    /// [`Self::plan`] の本体（プラットフォームを渡せる）。
+    fn plan_for(
+        &self,
+        registry: Option<&Registry>,
+        platform: Option<&str>,
+    ) -> std::result::Result<LaunchPlan, LaunchError> {
         match &self.launch {
-            CustomLaunch::Command { command, .. } => find_in_path(command).is_some(),
+            CustomLaunch::Command { command, .. } => Ok(LaunchPlan::Command {
+                found: find_in_path(command).is_some(),
+            }),
+            CustomLaunch::Registry { .. } => {
+                let (entry, launch) = registry_launch(&self.id, registry, platform)?;
+                match launch {
+                    Launch::Npx(_) if find_in_path("npx").is_some() => Ok(LaunchPlan::Npx {
+                        version: entry.version.clone(),
+                    }),
+                    Launch::Npx(_) => Err(LaunchError::NeedsNode),
+                    other => Err(LaunchError::NotSupportedYet(other.kind())),
+                }
+            }
         }
     }
 
-    /// 起動コマンドを組む。手元は PATH から探し、見つからなければ書いたまま渡す（ユーザーの指定を
-    /// 勝手に捨てない＝起動の失敗として原因が見える）。リモートは探索をリモートに任せる。
-    fn command_on(&self, host: &dyn Host, cwd: PathBuf) -> AgentCommand {
+    /// 起動コマンドを組む（ダウンロードはしない）。自分のコマンドは PATH から探し、見つからなければ
+    /// 書いたまま渡す（ユーザーの指定を勝手に捨てない＝起動の失敗として原因が見える）。レジストリの
+    /// 物は配布から組む。リモートは探索をリモートに任せ、binary は使わない（手元の配布の形なので）。
+    fn command_on(
+        &self,
+        host: &dyn Host,
+        cwd: PathBuf,
+        registry: Option<&Registry>,
+    ) -> Result<AgentCommand> {
         match &self.launch {
             CustomLaunch::Command { command, args, env } => {
                 let path = if host.is_remote() {
@@ -75,9 +195,37 @@ impl CustomAgent {
                 };
                 let mut resolved = AgentCommand::new(path, args.clone(), cwd);
                 resolved.env = env.clone();
-                resolved
+                Ok(resolved)
+            }
+            CustomLaunch::Registry { env } => {
+                let platform = if host.is_remote() {
+                    None
+                } else {
+                    crate::registry::platform_key()
+                };
+                let (_, launch) = registry_launch(&self.id, registry, platform)?;
+                match launch {
+                    Launch::Npx(npx) => {
+                        let npx_path = self.tool_on(host, &cwd, "npx")?;
+                        Ok(npx_command(npx_path, &npx, env, cwd))
+                    }
+                    other => Err(LaunchError::NotSupportedYet(other.kind()).into()),
+                }
             }
         }
+    }
+
+    /// 起動に使う道具（npx 等）を探す。手元は PATH、リモートは `command -v`。無ければ理由を返す。
+    fn tool_on(&self, host: &dyn Host, cwd: &Path, tool: &str) -> Result<PathBuf> {
+        let found = if host.is_remote() {
+            find_on_remote(host, cwd, tool)?
+        } else {
+            find_in_path(tool)
+        };
+        found.ok_or_else(|| match tool {
+            "npx" => LaunchError::NeedsNode.into(),
+            _ => anyhow::anyhow!("{tool} が見つからない"),
+        })
     }
 }
 
@@ -163,7 +311,7 @@ impl Agent {
     ) -> Result<Option<AgentCommand>> {
         match self {
             Agent::Builtin(kind) => kind.resolve_command_on(host, cwd, settings, registry),
-            Agent::Custom(custom) => Ok(Some(custom.command_on(host, cwd.into()))),
+            Agent::Custom(custom) => custom.command_on(host, cwd.into(), registry).map(Some),
         }
     }
 }
@@ -193,20 +341,37 @@ pub struct AgentCatalog {
 impl AgentCatalog {
     /// 設定の写しから一覧を作る。組み込みの id は上書き（新しいエージェントにしない）、表示名は
     /// 重ならないようにずらす。どうしても重なる（id まで同じ名前が既にある）物は一覧に入れない。
-    pub fn new(specs: Vec<CustomAgentSpec>) -> Self {
+    ///
+    /// 名前は `name` → レジストリの名前（レジストリから足した物）→ id の順。`registry` は名前を引く
+    /// ためだけに使う（無くても一覧は作れる）。組み込みのエージェントのレジストリの項目
+    /// （`claude-acp` 等）は足さない — 同じエージェントが別の起動で二重に並ぶのを避ける。
+    pub fn new(specs: Vec<CustomAgentSpec>, registry: Option<&Registry>) -> Self {
         let mut taken: Vec<String> = AGENTS.iter().map(|agent| agent.label.to_string()).collect();
         let mut customs = Vec::new();
         for spec in specs {
             if spec.id.trim().is_empty() || AGENTS.iter().any(|agent| agent.id == spec.id) {
                 continue;
             }
+            let from_registry = matches!(spec.launch, CustomLaunch::Registry { .. });
+            if from_registry && builtin_for_registry_id(&spec.id).is_some() {
+                eprintln!(
+                    "{} は組み込みのエージェントのレジストリの項目なので一覧に足さない",
+                    spec.id
+                );
+                continue;
+            }
+            let registry_name = registry
+                .filter(|_| from_registry)
+                .and_then(|registry| registry.agent(&spec.id))
+                .map(|entry| entry.name.clone());
             let base = spec
                 .name
                 .as_deref()
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
-                .unwrap_or(spec.id.as_str())
-                .to_string();
+                .map(str::to_string)
+                .or(registry_name)
+                .unwrap_or_else(|| spec.id.clone());
             let label = if taken.contains(&base) {
                 format!("{base} ({})", spec.id)
             } else {
@@ -298,17 +463,51 @@ mod tests {
         }
     }
 
+    fn from_registry(id: &str, name: Option<&str>) -> CustomAgentSpec {
+        CustomAgentSpec {
+            id: id.to_string(),
+            name: name.map(str::to_string),
+            launch: CustomLaunch::Registry {
+                env: [("PI_MODEL".to_string(), "glm".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        }
+    }
+
+    /// レジストリの見本（npx の pi・binary だけの amp・uvx だけの fast-agent・組み込みの claude）。
+    fn sample_registry() -> Registry {
+        crate::registry::parse(
+            r#"{"version":"1.0.0","agents":[
+              {"id":"pi-acp","name":"pi ACP","version":"0.0.34","description":"pi",
+               "distribution":{"npx":{"package":"pi-acp@0.0.34","args":["--acp"],
+                                      "env":{"FROM_REGISTRY":"1"}}}},
+              {"id":"amp-acp","name":"Amp","version":"0.9.0","description":"amp",
+               "distribution":{"binary":{"darwin-aarch64":{"archive":"https://example.invalid/a.tar.gz",
+                                                           "cmd":"./amp-acp"}}}},
+              {"id":"fast-agent","name":"fast-agent","version":"0.10.1","description":"fast",
+               "distribution":{"uvx":{"package":"fast-agent-acp==0.10.1"}}},
+              {"id":"claude-acp","name":"Claude Agent","version":"99.0.0","description":"",
+               "distribution":{"npx":{"package":"@agentclientprotocol/claude-agent-acp@99.0.0"}}}
+            ]}"#,
+        )
+        .expect("見本を読める")
+    }
+
     /// H1: `agent_servers` の新しい id は一覧に並ぶ。名前が無ければ id、組み込みの id は上書き
     /// （一覧を増やさない）、組み込みと同じ名前はずらす。
     #[test]
     fn custom_agents_join_the_list() {
-        let catalog = AgentCatalog::new(vec![
-            command("dsh", Some("DeepSeek Harness"), "dsh-acp"),
-            command("pi", None, "pi-acp"),
-            command("codex", Some("別の Codex"), "codex-acp"),
-            command("my-codex", Some("Codex"), "codex-acp"),
-            command("blank", Some("  "), "blank-acp"),
-        ]);
+        let catalog = AgentCatalog::new(
+            vec![
+                command("dsh", Some("DeepSeek Harness"), "dsh-acp"),
+                command("pi", None, "pi-acp"),
+                command("codex", Some("別の Codex"), "codex-acp"),
+                command("my-codex", Some("Codex"), "codex-acp"),
+                command("blank", Some("  "), "blank-acp"),
+            ],
+            None,
+        );
         let labels = catalog.labels();
         assert_eq!(&labels[..AGENTS.len()], crate::AGENT_LABELS);
         assert_eq!(
@@ -337,9 +536,36 @@ mod tests {
         assert!(catalog.by_label("知らない").is_none());
     }
 
+    /// H2: レジストリから足した物の名前は `name` → レジストリの名前 → id。組み込みのエージェントの
+    /// レジストリの項目（claude-acp）は二重に並べない。
+    #[test]
+    fn registry_agents_are_named_from_the_registry() {
+        let registry = sample_registry();
+        let catalog = AgentCatalog::new(
+            vec![
+                from_registry("pi-acp", None),
+                from_registry("amp-acp", Some("Amp (仕事用)")),
+                from_registry("unknown-acp", None),
+                from_registry("claude-acp", None),
+            ],
+            Some(&registry),
+        );
+        let labels: Vec<&str> = catalog
+            .customs()
+            .iter()
+            .map(|custom| custom.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["pi ACP", "Amp (仕事用)", "unknown-acp"]);
+        assert!(builtin_for_registry_id("claude-acp").is_some());
+        assert!(builtin_for_registry_id("pi-acp").is_none());
+    }
+
     #[test]
     fn a_custom_agent_gets_a_monogram_from_its_name() {
-        let catalog = AgentCatalog::new(vec![command("dsh", Some("DeepSeek Harness"), "dsh-acp")]);
+        let catalog = AgentCatalog::new(
+            vec![command("dsh", Some("DeepSeek Harness"), "dsh-acp")],
+            None,
+        );
         let dsh = catalog.by_id("dsh").expect("在る");
         assert_eq!(dsh.brand(), (None, "DH".to_string(), CUSTOM_BRAND_COLOR));
         assert_eq!(monogram_for("pi-acp"), "PA");
@@ -351,16 +577,19 @@ mod tests {
     /// PATH に無い名前も捨てずにそのまま渡す（起動の失敗として原因が見える）。
     #[test]
     fn a_custom_command_is_launched_as_written() {
-        let catalog = AgentCatalog::new(vec![command(
-            "dsh",
-            Some("DeepSeek Harness"),
-            "definitely-not-a-real-agent-xyz",
-        )]);
+        let catalog = AgentCatalog::new(
+            vec![command(
+                "dsh",
+                Some("DeepSeek Harness"),
+                "definitely-not-a-real-agent-xyz",
+            )],
+            None,
+        );
         let agent = catalog.by_id("dsh").expect("在る");
         let resolved = agent
             .resolve_command_on(LocalHost::shared().as_ref(), "/tmp", None, None)
-            .expect("手元は探索に失敗しない")
-            .expect("足した物は必ず組める");
+            .expect("自分のコマンドは必ず組める")
+            .expect("組める");
         assert!(resolved.path.ends_with("definitely-not-a-real-agent-xyz"));
         assert_eq!(resolved.args, vec!["--acp".to_string()]);
         assert_eq!(
@@ -368,7 +597,89 @@ mod tests {
             Some("fast")
         );
         assert_eq!(resolved.cwd, PathBuf::from("/tmp"));
-        assert!(!agent.custom().expect("足した物").command_found());
+        assert_eq!(
+            agent.custom().expect("足した物").plan(None),
+            Ok(LaunchPlan::Command { found: false })
+        );
+    }
+
+    /// H2: レジストリから足した npx の物は、レジストリの版（上限つき範囲）と引数で npx を起こし、
+    /// レジストリの env に設定の env を足す。レジストリに無い・このマシンの配布が無い物は理由を返す。
+    #[test]
+    fn a_registry_agent_is_launched_from_its_distribution() {
+        let registry = sample_registry();
+        let catalog = AgentCatalog::new(
+            vec![
+                from_registry("pi-acp", None),
+                from_registry("unknown-acp", None),
+            ],
+            Some(&registry),
+        );
+        let pi = catalog.by_id("pi-acp").expect("在る");
+        let plan = pi.custom().expect("足した物").plan(Some(&registry));
+        if find_in_path("npx").is_some() {
+            assert_eq!(
+                plan,
+                Ok(LaunchPlan::Npx {
+                    version: "0.0.34".to_string()
+                })
+            );
+            let resolved = pi
+                .resolve_command_on(LocalHost::shared().as_ref(), "/tmp", None, Some(&registry))
+                .expect("組める")
+                .expect("組める");
+            assert_eq!(
+                resolved.args,
+                vec![
+                    "-y".to_string(),
+                    "pi-acp@0.0.0 - 0.0.34".to_string(),
+                    "--acp".to_string()
+                ]
+            );
+            assert_eq!(
+                resolved.env.get("FROM_REGISTRY").map(String::as_str),
+                Some("1")
+            );
+            assert_eq!(
+                resolved.env.get("PI_MODEL").map(String::as_str),
+                Some("glm")
+            );
+        } else {
+            assert_eq!(plan, Err(LaunchError::NeedsNode));
+        }
+        let unknown = catalog.by_id("unknown-acp").expect("在る");
+        assert_eq!(
+            unknown.custom().expect("足した物").plan(Some(&registry)),
+            Err(LaunchError::NotInRegistry {
+                id: "unknown-acp".to_string()
+            })
+        );
+        let Err(error) =
+            unknown.resolve_command_on(LocalHost::shared().as_ref(), "/tmp", None, Some(&registry))
+        else {
+            panic!("レジストリに無い物は組めない");
+        };
+        assert_eq!(
+            error.downcast_ref::<LaunchError>(),
+            Some(&LaunchError::NotInRegistry {
+                id: "unknown-acp".to_string()
+            }),
+            "理由は型のまま UI へ渡る（UI が言葉にする）"
+        );
+        // このマシン向けの binary が無い物（x86_64 の Linux から見た amp）は使えない。
+        let amp = CustomAgent {
+            id: "amp-acp".to_string(),
+            label: "Amp".to_string(),
+            launch: CustomLaunch::Registry {
+                env: BTreeMap::new(),
+            },
+        };
+        assert_eq!(
+            amp.plan_for(Some(&registry), Some("linux-x86_64")),
+            Err(LaunchError::NoDistribution {
+                platform: Some("linux-x86_64".to_string())
+            })
+        );
     }
 
     /// 起動の本番の確かめ: 偽のエージェント（python の ACP サーバ）を「自分のコマンド」として足し、
@@ -394,15 +705,18 @@ for line in sys.stdin:
     elif method == "session/new":
         print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "custom-1"}}), flush=True)
 "#;
-        let catalog = AgentCatalog::new(vec![CustomAgentSpec {
-            id: "fake".to_string(),
-            name: Some("Fake Harness".to_string()),
-            launch: CustomLaunch::Command {
-                command: python.to_string_lossy().into_owned(),
-                args: vec!["-c".to_string(), script.to_string()],
-                env: BTreeMap::new(),
-            },
-        }]);
+        let catalog = AgentCatalog::new(
+            vec![CustomAgentSpec {
+                id: "fake".to_string(),
+                name: Some("Fake Harness".to_string()),
+                launch: CustomLaunch::Command {
+                    command: python.to_string_lossy().into_owned(),
+                    args: vec!["-c".to_string(), script.to_string()],
+                    env: BTreeMap::new(),
+                },
+            }],
+            None,
+        );
         let agent = catalog.by_label("Fake Harness").expect("在る");
         let cwd = std::env::temp_dir();
         let resolved = agent
