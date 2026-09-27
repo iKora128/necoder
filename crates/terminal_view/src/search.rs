@@ -257,6 +257,8 @@ impl TerminalView {
             let mut input = EditorView::plain(theme, accent, true, cx);
             // tab 幅は既定（4）のまま。
             input.set_typography(FIELD_FONT_SIZE, 4, cx);
+            // 端末は出力が無ければ描き直さない（idle 0%）。キャレットは点滅させず常に出す（前と同じ）。
+            input.set_caret_blink_enabled(false, cx);
             input.set_plain_text(&query, cx);
             input
         });
