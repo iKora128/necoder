@@ -762,12 +762,22 @@ impl TerminalView {
 
     /// テーマ差し替え（テーマセレクタ連動）。
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search {
+            search
+                .input
+                .update(cx, |input, cx| input.set_theme(theme.clone(), cx));
+        }
         self.theme = theme;
         cx.notify();
     }
 
     /// プロジェクト色（検索欄の枠・キャレット）。
     pub fn set_accent(&mut self, accent: Hsla, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search {
+            search
+                .input
+                .update(cx, |input, cx| input.set_accent(accent, cx));
+        }
         self.accent = accent;
         cx.notify();
     }
@@ -809,7 +819,9 @@ impl TerminalView {
     /// 開発用（offscreen 検証・`NECODER_TERMINAL_PROBE`）: 端末への 1 コマンド。
     /// `type:<文>` = 文をタイプして ⏎ / `select:<行>,<列>-<行>,<列>` = 表示座標で選択 /
     /// `find:<語>` = ⌘F を開いて語を入れる / `find-toggle:case|regex` = ⌘F バーの Aa / `.*` を押す /
-    /// `key:<キー>` = キーを 1 つ打つ（`shift-enter`）/ `menu:<x>,<y>` = 右クリックメニューを出す。
+    /// `find-mark:<文>` = 検索欄で `<文>` を変換中にする（IME の未確定）/ `find-confirm:<文>` = 変換を
+    /// `<文>` で確定する / `key:<キー>` = キーを 1 つ打つ（`shift-enter`）/ `menu:<x>,<y>` = 右クリック
+    /// メニューを出す。
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn debug_probe(
@@ -853,9 +865,25 @@ impl TerminalView {
             "find" => {
                 self.find(&actions::Find, window, cx);
                 if let Some(search) = self.search.as_mut() {
+                    search
+                        .input
+                        .update(cx, |input, cx| input.set_plain_text(argument, cx));
                     search.query = argument.to_string();
                 }
                 self.refresh_search(true, cx);
+            }
+            "find-mark" | "find-confirm" => {
+                let Some(search) = self.search.as_ref() else {
+                    eprintln!("TERMINAL_PROBE: {name} の前に find で検索バーを開く");
+                    return;
+                };
+                search.input.update(cx, |input, cx| {
+                    if name == "find-mark" {
+                        input.replace_and_mark_text_in_range(None, argument, None, window, cx);
+                    } else {
+                        input.replace_text_in_range(None, argument, window, cx);
+                    }
+                });
             }
             "find-toggle" => {
                 let Some(search) = self.search.as_mut() else {
@@ -1185,7 +1213,12 @@ impl TerminalView {
         }
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // 子（⌘F バーの入力欄）にフォーカスがある時のキーは入力欄の物。PTY へ流さず、止めもしない
+        // （止めると、打った文字が入力欄の IME の経路へ届かない）。
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         // 変換候補の操作は IME のもの。未処理キーが流れてきても PTY へ漏らさない。
         if !self.marked_text.is_empty() {
             cx.stop_propagation();
@@ -1302,15 +1335,11 @@ impl TerminalView {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        // 検索欄にフォーカスがある時は語へ入れる（1 行目だけ）。
-        if let Some(search) = self.search.as_mut() {
-            if search.focus.is_focused(window) {
-                search
-                    .query
-                    .push_str(text.lines().next().unwrap_or_default());
-                self.refresh_search(true, cx);
-                return;
-            }
+        // 検索欄にフォーカスがある時は語へ入れる（1 行目だけ）。既定の keymap では入力欄の
+        // `editor::Paste` が先に当たり、欄が同じ所へ流す（`search::render_search_bar`）。
+        if self.search_input_focused(window, cx) {
+            self.paste_into_search(&text, cx);
+            return;
         }
         self.paste_text(&text, cx);
     }
@@ -1355,20 +1384,19 @@ impl TerminalView {
     /// ⌘F。検索バーを開いて入力欄へ。開いていれば入力欄へフォーカスを戻すだけ。
     fn find(&mut self, _: &actions::Find, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.is_none() {
-            let mut search =
-                search::TerminalSearch::new(cx.focus_handle(), self.content.display_offset);
             // 1 行の選択があれば語の初期値に（エディタの ⌘F と同じ）。
-            if let Some(text) = self.term.lock().selection_to_string() {
-                let text = text.trim_end_matches('\n');
-                if !text.is_empty() && !text.contains('\n') && text.len() <= 200 {
-                    search.query = text.to_string();
-                }
-            }
-            self.search = Some(search);
-            self.refresh_search(true, cx);
+            let selection = self.term.lock().selection_to_string();
+            let seed = selection
+                .as_deref()
+                .map(|text| text.trim_end_matches('\n'))
+                .filter(|text| !text.is_empty() && !text.contains('\n') && text.len() <= 200)
+                .unwrap_or_default()
+                .to_string();
+            self.open_search(seed, cx);
         }
         if let Some(search) = &self.search {
-            window.focus(&search.focus, cx);
+            let focus = search.input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
         }
         cx.notify();
     }
@@ -3103,11 +3131,17 @@ mod ime_tests {
     fn composition_confirmation_does_not_send_enter(cx: &mut gpui::TestAppContext) {
         let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
         terminal.update_in(cx, |terminal, window, cx| {
+            // キーを受けるのはフォーカスのある端末だけ（検索欄にある時は入力欄の物）。
+            window.focus(&terminal.focus_handle, cx);
             terminal.replace_and_mark_text_in_range(None, "にほんご", Some(4..4), window, cx);
             assert_eq!(terminal.marked_text_range(window, cx), Some(0..4));
             assert!(terminal.written_input.borrow().is_empty());
             // IME 操作用の Enter が通常キー経路に来ても送らない。
-            let enter = KeyDownEvent { keystroke: gpui::Keystroke::parse("enter").unwrap(), is_held: false, prefer_character_input: false };
+            let enter = KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            };
             terminal.on_key_down(&enter, window, cx);
             assert!(terminal.written_input.borrow().is_empty());
             terminal.replace_text_in_range(None, "日本語", window, cx);
@@ -3132,7 +3166,12 @@ mod ime_tests {
                     .range,
                 1..3
             );
-            assert_eq!(terminal.text_for_range(1..3, &mut None, window, cx).as_deref(), Some("🐱"));
+            assert_eq!(
+                terminal
+                    .text_for_range(1..3, &mut None, window, cx)
+                    .as_deref(),
+                Some("🐱")
+            );
             terminal.unmark_text(window, cx);
             assert_eq!(terminal.marked_text_range(window, cx), None);
             assert!(terminal.written_input.borrow().is_empty());

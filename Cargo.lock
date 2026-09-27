@@ -7200,6 +7200,7 @@ name = "terminal_view"
 version = "0.1.20"
 dependencies = [
  "alacritty_terminal",
+ "editor_view",
  "futures",
  "gpui",
  "host",

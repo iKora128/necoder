@@ -4263,6 +4263,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// 端末の ⌘F バーの入力欄（IME の正しい EditorView・`Editor` は `Terminal` より深い）の中でも、
+    /// 端末の束は端末の物: ⌘F は全域のバッファ内検索に取られず、⌘W は裏のエディタのタブではなく
+    /// 端末を閉じる（R12）。
+    #[gpui::test]
+    fn terminal_keys_win_inside_the_search_field(cx: &mut gpui::TestAppContext) {
+        let (workspace, terminal, cx, root) =
+            terminal_key_fixture(cx, keymap_core::KeymapPlatform::MacOs);
+        // 裏にエディタのタブ（全域の ⌘F / ⌘W が効く相手）を開いてから端末へ戻る。
+        let notes = root.join("notes.txt");
+        std::fs::write(&notes, "hello\n").unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file_sync(notes.clone(), window, cx);
+            window.focus(&terminal.read(cx).focus_handle(), cx);
+        });
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("ab");
+        cx.simulate_keystrokes("cmd-f");
+        assert!(terminal.read_with(cx, |terminal, _| terminal.search_open()));
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.buffer_search.is_none()),
+            "検索欄の中でも全域のバッファ内検索に取られない"
+        );
+        cx.simulate_keystrokes("cmd-w");
+        let (tabs, terminal_tabs) = workspace.read_with(cx, |workspace, cx| {
+            (
+                workspace.tabs.len(),
+                workspace.project_sessions.sessions[0]
+                    .terminal_dock
+                    .read(cx)
+                    .debug_tabs()
+                    .0,
+            )
+        });
+        assert_eq!(tabs, 1, "裏のエディタのタブは閉じない");
+        assert_eq!(terminal_tabs, 0, "⌘W は端末を閉じる");
+        assert!(terminal.read_with(cx, |terminal, _| terminal.debug_written_input().is_empty()));
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Windows / Linux では ⌃ + 文字がシェルへ届く（全域の Ctrl+F / Ctrl+W / Ctrl+P / Ctrl+J に
     /// 取られない）。端末の操作は Ctrl+Shift + 文字。
     #[gpui::test]
