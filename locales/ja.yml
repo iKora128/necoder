@@ -89,6 +89,16 @@ agent:
   err_cancel_session_lost: セッションが応答しないため中断しました
   err_session_lost_transport: エージェントとの接続が切れました（SSH 切断など）
   session_lost_banner: セッションが切れました（SSH 切断など）。次の送信で立ち上げ直します
+  session_lost_banner_local: エージェントが終了しました。次の送信で立ち上げ直します
+  err_session_lost_process: エージェントのプロセスが終了しました
+  err_agent_exited: "エージェントが起動してすぐ終了しました（%{status}）。エージェントが stderr に書いた理由は画面にだけ出し、保存しません"
+  exit_code: "終了コード %{code}"
+  exit_signal: "シグナル %{signal} で終了"
+  exit_unknown: 終わり方は不明
+  exit_title: 起動してすぐ終了しました
+  exit_body: "%{status}。エージェントが stderr に最後に書いた行です（画面だけ・保存しません。渡した鍵などは伏せています）"
+  exit_no_stderr: （stderr には何も書かれていませんでした）
+  exit_dismiss: 閉じる
   session_resume: 再開
   session_resume_tip: 送信せずに今すぐ立ち上げ直す（前回の会話は対応エージェントなら引き継ぎます）
   session_resuming: 再開中…
@@ -658,6 +668,7 @@ settings:
   agent_disabled: 使わない（選択肢に出さない）
   agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
   agent_remove: 外す
+  agent_remove_binary_failed: "%{agent} の落とした binary を消せませんでした: %{reason}"
   custom_command_ready: "自分のコマンドで起動（%{command}）"
   custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
   custom_registry_npx: "レジストリ %{version} · npx（初回に取得）"

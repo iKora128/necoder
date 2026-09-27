@@ -69,25 +69,35 @@ agent:
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
   err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
-  err_launch_not_in_registry: "%{id} isnt in the ACP registry (refresh it from Settings → AI agents → Add agent)"
+  err_launch_not_in_registry: "%{id} isn't in the ACP registry (refresh it from Settings → AI agents → Add agent)"
   err_launch_no_distribution: "No build for this machine (%{platform})"
   err_launch_needs_node: Needs node (npx). Install node, then resume
   err_launch_needs_uv: Needs uv (uvx). Install uv, then resume (necoder doesn't install it)
   err_launch_binary_on_remote: This agent only ships a binary, so it can't start over SSH
   err_launch_not_deployed: Not downloaded yet (it's downloaded and checked on first send)
-  err_deploy_download: "Couldnt download %{url}: %{reason}"
-  err_deploy_checksum: "The download doesnt match the registrys sha256, so it wasnt used (registry %{expected} / download %{actual})"
-  err_deploy_unsafe: "The archive has a path outside its folder (%{entry}), so it wasnt unpacked"
-  err_deploy_other: "Couldnt put the binary in place: %{reason}"
+  err_deploy_download: "Couldn't download %{url}: %{reason}"
+  err_deploy_checksum: "The download doesn't match the registry's sha256, so it wasn't used (registry %{expected} / download %{actual})"
+  err_deploy_unsafe: "The archive has a path outside its folder (%{entry}), so it wasn't unpacked"
+  err_deploy_other: "Couldn't put the binary in place: %{reason}"
   deploying: "Downloading %{agent} %{version} (binary, first time only)…"
   deploy_verified: Checked against the registry's sha256
   deploy_unverified: The registry has no sha256 for this binary, so it's used unchecked
-  deploy_fallback: "Couldnt download the new version (%{new}), so starting the one in place (%{version})"
+  deploy_fallback: "Couldn't download the new version (%{new}), so starting the one in place (%{version})"
   err_session_lost: Session ended. Send again to reconnect
   err_session_ended: The agent session ended (treated as interrupted)
   err_cancel_session_lost: Interrupted — the session stopped responding
   err_session_lost_transport: Lost the connection to the agent (e.g. SSH dropped)
   session_lost_banner: Session lost (e.g. SSH dropped). It restarts with your next message
+  session_lost_banner_local: The agent exited. It restarts with your next message
+  err_session_lost_process: The agent's process exited
+  err_agent_exited: "The agent exited right after starting (%{status}). What it wrote to stderr is shown on screen only and isn't saved"
+  exit_code: "Exit code %{code}"
+  exit_signal: "Ended by signal %{signal}"
+  exit_unknown: Unknown exit
+  exit_title: Exited right after starting
+  exit_body: "%{status}. The last lines the agent wrote to stderr (on screen only, not saved; keys it was given are masked)"
+  exit_no_stderr: (nothing was written to stderr)
+  exit_dismiss: Dismiss
   session_resume: Resume
   session_resume_tip: Restart the agent now without sending (picks up the previous conversation if the agent supports it)
   session_resuming: Resuming…
@@ -657,6 +667,7 @@ settings:
   agent_disabled: Off (hidden from choices)
   agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
   agent_remove: Remove
+  agent_remove_binary_failed: "Couldn't delete the binary downloaded for %{agent}: %{reason}"
   custom_command_ready: "Starts with your command (%{command})"
   custom_command_missing: "Command not found (%{command}). Write a name on the PATH or an absolute path"
   custom_registry_npx: "Registry %{version} · npx (fetched on first start)"
@@ -671,7 +682,7 @@ settings:
   custom_binary_download_unverified: "Registry %{version} · binary (downloaded on first start, no checksum to check)"
   custom_binary_on_remote: This agent only ships a binary, so it can't start over SSH
   custom_not_deployed: Not downloaded yet (downloaded on first start)
-  custom_deploy_failed: "Couldnt put the binary in place: %{reason}"
+  custom_deploy_failed: "Couldn't put the binary in place: %{reason}"
   add_agent_sha256: The binary is checked against the registry's sha256 after download
   add_agent_no_sha256: No checksum in the registry (no sha256). The downloaded binary is used unchecked
   agents_add: + Add agent
@@ -691,7 +702,7 @@ settings:
   add_agent_fetch: Fetch
   add_agent_fetching: Fetching…
   add_agent_refresh: Refresh
-  add_agent_fetch_failed: "Couldnt fetch: %{reason}"
+  add_agent_fetch_failed: "Couldn't fetch: %{reason}"
   add_agent_custom_hint: For an agent that isn't listed, write your command in agent_servers in settings.json
   add_agent_open_settings_json: Open settings.json
   add_agent_close: Close

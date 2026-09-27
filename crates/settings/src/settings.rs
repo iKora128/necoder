@@ -587,6 +587,9 @@ pub struct SettingsView {
     /// ACP レジストリの手元の写し（足したエージェントの状態・追加の画面に使う）。描画のたびに
     /// ファイルを読まないよう、開き直すたびに [`Self::refresh_lists`] で読む。
     registry: Option<std::sync::Arc<acp_client::registry::Registry>>,
+    /// 足したエージェントの落とした binary の置き場（`external_agents/binary`・外す時に消す先）。
+    /// テストは一時フォルダへ差し替える（本物のデータの置き場に触らない）。
+    agent_binary_root: Option<PathBuf>,
     /// Ghostty の設定ファイルがあるか（初回の画面で「Ghostty から取り込む」を出すか・O45 H14）。
     /// 描画で fs を見ないよう、[`Self::refresh_lists`] で見て持っておく。
     ghostty_config_present: bool,
@@ -711,6 +714,7 @@ impl SettingsView {
             launch_editor: None,
             add_agent: None,
             registry: None,
+            agent_binary_root: acp_client::deploy::binary_root(),
             ghostty_config_present: false,
             cli_shim_target: None,
             cli_shim_busy: false,
@@ -4617,9 +4621,15 @@ mod tests {
                 Some("dsh".to_string())
             );
         });
+        let binaries = std::env::temp_dir().join(format!(
+            "necoder-settings-custom-agent-binaries-{}",
+            std::process::id()
+        ));
         let (view, cx) = cx.add_window_view(|_window, cx| {
             let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
             view.availability_pending = false;
+            // 外す時に消しに行く先も一時フォルダ（本物のデータの置き場に触らない）。
+            view.agent_binary_root = Some(binaries.clone());
             view
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -4666,6 +4676,77 @@ mod tests {
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// 外す（H2-b）: 足したエージェントを外すと、落とした binary（`external_agents/binary/<id>`）を消す。
+    /// 消す直前に settings.json を読み直し、同じ id がまだ書かれていれば（プロジェクトの設定で足している・
+    /// 書き直した）消さない。消す先は一時フォルダ（本物の置き場に触らない）。
+    #[gpui::test]
+    fn removing_an_added_agent_deletes_its_downloaded_binary(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder-settings-remove-binary-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        let binaries = root.join("binary");
+        let distribution = acp_client::registry::BinaryDistribution {
+            archive: "https://example.invalid/agent".to_string(),
+            cmd: "./agent".to_string(),
+            args: Vec::new(),
+            env: Default::default(),
+            sha256: None,
+        };
+        for id in ["amp-acp", "vtcode"] {
+            acp_client::deploy::BinaryTarget {
+                id,
+                version: "1.0.0",
+                platform: "darwin-aarch64",
+                distribution: &distribution,
+            }
+            .deploy_with(&binaries, |_url: &str, destination: &Path| {
+                std::fs::write(destination, "#!/bin/sh\n")
+                    .map_err(|error| acp_client::deploy::DeployError::Io(error.to_string()))
+            })
+            .expect("置ける");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join(".necoder")).expect("作れる");
+        // プロジェクトの設定でも vtcode を足している（user の層から外しても、まだ使われている）。
+        std::fs::write(
+            project.join(".necoder/settings.json"),
+            r#"{ "agent_servers": { "vtcode": { "type": "registry", "name": "VT Code" } } }"#,
+        )
+        .expect("書ける");
+        let user = root.join("settings.json");
+        std::fs::write(
+            &user,
+            r#"{ "onboarded": true, "agent_servers": {
+                "amp-acp": { "type": "registry", "name": "Amp" },
+                "vtcode": { "type": "registry", "name": "VT Code" } } }"#,
+        )
+        .expect("書ける");
+        cx.update(|cx| init(Some(user.clone()), Some(project.clone()), cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view.agent_binary_root = Some(binaries.clone());
+            view
+        });
+        view.update(cx, |view, cx| {
+            view.remove_custom_agent("amp-acp", false, cx);
+            view.remove_custom_agent("vtcode", false, cx);
+        });
+        cx.run_until_parked();
+        assert!(!binaries.join("amp-acp").exists(), "外すと落とした物を消す");
+        assert!(
+            binaries.join("vtcode/1.0.0/darwin-aarch64/agent").exists(),
+            "プロジェクトの設定でまだ使っている id は消さない"
+        );
+        cx.update(|_window, cx| {
+            assert!(!get(cx).agent_servers.contains_key("amp-acp"));
+            assert!(get(cx).agent_servers.contains_key("vtcode"));
+        });
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// H2: 「エージェントを追加」はレジストリの全件を並べて検索でき、足すと settings.json の
