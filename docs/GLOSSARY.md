@@ -62,6 +62,7 @@
 | ↳ **消えています**（Task の worktree が necoder の外で消された。片付け = レールから外す） | `vanished_worktree` / `forget_vanished_task` | 消えています / 片付け | Gone / Clean up |
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
+| ↳ **足したエージェント**（組み込みの 7 件の外から一覧に足したエージェント。settings.json の `agent_servers.<新しい id>` に自分のコマンドを書いた物・issue #38 H1。表示名は `name`・無ければ id） | `acp_client::CustomAgent` / `acp_client::AgentCatalog` / `acp_client::Agent`（組み込みと共通の入口）/ `settings::agent_catalog` | 足したエージェント / 外す | Added agent / Remove |
 | ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |

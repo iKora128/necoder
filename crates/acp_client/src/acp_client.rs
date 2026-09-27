@@ -7,6 +7,7 @@
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
 pub mod codex_limits;
+pub mod custom;
 pub mod history;
 pub mod mcp;
 pub mod preset;
@@ -26,6 +27,8 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
+
+pub use custom::{Agent, AgentCatalog, CustomAgent, CustomAgentSpec, CustomLaunch};
 
 /// 権限リクエストの選択肢の種類（UI のスタイル分け用。ACP `PermissionOptionKind` を簡約）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

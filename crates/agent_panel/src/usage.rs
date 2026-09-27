@@ -342,10 +342,9 @@ impl UsageKey {
     /// エージェントを動かしている場所（[`host_label`]）と、設定の認証の環境（`agent_servers.<id>.env`）
     /// から作る。Host は呼ばない（描画からも呼ばれる）。
     pub fn for_agent(agent: SharedString, host: SharedString, cx: &App) -> Self {
-        let agent_override = acp_client::AGENTS
-            .iter()
-            .find(|candidate| candidate.label == agent.as_ref())
-            .and_then(|candidate| crate::agent_server_override(candidate.id, cx));
+        // 足したエージェント（H1）も同じ一覧で引く（`start_session` と同じ上書きから鍵を作る）。
+        let agent_override = settings::agent_by_label(cx, agent.as_ref())
+            .and_then(|candidate| crate::agent_server_override(candidate.id(), cx));
         Self::with_override(agent, host, agent_override.as_ref())
     }
 

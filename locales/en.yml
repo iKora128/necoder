@@ -300,6 +300,7 @@ cmd:
   new_thread_opencode: "AI: New thread (OpenCode)"
   new_thread_kimi: "AI: New thread (Kimi CLI)"
   new_thread_grok: "AI: New thread (Grok Build)"
+  new_thread_with: "AI: New thread (%{agent})"
   next_tab: "Tabs: Next"
   prev_tab: "Tabs: Previous"
   next_thread: "AI: Next thread"
@@ -640,6 +641,9 @@ settings:
   agent_signed_out: Signed out
   agent_disabled: Off (hidden from choices)
   agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
+  agent_remove: Remove
+  custom_command_ready: "Starts with your command (%{command})"
+  custom_command_missing: "Command not found (%{command}). Write a name on the PATH or an absolute path"
   launch_default: Launch as usual (registry version and command)
   launch_env: "Launch: default + environment (%{names})"
   launch_custom: "Launch: own command (%{command})"

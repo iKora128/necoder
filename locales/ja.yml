@@ -301,6 +301,7 @@ cmd:
   new_thread_opencode: "AI: 新しいスレッド（OpenCode）"
   new_thread_kimi: "AI: 新しいスレッド（Kimi CLI）"
   new_thread_grok: "AI: 新しいスレッド（Grok Build）"
+  new_thread_with: "AI: 新しいスレッド（%{agent}）"
   next_tab: "タブ: 次へ"
   prev_tab: "タブ: 前へ"
   next_thread: "AI: 次のスレッド"
@@ -641,6 +642,9 @@ settings:
   agent_signed_out: 未ログイン
   agent_disabled: 使わない（選択肢に出さない）
   agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
+  agent_remove: 外す
+  custom_command_ready: "自分のコマンドで起動（%{command}）"
+  custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
   launch_default: 起動は既定のまま（レジストリの版とコマンド）
   launch_env: "起動: 既定 + 環境変数（%{names}）"
   launch_custom: "起動: 自分のコマンド（%{command}）"

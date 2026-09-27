@@ -198,6 +198,22 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - npm 指定は**完全一致ピンにしない**（`pkg@0.0.0 - X` の上限範囲）。npm の `min-release-age` 環境で
   公開直後の版が入らなくなるため。詳細と Zed 比較の境界は `docs/research/acp-agent-registry-notes.md`
 
+**組み込みの 7 件の外のエージェント（H1・issue #38・2026-09-27）**: `agent_servers` のキーが組み込みの id
+（`claude` / `codex` …）でなければ、上書きではなく**新しいエージェント**として一覧に並ぶ。
+`{"name": "DeepSeek Harness", "command": "dsh-acp", "args": [], "env": {}}`（`type` は省略可・`command` が
+あれば `custom`）。`name` が無ければ id を出す。組み込みの id では今までどおり上書きで、`name` は読まない。
+
+- **一覧は設定の写し**: `settings::SettingsGlobal` が store を差し替えるたびに `acp_client::AgentCatalog` を
+  作り直す（`settings::agent_catalog(cx)`）。acp_client は設定のスキーマを知らないので、写すのは settings
+  （`custom_agent_specs`）。プロセス全体の可変な置き場は作らない（窓・テストごとの App が自分の一覧を持つ）
+- **スレッドは相手を表示名で覚える**（DB の `threads.agent`）ので、表示名は組み込み・他の足した物と
+  重ならないようにずらす（`名前 (id)`）。引く時は表示名 → id の順（名前を後から変えても前のスレッドが
+  相手を見失わない）。`disabled_agents` / `agent_config_defaults` は id で引く
+- 組み込みと足した物を 1 つの型で扱う入口は `acp_client::Agent`（`Builtin(&AgentKind)` / `Custom`）。
+  oneshot（題名づけ）・再ログインの案内・レジストリの版の解決・ログインの確かめは組み込みだけ
+- 起動は書いたコマンドをそのまま組む（PATH で探し、無ければ書いたまま渡す＝起動の失敗として原因が見える）。
+  リモートは探索をリモートに任せる
+
 ### 7.2 MCP サーバはクライアントが渡す（2026-09-10）
 
 **ACP では「どの MCP サーバへ繋ぐか」を決めるのはクライアント（＝necoder）**。エージェント側の

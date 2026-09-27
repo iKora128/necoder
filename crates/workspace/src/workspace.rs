@@ -1531,6 +1531,9 @@ struct WorkspaceOverlays {
     picker_font_key: &'static str,
     /// シェルのピッカーの行（入っているシェル・O25）。
     picker_shells: Vec<String>,
+    /// パレットの「新しいスレッド（…）」のうち設定で足したエージェントの行（表示名・H1）。行の id は
+    /// [`overlays::PALETTE_CUSTOM_AGENT_ROW`] からの通し番号（コマンドの登録簿の番号と重ならない）。
+    picker_agent_threads: Vec<SharedString>,
     theme_before_preview: Option<Theme>,
     picker_observation: Option<Subscription>,
     color_picker: Option<ColorPickerState>,

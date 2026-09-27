@@ -428,6 +428,29 @@ composer のエージェントの選択・＋ Task の「並べて比べる」�
 
 **既定に戻す** で元に戻る。効くのは次に起動するエージェントから。値は settings.json（`agent_servers`）にそのまま残るので、API キーなどの秘密は書かない。
 
+### 自分のエージェントを足す（settings.json）
+
+組み込みの 7 件（Claude Code・Codex・GitHub Copilot・Qwen Code・OpenCode・Kimi CLI・Grok Build）の外の
+ACP エージェントも、settings.json の `agent_servers` に新しい id で書けば一覧に並ぶ。
+
+```json
+"agent_servers": {
+  "dsh": {
+    "name": "DeepSeek Harness",
+    "command": "dsh-acp",
+    "args": [],
+    "env": { "DEEPSEEK_MODEL": "deepseek-v4" }
+  }
+}
+```
+
+- `command` は ACP を話すコマンド（PATH にある名前か絶対パス）。`args` と `env` は省ける
+- `name` が一覧・ピル・タブに出る名前。無ければ id（上の例なら `dsh`）。組み込みと同じ名前は `名前 (id)` になる
+- `"type": "custom"` は書いても書かなくてもよい
+- 足したエージェントは composer のエージェントのピル・＋ Task の「並べて比べる」・パレットの「AI: 新しいスレッド（名前）」に出る。**設定（⌘,）→ AI エージェント**に組み込みと同じ行で並び、既定 / Captain / 使う・使わないも同じ。行の下の **変える…** で起動を変え、**外す** で一覧から消す
+- 組み込みの id（`claude` / `codex` など）に書いた物は、今までどおりその起動の上書き（`name` は読まない）
+- 値は settings.json にそのまま残るので、API キーなどの秘密は `env` に書かない
+
 ### 権限の既定（毎回聞く / 聞かずに進める）
 
 新しいスレッドは、composer のピルで最後に選んだ権限モードで始まる（エージェントごとに覚える）。
@@ -813,7 +836,8 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | `reduce_motion` | `false` | スピナー等の動きを止める |
 | `captain_agent` | なし | Fleet の Captain に使うエージェント（設定 → AI エージェントで選べる） |
 | `agent_permission_default` | `default` | 新しいスレッドの権限モードの既定（`bypass` = 聞かずに進める・そのモードを持つエージェントだけ）。ピルで選んだモードがあればそちらが勝つ |
-| `disabled_agents` | `[]` | 使わないエージェント（`claude` / `codex` / `copilot` / `qwen` / `opencode` / `kimi` / `grok`）。選択肢に出さず、ログインの確かめでも起動しない。設定 → AI エージェントの各行のスイッチで出し入れできる |
+| `disabled_agents` | `[]` | 使わないエージェント（`claude` / `codex` / `copilot` / `qwen` / `opencode` / `kimi` / `grok` と、`agent_servers` で足したエージェントの id）。選択肢に出さず、ログインの確かめでも起動しない。設定 → AI エージェントの各行のスイッチで出し入れできる |
+| `agent_servers` | `{}` | エージェントの起動の上書き（組み込みの id）と、足したエージェント（新しい id・「自分のエージェントを足す」）。設定 → AI エージェントの各行の「変える…」でも書ける |
 
 設定画面のトグルは settings.json へ書き込む。settings.json を手で編集していて JSON として読めない状態（末尾のカンマ・コメントなど）のときは、ファイルを上書きせず「settings.json を読めないので保存しませんでした」と理由つきで知らせる。直してから押し直す。
 
