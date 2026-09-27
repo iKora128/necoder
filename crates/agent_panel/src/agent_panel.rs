@@ -30,6 +30,7 @@ mod idle;
 mod recipes;
 mod remote;
 mod search;
+mod shell;
 pub mod sound;
 pub mod usage;
 
@@ -182,6 +183,9 @@ enum Entry {
     /// 会話の区切りの知らせ（O15）: 「以前の N 件は省略」（再生した履歴の頭）・「新しいセッションで
     /// 続けています」。会話の本文ではない＝全文検索・引き継ぎの前置き・digest に入れない。
     Notice(SharedString),
+    /// composer の先頭の `!` で人が走らせたシェルコマンド（`! <コマンド>` → `⎿ 出力`・#37・`shell.rs`）。
+    /// モデルのターンではない。結果は次のプロンプトに添える。
+    Shell(Box<shell::ShellRun>),
 }
 
 /// message rail（O17）に印を出すのは、ユーザーの発話がこの数以上ある時だけ（少なければ一覧で足りる）。
@@ -1821,6 +1825,7 @@ fn entry_plain_text(entry: &Entry) -> String {
             None => format!("{tool} {args}"),
         },
         Entry::Checkpoint { label, .. } => format!("checkpoint — {label}"),
+        Entry::Shell(run) => run.plain_text(),
     }
 }
 
@@ -2184,6 +2189,11 @@ pub struct AgentPanel {
     auto_naming: std::collections::HashSet<String>,
     /// composer の `/` 補完（O2）。composer の変化を observe して局面を読み直す。
     slash: SlashCompletion,
+    /// composer の本文が `!` のコマンド（シェルモード・#37）。立っている間 composer の下にヒントを出す。
+    /// `/` 補完と同じく composer の変化で読み直す。
+    shell_input: bool,
+    /// 終了する時に `!` のコマンドを止める購読（パネルと一緒に外れる）。
+    _stop_shell_on_quit: gpui::Subscription,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -2254,12 +2264,29 @@ impl AgentPanel {
 
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
         let panel_id = cx.entity_id();
-        cx.on_release(move |_, cx| {
+        cx.on_release(move |panel, cx| {
+            // `!` で走らせたコマンドを残さない（窓を閉じた・パネルが無くなった）。
+            panel.stop_all_shell_runs();
             let registry = cx.default_global::<RunningRegistry>();
             registry.1.remove(&panel_id);
             registry.rebuild();
         })
         .detach();
+        // 終了する時も `!` のコマンドを止める（子は自分のプロセスグループで動くので、necoder が
+        // 終わっても残る）。止める印を立て、runner が SIGTERM を送るまで少しだけ待つ。
+        // 購読はパネルが持つ（パネルが無くなれば外れる）。
+        let stop_shell_on_quit = cx.on_app_quit(|panel, cx| {
+            let waiting = panel.stop_all_shell_runs();
+            let timer = waiting.then(|| {
+                cx.background_executor()
+                    .timer(shell::SHELL_STOP_ON_QUIT_WAIT)
+            });
+            async move {
+                if let Some(timer) = timer {
+                    timer.await;
+                }
+            }
+        });
         // 設定は global（settings.json が真実）から取る。live-reload / CLI / MCP 変更に observe で追従。
         let submit_on_enter = settings::get(cx).submit_on_enter;
         let composer =
@@ -2616,6 +2643,8 @@ PYEOF"#;
             preview_exists: RefCell::new(HashMap::new()),
             auto_naming: std::collections::HashSet::new(),
             slash: SlashCompletion::default(),
+            shell_input: false,
+            _stop_shell_on_quit: stop_shell_on_quit,
         }
     }
 
@@ -2817,8 +2846,8 @@ PYEOF"#;
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
-        for entry in thread.entries.iter().skip(thread.persisted_entries) {
-            let (role, content) = match entry {
+        for index in thread.persisted_entries..thread.entries.len() {
+            let (role, content) = match &thread.entries[index] {
                 Entry::User(text) => ("user", text.to_string()),
                 Entry::LedgerEvent(text) => ("ledger_event", text.to_string()),
                 Entry::Thinking(text) => ("thinking", text.to_string()),
@@ -2826,13 +2855,22 @@ PYEOF"#;
                 Entry::Agent(text) => ("agent", text.to_string()),
                 Entry::Checkpoint { id, label } => ("checkpoint", format!("{id}\t{label}")),
                 Entry::Notice(text) => ("notice", text.to_string()),
+                Entry::Shell(run) => ("shell", run.stored_content()),
             };
-            if let Err(error) = storage.insert_turn(&thread.id, role, &content) {
-                eprintln!("turn の永続化に失敗: {error:#}");
-                return; // persisted_entries を進めない = 次回リトライ
+            match storage.insert_turn(&thread.id, role, &content) {
+                Ok(turn_id) => {
+                    thread.persisted_entries = index + 1;
+                    // 走っている途中で保存した `!` の行は、終わった時にこの行を書き換える。
+                    if let Some(Entry::Shell(run)) = thread.entries.get_mut(index) {
+                        run.note_stored(turn_id);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("turn の永続化に失敗: {error:#}");
+                    return; // ここから先は persisted_entries を進めない = 次回リトライ
+                }
             }
         }
-        thread.persisted_entries = thread.entries.len();
         self.persist_thread_meta(thread_index);
     }
 
@@ -3512,6 +3550,7 @@ PYEOF"#;
                     Entry::Agent(text) => ("⏺", text.clone()),
                     Entry::Checkpoint { label, .. } => ("⟲", label.clone()),
                     Entry::Notice(text) => ("—", text.clone()),
+                    Entry::Shell(run) => ("!", run.command.clone()),
                 };
                 (SharedString::from(bullet), text)
             })
@@ -4216,6 +4255,12 @@ PYEOF"#;
                 cx.notify();
                 return;
             }
+            // `!` で走らせたコマンドがあれば、まずそれを止める（人が自分で起こした物が先。
+            // エージェントのターンはもう一度 Esc で止まる）。
+            if self.stop_shell_runs(self.active, cx) {
+                cx.stop_propagation();
+                return;
+            }
             // 実行中なら Esc = 中断（Claude Code / Zed と同じ体感）。
             if self
                 .threads
@@ -4630,6 +4675,8 @@ PYEOF"#;
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
         closed.running = false;
         closed.turn_started_at = None;
+        // `!` で走らせているコマンドも止める（閉じたタブの裏で動かし続けない）。
+        self.stop_shell_runs_of(&mut closed, cx);
         self.closed_threads.push(closed);
         // active を有効域へ寄せる。空になったら 0（描画は get(active)=None で空状態になる）。
         if self.threads.is_empty() {
@@ -5993,8 +6040,17 @@ PYEOF"#;
 
     /// composer の内容をアクティブスレッドへ積み、**常駐 ACP セッション**へ prompt を送る（空なら無視）。
     /// 応答は `run_session` からのイベントを [`Self::on_event`] で**逐次** transcript に反映する（ストリーミング）。
+    ///
+    /// 先頭が `!` の本文はシェルのコマンドとして走らせ、エージェントには送らない（`shell.rs`・#37）。
+    /// **`!` を解釈するのはここ（人が composer から送った時）だけ** — ほかの入口（スマホ・`ne` / MCP・
+    /// Captain・Fleet の注記・キュー・steer）は `send_prompt_*` を通り、`!` は文のまま届く。
+    /// エージェントの生成中でも待たずに走らせる（キューに積むと、後で文として送られてしまう）。
     fn submit(&mut self, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).plain_text();
+        if let Some(command) = shell::shell_command_input(&text) {
+            self.run_shell_command(self.active, command, cx);
+            return;
+        }
         let prompt = text.trim().to_string();
         if prompt.is_empty() {
             return;
@@ -6091,11 +6147,19 @@ PYEOF"#;
     }
 
     /// composer の本文から `/` 補完の局面を読み直す（composer の notify ごと・O2）。
+    /// `!` のコマンド（シェルモード・#37）かどうかもここで読み直す（composer の下のヒント）。
     fn refresh_slash_state(&mut self, cx: &mut Context<Self>) {
         let composer = self.composer.read(cx);
         let first_line = composer.first_line_text();
+        // 全文を複製するのは先頭が `!` の時だけ（点滅の notify ごとに本文を写さない）。
+        let shell_input = first_line.starts_with('!')
+            && shell::shell_command_input(&composer.plain_text()).is_some();
         let single_line = composer.buffer().len_bytes() == first_line.len();
         let input = slash_input(&first_line, single_line, composer.has_marked_text());
+        if shell_input != self.shell_input {
+            self.shell_input = shell_input;
+            cx.notify();
+        }
         if input == self.slash.input {
             return;
         }
@@ -6291,6 +6355,17 @@ PYEOF"#;
         {
             context_prefix.push_str(context);
         }
+        // `!` で人が走らせたコマンドの結果（#37）は、次の通常の送信に 1 回だけ添える（本文の直前）。
+        // この会話の持ち主の文脈なので、composer 以外の入口（キュー・Captain の台帳など）から来た
+        // 送信にも添える。slash コマンドには添えない（本文 1 ブロックの約束・次の通常の送信まで残す）。
+        let shell_attachment = self
+            .threads
+            .get(thread_index)
+            .filter(|_| !is_slash_command)
+            .and_then(|thread| shell::pending_shell_attachment(&thread.entries));
+        if let Some((block, _)) = &shell_attachment {
+            context_prefix.push_str(block);
+        }
         // 「新しいセッションで続ける」の前置き（O15）は、次の通常の送信の頭に 1 回だけ付ける
         // （表示は人の本文のまま）。送れたら捨てる。
         let handoff = self
@@ -6408,9 +6483,13 @@ PYEOF"#;
                 thread.command_tx = None;
             }
             self.fail_turn(thread_index, &i18n::t!("agent.err_session_lost"), cx);
-        } else if handoff.is_some() {
-            if let Some(thread) = self.threads.get_mut(thread_index) {
+        } else if let Some(thread) = self.threads.get_mut(thread_index) {
+            if handoff.is_some() {
                 thread.handoff_preamble = None;
+            }
+            // 添えたシェルの結果は渡し済み（次の送信には添えない）。
+            if let Some((_, delivered)) = &shell_attachment {
+                shell::mark_shell_runs_delivered(&mut thread.entries, delivered);
             }
         }
     }
@@ -9074,6 +9153,8 @@ PYEOF"#;
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         match entry {
+            // `!` で人が走らせたコマンド（#37・`shell.rs`）。
+            Entry::Shell(run) => self.render_shell_entry(index, run, cx),
             Entry::LedgerEvent(text) => div()
                 .p(px(10.))
                 .rounded(px(6.))
@@ -11378,7 +11459,9 @@ PYEOF"#;
                                                 }),
                                             ),
                                     )
-                            })),
+                            }))
+                            // `!` の結果のうち、次の送信に添える予定の物（#37）。
+                            .children(self.render_shell_chips(cx)),
                     )
                     // composer 本体（平坦 EditorView。Enter=改行 / ⌘Enter=送信 / IME 確定 Enter は送信にしない）
                     // 高さは内容に合わせて自動で伸びる（auto-grow）: 基準高 composer_height
@@ -11427,6 +11510,8 @@ PYEOF"#;
                             }))
                             .child(self.composer.clone()),
                     )
+                    // 本文が `!` で始まる間: シェルで走ること（走らせられない理由）を 1 行（#37）。
+                    .children(self.render_shell_hint(cx))
                     // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
                     .child(
                         div()
@@ -11497,7 +11582,8 @@ PYEOF"#;
                             )
                             .child(div().flex_1())
                             .child(if running {
-                                // 実行中は送信ボタンを**停止**に差し替える（Esc と同じ動作）。
+                                // 実行中は送信ボタンを**停止**に差し替える（Esc と同じくターンを止める。
+                                // `!` のコマンドは行の「止める」か Esc で止まる＝このボタンはターン専用）。
                                 // 中立の警告色ではなく縁取りにして、識別色の意味を汚さない（§1.3）。
                                 div()
                                     .id("stop-button")
@@ -12615,6 +12701,11 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
                 label: label.to_string().into(),
             }
         }
+        // `!` の行（走っている途中で保存した物は「中断」として読む）。読めなければ本文のまま出す。
+        "shell" => match shell::ShellRun::from_stored(&content) {
+            Some(run) => Entry::Shell(Box::new(run)),
+            None => Entry::Agent(content.into()),
+        },
         _ => Entry::Agent(content.into()),
     }
 }

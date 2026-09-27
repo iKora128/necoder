@@ -144,6 +144,22 @@ agent:
   running_hint: esc で中断
   running_thinking: 考えています
   slash_footer: "%{count} 件 · ↑↓ で選ぶ · Enter / Tab で入れる · esc で閉じる"
+  shell_hint: シェルで実行（エージェントには送らない・結果は次の送信に添える）
+  shell_hint_no_project: シェルで実行するには、プロジェクトを開いてください
+  shell_hint_no_folder: このチャットにはまだフォルダがありません。最初のメッセージを送ると、そのフォルダでシェルを実行できます
+  shell_running: 実行中
+  shell_stopping: 止めています…
+  shell_stop: 止める
+  shell_stop_tip: このコマンドを止める（esc でも止まる）
+  shell_exit_code: "終了コード %{code}"
+  shell_signal: シグナルで終了
+  shell_interrupted: 中断
+  shell_interrupted_remote: 中断（SSH 先のコマンドは止められないため、向こうでは最後まで動きます）
+  shell_failed: "実行できませんでした: %{message}"
+  shell_no_output: （出力なし）
+  shell_output_cut: "…（長いので途中を省きました）…"
+  shell_pending_tip: このシェルの結果を次の送信に添えます（× で外す）
+  shell_context_intro: "（ユーザーがこの会話の作業ディレクトリで、次のシェルコマンドを実行しました。結果を文脈として使ってください）"
   goal_label: 目標
   goal_status_active: 進行中
   goal_pause: 一時停止

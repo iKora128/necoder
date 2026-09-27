@@ -143,6 +143,22 @@ agent:
   running_hint: esc to interrupt
   running_thinking: Thinking
   slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
+  shell_hint: Runs in the shell (not sent to the agent; the output goes with your next message)
+  shell_hint_no_project: Open a project to run shell commands
+  shell_hint_no_folder: This chat has no folder yet. Send a first message, then shell commands run in its folder
+  shell_running: Running
+  shell_stopping: Stopping…
+  shell_stop: Stop
+  shell_stop_tip: Stop this command (esc also works)
+  shell_exit_code: "exit code %{code}"
+  shell_signal: Terminated by a signal
+  shell_interrupted: Interrupted
+  shell_interrupted_remote: Interrupted (commands on an SSH host can't be stopped, so it keeps running there)
+  shell_failed: "Couldn't run: %{message}"
+  shell_no_output: (no output)
+  shell_output_cut: "… (middle of the output omitted) …"
+  shell_pending_tip: This shell output goes with your next message (× to leave it out)
+  shell_context_intro: "(The user ran the following shell commands in this conversation's working directory. Use the output as context.)"
   goal_label: Goal
   goal_status_active: Active
   goal_pause: Pause

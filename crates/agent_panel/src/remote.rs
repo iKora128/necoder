@@ -9,7 +9,7 @@ fn text(value: &str) -> String {
     value[..floor_char_boundary(value, value.len().min(TEXT_LIMIT))].to_string()
 }
 
-fn turn_id(thread: &Thread) -> String {
+pub(crate) fn turn_id(thread: &Thread) -> String {
     format!("{}:{:?}", thread.session_serial, thread.turn_started_at)
 }
 
@@ -75,6 +75,8 @@ impl AgentPanel {
                     ),
                     Entry::Checkpoint { label, .. } => ("checkpoint", text(label)),
                     Entry::Notice(v) => ("notice", text(v)),
+                    // `!` の行（#37）はツールの行と同じ見せ方（PWA に種類を足さない）。
+                    Entry::Shell(run) => ("tool", text(&run.plain_text())),
                 };
                 json!({ "id": index, "kind": kind, "text": content })
             })

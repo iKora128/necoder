@@ -905,8 +905,9 @@ impl Storage {
         })
     }
 
-    /// turn を 1 行追記する（ストリーミング確定後に呼ぶ）。
-    pub fn insert_turn(&self, thread_id: &str, role: &str, content: &str) -> Result<()> {
+    /// turn を 1 行追記する（ストリーミング確定後に呼ぶ）。追記した行の id を返す
+    /// （あとで中身を書き換える行＝走っている途中で保存したシェルの結果などに使う）。
+    pub fn insert_turn(&self, thread_id: &str, role: &str, content: &str) -> Result<i64> {
         let (thread_id, role, content) =
             (thread_id.to_string(), role.to_string(), content.to_string());
         let now = unix_ms();
@@ -918,6 +919,32 @@ impl Storage {
                 )
                 .await
                 .context("turns の追記に失敗")?;
+                let mut rows = conn
+                    .query("SELECT last_insert_rowid()", ())
+                    .await
+                    .context("追記した turn の id を読めない")?;
+                let row = rows
+                    .next()
+                    .await
+                    .context("追記した turn の id を読めない")?
+                    .context("last_insert_rowid の行が無い")?;
+                Ok(*row.get_value(0)?.as_integer().context("turn の id")?)
+            })
+        })
+    }
+
+    /// 追記済みの turn の中身を書き換える（`turn_id` は [`Self::insert_turn`] が返した id）。
+    /// 走っている途中で保存したシェルの結果（`!`・#37）を、終わった時に最終の形へ直すのに使う。
+    pub fn update_turn(&self, turn_id: i64, content: &str) -> Result<()> {
+        let content = content.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "UPDATE turns SET content = ?1 WHERE id = ?2",
+                    (content.as_str(), turn_id),
+                )
+                .await
+                .context("turns の書き換えに失敗")?;
                 Ok(())
             })
         })
@@ -3675,6 +3702,29 @@ mod tests {
         storage.unarchive_thread("t2").unwrap();
         assert_eq!(storage.load_threads().unwrap().len(), 2);
         storage.archive_thread("t2").unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 追記した turn の id で、その行だけを後から書き換えられる（走っている途中で保存したシェルの
+    /// 結果を、終わった時に最終の形へ直す・#37）。並びも他の行も変わらない。
+    #[test]
+    fn a_turn_can_be_rewritten_by_its_id() {
+        let path = temp_db("update_turn");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        let first = storage.insert_turn("t1", "user", "テストを流して").unwrap();
+        let running = storage.insert_turn("t1", "shell", "running").unwrap();
+        let after = storage.insert_turn("t1", "agent", "流します").unwrap();
+        assert!(first < running && running < after, "id は追記の順に増える");
+        storage.update_turn(running, "exited 0").unwrap();
+        assert_eq!(
+            storage.load_recent_turns("t1", 10).unwrap(),
+            vec![
+                ("user".to_string(), "テストを流して".to_string()),
+                ("shell".to_string(), "exited 0".to_string()),
+                ("agent".to_string(), "流します".to_string()),
+            ]
+        );
         let _ = std::fs::remove_file(&path);
     }
 

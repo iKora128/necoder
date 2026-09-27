@@ -275,6 +275,117 @@ impl CommandOutput {
     }
 }
 
+/// 上限つきで取り込んだ出力 1 本（[`Host::run_user_command`]）。頭と尻を残して間を捨てる
+/// （`cat` の頭も `cargo build` の尻も落とさない・transcript のツール結果と同じ考え方）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapturedOutput {
+    /// 先頭から（上限の半分まで）。間を捨てていなければ全部ここにある。
+    pub head: Vec<u8>,
+    /// 末尾（上限の残り半分まで）。間を捨てていなければ空。
+    pub tail: Vec<u8>,
+    /// `head` と `tail` の間で捨てたバイト数（0 = 全部持っている）。
+    pub omitted: u64,
+}
+
+impl CapturedOutput {
+    /// 手元に全部ある出力（remote の結果）を同じ上限で丸める。
+    fn from_bytes(bytes: &[u8], limit: usize) -> Self {
+        let mut buffer = CaptureBuffer::new(limit);
+        buffer.push(bytes);
+        buffer.take()
+    }
+}
+
+/// [`Host::run_user_command`] の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserCommandOutput {
+    /// 終了コード。シグナルで終わった・止めた・走らせなかった時は `None`。
+    pub status_code: Option<i32>,
+    pub stdout: CapturedOutput,
+    pub stderr: CapturedOutput,
+    /// 取り消しで止めた（出力は止めるまでの分）。始める前に取り消されていれば何も走らせていない。
+    pub cancelled: bool,
+}
+
+impl UserCommandOutput {
+    /// 始める前に取り消された（起動もしていない）。
+    fn not_started() -> Self {
+        Self {
+            status_code: None,
+            stdout: CapturedOutput::default(),
+            stderr: CapturedOutput::default(),
+            cancelled: true,
+        }
+    }
+}
+
+/// 頭と尻だけを持つ取り込み口（[`CapturedOutput`] を作る）。読み手のスレッドと取り出す側で共有する。
+struct CaptureBuffer {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    head_limit: usize,
+    tail_limit: usize,
+    omitted: u64,
+    /// 取り出した後（[`Self::take`]）。まだ読み手が生きていても（`&` の孫がパイプを握っている）以後は捨てる。
+    taken: bool,
+}
+
+impl CaptureBuffer {
+    fn new(limit: usize) -> Self {
+        let head_limit = limit / 2;
+        Self {
+            head: Vec::new(),
+            tail: std::collections::VecDeque::new(),
+            head_limit,
+            tail_limit: limit - head_limit,
+            omitted: 0,
+            taken: false,
+        }
+    }
+
+    fn push(&mut self, mut bytes: &[u8]) {
+        if self.taken {
+            return;
+        }
+        let room = self.head_limit.saturating_sub(self.head.len());
+        if room > 0 {
+            let taken = room.min(bytes.len());
+            self.head.extend_from_slice(&bytes[..taken]);
+            bytes = &bytes[taken..];
+        }
+        if bytes.is_empty() {
+            return;
+        }
+        if bytes.len() >= self.tail_limit {
+            // 1 回で尻の上限を超える: 今までの尻は全部押し出される。
+            self.omitted += (self.tail.len() + bytes.len() - self.tail_limit) as u64;
+            self.tail.clear();
+            self.tail.extend(&bytes[bytes.len() - self.tail_limit..]);
+            return;
+        }
+        let overflow = (self.tail.len() + bytes.len()).saturating_sub(self.tail_limit);
+        self.tail.drain(..overflow);
+        self.omitted += overflow as u64;
+        self.tail.extend(bytes);
+    }
+
+    fn take(&mut self) -> CapturedOutput {
+        self.taken = true;
+        let mut head = std::mem::take(&mut self.head);
+        let mut tail: Vec<u8> = std::mem::take(&mut self.tail).into();
+        let omitted = std::mem::take(&mut self.omitted);
+        if omitted == 0 {
+            // 間を捨てていない＝頭と尻は地続き。1 本にして返す。
+            head.append(&mut tail);
+        }
+        CapturedOutput {
+            head,
+            tail,
+            omitted,
+        }
+    }
+}
+
 /// Project/workspace が使う OS 境界。blocking API なので UI thread では呼ばず background executor へ載せる。
 pub trait Host: Send + Sync {
     fn id(&self) -> &str;
@@ -325,6 +436,37 @@ pub trait Host: Send + Sync {
         }
         let output = self.run_command(spec)?;
         Ok((!cancel.load(Ordering::Acquire)).then_some(output))
+    }
+    /// 人が打ったシェルコマンドを流す（エージェントパネルの `!`・#37）。
+    /// [`Self::run_command_cancellable`] と違い、**副作用のある command に使う**前提で、止めるのは
+    /// 人の操作（esc / ■）だけ。stdin は空（対話しない）。
+    ///
+    /// - 出力は stream ごとに頭と尻を合わせて `output_limit` バイトまで持ち、間は読み捨てる
+    ///   （子は止めない）。巨大な `cat` や止まらない出力でメモリを食わない
+    /// - `cancel` が立ったら止め、そこまでの出力を `cancelled` 付きで返す
+    ///
+    /// 既定（remote）は daemon との 1 往復の途中で止める口が無いので、取り消されても最後まで走らせて
+    /// 結果をそのまま返す（[`Self::can_stop_user_command`] が `false`＝呼ぶ側は待たずに畳む）。
+    fn run_user_command(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+        output_limit: usize,
+    ) -> Result<UserCommandOutput> {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(UserCommandOutput::not_started());
+        }
+        let output = self.run_command(spec)?;
+        Ok(UserCommandOutput {
+            status_code: output.status_code,
+            stdout: CapturedOutput::from_bytes(&output.stdout, output_limit),
+            stderr: CapturedOutput::from_bytes(&output.stderr, output_limit),
+            cancelled: false,
+        })
+    }
+    /// [`Self::run_user_command`] を走っている途中で止められるか（手元だけ `true`）。
+    fn can_stop_user_command(&self) -> bool {
+        false
     }
     /// このホストで 1 行スクリプトを流す [`CommandSpec`] を組む。
     ///
@@ -523,6 +665,19 @@ impl Host for LocalHost {
         cancel: &AtomicBool,
     ) -> Result<Option<CommandOutput>> {
         run_command_cancellable_local(spec, cancel)
+    }
+
+    fn run_user_command(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+        output_limit: usize,
+    ) -> Result<UserCommandOutput> {
+        run_user_command_local(spec, cancel, output_limit)
+    }
+
+    fn can_stop_user_command(&self) -> bool {
+        true
     }
 
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess> {
@@ -947,6 +1102,240 @@ fn read_pipe_in_background(
 /// 取り消した子を止めて回収する（ゾンビを残さない）。すでに終わっていれば kill は失敗するが、それで良い。
 fn stop_child(child: &mut Child) {
     let _already_exited = child.kill();
+    if let Err(error) = child.wait() {
+        eprintln!("止めた process を回収できない: {error}");
+    }
+}
+
+/// 人が打ったコマンドを止める時、まず行儀よく終わらせる（SIGTERM）猶予。git などは受け取ると
+/// lock を片付けてから終わる。過ぎても子が生きていればグループごと SIGKILL。
+const USER_COMMAND_STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// 子が終わった後、出力のパイプが閉じるのを待つ上限。`&` で背景に回した孫がパイプを握ったままだと
+/// いつまでも閉じないので、ここで打ち切って結果を返す（孫は止めない＝端末で `&` を付けた時と同じ）。
+const USER_COMMAND_PIPE_GRACE: Duration = Duration::from_millis(300);
+
+/// [`Host::run_user_command`] の local 実装。
+///
+/// 子は**自分のプロセスグループ**で起こす（unix）。止める時にグループごとシグナルを送れば、
+/// パイプの後段や `cargo` が起こした `rustc` まで止まる（子だけ止めると孫が残り、出力のパイプも
+/// 閉じない）。stdout と stderr は別々のスレッドで上限つきで読み（片方が埋まると子が止まる）、
+/// 待つ間は [`CANCEL_POLL_INTERVAL`] ごとに子の終わりと取り消しの印を見る。
+fn run_user_command_local(
+    spec: &CommandSpec,
+    cancel: &AtomicBool,
+    output_limit: usize,
+) -> Result<UserCommandOutput> {
+    if cancel.load(Ordering::Acquire) {
+        return Ok(UserCommandOutput::not_started());
+    }
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .envs(&spec.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+        // SAFETY: fork と exec の間の子で走る。中で呼ぶのは async-signal-safe な関数だけ
+        // （sigemptyset・sigprocmask・signal）で、メモリも確保しない。
+        unsafe {
+            command.pre_exec(reset_child_signals);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("process を起動できない: {}", spec.program))?;
+    let buffers = [
+        Arc::new(Mutex::new(CaptureBuffer::new(output_limit))),
+        Arc::new(Mutex::new(CaptureBuffer::new(output_limit))),
+    ];
+    let (sender, receiver) = mpsc::channel::<()>();
+    let pipes = child
+        .stdout
+        .take()
+        .zip(child.stderr.take())
+        .context("process の stdout / stderr が無い");
+    let started = pipes.and_then(|(stdout, stderr)| {
+        capture_pipe_in_background(stdout, buffers[0].clone(), sender.clone())?;
+        capture_pipe_in_background(stderr, buffers[1].clone(), sender)
+    });
+    if let Err(error) = started {
+        stop_user_command(&mut child);
+        return Err(error);
+    }
+    let mut open_pipes = 2usize;
+    let mut status: Option<std::process::ExitStatus> = None;
+    let mut exited_at: Option<std::time::Instant> = None;
+    let mut stop_started_at: Option<std::time::Instant> = None;
+    let mut killed = false;
+    loop {
+        match receiver.recv_timeout(CANCEL_POLL_INTERVAL) {
+            Ok(()) => open_pipes = open_pipes.saturating_sub(1),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => open_pipes = 0,
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit)) => {
+                    status = Some(exit);
+                    exited_at = Some(std::time::Instant::now());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stop_user_command(&mut child);
+                    return Err(error).context("process の終了を確かめられない");
+                }
+            }
+        }
+        // シグナルは子をまだ回収していない間だけ送る（回収した後はグループの id が再利用されうる）。
+        if status.is_none() && cancel.load(Ordering::Acquire) {
+            match stop_started_at {
+                None => {
+                    signal_process_group(&mut child, StopSignal::Terminate);
+                    stop_started_at = Some(std::time::Instant::now());
+                }
+                Some(started) if !killed && started.elapsed() >= USER_COMMAND_STOP_GRACE => {
+                    signal_process_group(&mut child, StopSignal::Kill);
+                    killed = true;
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(exited_at) = exited_at {
+            if open_pipes == 0 || exited_at.elapsed() >= USER_COMMAND_PIPE_GRACE {
+                break;
+            }
+        }
+    }
+    let take = |buffer: &Arc<Mutex<CaptureBuffer>>| {
+        buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    };
+    Ok(UserCommandOutput {
+        status_code: status.and_then(|status| status.code()),
+        stdout: take(&buffers[0]),
+        stderr: take(&buffers[1]),
+        cancelled: stop_started_at.is_some(),
+    })
+}
+
+/// パイプを上限つきで最後まで読むスレッドを立てる（読み終えたら `done` へ知らせる）。
+/// 上限を超えた分は [`CaptureBuffer`] が頭と尻を残して捨てる＝子は止めない。
+fn capture_pipe_in_background(
+    mut pipe: impl Read + Send + 'static,
+    buffer: Arc<Mutex<CaptureBuffer>>,
+    done: mpsc::Sender<()>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("necoder-command-output".to_string())
+        .spawn(move || {
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => buffer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(&chunk[..read]),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        eprintln!("コマンドの出力を読めない: {error}");
+                        break;
+                    }
+                }
+            }
+            // 受け手が先に抜けていたら（打ち切って結果を返した）知らせは要らない。
+            let _unwanted = done.send(());
+        })
+        .context("process の出力を読むスレッドを起動できない")?;
+    Ok(())
+}
+
+/// 子のシグナルの状態を既定へ戻す（`pre_exec`・fork の後 exec の前に子の中で走る）。
+///
+/// 背景の executor のスレッド（macOS は GCD）は非同期のシグナルを**ブロック**していて、Rust の
+/// `Command` はそのマスクを子へそのまま継ぐ（std の仕様・SIGPIPE の扱いしか直さない）。そのままだと
+/// 子は SIGTERM も SIGINT も受け取れず、止める操作が猶予の後の SIGKILL まで効かない（git が lock を
+/// 片付けられない・終了時の SIGTERM が届かず子が残る）。人のコマンドは端末と同じ既定の状態で
+/// 走らせたいので、マスクを空にし、無視の設定も既定へ戻す（端末の PTY の子と同じ顔ぶれ）。
+#[cfg(unix)]
+fn reset_child_signals() -> std::io::Result<()> {
+    // SAFETY: どれも async-signal-safe な libc の関数を、宣言どおりの引数で呼ぶだけ。
+    // `mask` は sigemptyset が初期化してから読む。
+    unsafe {
+        let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        if libc::sigemptyset(mask.as_mut_ptr()) != 0
+            || libc::sigprocmask(libc::SIG_SETMASK, mask.as_ptr(), std::ptr::null_mut()) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        for signal in [
+            libc::SIGCHLD,
+            libc::SIGHUP,
+            libc::SIGINT,
+            libc::SIGQUIT,
+            libc::SIGTERM,
+            libc::SIGALRM,
+        ] {
+            if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum StopSignal {
+    /// SIGTERM（行儀よく終わらせる）。
+    Terminate,
+    /// SIGKILL。
+    Kill,
+}
+
+/// 子のプロセスグループ全体へシグナルを送る。**子をまだ回収していない間だけ呼ぶ**こと
+/// （回収前ならグループの id は他のプロセスへ再利用されていない）。
+#[cfg(unix)]
+fn signal_process_group(child: &mut Child, signal: StopSignal) {
+    let signal = match signal {
+        StopSignal::Terminate => libc::SIGTERM,
+        StopSignal::Kill => libc::SIGKILL,
+    };
+    let Ok(group) = libc::pid_t::try_from(child.id()) else {
+        // pid が pid_t に収まらないことは無いが、収まらなければ子だけでも止める。
+        let _already_exited = child.kill();
+        return;
+    };
+    // SAFETY: killpg はシグナルを送るだけでメモリに触れない。相手は `process_group(0)` で起こした
+    // 子のグループ（id = 子の pid）で、呼ぶのは子を回収する前だけ。
+    let result = unsafe { libc::killpg(group, signal) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        // ESRCH = グループがもう空（全員終わっている）。それで良い。
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            eprintln!("コマンドのプロセスグループを止められない: {error}");
+        }
+    }
+}
+
+/// Windows はグループで止める口を持たない（孫は残る）。子だけ止める。
+#[cfg(not(unix))]
+fn signal_process_group(child: &mut Child, _signal: StopSignal) {
+    if let Err(error) = child.kill() {
+        eprintln!("コマンドを止められない: {error}");
+    }
+}
+
+/// 起動の途中で失敗した子をグループごと止めて回収する（ゾンビも孫も残さない）。
+fn stop_user_command(child: &mut Child) {
+    signal_process_group(child, StopSignal::Kill);
     if let Err(error) = child.wait() {
         eprintln!("止めた process を回収できない: {error}");
     }
@@ -4996,6 +5385,225 @@ mod tests {
             .expect("起動しないで戻る");
         assert!(output.is_none());
         assert!(!marker.exists(), "取り消した後の command は走らせない");
+    }
+
+    /// 人が打ったコマンド（エージェントパネルの `!`・#37）: 出力と終了コードをそのまま返す。
+    /// 上限を超えた出力は頭と尻を残して間を捨てる（子は止めない＝最後まで読み切る）。
+    #[cfg(unix)]
+    #[test]
+    fn user_command_returns_output_and_keeps_head_and_tail() {
+        let cancel = AtomicBool::new(false);
+        let short = CommandSpec::new("sh", std::env::temp_dir())
+            .args(["-c", "printf abc; echo oops >&2; exit 3"]);
+        let output = LocalHost
+            .run_user_command(&short, &cancel, 1_000)
+            .expect("起動できる");
+        assert_eq!(output.stdout.head, b"abc");
+        assert_eq!(output.stdout.omitted, 0);
+        assert_eq!(output.stderr.head, b"oops\n");
+        assert_eq!(output.status_code, Some(3));
+        assert!(!output.cancelled);
+        assert!(LocalHost.can_stop_user_command());
+
+        let long = CommandSpec::new("sh", std::env::temp_dir()).args(["-c", "seq 1 100000"]);
+        let output = LocalHost
+            .run_user_command(&long, &cancel, 1_000)
+            .expect("起動できる");
+        assert_eq!(output.status_code, Some(0));
+        assert_eq!(output.stdout.head.len(), 500);
+        assert_eq!(output.stdout.tail.len(), 500);
+        assert!(output.stdout.head.starts_with(b"1\n2\n3\n"));
+        assert!(output.stdout.tail.ends_with(b"99999\n100000\n"));
+        let total: u64 = (1..=100_000u64)
+            .map(|n| n.to_string().len() as u64 + 1)
+            .sum();
+        assert_eq!(output.stdout.omitted, total - 1_000, "捨てた量を数える");
+
+        // remote（既定の実装）も同じ上限で丸める。
+        let captured = CapturedOutput::from_bytes(b"0123456789", 4);
+        assert_eq!(
+            (captured.head, captured.tail, captured.omitted),
+            (b"01".to_vec(), b"89".to_vec(), 6)
+        );
+        let captured = CapturedOutput::from_bytes(b"0123", 4);
+        assert_eq!(
+            (captured.head, captured.tail, captured.omitted),
+            (b"0123".to_vec(), Vec::new(), 0)
+        );
+    }
+
+    /// 止めるとプロセスグループごと止まる: `&` で起こした孫（`sleep`）も残らない。止めるまでの
+    /// 出力は返す。始める前に取り消されていれば走らせない。
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_user_command_takes_down_its_process_group() {
+        let scratch =
+            std::env::temp_dir().join(format!("necoder_user_command_{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("一時ディレクトリを作れる");
+        let pid_file = scratch.join("sleeper.pid");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let watched = pid_file.clone();
+        let canceller = thread::spawn(move || {
+            // 孫が pid を書き出してから止める（書く前に止めると確かめる相手が居ない）。
+            for _ in 0..500 {
+                if std::fs::read_to_string(&watched).is_ok_and(|pid| pid.ends_with('\n')) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            flag.store(true, Ordering::Release);
+        });
+        let spec = CommandSpec::new("sh", &scratch).args([
+            "-c",
+            "echo started; sleep 30 & echo $! > sleeper.pid; wait; echo never",
+        ]);
+        let started = std::time::Instant::now();
+        let output = LocalHost
+            .run_user_command(&spec, &cancel, 1_000)
+            .expect("起動できる");
+        canceller.join().expect("取り消し役のスレッド");
+        assert!(output.cancelled);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "止めたらすぐ戻る: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(output.stdout.head, b"started\n", "止めるまでの出力は返す");
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .expect("孫の pid")
+            .trim()
+            .parse()
+            .expect("pid は数");
+        // 孫はグループへのシグナルで止まる（親に回収されるまで一瞬ゾンビで残るので少し待つ）。
+        let alive = |pid: libc::pid_t| {
+            // SAFETY: シグナル 0 は送らずに存在だけを確かめる。
+            unsafe { libc::kill(pid, 0) == 0 }
+        };
+        let mut gone = false;
+        for _ in 0..200 {
+            if !alive(pid) {
+                gone = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !gone {
+            // 後始末（失敗の時も孫を残さない）。
+            // SAFETY: 自分が起こした孫の pid。
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(gone, "孫の sleep（pid {pid}）がグループごと止まる");
+
+        // SIGTERM を無視するコマンドも、猶予の後の SIGKILL で止まる（無視は孫の sleep にも継がれる）。
+        let stubborn = CommandSpec::new("sh", &scratch)
+            .args(["-c", "trap '' TERM; echo started; sleep 30; echo never"]);
+        let cancel_stubborn = Arc::new(AtomicBool::new(false));
+        let flag = cancel_stubborn.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            flag.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let output = LocalHost
+            .run_user_command(&stubborn, &cancel_stubborn, 1_000)
+            .expect("起動できる");
+        canceller.join().expect("取り消し役のスレッド");
+        assert!(output.cancelled);
+        assert!(
+            started.elapsed() >= USER_COMMAND_STOP_GRACE
+                && started.elapsed() < USER_COMMAND_STOP_GRACE + Duration::from_secs(5),
+            "SIGTERM を無視されたら猶予の後に SIGKILL: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(output.stdout.head, b"started\n");
+
+        // 取り消し済みなら起動しない（印のファイルが作られない）。
+        let marker = scratch.join("never-started");
+        let touch =
+            CommandSpec::new("touch", &scratch).args([marker.to_string_lossy().to_string()]);
+        let output = LocalHost
+            .run_user_command(&touch, &cancel, 1_000)
+            .expect("起動しないで戻る");
+        assert!(output.cancelled && output.status_code.is_none());
+        assert!(!marker.exists(), "取り消した後の command は走らせない");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// 背景の executor のスレッド（macOS の GCD）はシグナルをブロックしていて、Rust の `Command` は
+    /// そのマスクを子へ継ぐ。それでも子は既定の状態で走る＝SIGTERM で猶予（SIGKILL）を待たずに止まる。
+    /// 実害: 継いだままだと SIGTERM が届かず、止めるたびに 2 秒待ち、終了時の SIGTERM では残っていた。
+    #[cfg(unix)]
+    #[test]
+    fn a_user_command_does_not_inherit_the_callers_blocked_signals() {
+        let runner = thread::spawn(|| {
+            // GCD のワーカーと同じく、呼ぶスレッドで SIGTERM などをブロックする。
+            // SAFETY: このスレッドのシグナルマスクを変えるだけ。`blocked` は sigemptyset が初期化する。
+            unsafe {
+                let mut blocked = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+                libc::sigemptyset(blocked.as_mut_ptr());
+                for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+                    libc::sigaddset(blocked.as_mut_ptr(), signal);
+                }
+                libc::pthread_sigmask(libc::SIG_BLOCK, blocked.as_ptr(), std::ptr::null_mut());
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = cancel.clone();
+            let canceller = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(200));
+                flag.store(true, Ordering::Release);
+            });
+            let spec = CommandSpec::new("sh", std::env::temp_dir())
+                .args(["-c", "echo started; sleep 30; echo never"]);
+            let started = std::time::Instant::now();
+            let output = LocalHost.run_user_command(&spec, &cancel, 1_000);
+            let elapsed = started.elapsed();
+            canceller.join().expect("取り消し役のスレッド");
+            (output, elapsed)
+        });
+        let (output, elapsed) = runner.join().expect("呼ぶスレッド");
+        let output = output.expect("起動できる");
+        assert!(output.cancelled);
+        assert_eq!(output.stdout.head, b"started\n");
+        assert!(
+            elapsed < Duration::from_millis(1_500),
+            "SIGTERM で止まる（SIGKILL の猶予を待たない）: {elapsed:?}"
+        );
+    }
+
+    /// `&` で背景に回した孫がパイプを握っていても、子が終われば待ちすぎずに返す（孫は止めない＝
+    /// 端末で `&` を付けた時と同じ）。
+    #[cfg(unix)]
+    #[test]
+    fn a_user_command_returns_even_if_a_background_job_holds_the_pipe() {
+        let scratch =
+            std::env::temp_dir().join(format!("necoder_user_command_bg_{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("一時ディレクトリを作れる");
+        let cancel = AtomicBool::new(false);
+        let spec = CommandSpec::new("sh", &scratch)
+            .args(["-c", "sleep 30 & echo $! > sleeper.pid; echo done"]);
+        let started = std::time::Instant::now();
+        let output = LocalHost
+            .run_user_command(&spec, &cancel, 1_000)
+            .expect("起動できる");
+        let pid: Option<libc::pid_t> = std::fs::read_to_string(scratch.join("sleeper.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok());
+        if let Some(pid) = pid {
+            // 後始末: 背景に回った孫は自分で止める。
+            // SAFETY: 自分が起こした孫の pid。
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "孫を待たずに返す: {:?}",
+            started.elapsed()
+        );
+        assert!(!output.cancelled);
+        assert_eq!(output.status_code, Some(0));
+        assert_eq!(output.stdout.head, b"done\n");
+        assert!(pid.is_some(), "孫の pid が書かれている");
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     #[test]
