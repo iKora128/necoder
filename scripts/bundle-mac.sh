@@ -5,11 +5,18 @@
 # `cargo run` の素のバイナリは Dock に汎用アイコンが出るだけなので、Dock/Finder に
 # マスコットを出すにはこのバンドルを使う（or ビルド済み .app を /Applications に置く）。
 #
-# 使い方: ./scripts/bundle-mac.sh [release|debug]   （既定 release）
+# 使い方: ./scripts/bundle-mac.sh [release|debug] [dev]   （既定 release）
+#
+# `dev` を付けると、常用の necoder と並べて動かす検証用の「necoder Dev.app」を作る。bundle ID が別
+# （dev.necoder.editor.dev）で、Info.plist の LSEnvironment が状態の置き場を ~/.necoder-dev へ向ける
+# （NECODER_HOME・GUI ソケット・書類フォルダ・アップデート確認の停止）。常用の設定・DB・ソケット・
+# 書類には触れないので、統合ブランチを実機で確かめる時に本体を止めずに済む。置き場は
+# NECODER_DEV_HOME で変えられる（絶対パス）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROFILE="${1:-release}"
+FLAVOR="${2:-}"
 # バージョンの唯一の出所 = workspace の Cargo.toml（[workspace.package] version）。
 # updater は CARGO_PKG_VERSION（= 同じ値）と比較し、タグとの一致は release.yml が検証する
 # ＝「Cargo.toml / Info.plist / タグ」三重手動同期の廃止（不一致だと更新チップが無限に出る）。
@@ -22,7 +29,34 @@ fi
 # 小サイズで読めるバストアップ。全身の neko-art.png は 32px で潰れるため不採用。
 ICON_SRC="lp/assets/img/necoder-mark.png"
 ICON_DIR="crates/necoder/assets/icon"
-APP="target/necoder.app"
+if [ "$FLAVOR" = "dev" ]; then
+    APP_NAME="necoder Dev"
+    BUNDLE_ID="dev.necoder.editor.dev"
+    DEV_HOME="${NECODER_DEV_HOME:-$HOME/.necoder-dev}"
+    # LSEnvironment は ~ も $HOME も展開しないので、ここで絶対パスに決める。
+    case "$DEV_HOME" in
+        /*) ;;
+        *) echo "NECODER_DEV_HOME は絶対パスで指定する: $DEV_HOME" >&2; exit 1 ;;
+    esac
+    mkdir -p "$DEV_HOME"
+    # GUI ソケットは NECODER_HOME に従わず ~/.necoder/gui.sock が既定なので、別に指定する
+    # （同じソケットを常用の本体と取り合わないため）。
+    LS_ENVIRONMENT="  <key>LSEnvironment</key>
+  <dict>
+    <key>NECODER_HOME</key><string>${DEV_HOME}</string>
+    <key>NECODER_GUI_SOCK</key><string>${DEV_HOME}/gui.sock</string>
+    <key>NECODER_DOCUMENTS_DIR</key><string>${DEV_HOME}/documents</string>
+    <key>NECODER_NO_UPDATE_CHECK</key><string>1</string>
+  </dict>"
+elif [ -z "$FLAVOR" ]; then
+    APP_NAME="necoder"
+    BUNDLE_ID="dev.necoder.editor"
+    LS_ENVIRONMENT=""
+else
+    echo "2 つ目の引数は dev だけ: $FLAVOR" >&2
+    exit 1
+fi
+APP="target/$APP_NAME.app"
 
 # 1) アイコン（.icns）を生成（角丸マスク → iconset → iconutil）。
 python3 scripts/make-icon.py "$ICON_SRC" "$ICON_DIR"
@@ -93,9 +127,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>necoder</string>
-  <key>CFBundleDisplayName</key><string>necoder</string>
-  <key>CFBundleIdentifier</key><string>dev.necoder.editor</string>
+  <key>CFBundleName</key><string>${APP_NAME}</string>
+  <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleVersion</key><string>${APP_VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -131,6 +165,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
       </array>
     </dict>
   </array>
+${LS_ENVIRONMENT}
 </dict>
 </plist>
 PLIST
@@ -139,7 +174,7 @@ PLIST
 #    その Identifier は `necoder-<hash>` で Info.plist の CFBundleIdentifier と食い違う。
 #    macOS 13+ はこの不一致でアイコン解決/Launch Services の登録がおかしくなる（Dock に
 #    マスコットが出ない実例）。組み立て後に bundle 全体を署名し直して identifier を揃える。
-codesign --force --sign - --identifier dev.necoder.editor \
+codesign --force --sign - --identifier "$BUNDLE_ID" \
     --entitlements crates/necoder/resources/necoder.entitlements "$APP"
 
 # 5) Finder / Dock のアイコンキャッシュを更新させる。
@@ -150,5 +185,8 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 [ -x "$LSREGISTER" ] && "$LSREGISTER" -f -R "$PWD/$APP"
 
 echo "組み立て完了: $APP"
+if [ "$FLAVOR" = "dev" ]; then
+    echo "   状態の置き場: $DEV_HOME（常用の necoder とは別・消せば初期状態に戻る）"
+fi
 echo "→ open \"$APP\" で起動（Dock にマスコットが出る）"
 echo "   アイコンが古いままなら: killall Dock"
