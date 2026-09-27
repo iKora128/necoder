@@ -16,7 +16,7 @@
 //! 新しいエージェントにはしない（`name` も読まない）。
 
 use crate::deploy::{BinaryTarget, DeployError, Deployed};
-use crate::registry::{DistributionKind, Launch, Registry, RegistryAgent};
+use crate::registry::{Launch, Registry, RegistryAgent};
 use crate::{
     bounded_npm_spec, find_in_path, find_on_remote, AgentCommand, AgentKind, AgentOverride, AGENTS,
 };
@@ -53,8 +53,8 @@ pub enum LaunchError {
     NoDistribution { platform: Option<String> },
     /// npx が無い（node を入れると使える）。
     NeedsNode,
-    /// この配布の形はまだ起動できない。
-    NotSupportedYet(DistributionKind),
+    /// uvx が無い（uv を入れると使える・necoder は勝手に入れない）。
+    NeedsUv,
     /// binary の配布しか無いエージェントをリモートで起こそうとした（binary は手元に落として走らせる物）。
     BinaryOnRemote,
     /// binary をまだ落としていない（最初の起動で落とす・[`Agent::deploy_command`]）。
@@ -75,9 +75,7 @@ impl std::fmt::Display for LaunchError {
                 platform.as_deref().unwrap_or("?")
             ),
             LaunchError::NeedsNode => write!(formatter, "npx が無い（node が要る）"),
-            LaunchError::NotSupportedYet(kind) => {
-                write!(formatter, "{} の配布はまだ起動できない", kind.as_str())
-            }
+            LaunchError::NeedsUv => write!(formatter, "uvx が無い（uv が要る）"),
             LaunchError::BinaryOnRemote => {
                 write!(formatter, "binary の配布はリモートでは起動できない")
             }
@@ -97,6 +95,8 @@ pub enum LaunchPlan {
     Command { found: bool },
     /// レジストリの版を npx が初回に取って起動する。
     Npx { version: String },
+    /// レジストリの版を uvx（uv）が初回に取って起動する。
+    Uvx { version: String },
     /// レジストリの binary を置いて起動する。`deployed` = この版を置いてある（無ければ最初の起動で
     /// 落とす）。`verified` = sha256 を照合した / できる（`false` = レジストリに検証の値が無い）。
     Binary {
@@ -168,6 +168,31 @@ fn npx_command(
     resolved
 }
 
+/// uvx でレジストリの版を起こすコマンド（`uvx <package> <args>`・`pkg==1.2.3` も `pkg@1.2.3` も uvx が
+/// そのまま受ける）。uv は necoder が入れない — 無ければ [`LaunchError::NeedsUv`] で案内する。
+fn uvx_command(
+    uvx_path: PathBuf,
+    uvx: &crate::registry::UvxDistribution,
+    settings_env: &BTreeMap<String, String>,
+    cwd: PathBuf,
+) -> AgentCommand {
+    let mut args = vec![uvx.package.clone()];
+    args.extend(uvx.args.iter().cloned());
+    let mut resolved = AgentCommand::new(uvx_path, args, cwd);
+    resolved.env = uvx.env.clone();
+    resolved.env.extend(settings_env.clone());
+    resolved
+}
+
+/// 道具（npx / uvx）が無い時の理由。
+fn missing_tool(tool: &str) -> anyhow::Error {
+    match tool {
+        "npx" => LaunchError::NeedsNode.into(),
+        "uvx" => LaunchError::NeedsUv.into(),
+        _ => anyhow::anyhow!("{tool} が見つからない"),
+    }
+}
+
 /// 設定側から受け取る 1 件（settings 層が `agent_servers` から写す）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomAgentSpec {
@@ -197,32 +222,43 @@ impl CustomAgent {
         self.plan_for(registry, crate::registry::platform_key())
     }
 
-    /// [`Self::plan`] の本体（プラットフォームと binary の置き場を渡せる）。
+    /// [`Self::plan`] の本体（プラットフォームを渡せる）。
     fn plan_for(
         &self,
         registry: Option<&Registry>,
         platform: Option<&str>,
     ) -> std::result::Result<LaunchPlan, LaunchError> {
-        self.plan_in(registry, platform, crate::deploy::binary_root().as_deref())
+        self.plan_in(
+            registry,
+            platform,
+            crate::deploy::binary_root().as_deref(),
+            &find_in_path,
+        )
     }
 
+    /// [`Self::plan`] の本体（プラットフォーム・binary の置き場・道具の探し方を渡せる）。
     fn plan_in(
         &self,
         registry: Option<&Registry>,
         platform: Option<&str>,
         binary_root: Option<&Path>,
+        find_tool: &dyn Fn(&str) -> Option<PathBuf>,
     ) -> std::result::Result<LaunchPlan, LaunchError> {
         match &self.launch {
             CustomLaunch::Command { command, .. } => Ok(LaunchPlan::Command {
-                found: find_in_path(command).is_some(),
+                found: find_tool(command).is_some(),
             }),
             CustomLaunch::Registry { .. } => {
                 let (entry, launch) = registry_launch(&self.id, registry, platform)?;
                 match launch {
-                    Launch::Npx(_) if find_in_path("npx").is_some() => Ok(LaunchPlan::Npx {
+                    Launch::Npx(_) if find_tool("npx").is_some() => Ok(LaunchPlan::Npx {
                         version: entry.version.clone(),
                     }),
                     Launch::Npx(_) => Err(LaunchError::NeedsNode),
+                    Launch::Uvx(_) if find_tool("uvx").is_some() => Ok(LaunchPlan::Uvx {
+                        version: entry.version.clone(),
+                    }),
+                    Launch::Uvx(_) => Err(LaunchError::NeedsUv),
                     Launch::Binary {
                         platform,
                         distribution,
@@ -244,7 +280,6 @@ impl CustomAgent {
                             }),
                         })
                     }
-                    other => Err(LaunchError::NotSupportedYet(other.kind())),
                 }
             }
         }
@@ -334,28 +369,45 @@ impl CustomAgent {
         cwd: PathBuf,
         registry: Option<&Registry>,
     ) -> Result<AgentCommand> {
+        if host.is_remote() {
+            let remote_cwd = cwd.clone();
+            self.command_with(cwd, registry, None, &|tool| {
+                find_on_remote(host, &remote_cwd, tool)
+            })
+        } else {
+            self.command_with(cwd, registry, crate::registry::platform_key(), &|tool| {
+                Ok(find_in_path(tool))
+            })
+        }
+    }
+
+    /// [`Self::command_on`] の本体。`platform` = binary を選ぶキー（`None` = リモート・binary を使わない）、
+    /// `find_tool` = 道具（npx / uvx / 自分のコマンド）の探し方（手元は PATH・リモートは `command -v`）。
+    fn command_with(
+        &self,
+        cwd: PathBuf,
+        registry: Option<&Registry>,
+        platform: Option<&str>,
+        find_tool: &dyn Fn(&str) -> Result<Option<PathBuf>>,
+    ) -> Result<AgentCommand> {
+        let remote = platform.is_none();
         match &self.launch {
             CustomLaunch::Command { command, args, env } => {
-                let path = if host.is_remote() {
+                let path = if remote {
                     PathBuf::from(command)
                 } else {
-                    find_in_path(command).unwrap_or_else(|| PathBuf::from(command))
+                    find_tool(command)?.unwrap_or_else(|| PathBuf::from(command))
                 };
                 let mut resolved = AgentCommand::new(path, args.clone(), cwd);
                 resolved.env = env.clone();
                 Ok(resolved)
             }
             CustomLaunch::Registry { env } => {
-                let platform = if host.is_remote() {
-                    None
-                } else {
-                    crate::registry::platform_key()
-                };
                 let (entry, launch) = match registry_launch(&self.id, registry, platform) {
                     Ok(found) => found,
                     // binary しか無い物はリモートで起こせない（「このマシンの配布が無い」と言わない）。
                     Err(LaunchError::NoDistribution { .. })
-                        if host.is_remote()
+                        if remote
                             && registry
                                 .and_then(|registry| registry.agent(&self.id))
                                 .is_some_and(|entry| !entry.distribution.binary.is_empty()) =>
@@ -366,8 +418,12 @@ impl CustomAgent {
                 };
                 match launch {
                     Launch::Npx(npx) => {
-                        let npx_path = self.tool_on(host, &cwd, "npx")?;
+                        let npx_path = find_tool("npx")?.ok_or_else(|| missing_tool("npx"))?;
                         Ok(npx_command(npx_path, &npx, env, cwd))
+                    }
+                    Launch::Uvx(uvx) => {
+                        let uvx_path = find_tool("uvx")?.ok_or_else(|| missing_tool("uvx"))?;
+                        Ok(uvx_command(uvx_path, &uvx, env, cwd))
                     }
                     Launch::Binary {
                         platform,
@@ -387,23 +443,9 @@ impl CustomAgent {
                         let deployed = installed.ok_or(LaunchError::NotDeployed)?;
                         Ok(binary_command(deployed.command, &distribution, env, cwd))
                     }
-                    other => Err(LaunchError::NotSupportedYet(other.kind()).into()),
                 }
             }
         }
-    }
-
-    /// 起動に使う道具（npx 等）を探す。手元は PATH、リモートは `command -v`。無ければ理由を返す。
-    fn tool_on(&self, host: &dyn Host, cwd: &Path, tool: &str) -> Result<PathBuf> {
-        let found = if host.is_remote() {
-            find_on_remote(host, cwd, tool)?
-        } else {
-            find_in_path(tool)
-        };
-        found.ok_or_else(|| match tool {
-            "npx" => LaunchError::NeedsNode.into(),
-            _ => anyhow::anyhow!("{tool} が見つからない"),
-        })
     }
 }
 
@@ -918,7 +960,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         assert_eq!(
-            amp.plan_in(Some(&registry), Some(platform), Some(&root)),
+            amp.plan_in(Some(&registry), Some(platform), Some(&root), &find_in_path),
             Ok(LaunchPlan::Binary {
                 version: "0.9.0".to_string(),
                 deployed: false,
@@ -1018,6 +1060,102 @@ mod tests {
         if let Err(error) = std::fs::remove_dir_all(&root) {
             eprintln!("テストの置き場を消せない: {error}");
         }
+    }
+
+    /// H2-c: uvx の物は、uv（uvx）がある機械では `uvx <package> <args>` で起こし、レジストリの env に
+    /// 設定の env を足す。無い機械では「uv が要る」を返す（necoder は勝手に入れない）。リモートでは
+    /// binary を使わない（binary しか無い物は「リモートでは起動できない」）。
+    #[test]
+    fn a_uvx_agent_starts_with_uv_and_asks_for_it_otherwise() {
+        let registry = crate::registry::parse(
+            r#"{"version":"1.0.0","agents":[
+              {"id":"fast-agent","name":"fast-agent","version":"0.10.1","description":"",
+               "distribution":{"uvx":{"package":"fast-agent-acp==0.10.1","args":["-x"],
+                                      "env":{"FAST_AGENT_MODEL":"codexplan"}}}},
+              {"id":"amp-acp","name":"Amp","version":"0.9.0","description":"",
+               "distribution":{"binary":{"linux-x86_64":{"archive":"https://example.invalid/a.tar.gz",
+                                                         "cmd":"./amp-acp"}}}}
+            ]}"#,
+        )
+        .expect("見本を読める");
+        let fast = CustomAgent {
+            id: "fast-agent".to_string(),
+            label: "fast-agent".to_string(),
+            launch: CustomLaunch::Registry {
+                env: [(
+                    "OPENAI_BASE_URL".to_string(),
+                    "https://example.invalid/v1".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        };
+        let with_uv = |tool: &str| -> Option<PathBuf> {
+            (tool == "uvx").then(|| PathBuf::from("/opt/uv/bin/uvx"))
+        };
+        let without_uv = |_tool: &str| -> Option<PathBuf> { None };
+        assert_eq!(
+            fast.plan_in(Some(&registry), Some("linux-x86_64"), None, &with_uv),
+            Ok(LaunchPlan::Uvx {
+                version: "0.10.1".to_string()
+            })
+        );
+        assert_eq!(
+            fast.plan_in(Some(&registry), Some("linux-x86_64"), None, &without_uv),
+            Err(LaunchError::NeedsUv),
+            "uv が無ければ案内する（入れない）"
+        );
+        let command = fast
+            .command_with(
+                PathBuf::from("/tmp"),
+                Some(&registry),
+                Some("linux-x86_64"),
+                &|tool| Ok(with_uv(tool)),
+            )
+            .expect("uv があれば組める");
+        assert_eq!(command.path, PathBuf::from("/opt/uv/bin/uvx"));
+        assert_eq!(
+            command.args,
+            vec!["fast-agent-acp==0.10.1".to_string(), "-x".to_string()]
+        );
+        assert_eq!(
+            command.env.get("FAST_AGENT_MODEL").map(String::as_str),
+            Some("codexplan")
+        );
+        assert_eq!(
+            command.env.get("OPENAI_BASE_URL").map(String::as_str),
+            Some("https://example.invalid/v1")
+        );
+        let Err(error) = fast.command_with(
+            PathBuf::from("/tmp"),
+            Some(&registry),
+            Some("linux-x86_64"),
+            &|tool| Ok(without_uv(tool)),
+        ) else {
+            panic!("uv が無ければ組めない");
+        };
+        assert_eq!(
+            error.downcast_ref::<LaunchError>(),
+            Some(&LaunchError::NeedsUv)
+        );
+
+        // リモート（platform = None）では binary を使わない。
+        let amp = CustomAgent {
+            id: "amp-acp".to_string(),
+            label: "Amp".to_string(),
+            launch: CustomLaunch::Registry {
+                env: BTreeMap::new(),
+            },
+        };
+        let Err(error) =
+            amp.command_with(PathBuf::from("/tmp"), Some(&registry), None, &|_| Ok(None))
+        else {
+            panic!("binary だけの物はリモートで組めない");
+        };
+        assert_eq!(
+            error.downcast_ref::<LaunchError>(),
+            Some(&LaunchError::BinaryOnRemote)
+        );
     }
 
     /// 起動の本番の確かめ: 偽のエージェント（python の ACP サーバ）を「自分のコマンド」として足し、

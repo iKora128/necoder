@@ -72,7 +72,7 @@ agent:
   err_launch_not_in_registry: "%{id} isnt in the ACP registry (refresh it from Settings → AI agents → Add agent)"
   err_launch_no_distribution: "No build for this machine (%{platform})"
   err_launch_needs_node: Needs node (npx). Install node, then resume
-  err_launch_not_yet: "This kind of build (%{kind}) cant start yet"
+  err_launch_needs_uv: Needs uv (uvx). Install uv, then resume (necoder doesn't install it)
   err_launch_binary_on_remote: This agent only ships a binary, so it can't start over SSH
   err_launch_not_deployed: Not downloaded yet (it's downloaded and checked on first send)
   err_deploy_download: "Couldnt download %{url}: %{reason}"
@@ -662,7 +662,8 @@ settings:
   custom_not_in_registry: "Not found in the registry (%{id}). Refresh it from Add agent"
   custom_no_distribution: "No build for this machine (%{platform})"
   custom_needs_node: Needs node (this build starts with npx)
-  custom_not_yet: "This kind of build (%{kind}) cant start yet"
+  custom_needs_uv: Needs uv (this build starts with uvx). Install uv to use it (necoder doesn't install it)
+  custom_registry_uvx: "Registry %{version} · uvx (fetched on first start)"
   custom_binary_ready: "Registry %{version} · binary (in place, checked against sha256)"
   custom_binary_ready_unverified: "Registry %{version} · binary (in place, no checksum to check)"
   custom_binary_download: "Registry %{version} · binary (downloaded and checked against sha256 on first start)"

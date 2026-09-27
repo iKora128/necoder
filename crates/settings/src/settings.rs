@@ -4265,6 +4265,10 @@ fn custom_agent_status(
             CustomStatusTone::Ready,
             i18n::t!("settings.custom_registry_npx", "version" => version),
         ),
+        Ok(acp_client::LaunchPlan::Uvx { version }) => (
+            CustomStatusTone::Ready,
+            i18n::t!("settings.custom_registry_uvx", "version" => version),
+        ),
         // キーは literal で並べる（動的に組むと locales の書き忘れに気づけない）。
         Ok(acp_client::LaunchPlan::Binary {
             version,

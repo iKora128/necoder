@@ -73,7 +73,7 @@ agent:
   err_launch_not_in_registry: "%{id} が ACP レジストリに見つかりません（設定 → AI エージェント → エージェントを追加 で取り直してください）"
   err_launch_no_distribution: "このマシン（%{platform}）向けの配布がありません"
   err_launch_needs_node: node（npx）が要ります。node を入れてから再開してください
-  err_launch_not_yet: "この配布（%{kind}）はまだ起動できません"
+  err_launch_needs_uv: uv（uvx）が要ります。uv を入れてから再開してください（necoder は入れません）
   err_launch_binary_on_remote: このエージェントは binary の配布しか無いので、リモート（SSH）では起動できません
   err_launch_not_deployed: まだ落としていません（最初の送信で落として検証します）
   err_deploy_download: "%{url} を落とせませんでした: %{reason}"
@@ -663,7 +663,8 @@ settings:
   custom_not_in_registry: "レジストリに見つかりません（%{id}）。エージェントを追加 で取り直してください"
   custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
   custom_needs_node: node が要ります（npx で起動する配布）
-  custom_not_yet: "この配布（%{kind}）はまだ起動できません"
+  custom_needs_uv: uv が要ります（uvx で起動する配布）。uv を入れると使えます（necoder は入れません）
+  custom_registry_uvx: "レジストリ %{version} · uvx（初回に取得）"
   custom_binary_ready: "レジストリ %{version} · binary（置いてあります・sha256 で照合済み）"
   custom_binary_ready_unverified: "レジストリ %{version} · binary（置いてあります・検証の値がありません）"
   custom_binary_download: "レジストリ %{version} · binary（最初の起動で落として sha256 で照合します）"

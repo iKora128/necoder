@@ -40,9 +40,9 @@ This notice is a focused distribution notice, not a replacement for that complet
 
 necoder does not bundle or redistribute ACP agents. When a user adds an agent from the public ACP
 registry (`https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`) and starts it, necoder
-fetches it on that user's machine from the location the registry lists: npm (`npx`) or a binary archive
-URL, which necoder downloads over HTTPS only and checks against the registry's sha256 when one is
-provided. Each agent remains under its own license, which the registry records and the "Add agent"
+fetches it on that user's machine from the location the registry lists: npm (`npx`), PyPI (`uvx`, only
+when the user has installed uv), or a binary archive URL, which necoder downloads over HTTPS only and
+checks against the registry's sha256 when one is provided. Each agent remains under its own license, which the registry records and the "Add agent"
 dialog shows; some are proprietary.
 
 ## Bundled fonts

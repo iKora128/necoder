@@ -221,8 +221,9 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 相手を覚えるので、レジストリのキャッシュの有無で名前が変わらないようにするため。
 
 - 起動の配布は **binary（このマシンの `<os>-<arch>` に完全一致）→ npx → uvx** の順で選ぶ
-  （`RegistryAgent::launch_for`）。リモートは binary を使わない（手元の配布の形なので）。いまは npx と binary を
-  起動する（uvx は `LaunchError::NotSupportedYet`）
+  （`RegistryAgent::launch_for`）。リモートは binary を使わない（手元の配布の形なので）。npx は `npx -y
+  <pkg@0.0.0 - 版> <args>`、uvx は `uvx <package> <args>`（uv がある機械だけ。無ければ `LaunchError::NeedsUv`
+  で「uv が要る」と案内し、**necoder は uv を入れない**）、binary は下の配備
 - 組み込みのエージェントのレジストリの項目（`claude-acp` 等）は足させない（同じエージェントが別の起動で
   二重に並ぶ）。組み込みの起動（PATH / npx の版の解決）は変えない — binary / uvx の配備は足した物だけ
 - 起動できない理由は `acp_client::LaunchError`（レジストリに無い・このマシンの配布が無い・node が要る…）で

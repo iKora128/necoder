@@ -12734,9 +12734,7 @@ fn launch_error_text(error: &anyhow::Error) -> String {
             "platform" => platform.as_deref().unwrap_or("?")
         ),
         Some(LaunchError::NeedsNode) => i18n::t!("agent.err_launch_needs_node"),
-        Some(LaunchError::NotSupportedYet(kind)) => {
-            i18n::t!("agent.err_launch_not_yet", "kind" => kind.as_str())
-        }
+        Some(LaunchError::NeedsUv) => i18n::t!("agent.err_launch_needs_uv"),
         Some(LaunchError::BinaryOnRemote) => i18n::t!("agent.err_launch_binary_on_remote"),
         Some(LaunchError::NotDeployed) => i18n::t!("agent.err_launch_not_deployed"),
         Some(LaunchError::Deploy(DeployError::Download { url, reason })) => i18n::t!(
@@ -15457,6 +15455,12 @@ PYEOF"#;
         assert_eq!(
             launch_error_text(&needs_node),
             i18n::t!("agent.err_launch_needs_node")
+        );
+        // uv が無い機械では「uv が要る」と案内する（necoder は入れない・H2-c）。
+        let needs_uv = anyhow::Error::new(acp_client::LaunchError::NeedsUv);
+        assert_eq!(
+            launch_error_text(&needs_uv),
+            i18n::t!("agent.err_launch_needs_uv")
         );
         let missing = anyhow::Error::new(acp_client::LaunchError::NotInRegistry {
             id: "pi-acp".to_string(),

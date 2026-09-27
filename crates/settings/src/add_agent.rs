@@ -86,9 +86,7 @@ pub(crate) fn launch_problem_text(error: &acp_client::LaunchError) -> String {
             "platform" => platform.as_deref().unwrap_or("?")
         ),
         acp_client::LaunchError::NeedsNode => i18n::t!("settings.custom_needs_node"),
-        acp_client::LaunchError::NotSupportedYet(kind) => {
-            i18n::t!("settings.custom_not_yet", "kind" => kind.as_str())
-        }
+        acp_client::LaunchError::NeedsUv => i18n::t!("settings.custom_needs_uv"),
         acp_client::LaunchError::BinaryOnRemote => i18n::t!("settings.custom_binary_on_remote"),
         acp_client::LaunchError::NotDeployed => i18n::t!("settings.custom_not_deployed"),
         acp_client::LaunchError::Deploy(error) => {
@@ -681,6 +679,15 @@ mod tests {
             ]}"#,
         )
         .expect("見本を読める")
+    }
+
+    /// H2-c: uv が無い機械では、uvx の物に「uv が要ります」と出す（足せるが、入れるのは人）。
+    #[test]
+    fn uvx_agents_ask_for_uv_when_it_is_missing() {
+        let note = plan_note(&Err(acp_client::LaunchError::NeedsUv));
+        assert_eq!(note, Some((i18n::t!("settings.custom_needs_uv"), true)));
+        assert!(i18n::translate_in("ja", "settings.custom_needs_uv")
+            .is_some_and(|text| text.contains("uv が要ります")));
     }
 
     /// H2-b: binary は検証の値の有無を必ず出す（無い物は注意の色で「検証の値がありません」）。
