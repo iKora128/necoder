@@ -11,10 +11,14 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   await expect(page.locator('#destination')).toContainText('PWA integration');
   expect(new URL(page.url()).hash).toBe('');
   await expect(page.locator('#projects option')).toHaveCount(1);
-  await page.locator('#message').fill('スマホからのテスト指示');
+  // fixture（transcript と送信の数）は chromium → webkit の順で project をまたいで共有される。本文が同じだと
+  // webkit の回では chromium が送った同じ文で toContainText が先に通り、数を見る時に自分の送信がまだ
+  // 届いていないことがある。本文を project ごとに変え、数は届くまで待つ。
+  const message = `スマホからのテスト指示（${testInfo.project.name}）`;
+  await page.locator('#message').fill(message);
   await page.locator('#send').click();
-  await expect(page.locator('#transcript')).toContainText('スマホからのテスト指示');
-  expect((await (await request.get('http://127.0.0.1:8792/count')).json()).count).toBe(count + 1);
+  await expect(page.locator('#transcript')).toContainText(message);
+  await expect.poll(async () => (await (await request.get('http://127.0.0.1:8792/count')).json()).count).toBe(count + 1);
   await page.locator('#diff').click();
   await expect(page.locator('#diff-text')).toContainText('+remote ready');
   await page.locator('#close-diff').click();
@@ -33,7 +37,7 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   await request.get('http://127.0.0.1:8792/disconnect');
   await expect(page.locator('#status')).toHaveText('PCに接続できません');
   await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 15000 });
-  await expect(page.locator('#transcript')).toContainText('スマホからのテスト指示');
+  await expect(page.locator('#transcript')).toContainText(message);
   await page.screenshot({ path: `test-results/pwa-mobile-${testInfo.project.name}.png`, fullPage: true });
   await request.get(`http://127.0.0.1:8792/revoke?room=${room}`);
   await expect(page.locator('#send')).toBeDisabled();
