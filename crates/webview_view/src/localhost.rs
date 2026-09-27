@@ -41,6 +41,39 @@ pub fn normalize(url: &str) -> Option<String> {
     is_allowed_url(&parsed).then(|| parsed.to_string())
 }
 
+/// http(s) の URL の host が「その URL を出した機械自身」を指す時、そのポート（省略時は scheme の既定）。
+/// ループバック全域（`127.0.0.0/8`・`::1`・IPv4 射影の `::ffff:127.x`）・未指定アドレス（`0.0.0.0` /
+/// `[::]`・ブラウザは手元へ繋ぐ）・`localhost` と `*.localhost`（ブラウザはループバックへ解決する）。
+///
+/// Web タブで開けるか（[`is_allowed`]）より**広い**。SSH 先で出た URL をこれで見分け、手元ではそのまま
+/// 開かない（手元の WebView でもブラウザでも、手元の機械の同じポートを見てしまう）。`0.0.0.0` は
+/// uvicorn や Django の開発サーバが起動時にそのまま出す表記。
+pub fn origin_machine_port(url: &str) -> Option<u16> {
+    let parsed = Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let points_back = match parsed.host()? {
+        Host::Domain(domain) => {
+            let domain = domain.trim_end_matches('.');
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+        Host::Ipv4(address) => address.is_loopback() || address.is_unspecified(),
+        Host::Ipv6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback() || mapped.is_unspecified())
+        }
+    };
+    if points_back {
+        parsed.port_or_known_default()
+    } else {
+        None
+    }
+}
+
 /// パレットに打たれた文字列を URL にする。受け付けるのは:
 ///
 /// - ポート番号だけ（`3000` / `:3000`）→ `http://localhost:3000/`
@@ -199,6 +232,40 @@ mod tests {
             "not a url",
         ] {
             assert!(!is_allowed(url), "{url}");
+        }
+    }
+
+    /// SSH 先で出た URL のうち「出た機械自身」を指す物とそのポート。Web タブの許可範囲より広く、
+    /// ブラウザで開くと手元へ繋がってしまう表記（`0.0.0.0`・`127.0.0.2`・`*.localhost`）も拾う。
+    #[test]
+    fn urls_that_point_back_at_their_own_machine() {
+        for (url, port) in [
+            ("http://localhost:5173/", 5173),
+            ("http://LOCALHOST:5173/", 5173),
+            ("http://localhost.:5173/", 5173),
+            ("http://app.localhost:3000/", 3000),
+            ("http://127.0.0.1:8080/", 8080),
+            ("http://127.0.0.2:3000/", 3000),
+            ("http://127.1/", 80),
+            ("http://0.0.0.0:8000/docs", 8000),
+            ("http://[::1]:4000/", 4000),
+            ("http://[::]:4000/", 4000),
+            ("http://[::ffff:127.0.0.1]:4000/", 4000),
+            ("https://localhost/", 443),
+        ] {
+            assert_eq!(origin_machine_port(url), Some(port), "{url}");
+        }
+        for url in [
+            "https://example.com/",
+            "http://localhost.example.com/",
+            "http://127.0.0.1.nip.io/",
+            "http://192.168.1.20:5173/",
+            "http://localhost@evil.example/",
+            "ws://localhost:24678/",
+            "file:///etc/hosts",
+            "not a url",
+        ] {
+            assert_eq!(origin_machine_port(url), None, "{url}");
         }
     }
 

@@ -88,35 +88,21 @@ pub(crate) enum UrlDestination {
 /// URL の行き先を決める（R06・純関数）。`remote_host` は URL が出てきたプロジェクトの SSH 先
 /// （手元のプロジェクト・Chat は `None`）。
 pub(crate) fn url_destination(url: &str, remote_host: Option<&str>) -> UrlDestination {
-    let Some(normalized) = localhost::normalize(url) else {
-        return UrlDestination::Browser;
+    let Some(host) = remote_host else {
+        return match localhost::normalize(url) {
+            Some(_) => UrlDestination::WebTab,
+            None => UrlDestination::Browser,
+        };
     };
-    match remote_host {
-        Some(host) => UrlDestination::RemoteLocalhost {
+    // SSH 先で出た URL は Web タブの許可範囲より広く見る。`0.0.0.0`（uvicorn・Django などが起動時に
+    // 出す）・`127.0.0.2`・`*.localhost` も、手元のブラウザで開けば手元の機械の同じポートへ繋がる。
+    match localhost::origin_machine_port(url) {
+        Some(port) => UrlDestination::RemoteLocalhost {
             host: host.to_string(),
-            port: localhost_port(&normalized),
+            port,
         },
-        None => UrlDestination::WebTab,
+        None => UrlDestination::Browser,
     }
-}
-
-/// 正規形の localhost の URL のポート（省略時は http = 80 / https = 443）。
-fn localhost_port(url: &str) -> u16 {
-    let https = url.starts_with("https://");
-    let authority = url
-        .split_once("://")
-        .map_or(url, |(_, rest)| rest)
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    // `[::1]:5173` / `localhost:5173`（IPv6 の `:` を読み違えないよう、最後の `]` の後ろだけ見る）。
-    let after_host = authority
-        .rsplit_once(']')
-        .map_or(authority, |(_, rest)| rest);
-    after_host
-        .rsplit_once(':')
-        .and_then(|(_, port)| port.parse().ok())
-        .unwrap_or(if https { 443 } else { 80 })
 }
 
 /// 接続先の localhost の URL を、手元へ転送したポートの URL に書き換える（`http://127.0.0.1:5173/app?x`
@@ -1314,6 +1300,32 @@ mod tests {
             url_destination("https://example.com/", Some("dev-box")),
             UrlDestination::Browser,
             "localhost でない URL は手元のブラウザ"
+        );
+        // Web タブの許可範囲の外でも、SSH 先の機械自身を指す表記は手元で開かない
+        // （ブラウザで開くと手元の同じポートへ繋がる）。
+        for (url, port) in [
+            ("http://0.0.0.0:8000/docs", 8000),
+            ("http://127.0.0.2:3000/", 3000),
+            ("http://app.localhost:3000/", 3000),
+            ("http://[::]:4000/", 4000),
+        ] {
+            assert_eq!(
+                url_destination(url, Some("dev-box")),
+                UrlDestination::RemoteLocalhost {
+                    host: "dev-box".into(),
+                    port
+                },
+                "{url}"
+            );
+        }
+        assert_eq!(
+            url_destination("http://0.0.0.0:8000/docs", None),
+            UrlDestination::Browser,
+            "手元のプロジェクトの 0.0.0.0 は手元のサーバなのでブラウザで開いてよい"
+        );
+        assert_eq!(
+            forwarded_url("http://0.0.0.0:8000/docs", 18000),
+            "http://localhost:18000/docs"
         );
     }
 
