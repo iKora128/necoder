@@ -21,9 +21,9 @@
 //! - [`holds_first_responder`]: OS のキーボードフォーカスがページにあるか（Esc をページの物として残す判定）
 //!
 //! 私的 API は wry が既に使っている `_inspector`（`_WKInspector`）の範囲に留める。`_WKInspector` の
-//! `detach` は WebKit の SPI（`_WKInspector.h`）で、Inspector の画面にある「別の窓で開く」ボタンと同じ
-//! WebKit の処理（`WebInspectorUIProxy::detach`）へ行く。知らないセレクタへ送ると ObjC の例外で落ちるので、
-//! 呼ぶ前に `respondsToSelector:` で確かめる。
+//! `detach` は WebKit の SPI（`_WKInspector.h`）で、Inspector の画面にある「別のウインドウに切り離す」
+//! ボタンと同じ WebKit の処理（`WebInspectorUIProxy::detach`）へ行く。知らないセレクタへ送ると
+//! ObjC の例外で落ちるので、呼ぶ前に `respondsToSelector:` で確かめる。
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, Sel};
