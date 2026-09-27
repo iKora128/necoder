@@ -982,6 +982,9 @@ impl AgentPanel {
 
 #[cfg(test)]
 mod tests {
+    //! 本物のシェルでコマンドを走らせるテストは POSIX の書き方（`;`・`sleep`・`pwd -P`）なので unix だけ
+    //! （Windows の手元は `cmd.exe /C`）。走らせないテスト（入口の判定・止める配線・SSH 先の中断）はどこでも。
+
     use super::*;
 
     /// 設定と作業ディレクトリを一時ディレクトリへ向ける（本物の置き場・書類に触れない）。
@@ -1019,6 +1022,7 @@ mod tests {
             self.root.join("project")
         }
 
+        #[cfg(unix)]
         fn storage(&self) -> storage::Storage {
             storage::Storage::open(&self.root.join("necoder.db")).expect("DB を開ける")
         }
@@ -1175,6 +1179,7 @@ mod tests {
     /// 人が composer から送った `!echo hi` と `!sh -c 'exit 3'` は、スレッドの作業ディレクトリで
     /// シェルとして走り、出力と終了コードが行に出る。エージェントには何も送らない（ターンもトークンも
     /// 使わない）。
+    #[cfg(unix)]
     #[gpui::test]
     fn a_bang_command_runs_in_the_threads_directory(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "run");
@@ -1222,6 +1227,7 @@ mod tests {
 
     /// 結果は次のプロンプトに 1 回だけ添わる（2 回目は添わない）。slash コマンドには添えず、次の
     /// 通常の送信まで残す。× で外した物は添えない。
+    #[cfg(unix)]
     #[gpui::test]
     fn the_output_goes_with_the_next_prompt_once(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "attach");
@@ -1342,6 +1348,7 @@ mod tests {
     /// 走っている途中で止めると、子（とその孫）を止めて、止めるまでの出力が残り、行は「中断」。
     /// 印は esc / ■ が立てる物と同じ（止めるまでの間はテストのスレッドが待っているので、印は別の
     /// スレッドから立てる）。
+    #[cfg(unix)]
     #[gpui::test]
     fn stopping_a_running_command_keeps_the_output_so_far(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "stop_midway");
@@ -1473,6 +1480,7 @@ mod tests {
 
     /// 行はトランスクリプトと一緒に保存され、再起動後も読める。走り出した時点で保存するので、途中で
     /// necoder が終わった物は「中断」として読める。終わったら同じ行を最終の形へ書き換える（行は増えない）。
+    #[cfg(unix)]
     #[gpui::test]
     fn shell_rows_are_saved_and_restored(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "restore");
@@ -1517,6 +1525,7 @@ mod tests {
     }
 
     /// Chat のスレッド: フォルダがあればそこで走らせる。無ければ走らせず、本文も残す（ヒントが案内する）。
+    #[cfg(unix)]
     #[gpui::test]
     fn a_chat_runs_in_its_folder_or_explains_why_it_cannot(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "chat");
