@@ -1138,7 +1138,15 @@ fn run_user_command_local(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+        // SAFETY: fork と exec の間の子で走る。中で呼ぶのは async-signal-safe な関数だけ
+        // （sigemptyset・sigprocmask・signal）で、メモリも確保しない。
+        unsafe {
+            command.pre_exec(reset_child_signals);
+        }
+    }
     let mut child = command
         .spawn()
         .with_context(|| format!("process を起動できない: {}", spec.program))?;
@@ -1247,6 +1255,40 @@ fn capture_pipe_in_background(
             let _unwanted = done.send(());
         })
         .context("process の出力を読むスレッドを起動できない")?;
+    Ok(())
+}
+
+/// 子のシグナルの状態を既定へ戻す（`pre_exec`・fork の後 exec の前に子の中で走る）。
+///
+/// 背景の executor のスレッド（macOS は GCD）は非同期のシグナルを**ブロック**していて、Rust の
+/// `Command` はそのマスクを子へそのまま継ぐ（std の仕様・SIGPIPE の扱いしか直さない）。そのままだと
+/// 子は SIGTERM も SIGINT も受け取れず、止める操作が猶予の後の SIGKILL まで効かない（git が lock を
+/// 片付けられない・終了時の SIGTERM が届かず子が残る）。人のコマンドは端末と同じ既定の状態で
+/// 走らせたいので、マスクを空にし、無視の設定も既定へ戻す（端末の PTY の子と同じ顔ぶれ）。
+#[cfg(unix)]
+fn reset_child_signals() -> std::io::Result<()> {
+    // SAFETY: どれも async-signal-safe な libc の関数を、宣言どおりの引数で呼ぶだけ。
+    // `mask` は sigemptyset が初期化してから読む。
+    unsafe {
+        let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        if libc::sigemptyset(mask.as_mut_ptr()) != 0
+            || libc::sigprocmask(libc::SIG_SETMASK, mask.as_ptr(), std::ptr::null_mut()) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        for signal in [
+            libc::SIGCHLD,
+            libc::SIGHUP,
+            libc::SIGINT,
+            libc::SIGQUIT,
+            libc::SIGTERM,
+            libc::SIGALRM,
+        ] {
+            if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -5486,6 +5528,47 @@ mod tests {
         assert!(output.cancelled && output.status_code.is_none());
         assert!(!marker.exists(), "取り消した後の command は走らせない");
         std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// 背景の executor のスレッド（macOS の GCD）はシグナルをブロックしていて、Rust の `Command` は
+    /// そのマスクを子へ継ぐ。それでも子は既定の状態で走る＝SIGTERM で猶予（SIGKILL）を待たずに止まる。
+    /// 実害: 継いだままだと SIGTERM が届かず、止めるたびに 2 秒待ち、終了時の SIGTERM では残っていた。
+    #[cfg(unix)]
+    #[test]
+    fn a_user_command_does_not_inherit_the_callers_blocked_signals() {
+        let runner = thread::spawn(|| {
+            // GCD のワーカーと同じく、呼ぶスレッドで SIGTERM などをブロックする。
+            // SAFETY: このスレッドのシグナルマスクを変えるだけ。`blocked` は sigemptyset が初期化する。
+            unsafe {
+                let mut blocked = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+                libc::sigemptyset(blocked.as_mut_ptr());
+                for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+                    libc::sigaddset(blocked.as_mut_ptr(), signal);
+                }
+                libc::pthread_sigmask(libc::SIG_BLOCK, blocked.as_ptr(), std::ptr::null_mut());
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = cancel.clone();
+            let canceller = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(200));
+                flag.store(true, Ordering::Release);
+            });
+            let spec = CommandSpec::new("sh", std::env::temp_dir())
+                .args(["-c", "echo started; sleep 30; echo never"]);
+            let started = std::time::Instant::now();
+            let output = LocalHost.run_user_command(&spec, &cancel, 1_000);
+            let elapsed = started.elapsed();
+            canceller.join().expect("取り消し役のスレッド");
+            (output, elapsed)
+        });
+        let (output, elapsed) = runner.join().expect("呼ぶスレッド");
+        let output = output.expect("起動できる");
+        assert!(output.cancelled);
+        assert_eq!(output.stdout.head, b"started\n");
+        assert!(
+            elapsed < Duration::from_millis(1_500),
+            "SIGTERM で止まる（SIGKILL の猶予を待たない）: {elapsed:?}"
+        );
     }
 
     /// `&` で背景に回した孫がパイプを握っていても、子が終われば待ちすぎずに返す（孫は止めない＝
