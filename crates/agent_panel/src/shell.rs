@@ -55,7 +55,7 @@ fn next_shell_run_id() -> u64 {
 }
 
 /// シェルの行の状態。**色相は使わない**（UI-SPEC §1.3）: 状態は文字で出す。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ShellStatus {
     /// 走っている。`stopping` = 止める印を立てて、終わるのを待っている（手元）。
     Running { stopping: bool },
@@ -68,7 +68,9 @@ pub(crate) enum ShellStatus {
     Failed(SharedString),
 }
 
-/// `!` で走らせたコマンド 1 回（transcript の `Entry::Shell`）。
+/// `!` で走らせたコマンド 1 回（transcript の `Entry::Shell`）。閉じたスレッドの退避（`ClosedThread`）で
+/// 一時ファイルへ書くので serde を持つ。退避は走り終えてからなので、止める印は書かない。
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct ShellRun {
     pub(crate) id: u64,
     pub(crate) command: SharedString,
@@ -82,6 +84,7 @@ pub(crate) struct ShellRun {
     /// （再起動を越えては添えない＝引き継ぎの前置きと同じ）。
     pub(crate) pending: bool,
     /// 止める印（走っている間だけ）。
+    #[serde(skip)]
     cancel: Option<Arc<AtomicBool>>,
     /// 走っている途中で止められるか（手元だけ）。できなければ止めた時に待たずに畳む。
     can_stop: bool,
@@ -557,9 +560,12 @@ impl AgentPanel {
         let open_index = self.thread_index_by_id(thread_id);
         let thread = match open_index {
             Some(index) => self.threads.get_mut(index),
+            // 閉じたスレッドは走っている行がある間は退避しない（`ClosedThread::spill_entries`）ので、
+            // 本文はまだメモリにある。
             None => self
                 .closed_threads
                 .iter_mut()
+                .map(|closed| &mut closed.thread)
                 .find(|thread| thread.id == thread_id),
         };
         let Some(thread) = thread else {
@@ -661,7 +667,7 @@ impl AgentPanel {
         for thread in self
             .threads
             .iter_mut()
-            .chain(self.closed_threads.iter_mut())
+            .chain(self.closed_threads.iter_mut().map(|closed| &mut closed.thread))
         {
             stopped |= stop_thread_shell_runs(thread).0;
         }

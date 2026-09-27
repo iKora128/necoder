@@ -43,6 +43,8 @@ pub struct RailSettings {
     pub terminal: bool,
     /// Todo ボード（.necoder/todos.md・M12-10）。
     pub todos: bool,
+    /// AI スレッド一覧（左カラムに全プロジェクトのスレッド状態。Fleet 中は Fleet サイドバー）。
+    pub threads: bool,
     /// リモート SSH（~/.ssh/config のホストへ接続・#2）。
     pub remote: bool,
     /// Fleet（多エージェントの面・FLEET-V2）。レールから Editor ⇄ Fleet を切り替える。
@@ -86,6 +88,7 @@ impl Default for RailSettings {
             agent: true,
             terminal: true,
             todos: true,
+            threads: true,
             remote: true,
             fleet: true,
             chat: true,
@@ -809,7 +812,12 @@ pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
 pub fn persist_user_values(path: &Path, values: Vec<(&str, Value)>) -> Result<()> {
     let mut root = read_settings_object(path)?;
     for (key, value) in values {
-        root.insert(key.to_string(), value);
+        // null は「未設定に戻す」= キーごと外す（`"captain_agent": null` を残さない。既定と project 層に任せる）。
+        if value.is_null() {
+            root.remove(key);
+        } else {
+            root.insert(key.to_string(), value);
+        }
     }
     write_settings_object(path, root)
 }
@@ -1377,6 +1385,23 @@ mod tests {
         ])
         .expect("マージできる");
         assert!(store.settings().reduce_motion);
+    }
+
+    #[test]
+    fn persist_user_value_with_null_removes_the_key() {
+        let dir = std::env::temp_dir()
+            .join(format!("necoder-settings-null-test-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(&path, r#"{ "theme": "necoder-light", "captain_agent": "Codex" }"#)
+            .expect("seed");
+        persist_user_value(&path, "captain_agent", Value::Null).expect("書ける");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert!(written.get("captain_agent").is_none(), "解任はキーごと外す");
+        assert_eq!(written["theme"], "necoder-light", "他のキーは保つ");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

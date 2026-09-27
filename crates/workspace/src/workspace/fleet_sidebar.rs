@@ -30,10 +30,14 @@ struct TaskRow {
     /// エージェントがいま何をしているか / どう終わったか（3 段目・Tier1 digest）。
     digest: Option<SharedString>,
     tokens: u32,
+    /// base からの `+N −M`（git 更新のキャッシュ。0/0 と未取得は出さない）。
+    shortstat: Option<(usize, usize)>,
     /// レール上の並び（`⌘N` = `ActivateProjectN` と一致させる。行の並び順ではない＝嘘をつかない）。
     rail_shortcut: Option<usize>,
     /// いちばん最近の依頼の時刻（並べ替え「最近」の鍵・O21）。
     last_input_at_ms: Option<i64>,
+    /// Captain の分解案を承認して作った Task（題名の前に `⚑`・FLEET-V2 §5.2）。
+    captain_origin: bool,
 }
 
 /// Task 行の並べ方（O21）。既定はレールの順。
@@ -155,7 +159,7 @@ fn task_row_matches(row: &TaskRow, query: &str) -> bool {
 
 impl Workspace {
     /// いま編隊として見ているリポジトリの鍵（レールで選んでいる slot のもの）。
-    fn fleet_repository_key(&self) -> Option<String> {
+    pub(super) fn fleet_repository_key(&self) -> Option<String> {
         self.active_slot()
             .map(|slot| slot.repository_key().to_string())
     }
@@ -518,8 +522,8 @@ impl Workspace {
         self.forget_fleet_worktrees();
     }
 
-    /// Captain スレッド（IntegrationSpace の pinned thread）へ寄せる。⌘0 / Captain バーのクリック。
-    /// Captain カード（舞台の 1 枚）は F6。ここでは「その会話を前面に出す」までを担う。
+    /// Captain スレッド（統合先の panel の席のスレッド）へ寄せる。⌘0 / Captain バー / ブリッジの ⚑ タブ
+    /// （FLEET-V2 §3.6）。未任命ならブリッジの会話ペインに任命の面を出す（§5.7）。
     pub(crate) fn focus_captain(
         &mut self,
         _: &FocusCaptain,
@@ -532,30 +536,26 @@ impl Workspace {
         let Some(index) = self.integration_slot_for(&key) else {
             return;
         };
-        let Some(agent) = settings::get(cx).captain_agent.clone() else {
-            // 未任命なら設定ホームの「AI エージェント」ページへ（任命ボタンの在処・§5.7）。
-            self.open_settings_action(&OpenSettings, window, cx);
-            self.chrome
-                .settings_view
-                .update(cx, |view, cx| view.show_agents_page(cx));
-            return;
-        };
-        let panel = self.project_sessions.sessions[index].fleet_agents[0].clone();
-        self.project_sessions.sessions[index].agent_panel = panel.clone();
-        let context = self.captain_context(&key, cx);
-        let names = captain::captain_thread_names();
-        let thread = panel.update(cx, |panel, cx| {
-            let thread =
-                panel.ensure_named_thread(&captain::captain_thread_name(), &names, &agent, cx);
-            panel.set_prompt_context(thread, context);
-            panel.focus_thread(thread, cx);
-            thread
-        });
         self.chrome.fleet_mode = true;
         self.chrome.stage_columns = 1;
-        self.chrome.captain_space =
-            Some(self.project_sessions.projects[index].task_space.id.clone());
-        self.chrome.captain_tab = 0;
+        if settings::get(cx).captain_agent.is_none() {
+            // 未任命ならブリッジの会話ペインに「任命する」面を出す（設定へ飛ばさない・§5.7）。
+            self.chrome.captain_appointing = true;
+            self.seed_fleet_cells(cx);
+            self.switch_project(index, window, cx);
+            if !self.stage_card_is_wide() {
+                self.set_stage_side(index, None, cx);
+            }
+            cx.notify();
+            return;
+        }
+        self.chrome.captain_appointing = false;
+        // 席（道具 = Captain 用の MCP・権限の問いは necoder が答える）と前置きを付けて前面へ（§5.8）。
+        let Some((panel, thread)) = self.ensure_captain_thread(index, cx) else {
+            return;
+        };
+        self.project_sessions.sessions[index].agent_panel = panel.clone();
+        panel.update(cx, |panel, cx| panel.focus_thread(thread, cx));
         self.reveal_agent_in_fleet(index, thread, window, cx);
     }
 
@@ -739,12 +739,14 @@ impl Workspace {
                     .iter()
                     .map(|(_, _, status)| status.tokens_used)
                     .sum(),
+                shortstat: self.project_sessions.sessions.get(index).and_then(|session| session.repository.shortstat()),
                 // レールの並び = ⌘1..9（`ActivateProjectN`）。10 本目以降は出さない。
                 rail_shortcut: (index < 9).then_some(index + 1),
                 last_input_at_ms: statuses
                     .iter()
                     .filter_map(|(_, _, status)| status.last_input_at_ms)
                     .max(),
+                captain_origin: slot.task_space.captain_origin,
             });
         }
         (integration, rows, integrated_today)
@@ -1057,7 +1059,7 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                            this.chrome.captain_space = None;
+                            this.chrome.captain_appointing = false;
                             this.switch_project(index, window, cx);
                         }),
                     ),
@@ -1164,11 +1166,12 @@ impl Workspace {
                             .flex_col()
                             .gap(px(1.))
                             // 1 段目: 名前 + ⎇ branch。ダブルクリックで改名（既存）。
+                            // gap は置かない: ブランチ名が幅 0 まで縮んだ時も gap だけは残り、その分だけ名前の
+                            // 末尾の字が欠ける。区切りはブランチ名の先頭の空白で取る（縮めば一緒に消える）。
                             .child(
                                 div()
                                     .flex()
                                     .items_baseline()
-                                    .gap(px(5.))
                                     .child(match renaming_editor {
                                         Some(editor) => div()
                                             .flex_1()
@@ -1176,13 +1179,20 @@ impl Workspace {
                                             .h(px(20.))
                                             .child(editor)
                                             .into_any_element(),
+                                        // 名前は縮められる（`flex_none` だと右の塊が太った時に重なる）。
                                         None => div()
-                                            .flex_none()
+                                            .flex_initial()
+                                            .min_w_0()
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_size(px(12.))
                                             .text_color(theme.fg0)
-                                            .child(row.title.clone())
+                                            // ⚑ 帰属は形で示す（色は付けない＝色は識別だけ・UI-SPEC §1.3）。
+                                            .child(if row.captain_origin {
+                                                SharedString::from(format!("⚑ {}", row.title))
+                                            } else {
+                                                row.title.clone()
+                                            })
                                             .into_any_element(),
                                     })
                                     .child(
@@ -1195,7 +1205,7 @@ impl Workspace {
                                             .text_color(theme.fg2)
                                             .when_some(row.branch.clone(), |element, branch| {
                                                 element.child(SharedString::from(format!(
-                                                    "⎇ {branch}"
+                                                    "  ⎇ {branch}"
                                                 )))
                                             }),
                                     ),
@@ -1282,6 +1292,14 @@ impl Workspace {
                             .items_end()
                             .gap(px(2.))
                             .child(div().text_size(px(10.)).text_color(theme.fg2).child(tokens))
+                            // `+N −M` は独立の段（トークンと同じ行に詰めると 256px のサイドバーで名前を潰す）。
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .children(self.shortstat_chips(row.shortstat)),
+                            )
                             // ⌘N は**レールの並び**（`ActivateProjectN`）。行の並びではない＝嘘をつかない。
                             .when_some(row.rail_shortcut, |element, n| {
                                 element.child(
@@ -1756,8 +1774,10 @@ mod tests {
             asked: asked.map(|text| SharedString::from(text.to_string())),
             digest: digest.map(|text| SharedString::from(text.to_string())),
             tokens: 0,
+            shortstat: None,
             rail_shortcut: None,
             last_input_at_ms: None,
+            captain_origin: false,
         }
     }
 

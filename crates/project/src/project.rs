@@ -1798,6 +1798,87 @@ pub fn git_changes(dir: &Path) -> Vec<WorkingChange> {
     git_changes_on(&LocalHost, dir)
 }
 
+/// `base` から作業ツリーまでに変わったファイル 1 件（Task の「変更」ペインと `+N −M` 用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    /// **絶対**パス（`git_changes` と同じ流儀。開く側が worktree を知らなくてよい）。
+    pub path: PathBuf,
+    pub kind: StatusKind,
+    /// 増減行数。バイナリは 0/0（git が `-` を返す）。
+    pub added: usize,
+    pub deleted: usize,
+}
+
+/// `base` から作業ツリーまでの変更ファイル一覧（`git diff --numstat` + `--name-status`）。
+/// コミット済みの分も未コミットの分も含む＝「この Task が base から何を変えたか」。untracked は
+/// git の diff に出ないので含まない（呼び出し側が `git_status` の Untracked を足す）。取れなければ `None`。
+pub fn git_diff_files_on(host: &dyn Host, dir: &Path, base: &str) -> Option<Vec<DiffFile>> {
+    let repo = git_repo_root_on(host, dir)?;
+    let run = |format: &str| {
+        run_git(
+            host,
+            &repo,
+            ["--no-optional-locks", "diff", format, "--no-renames", "-z", base],
+        )
+        .ok()
+        .filter(|output| output.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+    };
+    let counts = parse_numstat(&run("--numstat")?);
+    let kinds = parse_name_status(&run("--name-status")?);
+    Some(
+        kinds
+            .into_iter()
+            .map(|(kind, path)| {
+                let (added, deleted) = counts
+                    .iter()
+                    .find(|(_, _, candidate)| candidate == &path)
+                    .map_or((0, 0), |(added, deleted, _)| (*added, *deleted));
+                DiffFile {
+                    path: repo.join(&path),
+                    kind,
+                    added,
+                    deleted,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// `--numstat -z`: `<added>\t<deleted>\t<path>\0` の繰り返し。バイナリは `-\t-\t<path>`（0/0 で持つ）。
+fn parse_numstat(text: &str) -> Vec<(usize, usize, String)> {
+    text.split('\0')
+        .filter_map(|entry| {
+            let mut fields = entry.splitn(3, '\t');
+            let added = fields.next()?;
+            let deleted = fields.next()?;
+            let path = fields.next()?;
+            Some((
+                added.parse().unwrap_or(0),
+                deleted.parse().unwrap_or(0),
+                path.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// `--name-status -z`: `<letter>\0<path>\0` の繰り返し（`--no-renames` なので 1 件 = 2 要素）。
+fn parse_name_status(text: &str) -> Vec<(StatusKind, String)> {
+    let mut fields = text.split('\0');
+    let mut files = Vec::new();
+    while let (Some(letter), Some(path)) = (fields.next(), fields.next()) {
+        let kind = match letter.chars().next() {
+            Some('A') => StatusKind::Added,
+            Some('D') => StatusKind::Deleted,
+            Some('U') => StatusKind::Conflicted,
+            Some(_) => StatusKind::Modified,
+            None => continue,
+        };
+        files.push((kind, path.to_string()));
+    }
+    files
+}
+
 pub fn git_changes_on(host: &dyn Host, dir: &Path) -> Vec<WorkingChange> {
     let Some(repo) = git_repo_root_on(host, dir) else {
         return Vec::new();
@@ -2763,6 +2844,29 @@ mod tests {
             Some(diff)
         );
         assert_eq!(unified_diff_labeled("x\n", "x\n", "a", "b"), None);
+    }
+
+    #[test]
+    fn numstat_and_name_status_parse_nul_separated_output() {
+        let counts = parse_numstat("148\t71\tcrates/a/buffer.rs\0-\t-\tassets/icon.png\0");
+        assert_eq!(
+            counts,
+            vec![
+                (148, 71, "crates/a/buffer.rs".to_string()),
+                (0, 0, "assets/icon.png".to_string()),
+            ]
+        );
+        let kinds = parse_name_status("M\0crates/a/buffer.rs\0A\0docs/new file.md\0D\0old.rs\0");
+        assert_eq!(
+            kinds,
+            vec![
+                (StatusKind::Modified, "crates/a/buffer.rs".to_string()),
+                (StatusKind::Added, "docs/new file.md".to_string()),
+                (StatusKind::Deleted, "old.rs".to_string()),
+            ]
+        );
+        assert!(parse_numstat("").is_empty());
+        assert!(parse_name_status("").is_empty());
     }
 
     #[test]

@@ -31,7 +31,7 @@ impl Workspace {
         if !self.prepare_terminal_tab(cx) {
             return;
         }
-        let session = self.chrome.work_layout.allocate();
+        let session = self.allocate_terminal_id();
         let view = self
             .terminal_dock
             .update(cx, |dock, cx| dock.start_session(session, cx));
@@ -49,7 +49,7 @@ impl Workspace {
         if !self.prepare_terminal_tab(cx) {
             return;
         }
-        let session = self.chrome.work_layout.allocate();
+        let session = self.allocate_terminal_id();
         let (view, dock_has_tabs) = self.terminal_dock.update(cx, |dock, cx| {
             let view = dock.detach_active(session, cx);
             (view, dock.has_tabs())

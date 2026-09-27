@@ -688,6 +688,91 @@ impl Workspace {
                     Ok(record_json(&record))
                 }, cx);
             }
+            // Captain の分解案（FLEET-V2 §5.5）。worktree は作らず、案を DB に置いて要対応へ出す。
+            // DB に保存できてから画面に出す（保存に失敗した案が画面にだけ残らない）。
+            "propose_tasks" => {
+                let (tasks, note) = match crate::workspace::validate_proposed_tasks(&params) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        let _ = respond.send(err(message));
+                        return;
+                    }
+                };
+                let root = params
+                    .get("root")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                let root = paths::canonicalize(&root).unwrap_or(root);
+                let Some(integration) = self.project_sessions.projects.iter().position(|slot| {
+                    slot.task_space.is_integration()
+                        && paths::canonicalize(slot.worktree.root())
+                            .unwrap_or_else(|_| slot.worktree.root().to_path_buf())
+                            == root
+                }) else {
+                    let _ = respond.send(err(i18n::t!("captain.proposal_err_no_integration")));
+                    return;
+                };
+                let tasks_json = match serde_json::to_string(&tasks) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        let _ = respond.send(err(error));
+                        return;
+                    }
+                };
+                let Some(storage) = self.persistence.storage.clone() else {
+                    let _ = respond.send(err(i18n::t!("ipc.err_no_storage")));
+                    return;
+                };
+                let record = storage::CaptainProposalRecord {
+                    id: crate::workspace::new_proposal_id(),
+                    repository_id: self.project_sessions.projects[integration]
+                        .repository_key()
+                        .to_string(),
+                    root,
+                    note,
+                    tasks: tasks_json,
+                    status: storage::ProposalStatus::Pending,
+                    outcome: None,
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_millis() as i64)
+                        .unwrap_or(0),
+                    resolved_at: None,
+                };
+                cx.spawn(async move |workspace, cx| {
+                    let stored = record.clone();
+                    let saved = cx
+                        .background_executor()
+                        .spawn(async move { storage.insert_captain_proposal(&stored) })
+                        .await;
+                    let response = match saved {
+                        Err(error) => err(format!("{error:#}")),
+                        Ok(()) => {
+                            let id = record.id.clone();
+                            let rows = tasks.len();
+                            let _ = workspace.update(cx, |workspace, cx| {
+                                workspace.add_captain_proposal(
+                                    super::captain_proposals::CaptainProposal {
+                                        selected: vec![true; tasks.len()],
+                                        tasks,
+                                        record,
+                                    },
+                                    cx,
+                                );
+                            });
+                            ok(serde_json::json!({
+                                "proposal_id": id,
+                                "status": "pending",
+                                "rows": rows,
+                                "message": i18n::t!("captain.proposal_pending_reply"),
+                            }))
+                        }
+                    };
+                    let _ = respond.send(response);
+                })
+                .detach();
+            }
             "set_depends" => {
                 let depends_on: Vec<String> = params
                     .get("depends_on")

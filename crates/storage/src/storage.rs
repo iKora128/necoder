@@ -289,6 +289,59 @@ pub struct TaskEventRecord {
     pub created_at: i64,
 }
 
+/// リポジトリで絞った台帳の 1 件（Captain の wake の素材・FLEET-V2 §5.3）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryEvent {
+    pub event: TaskEventRecord,
+    /// その Task の題名。分解案の出来事など、Task に付かないものは `None`。
+    pub title: Option<String>,
+}
+
+/// 分解案の裁き（FLEET-V2 §5.5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl ProposalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProposalStatus::Pending => "pending",
+            ProposalStatus::Approved => "approved",
+            ProposalStatus::Rejected => "rejected",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(ProposalStatus::Pending),
+            "approved" => Some(ProposalStatus::Approved),
+            "rejected" => Some(ProposalStatus::Rejected),
+            _ => None,
+        }
+    }
+}
+
+/// Captain の分解案（FLEET-V2 §5.5）。承認されるまで worktree は作らない。
+/// `tasks` は JSON の文字列のまま持つ（行の形は workspace が決める＝storage は中身を知らない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptainProposalRecord {
+    pub id: String,
+    pub repository_id: String,
+    /// 統合先（main の worktree）の root。承認時にここから worktree を切る。
+    pub root: PathBuf,
+    /// Captain が添えた分け方の理由。
+    pub note: Option<String>,
+    pub tasks: String,
+    pub status: ProposalStatus,
+    /// 裁きの結果（承認した行・外した行など。JSON）。
+    pub outcome: Option<String>,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+}
+
 /// 既定の DB パス。置き場の決定は `paths` crate に集約している（WINDOWS-PORT.md §D1）。
 /// Windows では Roaming ではなく Local（数百 MB になりうるため）。
 pub fn default_db_path() -> Option<PathBuf> {
@@ -856,6 +909,293 @@ impl Storage {
         })
     }
 
+    // ── Captain の読んだ位置と分解案（FLEET-V2 §5.3 / §5.5） ──
+
+    /// 台帳の末尾の通し番号（空なら 0）。初めて任命されたリポジトリの読んだ位置をここから始める
+    /// （過去の全履歴を Captain へ流さない）。
+    pub fn latest_task_event_id(&self) -> Result<i64> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT MAX(id) FROM task_events", ())
+                    .await
+                    .context("task_events の末尾の読み出しに失敗")?;
+                match rows.next().await.context("task_events 末尾行の取得に失敗")? {
+                    Some(row) => Ok(row.get_value(0)?.as_integer().copied().unwrap_or(0)),
+                    None => Ok(0),
+                }
+            })
+        })
+    }
+
+    /// Captain がこのリポジトリの台帳をどこまで読んだか。`None` = まだ一度も読んでいない。
+    pub fn load_captain_cursor(&self, repository_id: &str) -> Result<Option<i64>> {
+        let repository_id = repository_id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT last_event_id FROM captain_cursors WHERE repository_id = ?1",
+                        (repository_id.as_str(),),
+                    )
+                    .await
+                    .context("captain_cursors の読み出しに失敗")?;
+                match rows.next().await.context("captain_cursors 行の取得に失敗")? {
+                    Some(row) => Ok(Some(
+                        *row.get_value(0)?.as_integer().context("last_event_id")?,
+                    )),
+                    None => Ok(None),
+                }
+            })
+        })
+    }
+
+    /// 読んだ位置を進める。**戻さない**（遅れて届いた古い確定で位置が巻き戻ると、同じ出来事を
+    /// 二度渡すことになる）。
+    pub fn save_captain_cursor(&self, repository_id: &str, last_event_id: i64) -> Result<()> {
+        let repository_id = repository_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let current = {
+                    let mut rows = conn
+                        .query(
+                            "SELECT last_event_id FROM captain_cursors WHERE repository_id = ?1",
+                            (repository_id.as_str(),),
+                        )
+                        .await
+                        .context("captain_cursors の読み出しに失敗")?;
+                    match rows.next().await.context("captain_cursors 行の取得に失敗")? {
+                        Some(row) => row.get_value(0)?.as_integer().copied(),
+                        None => None,
+                    }
+                };
+                if current.is_some_and(|current| current >= last_event_id) {
+                    return Ok(());
+                }
+                conn.execute(
+                    "INSERT OR REPLACE INTO captain_cursors (repository_id, last_event_id, updated_at)
+                     VALUES (?1, ?2, ?3)",
+                    (repository_id.as_str(), last_event_id, now),
+                )
+                .await
+                .context("captain_cursors の保存に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// このリポジトリの Task と分解案に付いた出来事のうち、`since_id` より新しいものを古い順で返す。
+    /// Captain の wake が 1 通にまとめる素材（どの種類を渡すかは呼び手が決める）。`cap` は読みすぎ防止。
+    pub fn load_repository_events_since(
+        &self,
+        repository_id: &str,
+        since_id: i64,
+        cap: i64,
+    ) -> Result<Vec<RepositoryEvent>> {
+        let repository_id = repository_id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT task_events.id, task_events.task_id, task_events.kind,
+                                task_events.payload, task_events.created_at, task_spaces.title
+                         FROM task_events
+                         LEFT JOIN task_spaces ON task_spaces.id = task_events.task_id
+                         LEFT JOIN captain_proposals ON captain_proposals.id = task_events.task_id
+                         WHERE task_events.id > ?2
+                           AND (task_spaces.repository_id = ?1 OR captain_proposals.repository_id = ?1)
+                         ORDER BY task_events.id ASC LIMIT ?3",
+                        (repository_id.as_str(), since_id, cap),
+                    )
+                    .await
+                    .context("リポジトリの台帳差分の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")?
+                {
+                    result.push(RepositoryEvent {
+                        event: TaskEventRecord {
+                            id: *row.get_value(0)?.as_integer().context("event id")?,
+                            task_id: row.get_value(1)?.as_text().context("event task")?.clone(),
+                            kind: row.get_value(2)?.as_text().context("event kind")?.clone(),
+                            payload: row
+                                .get_value(3)?
+                                .as_text()
+                                .context("event payload")?
+                                .clone(),
+                            created_at: *row
+                                .get_value(4)?
+                                .as_integer()
+                                .context("event created_at")?,
+                        },
+                        title: row.get_value(5)?.as_text().cloned(),
+                    });
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// 分解案を保存し、台帳に `captain_proposed` を積む（1 トランザクション）。
+    pub fn insert_captain_proposal(&self, proposal: &CaptainProposalRecord) -> Result<()> {
+        let proposal = proposal.clone();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("BEGIN", ()).await.context("proposal begin")?;
+                let outcome = async {
+                    conn.execute(
+                        "INSERT INTO captain_proposals
+                         (id, repository_id, root, note, tasks, status, outcome, created_at, resolved_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL)",
+                        (
+                            proposal.id.as_str(),
+                            proposal.repository_id.as_str(),
+                            proposal.root.to_string_lossy().as_ref(),
+                            proposal.note.as_deref(),
+                            proposal.tasks.as_str(),
+                            proposal.status.as_str(),
+                            proposal.created_at,
+                        ),
+                    )
+                    .await
+                    .context("captain_proposals の追加に失敗")?;
+                    conn.execute(
+                        "INSERT INTO task_events (task_id, kind, payload, created_at)
+                         VALUES (?1, 'captain_proposed', ?2, ?3)",
+                        (
+                            proposal.id.as_str(),
+                            proposal.tasks.as_str(),
+                            proposal.created_at,
+                        ),
+                    )
+                    .await
+                    .context("captain_proposed の追記に失敗")?;
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
+                finish_transaction(conn, outcome).await
+            })
+        })
+    }
+
+    /// まだ裁いていない分解案（古い順）。起動時に要対応へ戻す。
+    pub fn load_pending_captain_proposals(&self) -> Result<Vec<CaptainProposalRecord>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, repository_id, root, note, tasks, status, outcome, created_at, resolved_at
+                         FROM captain_proposals WHERE status = 'pending' ORDER BY created_at ASC",
+                        (),
+                    )
+                    .await
+                    .context("captain_proposals の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("captain_proposals 行の取得に失敗")?
+                {
+                    let status = row.get_value(5)?.as_text().context("status")?.clone();
+                    result.push(CaptainProposalRecord {
+                        id: row.get_value(0)?.as_text().context("id")?.clone(),
+                        repository_id: row.get_value(1)?.as_text().context("repository_id")?.clone(),
+                        root: PathBuf::from(row.get_value(2)?.as_text().context("root")?),
+                        note: row.get_value(3)?.as_text().cloned(),
+                        tasks: row.get_value(4)?.as_text().context("tasks")?.clone(),
+                        status: ProposalStatus::from_str(&status).context("status の値")?,
+                        outcome: row.get_value(6)?.as_text().cloned(),
+                        created_at: *row.get_value(7)?.as_integer().context("created_at")?,
+                        resolved_at: row.get_value(8)?.as_integer().copied(),
+                    });
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// 分解案を裁く（承認 / 却下）。台帳に `proposal_approved` / `proposal_rejected` を積み、その通し番号を返す。
+    /// 裁き済みの案をもう一度裁こうとしたらエラー（カードの二度押し・別窓との競合で二重に worktree を切らない）。
+    pub fn resolve_captain_proposal(
+        &self,
+        id: &str,
+        status: ProposalStatus,
+        outcome: &str,
+    ) -> Result<i64> {
+        anyhow::ensure!(status != ProposalStatus::Pending, "pending へは戻せない");
+        let (id, outcome) = (id.to_string(), outcome.to_string());
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("BEGIN", ()).await.context("proposal resolve begin")?;
+                let result = async {
+                    let pending = {
+                        let mut rows = conn
+                            .query(
+                                "SELECT status FROM captain_proposals WHERE id = ?1",
+                                (id.as_str(),),
+                            )
+                            .await
+                            .context("captain_proposals の読み出しに失敗")?;
+                        match rows.next().await.context("captain_proposals 行の取得に失敗")? {
+                            Some(row) => row.get_value(0)?.as_text().map(String::as_str)
+                                == Some(ProposalStatus::Pending.as_str()),
+                            None => anyhow::bail!("分解案が見つからない: {id}"),
+                        }
+                    };
+                    anyhow::ensure!(pending, "分解案はもう裁かれている: {id}");
+                    conn.execute(
+                        "UPDATE captain_proposals SET status = ?2, outcome = ?3, resolved_at = ?4
+                         WHERE id = ?1",
+                        (id.as_str(), status.as_str(), outcome.as_str(), now),
+                    )
+                    .await
+                    .context("captain_proposals の更新に失敗")?;
+                    let kind = match status {
+                        ProposalStatus::Approved => "proposal_approved",
+                        _ => "proposal_rejected",
+                    };
+                    conn.execute(
+                        "INSERT INTO task_events (task_id, kind, payload, created_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        (id.as_str(), kind, outcome.as_str(), now),
+                    )
+                    .await
+                    .context("分解案の裁きの追記に失敗")?;
+                    let mut rows = conn
+                        .query("SELECT last_insert_rowid()", ())
+                        .await
+                        .context("task event id の取得に失敗")?;
+                    match rows.next().await.context("task event id 行の取得に失敗")? {
+                        Some(row) => Ok(*row.get_value(0)?.as_integer().context("task event id")?),
+                        None => anyhow::bail!("task event id が返らない"),
+                    }
+                }
+                .await;
+                finish_transaction(conn, result).await
+            })
+        })
+    }
+
+    /// ある種類の出来事を持つ Task の id（重複なし）。`captain_task` = 分解案の承認で作られた Task（`⚑` 帰属）。
+    pub fn load_task_ids_with_event(&self, kind: &str) -> Result<Vec<String>> {
+        let kind = kind.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT DISTINCT task_id FROM task_events WHERE kind = ?1",
+                        (kind.as_str(),),
+                    )
+                    .await
+                    .context("task_events（種類別）の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")?
+                {
+                    result.push(row.get_value(0)?.as_text().context("task_id")?.clone());
+                }
+                Ok(result)
+            })
+        })
+    }
+
     // ── スレッド永続化（M12-1・turn 毎 INSERT の追記型） ──
 
     /// スレッドのメタを upsert する（作成・改名・トークン累計の更新）。
@@ -981,8 +1321,9 @@ impl Storage {
         })
     }
 
-    /// スレッドの ACP セッション id を忘れる（O15「新しいセッションで続ける」）。次にこのスレッドの
-    /// エージェントを立ち上げるとき、前の会話を `session/load` せず `session/new` から始める。
+    /// スレッドの ACP セッション id を忘れる（O15「新しいセッションで続ける」・Captain の会話の交代
+    /// FLEET-V2 §5.6）。次にこのスレッドのエージェントを立ち上げるとき、前の会話を `session/load` せず
+    /// `session/new` から始める。
     /// 忘れた id は「このスレッドの過去の会話」として残す（本文は transcript に在る＝履歴ビューで
     /// エージェントの一覧に重ねて出さない）。
     pub fn clear_thread_session(&self, thread_id: &str) -> Result<()> {
@@ -2724,7 +3065,51 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("review_notes index 作成に失敗")?;
+    // Captain がリポジトリの台帳をどこまで読んだか（FLEET-V2 §5.3）。再起動を跨いで未配達の知らせを残す。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS captain_cursors (
+            repository_id TEXT PRIMARY KEY,
+            last_event_id INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("captain_cursors 作成に失敗")?;
+    // Captain の分解案（FLEET-V2 §5.5）。承認されるまで worktree を作らないので、案そのものをここに置く。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS captain_proposals (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            root TEXT NOT NULL,
+            note TEXT,
+            tasks TEXT NOT NULL,
+            status TEXT NOT NULL,
+            outcome TEXT,
+            created_at INTEGER NOT NULL,
+            resolved_at INTEGER
+        )",
+        (),
+    )
+    .await
+    .context("captain_proposals 作成に失敗")?;
     Ok(())
+}
+
+/// `BEGIN` 済みのトランザクションを結果に応じて確定 / 取り消す。
+async fn finish_transaction<T>(conn: &turso::Connection, outcome: Result<T>) -> Result<T> {
+    match outcome {
+        Ok(value) => {
+            conn.execute("COMMIT", ()).await.context("commit")?;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(rollback) = conn.execute("ROLLBACK", ()).await {
+                return Err(error.context(format!("rollback にも失敗: {rollback:#}")));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// task_spaces への snapshot 置換。単発 upsert と transition（transaction 内）の共通実体。
@@ -3998,6 +4383,101 @@ mod tests {
         assert_eq!(
             parent_of(&storage, "space-api-tests").as_deref(),
             Some("space-api")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Captain の読んだ位置と分解案（FLEET-V2 §5.3 / §5.5）。未読はリポジトリで絞られ、位置は戻らず、
+    /// 分解案は二度裁けない（カードの二度押しで worktree を二重に切らない）。
+    #[test]
+    fn captain_cursor_and_proposals_round_trip() {
+        let path = temp_db("captain");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        let task = |id: &str, repository: &str, title: &str| TaskSpaceRecord {
+            id: id.into(),
+            repository_id: repository.into(),
+            root: PathBuf::from(format!("/work/{id}")),
+            branch: Some(format!("task/{id}")),
+            title: title.into(),
+            kind: SpaceKind::Task,
+            phase: TaskPhase::Planned,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            parent: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        storage.upsert_task_space(&task("space-a", "repo-a", "rope 設計")).unwrap();
+        storage.upsert_task_space(&task("space-b", "repo-b", "別リポジトリ")).unwrap();
+        assert_eq!(storage.latest_task_event_id().unwrap(), 0);
+        let first = storage
+            .append_task_event("space-a", "phase_changed", r#"{"phase":"review_ready"}"#)
+            .unwrap();
+        storage.append_task_event("space-b", "phase_changed", r#"{"phase":"failed"}"#).unwrap();
+        let human = storage
+            .append_task_event("space-a", "human_send", r#"{"text":"テストも"}"#)
+            .unwrap();
+        assert_eq!(storage.latest_task_event_id().unwrap(), human);
+
+        // 読んだ位置: 無い → 保存 → 戻らない。
+        assert_eq!(storage.load_captain_cursor("repo-a").unwrap(), None);
+        storage.save_captain_cursor("repo-a", first).unwrap();
+        storage.save_captain_cursor("repo-a", 0).unwrap();
+        assert_eq!(storage.load_captain_cursor("repo-a").unwrap(), Some(first));
+
+        // 未読はリポジトリで絞られ、Task の題名が付く。
+        let unread = storage.load_repository_events_since("repo-a", first, 100).unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].event.kind, "human_send");
+        assert_eq!(unread[0].title.as_deref(), Some("rope 設計"));
+
+        // 分解案: 保存すると台帳に captain_proposed が積まれ、同じリポジトリの未読に入る。
+        let proposal = CaptainProposalRecord {
+            id: "proposal-1".into(),
+            repository_id: "repo-a".into(),
+            root: PathBuf::from("/work/main"),
+            note: Some("実装とテストは 1 本に束ねた".into()),
+            tasks: r#"[{"title":"割り算","goal":"divide を足す","done_when":"テストが通る"}]"#.into(),
+            status: ProposalStatus::Pending,
+            outcome: None,
+            created_at: 5,
+            resolved_at: None,
+        };
+        storage.insert_captain_proposal(&proposal).unwrap();
+        let pending = storage.load_pending_captain_proposals().unwrap();
+        assert_eq!(pending, vec![proposal.clone()]);
+        let unread = storage.load_repository_events_since("repo-a", human, 100).unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].event.kind, "captain_proposed");
+        assert_eq!(unread[0].title, None);
+        assert!(storage.load_repository_events_since("repo-b", human, 100).unwrap().is_empty());
+
+        // 裁く: 台帳に積まれ、pending から消え、二度目はエラー。
+        let resolved = storage
+            .resolve_captain_proposal("proposal-1", ProposalStatus::Approved, r#"{"approved":["割り算"]}"#)
+            .unwrap();
+        assert!(resolved > human);
+        assert!(storage.load_pending_captain_proposals().unwrap().is_empty());
+        assert!(storage
+            .resolve_captain_proposal("proposal-1", ProposalStatus::Rejected, "{}")
+            .is_err());
+        assert!(storage
+            .resolve_captain_proposal("proposal-1", ProposalStatus::Pending, "{}")
+            .is_err());
+        let unread = storage.load_repository_events_since("repo-a", human, 100).unwrap();
+        assert_eq!(
+            unread.iter().map(|event| event.event.kind.as_str()).collect::<Vec<_>>(),
+            vec!["captain_proposed", "proposal_approved"]
+        );
+
+        // ⚑ 帰属の素材: 種類で Task を引ける。
+        storage.append_task_event("space-a", "captain_task", r#"{"proposal":"proposal-1"}"#).unwrap();
+        assert_eq!(
+            storage.load_task_ids_with_event("captain_task").unwrap(),
+            vec!["space-a".to_string()]
         );
         let _ = std::fs::remove_file(&path);
     }

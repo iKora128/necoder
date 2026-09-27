@@ -152,21 +152,36 @@ impl Workspace {
             .map(|slot| slot.repository_key().to_string())
             .and_then(|key| self.integration_slot_for(&key))
             .unwrap_or(self.project_sessions.active);
-        self.create_tasks_in(integration_index, prompt, start, plan, cx);
+        // 2 本以上なら fan-out（舞台に並べて比べる・O23）。
+        let fanout = plan.len() > 1;
+        let jobs = plan.into_iter().map(|task| (prompt.clone(), task)).collect();
+        self.create_tasks_in(integration_index, start, jobs, fanout, cx);
     }
 
-    /// 1 つの依頼から Task を切る（`plan` が 2 本以上なら fan-out・O23）。worktree は**順に**作り、
-    /// 1 本ごとに作成中の行を進める。1 本の失敗で残りを止めない（失敗した行にやり直しを出す）。
-    /// 2 本以上なら舞台に並べる（Fleet の中なら横に・外ならトーストで案内）。
+    /// Captain の分解案の承認（FLEET-V2 §5.5）: 印の付いた行を ＋ Task と同じ流れで切る（作成中の行・
+    /// 取り消し・やり直しも同じ）。行ごとに依頼（委任文）が違うので `jobs` で渡す。舞台は奪わない
+    /// （承認はブリッジの Captain の会話の横で押すので、列を増やして会話を押し出さない）。
+    pub(crate) fn create_proposed_task_jobs(
+        &mut self,
+        integration_index: usize,
+        jobs: Vec<(String, FanoutTask)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_tasks_in(integration_index, project::TaskStart::default(), jobs, false, cx);
+    }
+
+    /// 依頼から Task を切る（`jobs` = 1 本ごとの依頼と切り方）。worktree は**順に**作り、1 本ごとに作成中の
+    /// 行を進める。1 本の失敗で残りを止めない（失敗した行にやり直しを出す）。`fanout` なら作れた分を舞台に
+    /// 並べる（Fleet の中なら横に・外ならトーストで案内・O23）。
     fn create_tasks_in(
         &mut self,
         integration_index: usize,
-        prompt: String,
         start: project::TaskStart,
-        plan: Vec<FanoutTask>,
+        jobs: Vec<(String, FanoutTask)>,
+        fanout: bool,
         cx: &mut Context<Self>,
     ) {
-        if plan.is_empty() {
+        if jobs.is_empty() {
             return;
         }
         let Some(slot) = self.project_sessions.projects.get(integration_index) else {
@@ -176,10 +191,10 @@ impl Workspace {
         let root = slot.worktree.root().to_path_buf();
         let host = slot.worktree.host().clone();
         // 先頭は早送りから、残りは順番待ちで行を出す。
-        let jobs: Vec<(u64, FanoutTask)> = plan
+        let jobs: Vec<(u64, String, FanoutTask)> = jobs
             .into_iter()
             .enumerate()
-            .map(|(position, task)| {
+            .map(|(position, (prompt, task))| {
                 let stage = if position == 0 {
                     CreationStage::Syncing
                 } else {
@@ -187,7 +202,7 @@ impl Workspace {
                 };
                 let id =
                     self.begin_task_creation(&repository_key, &prompt, &start, task.clone(), stage);
-                (id, task)
+                (id, prompt, task)
             })
             .collect();
         cx.notify();
@@ -209,9 +224,8 @@ impl Workspace {
             {
                 return;
             }
-            let fanout = jobs.len() > 1;
             let mut spaces = Vec::new();
-            for (id, task) in jobs {
+            for (id, prompt, task) in jobs {
                 match workspace.update(cx, |workspace, cx| {
                     workspace.enter_creation_stage(id, CreationStage::Worktree, cx)
                 }) {
@@ -632,9 +646,9 @@ impl Workspace {
         let creation = self.chrome.task_creations.remove(position);
         self.create_tasks_in(
             integration_index,
-            creation.prompt,
             creation.start,
-            vec![creation.task],
+            vec![(creation.prompt, creation.task)],
+            false,
             cx,
         );
     }
@@ -833,6 +847,7 @@ mod tests {
             branch: branch.map(str::to_string),
             agent: None,
             title_suffix: None,
+            captain_proposal: None,
         }
     }
 
@@ -869,6 +884,7 @@ mod tests {
             branch: None,
             agent: Some("Codex".to_string()),
             title_suffix: Some("Codex".to_string()),
+            captain_proposal: None,
         };
         assert_eq!(
             auto_branch_plan(&fanout, "task/codex"),

@@ -250,6 +250,63 @@ pub(crate) fn events_since(since_id: i64) -> Result<Value> {
     ))
 }
 
+/// Task の事実層 + digest。GUI 不在時は台帳だけで答える（phase / result_summary は再起動を跨いで残る）。
+/// CLI と MCP の共通。Captain は digest が落ちると提案まで諦めることがあった（2026-09-25 の Codex の実験）。
+pub(crate) fn digest(task_id: &str) -> Result<Value> {
+    anyhow::ensure!(
+        !task_id.trim().is_empty(),
+        "task_id が空です。fleet_list_tasks が返す id を渡してください"
+    );
+    gui_request("digest", json!({ "task_id": task_id })).or_else(|gui_error| {
+        task_by_id(task_id).map(|record| {
+            json!({
+                "task_id": record.id,
+                "title": record.title,
+                "kind": record.kind.as_str(),
+                "phase": record.phase.as_str(),
+                "branch": record.branch,
+                "result_summary": record.result_summary,
+                "gui": format!("offline（{gui_error:#}）"),
+            })
+        })
+    })
+}
+
+/// Captain の分解案（FLEET-V2 §5.5）。worktree は作らない。GUI が居なければ（DB を開ける）DB へ直接置き、
+/// 次の起動で要対応に出る。GUI が居れば（DB がロック中）GUI に頼み、要対応にすぐ出る。
+pub(crate) fn propose_tasks(root: &Path, arguments: &Value) -> Result<Value> {
+    let (tasks, note) =
+        workspace::validate_proposed_tasks(arguments).map_err(|message| anyhow::anyhow!(message))?;
+    let root = paths::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match open_storage() {
+        Ok(storage) => {
+            let record = storage::CaptainProposalRecord {
+                id: workspace::new_proposal_id(),
+                repository_id: project::repository_id_on(LocalHost::shared().as_ref(), &root),
+                root,
+                note,
+                tasks: serde_json::to_string(&tasks).context("分解案を JSON にできない")?,
+                status: storage::ProposalStatus::Pending,
+                outcome: None,
+                created_at: unix_ms(),
+                resolved_at: None,
+            };
+            storage.insert_captain_proposal(&record)?;
+            Ok(json!({
+                "proposal_id": record.id,
+                "status": "pending",
+                "rows": tasks.len(),
+                "message": i18n::t!("captain.proposal_pending_reply"),
+            }))
+        }
+        Err(error) if is_lock_error(&error) => gui_request(
+            "propose_tasks",
+            json!({ "root": root, "tasks": tasks, "note": note }),
+        ),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
     let root = paths::canonicalize(root).context("IntegrationSpace を開けません")?;
     let host = LocalHost::shared();
@@ -865,20 +922,8 @@ fn run(args: &[String]) -> Result<()> {
                 return Err(usage_error("digest"));
             };
             let task = resolve_task(task)?;
-            // GUI 不在時は台帳のみで答える（phase/result_summary は再起動を跨いで残る）。
-            let digest =
-                gui_request("digest", json!({ "task_id": task.id })).unwrap_or_else(|gui_error| {
-                    json!({
-                        "task_id": task.id,
-                        "title": task.title,
-                        "kind": task.kind.as_str(),
-                        "phase": task.phase.as_str(),
-                        "branch": task.branch,
-                        "result_summary": task.result_summary,
-                        "gui": format!("offline（{gui_error:#}）"),
-                    })
-                });
-            print_json(&digest);
+            // GUI 不在時は台帳のみで答える（MCP の `fleet_digest` と同じ関数）。
+            print_json(&digest(&task.id)?);
         }
         Some("events") => {
             let since = argument(1)

@@ -511,6 +511,7 @@ mod tests {
             created_at_ms: 0,
             linked: true,
             parent: None,
+            captain_origin: false,
         };
         assert_eq!(
             space.diff_base(),

@@ -27,12 +27,16 @@
 | ↳ **引用**（エディタで選んだ行を `path:10-14` と抜粋のコードブロックにして composer の末尾へ足す。送信はしない・その下に注記を書く。⌥⌘K・O29 / D04。変更レビューの**注記**とは別＝保存しない） | `QuoteSelectionInThread` / `quote_lines` / `AgentPanel::append_quote_to_composer` | 引用 | Quote |
 | ↳ **プレビューチップ**（ツールカードからプレビュー表示で開く） | `preview_chip` | プレビュー | Preview |
 | **Fleet サイドバー**（状態一覧） | `fleet_sidebar`（← `herd`） | Fleet サイドバー | Fleet sidebar |
+| **AI スレッド一覧**（Editor の左カラム・全プロジェクトのスレッド状態。レールの activity アイコン・2026-09-24） | `render_herd_sidebar` / `show_herd`（`herd` は code 専用）・設定 `rail.threads` | AI スレッド一覧 | AI threads |
 | **系譜グラフ** | `lineage` / `graph` | 系譜 | Lineage |
 | ↳ 表示（4 種） | `GraphView::{Fan,Tree,Card,Hub}` | 扇形 / ツリー / カード / ハブ | Fan / Tree / Card / Hub |
 | **舞台**（Fleet 中央。Task カードを 1〜3 枚） | `stage` / `StageLayout::{One,Two,Three}` | 舞台 | Stage |
 | **Task カード**（舞台の 1 枚 = 1 Task。← セル） | `TaskCard` | Task カード | Task card |
-| ↳ **Task タブ**（カードの中の面。← FleetPane / 面） | `TaskTab::{Thread(id),Diff,Terminal(id),Files}` | スレッド / 変更 / ターミナル / ファイル | Thread / Diff / Terminal / Files |
-| **変更レビュー**（worktree の全変更を 1 画面で読む面。Fleet の「変更」タブの中身もこれ・session に 1 枚） | `review_view::ReviewView` / `OpenReview` | 変更レビュー | Review |
+| ↳ **スレッドタブ**（カードの中の会話。ペインバーの左） | `FleetPane::Agent` + `AgentPanel` の thread | スレッド名 | Thread name |
+| ↳ **サイドペイン**（会話の横に開く面。ペインバーの右のトグル。← Task タブ / FleetPane / 面） | `stage_side()`（`FleetPane::{Diff,Shell,Editor}`） | 変更 / ターミナル / ファイル | Changes / Terminal / Files |
+| **ブリッジ**（統合先 main のカード = Fleet の家。← Captain カード。2026-09-20: Captain は main に住むスレッドなので別カードにしない） | 統合先の slot + `FleetPane::{Formation,CaptainLog}` | ブリッジ（UI には出さない語。見えるのは `⚑ Captain` タブと `編隊図`） | Bridge |
+| ↳ **編隊図**（ブリッジのサイドペイン。ハブ / 扇形 / ツリー / カード。← 系譜グラフの展開表示。舞台の上に縦に展開する旧表示は廃止・系譜の帯は 1 行のまま残る） | `FleetPane::Formation` / `render_formation` | 編隊図 | Formation |
+| **変更レビュー**（worktree の全変更を 1 画面で読む面。Fleet の「変更」サイドペインの中身もこれ・session に 1 枚） | `review_view::ReviewView` / `OpenReview` | 変更レビュー | Review |
 | ↳ **比較の基準**（Task の base / HEAD / ブランチの分岐点 / コミット） | `project::review::ReviewBase` | 比較 | Compare |
 | ↳ **見た**（ファイルに付ける既読の印。付けると畳む。見た時の基準と差分の指紋に結び付き、変わったら外れる） | `reviewed` / `ReviewedMark` | 見た | Viewed |
 | ↳ ↳ **見た後に変更あり**（見た印を付けた後でファイルの差分が変わった。印は外れて畳みも開く） | `reviewed_stale` | 見た後に変更あり | Changed since viewed |
@@ -41,7 +45,7 @@
 | ↳ **注記トレイ**（変更レビューの下端。件数・一覧・送る） | `render_tray` | 注記 | Notes |
 | ↳ **送る**（注記を 1 通のプロンプトにまとめて宛先のスレッドへ） | `ReviewEvent::SendNotes` / `AgentPanel::send_user_prompt_to` | 送る / 未解決だけ再送 | Send / Resend unresolved |
 | ↳ **ピン**（舞台に並べる Task を選ぶ） | `pinned` | 並べる | Pin |
-| **系譜の帯**（中央上の薄い系譜・⌄ で 4 表示に展開） | `lineage_strip` | 系譜 | Lineage |
+| **系譜の帯**（舞台の上の 1 行の系譜・押すとその Task へ。4 表示の編隊図はブリッジのサイドペイン） | `lineage_strip` | 系譜 | Lineage |
 | **次へ**（phase に応じた唯一の主操作ボタン） | `next_action` | （phase 別の語） | （phase 別） |
 | **＋ Task**（1 プロンプト = 1 worktree のダイアログ） | `new_task_dialog` | ＋ Task | + Task |
 | ↳ **並べて比べる**（fan-out。1 つの依頼を選んだエージェントごとの Task へ・舞台に並べる・O23） | `plan_fanout` / `FanoutTask` / `create_prompted_tasks` | 並べて比べる | Compare side by side |
@@ -89,7 +93,12 @@
 | **要対応**（Fleet サイドバー最上段・裁く列。← 管制の要対応キュー） | `AttentionItem` / `attention_queue` | 要対応 | Attention |
 | **統合パイプライン**（TaskPhase 列の帯） | `render_pipeline` | 統合パイプライン | Integration pipeline |
 | **ニュース**（task_events の鏡・時系列） | `NewsItem` / `NewsKind` | ニュース | News |
-| **Captain**（任命制の采配スレッド。コードを書かず fleet CLI/MCP で采配・integrate は人間。← 監督） | `captain`（`NewsKind::Captain`・設定 `captain_agent`） | Captain | Captain |
+| **Captain**（任命制の采配スレッド。コードを書かず Captain 用の MCP で采配・Task を切るのは承認後・integrate は人間。← 監督） | `captain`（`NewsKind::Captain`・設定 `captain_agent`） | Captain | Captain |
+| ↳ **Captain の席**（Captain スレッドに付く決まり: 道具は Captain 用の MCP だけ・権限の問いには necoder が答える・編集と shell は断る） | `agent_panel::SeatPolicy`（id `captain`）・`necoder mcp --captain` | （UI には出さない語） | — |
+| ↳ **分解案**（Captain が出す「この N 本に分けたい」。承認した行だけ worktree とブランチになる） | `CaptainProposal`・`fleet_propose_tasks`・DB `captain_proposals` | 分解案 | Split / proposal |
+| ↳ **分解案カード**（要対応に出る承認の面。行ごとの印・承認 / 却下） | `AttentionKind::Proposal` | ⚑ Captain の分解案 · N 本 | ⚑ Captain's split · N Tasks |
+| ↳ **読んだ位置**（Captain が台帳をどこまで読んだか。再起動を跨いで未配達の知らせを残す） | DB `captain_cursors` | （UI には出さない語） | — |
+| ↳ **会話の交代**（膨らんだ Captain の会話を捨て、同じタブで新しい会話を始める。前置きが続きを渡す） | `AgentPanel::rotate_thread_session` | （transcript の区切り 1 行） | — |
 | ↳ **介入**（Captain を通さず Task に直接書く。台帳に残る） | `human_send`（`NewsKind::HumanSend`） | （宛先チップで示す） | — |
 | ↳ **采配ログ**（Captain の判断と実行の履歴） | `NewsKind::Captain` | 采配ログ | Captain log |
 | **集約気分**（編隊の最悪状態に追従する 1 匹） | `fleet_mood_mascot` | — | — |
@@ -124,7 +133,7 @@
 | ↳ **Web Inspector**（Web タブのツールバーの `</>`・自分の localhost のアプリを調べる開発者向けの道具。Design モードは使わない。macOS は WebKit の物（窓の題名は OS が付ける「Webインスペクタ」）を necoder の窓の中に付けず**別の窓**で開く・Windows は WebView2 の DevTools。「DevTools」とは書かない） | `ToggleWebInspector` / `WebViewView::toggle_devtools` / `webview_view::inspector` | Web Inspector | Web Inspector |
 | ↳ **内蔵の配信**（HTML ファイルを Web タブで開くための、necoder の中の小さな静的配信。`127.0.0.1`・token 付きの URL・そのファイルのフォルダだけ・使う Web タブがある間だけ動く） | `webview_view::static_server` / `StaticHosting` / `StaticMount` / `Workspace::open_static_web_tab` / `OpenHtmlInWebTab` | 内蔵の配信 / Web タブで開く | Built-in server / Open in Web tab |
 | **ne コマンド**（ターミナルから開く CLI・`code`/`cursor` 相当） | `cli_shim`（シム生成）/ `necoder cli`（実体） | ne コマンド | ne command |
-| **ターミナル**（下ドックの統合ターミナル。Task タブの Terminal と同じ実体） | `terminal_view::TerminalView` / `TerminalDock` | ターミナル | Terminal |
+| **ターミナル**（下ドックの統合ターミナル。Task カードの「ターミナル」サイドペインと同じ実体） | `terminal_view::TerminalView` / `TerminalDock` | ターミナル | Terminal |
 | ↳ **ターミナル内検索**（⌘F・scrollback を含む。エディタの「検索」= バッファ内検索とは別） | `terminal::Find` / `terminal_view::search` | ターミナル内を検索 | Find in terminal |
 | ↳ **ターミナルのリンク**（`path:line` と URL・OSC 8。URL を開く受け口は 1 か所） | `TerminalLink` / `TerminalEvent::OpenUrl` / `open_terminal_url` | （下線のみ） | (underline only) |
 | ↳ **どこからでも呼べるターミナル**（⌃`・どの画面の上にも浮かべる・ホームで開く・プロジェクトに紐付かない・隠しても止めない） | `terminal_float` / `FloatingTerminal` / `ToggleFloatingTerminal` | ターミナル: どこからでも（浮かべる） | Floating terminal |
@@ -153,12 +162,12 @@
 
 | 禁止 | → 正 | 理由 |
 |---|---|---|
-| `herd` / herd サイドバー | `fleet_sidebar` / Fleet サイドバー | Fleet に統一（`herd` は UI に一度も出ない code 専用語） |
+| `herd` / herd サイドバー | `fleet_sidebar` / Fleet サイドバー（Editor の左カラムでは AI スレッド一覧） | Fleet に統一（`herd` は UI に一度も出ない code 専用語） |
 | 監督 / `coordinator` / Coordinator | Captain / `captain` | Fleet の比喩に合わせ中核機能として改名（2026-09-12）。旧設定キー `coordinator_agent` の読み替えは作らない |
-| セル / `FleetPane` / surface | Task カード / `TaskTab` | 同じ worktree のターミナルが別セルになって増殖していた。全部 Task の中のタブ（FLEET-V2 §3.5） |
+| セル / `FleetPane` / surface | Task カード（スレッドタブ + サイドペイン） | 同じ worktree のターミナルが別セルになって増殖していた。全部 Task の中へ（FLEET-V2 §3.5） |
 | 作業 / 作業ツリー / 列 / ペイン / 面 / 配置（`workbench` / `WorkColumn` / `WorkPane` / `WorkSurface` / `RepositoryLayout`） | 廃止 | 0.1.15 の作業タブは実機で取り回しが悪く降格 → FLEET-V2 で削除 |
-| 管制（中央タブ）/ `FleetCenterView` | 要対応（サイドバー常設）+ Captain カード | 中央タブ 3 面は「今どこを見ているか」を失わせる。**リモート管制**の名前だけ P9 完了まで据え置き |
-| ＋ACP / ＋Terminal / ＋Worktree | ＋ Task（と Task タブ行の ＋▾） | 押す前に「どれか」を考えさせない。1 プロンプト = 1 worktree |
+| 管制（中央タブ）/ `FleetCenterView` | 要対応（サイドバー常設）+ ブリッジ（統合先のカード） | 中央タブ 3 面は「今どこを見ているか」を失わせる。**リモート管制**の名前だけ P9 完了まで据え置き |
+| ＋ACP / ＋Terminal / ＋Worktree | ＋ Task（会話はスレッドタブ隣の ＋・端末はターミナルペイン見出しの ＋） | 押す前に「どれか」を考えさせない。1 プロンプト = 1 worktree |
 | Multi Agent / 編隊（UI） | Fleet | Fleet を新概念としてユーザーにも前面 |
 | river / リバー | hub / Hub | 系譜の表示は Fan/Tree/Card/Hub に確定（River は廃止済み） |
 | space（一般的なレール枠の意味） | project / `ProjectSlot` | `TaskSpace` / `IntegrationSpace` という型名に限り使用 |

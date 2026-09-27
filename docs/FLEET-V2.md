@@ -6,6 +6,7 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
 `FLEET-ARCHITECTURE.md` のまま有効で、本文書はその上に画面と Captain を載せ直す。
 ビジュアルの正は `mock/fleet-v2.html`（`#l1` 1 枚 / `#l2` 2 列 / `#l3` 3 列 / `#captain` Captain / `#new` ＋Task）。
 比較調査と経緯は `docs/research/fleet-ux-2026-09.md`。
+Herdr / Orca の深掘り・采配役（Captain 型エージェント）の製品と研究・ゲームの類推の是非は `docs/research/captain-orchestrators-2026-09.md`（2026-09-20 調査・Captain の P0〜P2 の改善表つき）。
 
 ## 0. 一言で
 
@@ -37,14 +38,15 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
 | **要対応**（サイドバー最上段の裁く列） | `attention_queue` | 要対応 | Attention | 管制タブから移設 |
 | **舞台**（中央。Task カードを 1〜3 枚） | `stage` / `StageLayout::{One,Two,Three}` | 舞台 | Stage | 旧グリッド。上限 3 |
 | **Task カード**（舞台の 1 枚） | `TaskCard` | Task カード | Task card | 旧セル |
-| ↳ **Task タブ**（カードの中の面） | `TaskTab::{Thread(id),Diff,Terminal(id),Files}` | スレッド / 変更 / ターミナル / ファイル | Thread / Diff / Terminal / Files | 旧 FleetPane 5 種・作業タブの面 |
+| ↳ **スレッドタブ**（カードの中の会話。ペインバーの左） | `FleetPane::Agent` + `AgentPanel` の thread | スレッド名 | Thread name | 旧 Task タブのスレッド分 |
+| ↳ **サイドペイン**（会話の横に開く面。ペインバーの右のトグル。← Task タブ / FleetPane / 面） | `stage_side()`（`FleetPane::{Diff,Shell,Editor}`） | 変更 / ターミナル / ファイル | Changes / Terminal / Files | 旧 Task タブの面の分。タブではなく分割 |
 | ↳ **ピン**（並べる Task を選ぶ） | `pinned` | 並べる | Pin | サイドバー行の `◫` |
 | **系譜の帯**（中央上の薄い系譜） | `lineage_strip` | 系譜 | Lineage | ⌄ で従来の 4 表示に展開 |
 | **次へ**（phase に応じた唯一の主操作ボタン） | `next_action` | （phase 別の語） | （phase 別） | §4.3 |
 | **＋ Task**（1 プロンプト = 1 worktree） | `new_task_dialog` | ＋ Task | + Task | 旧 ＋ACP / ＋Terminal / ＋Worktree を統合 |
 | **準備スクリプト**（worktree 作成直後に 1 回） | `worktree_setup` | 準備 | Setup | `.necoder/worktree-setup.sh` |
 | **介入**（Captain を通さず Task に直接書く） | `human_send`（`NewsKind::HumanSend`） | （宛先チップで示す） | | 台帳に積む |
-| **采配ログ**（Captain の判断と実行の履歴） | `NewsKind::Captain` | 采配ログ | Captain log | ニュースの Captain 行 + Captain カードのタブ |
+| **采配ログ**（Captain の判断と実行の履歴） | `NewsKind::Captain` | 采配ログ | Captain log | ニュースの Captain 行 + ブリッジの采配ログペイン |
 
 **廃止語**: 監督 / Coordinator（→ Captain）・セル / `FleetPane`（→ Task カード / Task タブ）・
 作業 / 列 / ペイン / 面 / `WorkColumn` / `WorkPane` / `WorkSurface`（→ 廃止）・
@@ -58,13 +60,16 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
       |  要対応 N        ⏎ で先頭へ    |  系譜の帯（64px・⌄ で展開・⌘⇧G で畳む）
       |   [◐ tab色分け 45s 許可/常に/拒否] |  舞台: Task カード × 1（既定）/ 2 / 3
       |   [✓ gpui起動  変更を見る/Integrate]|   ┌ ● 名前 ⎇ branch [phase] …… [次へ] ⤢ ⋯
-      |  necoder ⎇ main · 3 Tasks       |   │ ●スレッド | ●レビュー | 変更 +N −M | ターミナル | ファイル | ＋▾
-      |   ⌂ main     統合先 · 保護        |   │ transcript / diff / PTY / ツリー
+      |  necoder ⎇ main · 3 Tasks       |   │ ●スレッド ●レビュー ＋ ……… ◨ 変更 +N −M | ターミナル | ファイル
+      |   ⌂ main     統合先 · 保護        |   │ 会話（transcript）│ サイドペイン（diff / PTY / ツリー）
       |   ⠿ rope設計 task/rope ⚑ +214 −87 |   │ 宛先チップ ／ トークン
       |     › 頼んだこと                  |   └ composer
       |     いま何を / どう終わったか       |  下段: ニュース / ターミナル（既存）
       |  ＋ Task（⌘N）／ 凡例             |
 ```
+
+**Fleet の家はブリッジ**（統合先 main のカード・§3.6）: `⚑ Captain` の会話 | 編隊図。レールで main を選んで Fleet に入ると
+ここが出る。Task を選ぶと上図の Task カード（会話 | サイドペイン）に替わり、⌘0 / `⚑ 編隊図` / サイドバーの Captain バーで戻る。
 
 ### 3.0 入口（Fleet をどこから開くか）
 
@@ -75,13 +80,17 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
 1. **titlebar 左のモード切替**: プロジェクトピルの右隣に `Editor | Fleet` のセグメント（`Workspace::mode`）。
    「今どちらの面にいるか」は「どのプロジェクトか」の隣にあるべき情報。右上のトグルは廃止。
    Fleet 側のセグメントに **要対応の件数バッジ**（`◐ 2`・err 色ボーダー・0 なら出さない）を載せ、Editor で作業中でも
-   裁くべきものがあれば目に入る。数えるのは承認待ち・質問待ちのスレッド + Failed な Task（質問待ちは O12 で追加・
-   macOS では同じ数を全窓の合計で Dock のバッジにも出す）。
+   裁くべきものがあれば目に入る。数えるのは承認待ち・質問待ちのスレッド + Failed な Task + 裁いていない Captain の分解案
+   （質問待ちは O12 で追加・分解案は §5.5・macOS では同じ数を全窓の合計で Dock のバッジにも出す）。
 2. **レールに Fleet の入口を置く**（herd サイドバーは Fleet の一部になるので単独表示を廃止・`ToggleHerdSidebar` 削除）。
    *実装時の訂正（2026-09-12・F0.5）*: 「レールの ⚡」は**そもそも存在しなかった**（`rail.herd` 設定だけが孤児で、
    どのアイコンにも結ばれていなかった）。よってアイコンを新設し、設定キーは `rail.fleet` に改名。
    絵は同梱済みの `layout-grid.svg`（旧 Fleet トグルと同じ＝入口が 2 つに見えない。`zap.svg` は同梱していない）。
    要対応があれば err 色・Fleet 表示中は accent。
+   *訂正（2026-09-24・本人要望）*: 「herd の単独表示を廃止」は撤回。Fleet から戻ると `show_herd` が残って Editor の左カラムに
+   全プロジェクトのスレッド一覧が出ており、本人がそれをレールから開きたいと言った。レールに **AI スレッド一覧**
+   （`activity.svg`・設定 `rail.threads`・UI-SPEC §2）を置き、Fleet 中は同じアイコンが Fleet サイドバーへの帰り道になる。
+   Fleet の入口は引き続き `layout-grid.svg` の 1 つだけ。
 3. **既定キー**: `⌘⇧M`（Mode）で Editor ⇄ Fleet。母語 Zed 互換の確定待ちの枠内で、Zed 未使用のキーを選ぶ。
    Fleet 内の ⌘0..9 / ⌘N（§7）は Fleet 文脈のみ。
 4. **初回の導線**: 2 本目の Task を切った瞬間（または Captain を任命した瞬間）に一度だけトースト
@@ -96,7 +105,7 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
 
 上から 5 段。左カラムの排他規則（Todo / git / エクスプローラを開いていればそれ）は solo と同じで変えない。
 
-0. **Captain バー**（`captain_bar`・最上段・高さ 46px）: `⚑` + `Captain` + agent 名 + `⎇ main` + `⌘0`、2 行目に最後の采配 1 行（✳）。クリックで Captain カードへ。未任命なら「Captain を任命する」（設定の Captain 節へ）。Task 行の並びに混ぜない（Task ではないので）。
+0. **Captain バー**（`captain_bar`・最上段・高さ 46px）: `⚑` + `Captain` + agent 名 + `⎇ main` + `⌘0`、2 行目に最後の采配 1 行（✳）。クリックでブリッジ（§3.6）の Captain の会話へ。未任命なら「未任命 — 押して任命する」で、押すとブリッジに任命の面が出る（§5.7）。Task 行の並びに混ぜない（Task ではないので）。
 1. **要対応**（`attention_queue`）。並び: Blocked 経過時間順 → Failed → レビュー待ち（radar 済み）→ 完了・未確認。
    カード = 状態グリフ + 名前 + 経過 / 1 行の内容（permission 文・エラー・digest）/ **Captain の推薦（あれば・✳ 付き）**
    / インライン操作。操作は phase ごとに固定:
@@ -121,7 +130,8 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
      ホバーで `◫`（ピン = 舞台に並べる・F2）と `🗑`。ダブルクリックで改名（既存）。
      ピンと舞台の列数は窓セッションに残る（O21・2026-09-26・再起動を越える。消えた Task のピンは読み飛ばし、次にピンする時に枠から外す）。
    - **統合先行**（`⌂ main · 統合先 · 保護`）は Captain の次。2 段目に「N 本が分岐中 · 今日 M 件統合」。クリックで
-     舞台に main の Task カード（タブ = ターミナル / ファイル / 変更（= 今日の統合）。スレッドは Captain のみ）。
+     舞台に main の Task カード。*訂正（2026-09-19）*: スレッドは隠さない。main の panel は Editor で普段使っている会話そのものなので、
+     Fleet に入った途端に見えなくなる方が害が大きい（ペインバーは他の Task と同じ）。
      統合先は**メインの作業ツリー**（linked worktree でない slot・`TaskSpace::linked`）。同じリポジトリに統合先扱いの
      slot が複数ある時（`task/` でない linked worktree を ⌘O で開いた等）もメインを選び、サイドバー・＋Task・Captain で
      同じ 1 つ（`integration_slot_for`・O21。以前はサイドバーだけ最後の 1 つを選んでいた）。
@@ -137,7 +147,7 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
      上げる（色相は使わない）。選んでいる間だけ Task 行の上に `N 本を選択 · 休ませる · 舞台に並べる · 片付け… · ×`
      （bg2 の帯・チップは枠 1px）。休ませる = 静かなエージェントをまとめて止める（トーストは 1 回）/ 舞台に並べる =
      先に選んだ 3 本まで（多ければ「先に選んだ 3 本を並べました」）/ 片付け… = 片付けの画面（O22）を、選んだ Task に
-     印を付けて開く（消すのは画面で失うものを数えてから）。操作の後と普通のクリックで選択は外れる。窓を閉じるまで
+     印を付けて開く（消すのは画面で失うものを数えてから）。操作の後と普通のクリックで選択は外れる。窓を閉じるまで（保存しない）。
    - **親子**（O21・A07・2026-09-26）: 起点に別の Task のブランチを選んで作った Task は、その Task の**子**（台帳の
      `task_parents`・CLI の JSON の `parent`）。子は親の直後に 1 段（14px）下げて `↳`（fg2）を付けて並ぶ（兄弟の間は
      今の並べ替えのまま・親が一覧に居ない子と輪になった親子は上の段）。⋯ の「休ませる」は子孫の分も止め、子がいれば
@@ -151,6 +161,7 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
      worktree と今切ったブランチを消す（既にあったブランチは消さない。走っている git や準備スクリプトを途中で止める口は
      Host に無いので、止めずに捨てる）。作れなかった行は `作れませんでした: <理由の 1 行目>`（warn）+ `やり直す`（同じ依頼・
      同じ詳細で、その行のリポジトリの統合先からもう一度）+ `×`（閉じる）で残る。全文はトーストにも出す。窓を閉じるまで。
+     Captain の分解案の承認（§5.5）で切る Task も同じ行で出る（行ごとに順に作り、作れなかった行だけやり直せる）。
 3.5 **外部の worktree**（O21・Task 行の下・`▾ 外部の worktree（N）` で畳める）: 選んでいるリポジトリの worktree のうち
    Task になっていないもの = レールに無いもの（**Orca・Claude Code・手で `git worktree add` したもの**も git の一覧から拾う）と、
    レールにあるが統合先扱いのもの（メイン以外）。行 = `◌`（中立）+ フォルダ名 + `⎇ branch` + `取り込む`。
@@ -162,13 +173,17 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
 
 ### 3.3 系譜の帯
 
-高さ 64px。main の線 + 分岐 N 本（Task 色）+ 統合済みは淡色で main に戻る + 先端に状態グリフ + 右に名前チップ。
-チップ / 先端クリックで舞台へ。右端 ⌄ で従来の 4 表示（扇形 / ツリー / カード / ハブ）に展開（高さは今の系譜グラフと同じ）。
-⌘⇧G で畳む（畳むと舞台に面積が戻る）。データは既存 `fleet_lanes`。
+*2026-09-20 作り直し*: 舞台の上は **1 行（30px）だけ**: `系譜` + 帯（main の `━` / 分岐 `┬━ 名前` / 統合済み `╰━`・Task 色・
+クリックで舞台の選択へ）+ 列数トグル（`▯ ▯▯ ▯▯▯`）+ `⚑ 編隊図`。
+編隊図そのもの（ハブ / 扇形 / ツリー / カード）は**ブリッジのサイドペイン**に住む（§3.6）。旧仕様の「⌄ で舞台の上に展開」は
+廃止した — 縦に積むと Task カードが潰れ（高さ 360px の図 + 下段 290px で会話の面積がほぼ 0）、畳んだままだと Fleet らしい絵が
+どこにも出ないので、実機では常に畳まれ「ただのチャット」に見えていた。`⚑ 編隊図` と ⌘⇧G（`ToggleLineage`）は
+「ブリッジへ行って編隊図を開く / ブリッジで開いていれば閉じる」。データは既存 `fleet_lanes`。
 
 ### 3.4 舞台
 
-`StageLayout::{One,Two,Three}`（既定 One・⌘⇧1/2/3・titlebar 右のトグル）。**4 枚以上は並べない**（herdr の 3 本上限）。
+`StageLayout::{One,Two,Three}`（既定 One・⌘⇧1/2/3）。*訂正（2026-09-19）*: トグル（`▯ ▯▯ ▯▯▯`）は**系譜ヘッダの右**に置く。
+専用の 30px 行は廃止し、舞台の上は「系譜 + 帯 + 列数 + ⚑ 編隊図」の 1 行だけにした（§3.3・縦 64px を舞台へ返す）。**4 枚以上は並べない**。*訂正（2026-09-21）*: 旧記述の「herdr の 3 本上限」は誤りで、herdr 本体に pane 数の上限は無い。出所は Zenn 記事の著者が自作 hook に入れた設定値（`MAX_COLUMNS=3` / `MIN_COLS=50`・152 桁の端末に 50 桁 × 3 列）。上限 3 の判断は変えない — 根拠は 1 利用者の経験則、カードの最小幅、監督制御の研究の相場（直接の制御は約 3 機・`docs/research/captain-orchestrators-2026-09.md`）。
 One = サイドバーで選んだ Task を差し替え表示。Two / Three = ピンした Task を左から（不足分は選択中で埋める）。
 カードの幅は等分・最小 420px（下回るなら列数を落とす）。「拡大 ⤢」は One に切り替えるだけ（旧サムネイル列は廃止）。
 舞台から外れた Task はサイドバーから戻る。閉じても実体（ProjectSession / AgentPanel / PTY）は残る（既存不変条件）。
@@ -184,22 +199,56 @@ One = サイドバーで選んだ Task を差し替え表示。Two / Three = ピ
   「統合先 `main` を取り込んで競合を解消し、コミットして」（競合したファイルの一覧つき・統合はしない）を送る（作業中なら
   終わってから流れる・スレッドが無ければ立てる）。送ったら覚えを消すので、次へは「統合」に戻り、直った後に押せば
   下見からやり直す（まだ競合していればまた覚える）。統合先は触らない。
-- **Task タブ行**（高さ 30px）: `● スレッド名`（複数可・色はスレッド色・上線 2px）| 区切り | `変更 +N −M` | `ターミナル N` | `ファイル` | 右端 `＋▾`。
-  `＋▾` = スレッドを足す / ターミナルを足す / ファイルを開く。**同じ worktree に何本足しても Task は 1 枚のまま**。
-  スレッドタブの × は既存 `remove_thread`（archive まで 1 本）。
-- **本体**: スレッド = 既存 `AgentPanel` を **chrome を畳んで**埋め込む（自前のスレッドタブ行は描かない・メタ行 1 行・
-  トークンメーターは畳まない）。変更 = 変更レビュー（UI-SPEC §14・Task の base が既定の比較）。ターミナル = `TerminalDock.detached` の名札で PTY を持ち回る
-  （既存）。ファイル = worktree のツリー（クリックで solo のエディタに開く。Fleet 内にエディタは持たない）。
+- **ペインバー**（高さ 30px・2026-09-19 に作り直し）。旧「Task タブ行」は *誰と話すか*（スレッド）と *何を見るか*
+  （変更 / ターミナル / ファイル）という別の軸を 1 本のタブに混ぜ、用途の読めない `＋会話 ＋端末` を同じ列に並べていた。
+  さらにタブは排他なので「会話を見ながら diff や端末を横に置く」ができなかった。2 つの軸を左右に分ける:
+  - **左 = スレッドタブ**（`● スレッド名`・色はスレッド色・選択は上線 2px）+ 直後に `＋`（= 会話を足す、だけ。
+    同じ worktree に足すので Task は 1 枚のまま）。タブはスレッドだけ。選択中のタブに `×`（既存 `close_thread`・
+    ⌘⇧T で戻せる）。最後の 1 本には出さない。`＋` で足した panel が空になったら一覧から外し、会話は残っている方へ移す。
+  - **右 = サイドペインのトグル**（`◨ 変更 +N −M | ターミナル N | ファイル`・角丸のセグメント。タブの見た目にしない）。
+    `+N −M` = `git diff --shortstat <base_oid>`（base が無い統合先は HEAD）を git 更新と同じ background で取り
+    `RepositoryController.shortstat` に置く。サイドバーの Task 行と変更ペインの見出しも同じ値を読む（0/0 と未取得は出さない）。
+    押すと**会話の右に分割で開く**（マルチプレクサの split）。同じものをもう一度押すか、ペイン見出しの `×` で閉じる。
+    開けるサイドペインは 1 つ（3 分割にはしない）。
+  - カード幅が 900px 未満（2〜3 列）では分割せず、サイドペインが本体の全面に出る。スレッドタブを押すと会話へ戻る。
+- **本体** = `会話 | 境 | サイドペイン`（サイドは既定 44%・境のドラッグで 25〜65%・全カード共通・保存はしない）。会話 = 既存 `AgentPanel` を **chrome を畳んで**埋め込む
+  （自前のスレッドタブ行は描かない・トークンメーターは畳まない）。サイドペインは見出し 28px（名前 + 補足 + `×`）+ 中身:
+  - 変更 = **変更レビュー**（UI-SPEC §14・O6・Task の base が既定の比較）。左にファイルの木（状態の 1 文字 + 名前 +
+    `+N −M`）、右に色付きの diff。行コメントと注記トレイ（O7）もそのまま使え、注記は隣の会話（スレッド）へ 1 通で送れる
+    ＝ Fleet から出ずに読んで直させられる。ファイルを編集する操作（「エディタで開く」）だけ Editor へ出る。見出しの補足は
+    `N ファイル` と `+N −M`（`git diff --numstat/--name-status <base_oid>` + untracked を git 更新の background で取り
+    `RepositoryController.task_files` に置く。`+N −M` はその合計）。開いた時に `activate_review` が基準を渡して読み込ませる
+    （描画中に git を叩かない）。*2026-09-20 の訂正*: F2 は `GitPanel` の Entity をそのまま埋めていたが、`GitPanel` は描画を
+    持たない（本体は active session だけを描く `render_git_panel`）ので、**実機では中身が空だった**。隔離 offscreen の実画面で
+    発覚し、一度はファイルの一覧（押すと Editor で diff）に替えた。*2026-09-27（統合）*: O6 の変更レビューをこのペインに
+    載せ直した（ファイルの一覧はレビューの無い session の予備としてだけ残る）。
+  - ターミナル = 見出しに Task 内の通番チップ `1 2 ＋`（**端末を足すのはここ**）と `⎇ branch`。PTY は
+    `TerminalDock.detached` の名札で持ち回る（既存）。1 本も無ければトグルを押した時に 1 本作る。
+  - ファイル = worktree のツリー（▸/▾・git の 1 文字と色はエクスプローラと同じ語彙。クリックで solo のエディタに開く。
+    Fleet 内にエディタは持たない）。
 - **composer**: 宛先チップ `● スレッド名 ／ プロジェクト ⎇ branch` + トークン `used / limit` + 入力枠（Task 色の枠）
   + ピル（Agent / model · effort / 承認モード）。既存そのまま。
 
-### 3.6 Captain カード
+### 3.6 ブリッジ（統合先のカード = Fleet の家）
 
-Task カードと同じ器で、ヘッダは `⚑ Captain ⎇ main · <agent>`、phase ピルは「次のイベントで起きる · 直近 HH:MM」。
-タブ = `Captain`（スレッド）| `采配ログ N` | `Task N`（自分が起動した Task の一覧・クリックで舞台へ）。
-transcript には人間の発話・Captain の思考（✳）・fleet コマンドの実行（⏺ / ⎿）・**台帳イベントの受信**
-（「イベント · 14:05（台帳）」の灰色カード。人間の発話と区別する）・Captain の報告が時系列で出る。
-composer の宛先は `⚑ Captain ／ プロジェクト ⎇ main`。ピルに「采配のみ · integrate は人間」を常時表示。
+*2026-09-20 作り直し*: 旧「Captain カード」（⌘0 の時だけ舞台に出る別実装のカード）は廃止し、**統合先（main）のカードそのものを
+ブリッジにした**。Captain は「main に住むただの ACP スレッド」（§5.1）なので、スレッドタブとして座るのが素直で、
+別のカード実装・`captain_space` / `captain_tab` の状態は要らなかった。レールで main を選んで Fleet に入ると最初に見えるのがここ。
+
+- **ペインバーの左**: 先頭に `⚑ Captain`（accent 色）→ 続けて main の通常スレッド → `＋`。
+  - 任命済み: `⚑ Captain` = main の panel の Captain スレッド（名前で再利用・通常スレッドの並びには二重に出さない）。
+  - 未任命: 同じ位置が `⚑ Captain を任命`（fg2）。押すと**会話ペインに任命の面**が出る（§5.7）。設定画面へは飛ばさない。
+  - ⌘0 / サイドバーの Captain バー / このタブはすべて同じ入口（`focus_captain`）。
+- **ペインバーの右**: `◨ 編隊図 | 采配ログ N | 変更 +N −M | ターミナル N | ファイル`。
+  - **編隊図**: 既存の 4 表示（ハブ / 扇形 / ツリー / カード）をペインの中に描く。表示切替はペイン見出しのチップ、補足に `N Tasks`。
+    ノード / ラベルのクリックでその Task の舞台へ。**何も選んでいない統合先は編隊図を開いておく**（`stage_side` の既定）。
+    × で閉じたら勝手に開き直さない。ハブはペインいっぱいに割合座標で描き、任命済みなら中心が `⚑ Captain · <agent> · N エージェント`。
+  - **采配ログ**: ニュースの Captain 行だけを時系列で（旧 Captain カードのタブを移設）。補足に「采配のみ · 統合と承認は人間が操作」。
+  - 旧「Task N」（名前だけの一覧）は編隊図とサイドバーで足りるので廃止。
+- ヘッダの phase ピルは Task の phase ではなく役割（`統合先 · 保護`）。「次へ」は出さない。
+- transcript には人間の発話・Captain の思考（✳）・fleet コマンドの実行（⏺ / ⎿）・**台帳イベントの受信**
+  （「イベント · 14:05（台帳）」の灰色カード。人間の発話と区別する・未実装）・Captain の報告が時系列で出る。
+  composer の宛先は `⚑ Captain ／ プロジェクト ⎇ main`。
 
 ### 3.7 下段
 
@@ -215,7 +264,7 @@ composer の宛先は `⚑ Captain ／ プロジェクト ⎇ main`。ピルに�
 - 表示行: ブランチ / worktree パス（`<repo の親>/<repo 名>-worktrees/<slug>`・設定 `worktree_dir` で変更可）/
   エージェント・model · effort・承認モードのピル（sticky 規則は 2026-07-27 のまま = `default_*`）/
   準備スクリプトの有無（✓ パス表示 / 無ければ「作る」→ テンプレを `.necoder/worktree-setup.sh` に書いて開く）。
-- 「詳細 ▾」（O20・実装 2026-09-26）: **ブランチ**（1 行・空 = `task/<slug>`・**既にあるローカルブランチ名なら、そのブランチの worktree を作る**＝新しいブランチは切らない）と**起点**（1 行・空 = **リポジトリの既定の起点**、それも無ければ統合先の今の HEAD・ブランチ / タグ / コミット）。リポジトリの既定の起点 = 統合先の `.necoder/settings.json` の `task_base`（例 `"origin/develop"`・O20・2026-09-26）。起点を指定せずに**新しいブランチを切る**時は ＋Task・fan-out・`ne fleet create` のどれもそこから切る（既にあるブランチの worktree には使わない）。**sparse checkout**（O20 / A24・2026-09-26）= 同じファイルの `task_sparse`（例 `["web", "packages/ui"]`・根からのフォルダ）があれば、新しい Task の worktree はそのフォルダと根のファイルだけを取り出す（`git worktree add --no-checkout` → `git sparse-checkout set --cone` → `checkout`・worktree ごとの設定なので統合先は全部のまま・既にあるブランチの worktree も同じ）。`..` と `-` で始まる物は捨てる。sparse の設定に失敗したら全部を取り出して続ける（空の worktree を残さない）。ダイアログを開いた時に 1 回読み、起点欄の説明と `⎇` 行に出す。上の `⎇` 行は選んだ名前と `（起点 …）` を映す。ブランチ名は `git check-ref-format --branch` で確かめ、使えなければ作らずにトースト。worktree のフォルダはブランチ名の `/` を `-` にした名前。準備スクリプトがあれば **「今回は準備スクリプトを実行しない」**（チェック・`.worktreeinclude` は写す）。**並べて比べる（fan-out・O23）**: エージェントのチップ（複数選択・**ログイン済みのエージェントだけ**＝composer のエージェント選択と同じ `authenticated_agent_labels`。開いた時に 1 回読み、1 つも分からなければカタログ全部）と「各 1 / 2 / 3」。選んだエージェント × 本数の Task を**順に**切る（同じリポジトリへ `git worktree add` を並走させると ref の lock でぶつかる・1 本の失敗で残りを止めない・上限 6）。ブランチは `task/<slug>-<エージェントの slug>`（本数が 2 以上なら `-<n>`・詳細でブランチ名を決めていれば `<名前>-<エージェント>`）、Task 名は `<1 行目> · <エージェント>`（`#n`）。各 Task の最初のスレッドはそのエージェント（`acquire_thread(Some(agent))`）。切れたら舞台に並べる（`stage_pinned` に最大 3 枚・列数 = 枚数）。Fleet の外ならトーストで ⌘⇧M を案内。比べるのは各カードの「変更」タブ（専用の比較画面は作らない）。未実装: 同じ worktree にスレッドを足す（隔離しない・読むだけの用途向けと明記）。
+- 「詳細 ▾」（O20・実装 2026-09-26）: **ブランチ**（1 行・空 = `task/<slug>`・**既にあるローカルブランチ名なら、そのブランチの worktree を作る**＝新しいブランチは切らない）と**起点**（1 行・空 = **リポジトリの既定の起点**、それも無ければ統合先の今の HEAD・ブランチ / タグ / コミット）。リポジトリの既定の起点 = 統合先の `.necoder/settings.json` の `task_base`（例 `"origin/develop"`・O20・2026-09-26）。起点を指定せずに**新しいブランチを切る**時は ＋Task・fan-out・`ne fleet create` のどれもそこから切る（既にあるブランチの worktree には使わない）。**sparse checkout**（O20 / A24・2026-09-26）= 同じファイルの `task_sparse`（例 `["web", "packages/ui"]`・根からのフォルダ）があれば、新しい Task の worktree はそのフォルダと根のファイルだけを取り出す（`git worktree add --no-checkout` → `git sparse-checkout set --cone` → `checkout`・worktree ごとの設定なので統合先は全部のまま・既にあるブランチの worktree も同じ）。`..` と `-` で始まる物は捨てる。sparse の設定に失敗したら全部を取り出して続ける（空の worktree を残さない）。ダイアログを開いた時に 1 回読み、起点欄の説明と `⎇` 行に出す。上の `⎇` 行は選んだ名前と `（起点 …）` を映す。ブランチ名は `git check-ref-format --branch` で確かめ、使えなければ作らずにトースト。worktree のフォルダはブランチ名の `/` を `-` にした名前。準備スクリプトがあれば **「今回は準備スクリプトを実行しない」**（チェック・`.worktreeinclude` は写す）。**並べて比べる（fan-out・O23）**: エージェントのチップ（複数選択・**ログイン済みのエージェントだけ**＝composer のエージェント選択と同じ `authenticated_agent_labels`。開いた時に 1 回読み、1 つも分からなければカタログ全部）と「各 1 / 2 / 3」。選んだエージェント × 本数の Task を**順に**切る（同じリポジトリへ `git worktree add` を並走させると ref の lock でぶつかる・1 本の失敗で残りを止めない・上限 6）。ブランチは `task/<slug>-<エージェントの slug>`（本数が 2 以上なら `-<n>`・詳細でブランチ名を決めていれば `<名前>-<エージェント>`）、Task 名は `<1 行目> · <エージェント>`（`#n`）。各 Task の最初のスレッドはそのエージェント（`acquire_thread(Some(agent))`）。切れたら舞台に並べる（`stage_pinned` に最大 3 枚・列数 = 枚数）。Fleet の外ならトーストで ⌘⇧M を案内。比べるのは各カードの「変更」サイドペイン（2〜3 列のカードは幅が 900px 未満なのでペインがカードの全面に出る・専用の比較画面は作らない）。未実装: 同じ worktree にスレッドを足す（隔離しない・読むだけの用途向けと明記）。
 - ⌘⏎ = `git worktree add -b` → 準備スクリプト → ProjectSession → 台帳 `planned` → スレッド起動 → プロンプト送信 →
   `working` → 舞台に出す。GUI も CLI/MCP の `fleet create` + `spawn-agent` も同じ関数を通す。
 - 「複数に分けたいなら Captain に目標を渡す（⌘0）」の案内をヘッダに常時。
@@ -254,23 +303,33 @@ ThreadActivity（Working / Blocked / Done / Idle）は状態グリフ、Git heal
 ### 5.1 位置づけ
 
 **任命制のただの ACP スレッド**（P6 の監督をそのまま昇格）。IntegrationSpace（main の worktree）に住み、
-コードを書かず、fleet CLI/MCP だけで采配する。**状態を持たない**（記憶は台帳）。だから交代・再起動・
-エージェント変更が自由で、Claude Code / Codex / Gemini / OpenCode どれでも Captain になれる。
+コードを書かず、**necoder が同梱する Captain 用の MCP の道具だけ**で采配する（§5.8）。**状態を持たない**（記憶は台帳）。
+だから交代・再起動・エージェント変更が自由で、Claude Code / Codex / Gemini / OpenCode どれでも Captain になれる。
 これが Claude Code の Agent Teams や Codex 内蔵のマルチエージェントとの差別化（Captain はエージェント非依存）。
+
+*2026-09-24*: 道具を `necoder fleet` CLI（shell で実行）から **Captain 用の MCP**（`necoder mcp --captain`・セッションへ
+necoder が自動で渡す）へ移した。shell を持たせる限り、git で worktree を直接切る・main のブランチを切り替える・
+ファイルを書く、という抜け道が残るため。先に実機で確かめた（/tmp の練習用 repo・Opus 5・3 回・JOURNAL 2026-09-24）:
+MCP だけを持たせた Captain は 3 回とも道具だけで Task を切り、編集も shell も試さなかった。Bypass で全道具を
+持たせた回も「自分では編集しません」と止まった。一方で 1 行の誤字にも迷わず worktree を切った ＝ 切る前の
+人間の承認（§5.5）が要の gate になる。
 
 ### 5.2 権限表
 
 | 操作 | Captain | 人間 | 備考 |
 |---|---|---|---|
-| Task を作る / 起動する（`fleet create` + `spawn-agent`） | ○ | ○ | Captain が作った Task は `⚑` 帰属 |
-| Task に追撃する（`fleet send`） | ○ | ○（介入・§5.4） | |
-| 待つ / 依存を宣言（`wait` / `depend` / `wait-deps`） | ○ | | |
-| レビュー実行（`fleet review` = radar） | ○ | ○ | read-only |
-| phase 遷移の報告（`fleet status`） | ○ | ○ | |
-| Task を終了（archived） | ○ | ○ | worktree は消さない |
+| Task を切る | **提案のみ**（`fleet_propose_tasks`） | ○（＋ Task） | ブランチと worktree は人間が承認した分だけ necoder が切る（§5.5）。承認で作られた Task は `⚑` 帰属 |
+| 既存 Task にエージェントを起こす（`fleet_spawn_agent`） | ○（確認なし） | ○ | worktree もビルドも増えないので自由 |
+| Task に追撃する（`fleet_send`） | ○（確認なし） | ○（介入・§5.4） | |
+| 依存を宣言（`fleet_set_depends`） | ○ | ○ | |
+| 待つ（`fleet_wait_task`） | **×** | | 席を塞ぐ。結果は知らせで届く（§5.3） |
+| レビュー実行（`fleet_review_task` = radar） | ○ | ○ | read-only |
+| phase の報告（`fleet_update_task`） | **×** | ○ | phase は担当エージェントが報告する。Captain が「担当を起こせなかった」を blocked で表した実例がある（画面では承認待ちに見える） |
+| Task を終了（archived） | × | ○ | worktree は消さない |
 | **Integrate** | **×** | ○ | 人間 gate（不変） |
 | **承認待ちへの応答** | **× （推薦のみ）** | ○ | §5.5 |
 | worktree / ブランチの削除 | × | ○ | |
+| ファイルの編集・shell | **×** | ○ | necoder が席の決まりで断る（§5.8） |
 | 設定の変更・Captain 自身の交代 | × | ○ | |
 
 Herdr socket 直叩き等の迂回路は Captain のツールセットに含めない（FLEET-CONTROL-PLAN §0-8 のまま）。
@@ -279,43 +338,121 @@ Herdr socket 直叩き等の迂回路は Captain のツールセットに含め�
 
 | イベント | 起きる | 渡すもの |
 |---|---|---|
-| 人間が Captain に書いた | 即時 | 発話 + 現況（`fleet list` 相当の事実層） |
-| Task が Done / review_ready / Failed | 即時 | 遷移 + digest（3 段圧縮・transcript は渡さない） |
-| Task が Blocked | 15 秒経過後 1 回 | permission 文 + Task の digest |
-| 人間が Task に介入した（§5.4） | 次の wake に同乗（単独では起こさない） | 介入の原文 |
-| Task が integrated | 即時 | 遷移（残 Task の采配のため） |
+| 人間が Captain に書いた | 即時 | 発話 + 前置き（役割・現況・直近の采配・§5.9） |
+| Task が Done / review_ready / Failed | 即時 | 台帳の未読 |
+| Task が Blocked | 15 秒経過後 1 回 | 台帳の未読 |
+| 人間が Task に介入した（§5.4） | 次の wake に同乗（単独では起こさない） | 台帳の未読（`human_send`） |
+| Task が integrated | 即時 | 台帳の未読 |
+| 分解案が承認 / 却下された（§5.5） | 即時 | 台帳の未読（`proposal_approved` / `proposal_rejected`） |
+| necoder の起動 | 未読があれば 1 回 | 台帳の未読 |
 
-実行中は重ねない（次のイベントはキューに積み、1 ターンにまとめて渡す）。
+**渡すのは「台帳の未読」**（*2026-09-24*）。Captain がどこまで読んだかの位置（台帳の通し番号）をリポジトリごとに
+DB（`captain_cursors`）へ保存し、起こす時はその位置より後の出来事をまとめて 1 通にする。位置を進めるのは Captain の
+ターンが**終わってから**（途中で落ちたら同じ出来事をもう一度渡す）。以前はメモリ上の待ち行列（`captain_pending`）で、
+再起動すると未配達の知らせが消えていた。統合先を開いていない間の出来事も、開いた時に届く。位置が無いリポジトリ
+（初めての任命）は、その時点の末尾から始める（過去の全履歴は渡さない）。1 通に載せるのは新しい方から 40 件まで
+（残りは `fleet_events` で読める、と 1 行添える）。
+
+渡す出来事: `phase_changed`（blocked / review_ready / changes_requested / merge_ready / failed / integrated / archived）・
+`human_send`・`task_created`・`proposal_approved`・`proposal_rejected`。working / planned などの途中経過と、
+Captain 自身の `captain`・`tier2` は渡さない（現況表と digest で足りる）。
+
+実行中は重ねない。起こす要求は 2 秒まとめてから 1 通にし（同じ Task の連続遷移を 1 通に畳む・旧 5 秒デバウンスの実装）、
+Captain が実行中ならターン終了で未読を確かめて続けて渡す。
 
 ### 5.4 人間の 2 つの玄関
 
-- **既定 = Captain に話す**（⌘0）。目標・優先順位・やめる指示。Captain が Task に分解して起動する。
+- **既定 = Captain に話す**（⌘0）。目標・優先順位・やめる指示。Captain が Task に分解して提案し、承認で起動する。
 - **介入 = Task に直接話す**（サイドバー行 / 舞台のカード）。composer はそのまま。送信時に台帳へ
   `human_send`（原文）を積み、ニュースに載せ、次の Captain wake に同乗させる。Captain は介入を前提に采配を続ける
   （Captain が知らないまま進む状態を作らない）。
 - 1 件だけの単純な作業は ＋ Task で直接切ってよい（毎回 Captain を通すと往復が 1 段増える）。
 
-### 5.5 承認の推薦（gate は人間のまま）
+### 5.5 承認（gate は人間のまま）
 
-Blocked で起きた Captain は「許可してよい: cargo test の実行（worktree 内・読み取りのみ）」の形で 1 行の推薦を返せる。
-UI は要対応カードに ✳ 付きで添えるだけで、**応答はしない**。ポリシーによる自動承認は本文書の範囲外（後段の判断）。
+**分解案の承認**（*2026-09-24*）: Captain が `fleet_propose_tasks` を呼ぶと、necoder は worktree をまだ作らず、
+要対応に**分解案カード**を 1 枚出す（見出し `⚑ Captain の分解案 · N 本`・並びは承認待ちの次）。見出しの直下に
+**承認（k 本を切る）/ 却下**、その下に理由（2 行まで）と行を並べる（ボタンを先頭に置くのは、要対応の欄が高さに上限を
+持ってスクロールするので、行の下だとボタンが隠れるため・2026-09-24 の実画面で確認）。行ごとに題名・目的・完了条件・
+範囲・エージェント（目的と完了は 1 行に畳む・全文は Captain の会話にある）。既定で全部に印が付き、印を外した行は切らない。
+承認の後は necoder が担当を起こして最初の指示を送るので、Captain は起こし直さない（役割文・道具の返り値・承認の知らせの
+3 か所で伝える。実験で Captain が「承認が届いたら担当を起こします」と書いたのを受けて足した）。
+
+- **承認**: 印の付いた行だけ、＋ Task と同じ流れ（作成中の行・O20・§3.2）でブランチと worktree を 1 本ずつ切り、準備スクリプトを回し、
+  担当を起こして、目的・完了条件・範囲をそのまま最初の指示として送る。作られた Task は `⚑` 帰属（サイドバー行の題名の前）。
+  作れなかった行はサイドバーに「やり直す」で残り、その行だけやり直せる（成功した行は作り直さない）。舞台には並べない（fan-out ではない）。
+- **却下**: 何も作らない。
+- どちらも台帳に `proposal_approved` / `proposal_rejected` を積み、Captain を起こす（§5.3）。
+- 道具の返り値は「承認待ち」。Captain はそのターンを終えてよい（待たない）。
+- 提案は DB（`captain_proposals`）に置くので、再起動を跨いでカードが残る。titlebar の要対応バッジにも数える
+  （Editor 画面にいても気づける）。
+
+**承認待ちへの推薦**: Blocked で起きた Captain は「許可してよい: cargo test の実行（worktree 内・読み取りのみ）」の形で
+1 行の推薦を返せる。UI は要対応カードに ✳ 付きで添えるだけで、**応答はしない**。ポリシーによる自動承認は本文書の範囲外（後段の判断）。
 
 ### 5.6 コストの規律
 
-- 渡すのは事実層 + Tier1 digest + キャッシュ済み Tier2 だけ（既存 `fleet digest` の 3 段圧縮）。transcript は渡さない。
-- Blocked は 15 秒閾値、同一 Task の連続イベントはデバウンス（5 秒）。
+- 渡すのは事実層 + Tier1 digest + 台帳の未読だけ（既存 `fleet digest` の 3 段圧縮）。transcript は渡さない。
+- Blocked は 15 秒閾値、起こす要求は 2 秒まとめて 1 通（§5.3）。
+- **会話の交代**（*2026-09-24*）: Captain は状態を持たないので、会話が膨らんだら捨ててよい。起こす前に、Captain スレッドの
+  文脈が上限の 40% を超えたか、前回の交代から 20 回起きていたら、同じタブのまま新しい会話へ切り替える（`session/load`
+  で引き継がず `session/new`）。次の 1 通には前置き（役割・現況・直近の采配 5 件・§5.9）と台帳の未読が付くので、続きから
+  采配できる。transcript には区切りを 1 行出す。
 - Captain のトークンは Task 行の右端と statusbar Σ に含めて常時見せる（見えないコストを作らない）。
 - Captain の采配は毎回 `task_events` に `captain` として残す（監査可能・ニュースの丸チップ）。
 
 ### 5.7 任命
 
 設定 `captain_agent`（旧 `coordinator_agent`・プロジェクト設定 `.necoder/settings.json` でも可・既定ドリフト禁止）。
-未任命の間はサイドバーの Captain 行が「任命する」になり、要対応・Task 行・＋Task は全部そのまま使える
-（Captain 無しでも Fleet は成立する）。
-**任命の UI（2026-09-23）**: 設定 › AI エージェントの各行（利用可能なもの）に `Captain にする` ボタン。任命中の行は
-`⚑ Captain`（accent）で、もう一度押すと解任（`captain_agent: null`）。書くのは user の settings.json（`set_user_value`）で、
-既定エージェント（★）とは連動させない。未任命の Captain 行 / ⌘0 はこのページを開く。オンボーディングには出さない。
-それまでは任命ボタンが無く、「任命する」を押しても設定画面が開くだけで行き止まりだった。
+未任命の間も要対応・Task 行・＋Task は全部そのまま使える（Captain 無しでも Fleet は成立する）。
+
+*2026-09-20*: **任命の UI を足した**。それまでは settings.json の手書きが唯一の入口で（Captain バーの文言が
+「settings.json の captain_agent」・押すと Captain 節の無い設定ホームへ飛ぶだけ）、Captain の機能（wake・采配ログ・⌘0）が
+実質誰にも使えなかった。
+
+- **任命**: ブリッジの `⚑ Captain を任命` タブ / Captain バー / ⌘0 → 会話ペインに任命の面（役割の説明 +
+  サインイン済みエージェントのボタン = `acp_client::authenticated_agent_labels()`）。押すと `captain_agent` を書いて
+  そのまま Captain の会話へ入る。
+- **設定からの任命・交代・解任**: 設定 → AI エージェントの行ごとの `Captain にする` / `⚑ Captain` ボタン（PR #8）。任命中のボタンをもう一度押すと解任。
+  user の `captain_agent` を更新し、既定エージェント（★）とは連動させない。解任は既存の永続化規約に従ってキーを削除する。
+  プロジェクトの `.necoder/settings.json` に同じキーがある場合は project 層が優先される。オンボーディングには任命ボタンを出さない。
+  作業中だった設定のセグメントは同じ操作の重複になるため、この行ごとのボタンへ統一した。Fleet 内の任命面はそのまま残す。
+
+### 5.8 Captain の席（道具と決まり・*2026-09-24*）
+
+Captain のスレッドは necoder が「席」として扱う。席は AgentPanel の汎用機能（`SeatPolicy`・Fleet を知らない）で、
+workspace が Captain 用の中身を詰めて渡す。
+
+1. **道具 = Captain 用の MCP だけ**。セッション開始時に `necoder mcp --captain <統合先>` を渡し、他の MCP を
+   持ち込ませない。止め方はエージェントごとに違い、`acp_client::preset::restrict_mcp_to` に閉じ込めてある:
+   **Codex** は codex-acp が Codex 自身の設定（`~/.codex/config.toml`・computer-use など）の MCP サーバも立ち上げるので
+   （*2026-09-25* 偽のサーバで確認）、ACP の mcpServers は空にし、`CODEX_CONFIG` で necoder の分
+   （`default_tools_approval_mode = "approve"`）と「止める」指定（登録済みの名前に `enabled = false`）を一緒に渡す
+   （ACP で渡すと codex-acp が `mcp_servers` を丸ごと差し込み、止める指定が上書きで消える）。
+   **Claude Code** は mcpServers で渡し、`strictMcpConfig` + `settingSources` 空（`~/.claude` の許可ルール・hooks を
+   持ち込まない）+ claude.ai のコネクタを止める環境変数。組み込みの道具は絞らない（MCP を読み込む `ToolSearch` まで消えうる）。道具: `fleet_list_tasks` `fleet_digest` `fleet_events` `fleet_propose_tasks` `fleet_spawn_agent`
+   `fleet_send` `fleet_set_depends` `fleet_review_task` と、読むだけの `list_files` `read_file` `search` `git_status`。
+   `write_file` `fleet_create_task` `fleet_update_task` `fleet_wait_task` `fleet_integrate_task` は一覧に出さず、呼ばれても断る。
+   型つきの引数（`fleet_propose_tasks` の目的・完了条件は必須）が、そのまま委任文の型になる。
+2. **権限モードは「聞いてくる」モードに固定**（Claude Code = `default`・Codex = `read-only`・他は広告の既定）。
+   ユーザーの既定（Bypass 等）を引き継がない。
+3. **許可要求には necoder が代わりに答える**（人間には何も出ない＝体感は Bypass と同じ静かさ）。
+   Codex の MCP の承認は「題名なし・種別 実行・要求全体の `_meta.is_mcp_tool_approval`」で届く（codex-acp 1.13.1）。
+   種別だけでは shell と区別できないので、acp_client がこの印と呼び出しの id を運び、席は先に届いた同じ id の呼び出しの
+   題名（`mcp.necoder.<道具>`）で裁く。読む・探す・考える・fetch と
+   necoder の道具は許可、編集・削除・移動・shell・他の道具は拒否して transcript に 1 行残す。「常に許可」は返さない
+   （エージェント側が権限モードを切り替えて以後聞いてこなくなるのを防ぐ＝裁定を necoder が持ち続ける。Chat と同じ作法）。
+4. **見張り**: 席のスレッドで編集・削除・移動・shell の道具が**完了した**ら（許可を求めずに実行された＝決まりの漏れ）、
+   necoder がそのターンを止め、transcript・ニュース・トーストに出す。前もっては止められないが、起きたらその場で必ず気づける。
+5. **席はスレッドの名前ではなく席に付く**。⌘0 と wake が選んだスレッドに付け、同じパネルの他のスレッドからは外す。
+   Captain スレッドを改名したら席と前置きを外す（普通のスレッドに戻る。次の ⌘0 で新しい Captain ができる）。
+6. 席が付く前から走っていたセッションは、次の送信で席の決まり（モード・MCP）を持って立ち上げ直す（会話は `session/load` で引き継ぐ）。
+
+### 5.9 前置き（役割・現況・直近の采配）
+
+Captain スレッドへの送信には、役割（`captain.role`）+ 現況表（`captain.facts`）+ 直近の采配（`captain.recent`・5 件・あれば）が
+前置きで付く（PR #12 で人間の発話にも付くようにした）。⌘0・wake・人間の送信の後に差し替える。slash コマンドには付けない。
+役割文は道具の一覧を持たない（MCP の道具が自分の説明を持つ）ので、毎回付いても短い。
 
 ## 6. worktree の運用（1 branch = 1 worktree・準備スクリプト・ビルドコスト）
 
@@ -435,7 +572,11 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 `fleet.new_task_setup_found/missing/create` `fleet.new_task_more` `fleet.new_task_existing_branch` `fleet.new_task_same_worktree`
 `fleet.new_task_start` `fleet.setup_failed`
 `captain.title` `captain.row_sub` `captain.appoint` `captain.phase` `captain.tab_log` `captain.tab_tasks`
-`captain.dest` `captain.pill_scope` `captain.role` `captain.facts` `captain.event` `captain.recommend` `captain.spawned_by` `captain.human_send`
+`captain.dest` `captain.pill_scope` `captain.role` `captain.facts` `captain.recommend` `captain.spawned_by` `captain.human_send`
+`captain.recent` `captain.wake_header` `captain.wake_omitted` `captain.line_created/human_send/approved/rejected` `captain.rotated` `captain.retired_name`
+`captain.seat_denied` `captain.seat_violation` `captain.seat_violation_news` `captain.proposal_title/goal/done_when/scope/approve/reject`
+`captain.proposal_pending_reply` `captain.proposal_err_tasks/too_many/field/agent/no_integration/resolve` `captain.facts_proposal`
+`captain.delegation` `captain.delegation_scope`（*2026-09-24*: `captain.event` は台帳の未読の見出し `captain.wake_header` に置き換えて削除）
 既存の `control.*` は要対応カードで使うものだけ `fleet.*` に移し、残りは削除。`coordinator_*` は `captain_*` に改名。
 
 ## 9. 既存コードとの対応
@@ -461,13 +602,13 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 |---|---|---|
 | **F0 用語と設定の改名 ✅ 2026-09-12** | `coordinator` → `captain`（`captain.rs` / 設定 `captain_agent` / `NewsKind::Captain` / 台帳 kind `captain` / i18n `captain.*` / GLOSSARY）。旧キーの読み替えは**作らない**（後方互換なし方針） | 全 test green・i18n parity |
 | **F0.5 入口 ✅ 2026-09-12** | titlebar 左の `Editor \| Fleet` セグメント + 要対応バッジ・レールに Fleet アイコン・⌘⇧M・初回トースト・右上トグルと `ToggleHerdSidebar` の削除（§3.0） | Editor 中に承認待ちが出るとセグメントにバッジが出て ⌘⇧M で Fleet に入れる |
-| **F1 サイドバー ✅ 2026-09-12** | Task 行 3 段（last_prompt を `Thread` に持つ = P1 残の回収）+ Captain 行 + 統合先行 + ⌘0/⌘1..9。他プロジェクトのグループを出さない。**残: `+N −M`（shortstat キャッシュ）と ピン `◫` は F2 / ⚑ 帰属は F6 / 要対応は F3** | 3 Task 並走で「頼んだこと / いま何を」が各行に出る。レール切替で編隊が切り替わる |
-| **F2 舞台と Task カード ✅ 2026-09-16** | `fleet_stage.rs` 新設。列数は `chrome.stage_columns`（1..=3・⌘⇧1/2/3・中央上のトグル）+ `stage_pinned`（◫）+ `stage_tabs`（Task ごとの選択面）。Task カード = ヘッダ（● 名前 ⎇ branch・phase ピル・**次へ**・⤢・⋯）+ Task タブ行（スレッド / 変更 / ターミナル N / ファイル / ＋会話 / ＋端末）+ 本体。*実装時の訂正*: `StageLayout` enum ではなく列数の整数、`FleetPane` は残して `fleet_cells` を「Task の中身の実体一覧」として使う（配置の正は `stage_cards()` が毎 render 導出）。拡大 ⤢ = 1 列化（`fleet_maximized` とサムネイル列は削除）。旧 ＋ACP/＋Terminal/＋Worktree バーと `fleet.add_*` キーを削除。**残: `+N −M` shortstat キャッシュ** | `fleet_panes_keep_their_threads_and_remote_targets` に「ピンしても同じ Task は 1 枚 / 幅不足で列を落とす / 端末を足してもカードが増えない」を追加 |
+| **F1 サイドバー ✅ 2026-09-12** | Task 行 3 段（last_prompt を `Thread` に持つ = P1 残の回収）+ Captain 行 + 統合先行 + ⌘0/⌘1..9。他プロジェクトのグループを出さない。**残（2026-09-19 に `+N −M` は実装）**: ピン `◫` は F2 / ⚑ 帰属は F6 / 要対応は F3** | 3 Task 並走で「頼んだこと / いま何を」が各行に出る。レール切替で編隊が切り替わる |
+| **F2 舞台と Task カード ✅ 2026-09-16** | `fleet_stage.rs` 新設。列数は `chrome.stage_columns`（1..=3・⌘⇧1/2/3・中央上のトグル）+ `stage_pinned`（◫）+ `stage_tabs`（Task ごとの選択面）。Task カード = ヘッダ（● 名前 ⎇ branch・phase ピル・**次へ**・⤢・⋯）+ Task タブ行（スレッド / 変更 / ターミナル N / ファイル / ＋会話 / ＋端末）+ 本体。*実装時の訂正*: `StageLayout` enum ではなく列数の整数、`FleetPane` は残して `fleet_cells` を「Task の中身の実体一覧」として使う（配置の正は `stage_cards()` が毎 render 導出）。拡大 ⤢ = 1 列化（`fleet_maximized` とサムネイル列は削除）。旧 ＋ACP/＋Terminal/＋Worktree バーと `fleet.add_*` キーを削除。**残: サイドペイン幅の永続化**（`+N −M`・幅ドラッグ・スレッドの ×・列数トグルの同居は 2026-09-19 に実装。統合先のスレッド非表示は §3.2 の訂正で取り下げ）。*2026-09-19 作り直し*: Task タブ行を**ペインバー**に（§3.5。左 = スレッドタブ + ＋ / 右 = サイドペインのトグル・カード幅 900px 以上は「会話 \| サイドペイン 44%」の分割・未満は全面）。`＋▾` 案は廃止（足す場所を文脈に置いた）。状態は `stage_tabs` のまま（会話を指せばサイド無し）。Captain カードも同じ器（`thread_tab` / `side_toggle` / `side_header` / `render_card_body` を共用）（2026-09-19: タブ行をスレッド色の `●` + 区切り + 上線 2px に整え、ターミナルの数字を Task 内の通番にした。`fleet.stage_columns` の `%` 落ちも修正） | `fleet_panes_keep_their_threads_and_remote_targets` に「ピンしても同じ Task は 1 枚 / 幅不足で列を落とす / 端末を足してもカードが増えない」を追加 |
 | **F3 要対応をサイドバーへ・中央タブ廃止 ✅ 2026-09-16** | `render_stage_attention`（Captain バーの直下・選択リポジトリの分だけ）が `render_attention_card` を再利用。サイドバー全体を `FleetControl` key context にして ⏎ / ⌘⇧U（`ControlNext`）が効く。管制タブ本体（ヘッダ / Captain バー / 稼働カード / パイプライン）・中央タブ帯・`ToggleControl`・`NECODER_CONTROL`・`fleet_mascot`・`control.*` の死キー 26 個を削除。*実装時の訂正*: `FleetCenterView` enum は `Work` が `workbench.rs` に残るため **F7 まで据え置き**（描画経路からは外れている） | 全 test green・`cargo check --workspace --all-targets` の警告は workbench 由来 5 件のみ（F7 で消える） |
 | **F4 ＋ Task ダイアログ + 準備スクリプト + task.env ✅ 2026-09-16** | `new_task_dialog.rs`（⌘N / サイドバーの ＋Task）: 1 入力（EditorView・⌘⏎）→ `project::task_slug` → `create_named_task_on`（`<repo>-worktrees/<slug>`・衝突は `-2`）→ `run_task_setup_on`（`.necoder/worktree-setup.sh`・失敗は `failed` + 要対応）→ `ipc_spawn_into` で 1 行目を Task 名にしてプロンプト送信。`host::task_environment` が `.necoder/task.env` を ACP（`acp_client`）とターミナル（`terminal_view`）の環境に注入。ダイアログに branch / worktree パス / 準備スクリプトの有無（無ければ「作る」= §6.2 テンプレを書いてエディタで開く）。CLI の `fleet create` も同じ関数。*未実装*: エージェント/model ピル（sticky 既定が自動で効く）・「詳細 ▾」・設定 `worktree_dir` | `task_slug` / `task_worktree_dir` / `task_environment` の unit test。**necoder 自身での `CARGO_TARGET_DIR` 共有の体感（2 本目の `cargo check`）は本人の実機の手番** |
 | **F5 系譜の帯 ✅ 2026-09-16** | 畳んだ系譜ヘッダの下に `render_lineage_strip`（Task 色の `┬━ 名前` / 統合済み `╰━` / main `━`・クリックで舞台の選択へ）。⌄ で従来 4 表示に展開・`ToggleLineage`（⌘⇧G・非 mac は ctrl-alt-g = Git パネルとの衝突回避）。*実装時の訂正*: 曲線描画の 64px 帯ではなくテキストの 1 行（34px）から始めた。既定は畳み | 帯の名前クリックで舞台が切り替わる（offscreen 目視は本人の手番） |
-| **F6 Captain の玄関（一部 2026-09-16）** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。残: 台帳イベントの灰色カード表示・承認の推薦（✳）を要対応カードへ・トークン表示 | 実 e2e（目標 1 つ → Captain が 2 Task）は未 |
-| F7 掃除 | workbench / work_layout / 旧プローブ / 旧 i18n キーの削除。UI-SPEC §11 を本文書の要約に置き換え。FLEET-CONTROL-PLAN の P3 に「F3 で移設」を記す | `cargo check --workspace` 警告 0 |
+| **F6 Captain の玄関（一部 2026-09-16・*2026-09-20*: Captain カードはブリッジ（§3.6）に統合・任命 UI と設定の交代/解任を追加（§5.7））** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。*2026-09-24*: **Captain の席（§5.8）と分解案の承認（§5.5）**・台帳の未読と読んだ位置（`captain_cursors`・§5.3・`captain_pending` は削除）・会話の交代（§5.6）・前置きの直近の采配（§5.9）・`⚑` 帰属・知らせが表示中のタブを奪わない（`send_ledger_event_to`）・ターン終了の通知に `completed`（失敗したターンで読んだ位置を進めない）。残: 台帳イベントの灰色カード表示・承認の推薦（✳）を要対応カードへ・トークン表示 | storage / agent_panel / workspace / necoder の test（読んだ位置と分解案の往復・席の裁定・見張り・交代・MCP の Captain 版・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`）。実機: /tmp の練習用 repo で Opus 5 が「分けて提案 → 承認待ちで止まる → 承認の知らせで起こし直さない」。隔離 offscreen で分解案カードと `⚑` 行を目視。**necoder 本体での実 e2e（目標 1 つ → 承認 → 2 Task）は本人の目視待ち** |
+| **F7 掃除 ✅ 2026-09-20** | `workbench.rs` / `work_layout.rs` / `FleetCenterView` / `work.*` の死キー 37 個 / `NECODER_WORKBENCH_PROBE` を削除。窓の状態の復元は `restore_window_state`（`persisted_state` の対・`explorer_controller.rs`）へ改名して残し、保存形式から `work_layout` / `fleet_view` を外した（旧 payload の余分なキーは serde が無視する）。端末の名札は `chrome.next_terminal_id`（プロセス内単調増加・PTY は再起動を越えないので保存しない）。生きていた 3 キーは `settings.pref_tabs_position` / `tabs_position_top` / `tabs_position_left` へ。設定キー `work_tabs_position` の名前は未決のまま据え置き。**残: UI-SPEC §11 の置換・FLEET-CONTROL-PLAN P3 の注記** | `cargo check --workspace --all-targets` **と `--release`** で警告 0（`WorkAction` の未使用警告は debug 専用プローブからしか構築されず、release ビルドでだけ出ていた） |
 
 順序は F0 → F1 → F2 → F3 → F4 → F5 → F6 → F7。F1 と F5 は独立。**各フェーズの終わりに本文書と JOURNAL を更新**。
 
@@ -477,6 +618,39 @@ F0 で追加した i18n キーは `captain.title`（Captain バーの見出し�
 役割 + 現況は Captain スレッドの prompt context として**人間の発話にも**前置する（§5.3「発話 + 現況」。以前は wake にしか付かず、
 人間から始めた Captain が役割を知らずに自分で作業していた）。道具一覧に `fleet create` を追加（無いと Task を切れない）。
 実装は `/goal` の規律（現在地把握 → 1 歩 → 検証 → 文書）で進める。ドッグフーディング中はスクショを回さず本人目視。
+
+## 10.5 実画面の検証（稼働中の本体に触れない隔離 offscreen）
+
+**`cargo check` / `cargo test` では見た目のバグは出ない**。F2 の「変更」が実機で空だったこと・Captain に任命の入口が
+無かったこと・展開した系譜がカードを潰すことは、どれも実画面を撮って初めて分かった（2026-09-20）。ドッグフーディング中は
+別インスタンスを立てない決まりだが、**データ・ソケット・書類フォルダを全部隔離した offscreen 撮影**なら本体に触れない
+（`CHAT.md` §7 と同じ流儀。窓は出ず、撮ったら自分で終了する）。
+
+```sh
+ISO=$(mktemp -d); mkdir -p $ISO/home $ISO/docs $ISO/project
+(cd $ISO/project && git init -q -b main && echo 'fn main() {}' > main.rs && git add -A && git -c user.email=p@e -c user.name=p commit -qm init)
+echo '{"onboarded":true,"agent_prewarm":false,"reduce_motion":true}' > $ISO/home/settings.json   # "captain_agent":"Claude Code" を足すと任命済み
+cargo build -p necoder --features screenshot
+NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO/docs \
+  NECODER_SCREENSHOT=$ISO/fleet.png NECODER_SCREENSHOT_DELAY_MS=5000 NECODER_WINDOW_SIZE=1680x1000 \
+  NECODER_CONTROL_PROBE=1 NECODER_FLEET_PROBE="graph;task:1;side:diff" ./target/debug/necoder $ISO/project
+```
+
+`NECODER_CONTROL_PROBE=1` が 5 本の擬似 Task（稼働 / 承認待ち / merge_ready / 失敗 / 待機）を仕込み、`NECODER_FLEET_PROBE` が
+画面を組み立てる（`;` 区切り・debug ビルド限定）:
+
+| 命令 | 何をするか |
+|---|---|
+| `graph` | Fleet に入り Task セルを seed する（最初に置く） |
+| `task:<n>` | n 本目の Task を舞台の選択にする（無ければブリッジのまま） |
+| `side:<diff\|terminal\|files>` | 選択中のカードのサイドペインを開く（それ以外の値で閉じる） |
+| `formation` | ブリッジへ行って編隊図を開く / 閉じる（`NECODER_GRAPH=fan\|tree\|card` で表示を選ぶ・既定ハブ） |
+| `captain` | ⌘0 と同じ（未任命なら任命の面・任命済みなら Captain の会話） |
+| `proposal:<n>` | Captain の分解案を n 行（既定 2・2 行目は印を外した状態）で要対応に仕込む（DB には書かない） |
+| `origin` | 1 本目の Task に `⚑` 帰属を付ける（分解案の承認で作られた Task の行の見た目） |
+| `editor` / `threads` | Fleet から Editor へ戻る（titlebar の `Editor` と同じ道）/ レールの AI スレッド一覧を押す（`graph;editor` で「戻った直後の左カラム」を撮れる） |
+| `columns:<n>` / `pin` | 舞台の列数 / 選択中の Task をピン |
+| `menu` / `rename` / `maximize` / `terminal` / `tall` / `close-all` | 従来の片付け UI・下段の検証 |
 
 ## 11. 今回確定した判断（DECISIONS に転記済み）
 

@@ -1562,7 +1562,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_work_file(path.clone(), cx);
         // ⌘P の「最近開いた」（D19）。対話で開いた分は `open_file` が先頭へ寄せ済みなので、
         // ここは起動時の復元・プロジェクト切替で開き直した分を古い側へ足すだけ。
         let active = self.project_sessions.active;
@@ -1747,16 +1746,10 @@ impl Workspace {
                 })
                 .collect(),
             active: self.project_sessions.active,
-            work_layout: self.chrome.work_layout.clone(),
             fleet_mode: self.chrome.fleet_mode,
             chat_mode: self.chat_mode(),
             chat_active: self.chrome.chat_shown.clone(),
             left_dock_width: self.chrome.explorer_width,
-            fleet_view: match self.chrome.fleet_center_view {
-                FleetCenterView::Work => "work",
-                FleetCenterView::Graph => "graph",
-            }
-            .to_string(),
             stage_pinned: self
                 .chrome
                 .stage_pinned
@@ -1765,6 +1758,33 @@ impl Workspace {
                 .collect(),
             stage_columns: self.chrome.stage_columns,
         }
+    }
+
+    /// 窓セッションの payload から「面」の状態（Fleet / Chat・左ドック幅）を戻す。プロジェクト列とタブ列は
+    /// 起動時に別経路（`SavedProject`）で戻すので、ここは [`Self::persisted_state`] の残りの対。
+    pub fn restore_window_state(&mut self, payload: &str, cx: &mut Context<Self>) {
+        let Ok(saved) = serde_json::from_str::<PersistedState>(payload) else {
+            return;
+        };
+        self.chrome.fleet_mode = saved.fleet_mode && !saved.chat_mode;
+        // Chat へ入るには window が要る（フォーカスの付け直し）ので、次の描画で消化する。
+        self.chrome.pending_chat_mode = saved.chat_mode;
+        self.chrome.chat_restore = saved.chat_active;
+        if saved.left_dock_width >= 160.0 {
+            self.chrome.explorer_width = saved.left_dock_width.min(720.0);
+        }
+        self.chrome.show_herd |= saved.fleet_mode;
+        // 舞台のピンと列数（O21）。消えた Task のピンは舞台に出る時に読み飛ばされる。
+        self.chrome.stage_pinned = saved
+            .stage_pinned
+            .into_iter()
+            .take(3)
+            .map(SpaceId)
+            .collect();
+        if (1..=3).contains(&saved.stage_columns) {
+            self.chrome.stage_columns = saved.stage_columns;
+        }
+        cx.notify();
     }
 
     /// 終了直前は background task に任せず、現時点の Workspace 列とタブ列を DB へ同期保存する。

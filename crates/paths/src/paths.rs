@@ -165,7 +165,7 @@ pub fn blobs_dir() -> Option<PathBuf> {
     Some(data_dir()?.join("blobs"))
 }
 
-/// 外部 ACP エージェント関連の置き場（レジストリのキャッシュ・将来の配備先）。
+/// 外部 ACP エージェント関連の置き場（レジストリのキャッシュ・版別 npm アダプタの配備先）。
 pub fn external_agents_dir() -> Option<PathBuf> {
     Some(data_dir()?.join("external_agents"))
 }

@@ -147,6 +147,8 @@ agent:
   attach_tip: ファイルを文脈に添付
   compact: /compact
   compact_tip: 文脈を要約して圧縮する（/compact）
+  compact_queued_tip: "実行中 — ターンが終わったら /compact を送る（送信待ちに積む）"
+  compact_none_tip: "まだ会話がありません"
   output_truncated: "… (%{n} 行省略)"
   result_lines: "%{n} 行"
   file_write: "書き込み %{path}"
@@ -392,31 +394,61 @@ news:
   failed: "失敗 — %{detail}"
 captain:
   log: "采配ログ"
-  tasks: "Task"
   human_gate: "采配のみ · 統合と承認は人間が操作"
   ledger_event: "台帳イベント"
   title: Captain
-  appoint: Captain を任命する（設定 › AI エージェント）
+  appoint: "未任命 — 押して任命する"
+  appoint_tab: "Captain を任命"
+  tab_tip: "Captain（main に住む采配役）へ · ⌘0"
+  appoint_title: "Captain を任命する"
+  appoint_body: "Captain は main に住む采配役です。目標を渡すと Task（worktree）に分けて起動し、終わり・失敗・承認待ちを見張って報告します。自分ではコードを書きません。どのエージェントでも務まり、あとで設定から交代・解任できます。"
+  appoint_no_agent: "使えるエージェントがありません。設定 → エージェント でサインインしてください。"
+  log_empty: "まだ采配はありません。Captain に目標を渡すと、ここに判断の履歴が並びます。"
   role: |
     あなたは necoder 編隊の Captain（采配役）です。
-    役割: 状況を読み、次の采配を決めて fleet CLI で指示する。人間から目標を渡されたら、Task に分解して起動する。
-    規律: 自分ではコードを書かない・ファイルを編集しない・手を動かさない（指示と采配のみ）。1 件だけの作業でも Task を切って任せる。integrate の最終承認は人間（あなたは `fleet review` で radar を確認して提案するまで）。
-
-    道具（shell で実行）:
-    %{exe} fleet create . <title>   — Task を切る（worktree とブランチができる・出力の id を使う）
-    %{exe} fleet list .              — この repo の Task 一覧
-    %{exe} fleet digest <id>        — Task の事実層 + digest（今なにをしているか）
-    %{exe} fleet events [since-id]  — 台帳イベントの差分
-    %{exe} fleet spawn-agent <id> [agent] [prompt...] — Task にエージェントを起こす
-    %{exe} fleet send <id> <message...>               — 追撃指示
-    %{exe} fleet status <id> <phase> [summary]        — phase 遷移の報告
-    %{exe} fleet wait <id> <phase|activity> [秒]      — 待つ（phase=台帳 / activity=live）
-    %{exe} fleet depend <id> <on...> / wait-deps <id> <phase> — 依存の宣言と待ち
-    %{exe} fleet review <id>        — Conflict Radar（merge_ready / changes_requested へ）
-
-    まず `%{exe} fleet list .` と `digest` で現況を読み、必要な采配だけ実行して、最後に判断を 1〜3 行で要約してください。何もする必要がなければ「静観」とだけ答えてください。
+    役割: 状況を読み、次の采配を決めて、MCP サーバ necoder の fleet 道具で指示する。人間から目標を渡されたら、Task に分けて提案する。
+    規律:
+    - 自分ではコードを書かない・ファイルを編集しない・shell を使わない。この席では necoder が断る。
+    - 新しい Task は fleet_propose_tasks で提案する。ブランチと worktree は、人間が承認した分だけ necoder が切る。承認と却下は次の知らせで届くので、待たずにこのターンを終える。
+    - 承認された Task には necoder が担当を起こし、目的と完了条件を最初の指示として送る。あなたが起こし直す必要はない（同じ Task に担当が 2 人並ぶ）。
+    - 提案の各行には目的と完了条件を必ず書く。触る範囲が重なる作業は 1 本にまとめる。1 件だけの作業でも Task にして任せる。
+    - 既存の Task への追撃（fleet_send）と担当の追加（fleet_spawn_agent）は、確認なしで行ってよい。
+    - phase は担当エージェントが報告する。あなたは書き換えない。integrate は人間が行う。あなたは fleet_review_task で radar を確かめて提案するまで。
+    進め方: まず fleet_list_tasks と fleet_digest で現況を読み、必要な采配だけ行い、最後に判断を 1〜3 行で要約する。何もする必要がなければ「静観」とだけ答える。
   facts: "現況（この repo の Task · id | 名前 | phase | digest）:"
-  event: "イベント: [%{event}] %{title}%{digest}"
+  recent: "直近の采配（古い順）:"
+  wake_header: "台帳の新しい出来事（前回の続き。#通し番号 Task-id 題名: 何が起きたか）:"
+  wake_omitted: "（古い %{n} 件は省いた。fleet_events で読める）"
+  line_created: "Task が作られた"
+  line_human_send: "人間が直接指示した「%{text}」"
+  line_approved: "分解案が承認され、necoder が Task を切って担当を起こした（最初の指示は送り済み）。切った: %{approved}／外した: %{skipped}"
+  line_rejected: "分解案が却下された（何も切っていない）"
+  rotated: "── 会話を交代した。ここから新しい会話で続ける（現況と直近の采配は前置きで渡す）"
+  retired_name: "Captain（%{agent}・交代前）"
+  seat_denied: "⚑ Captain の席では使えないので断った:"
+  seat_violation: "⚑ Captain の席で許可なしに編集されたので止めた:"
+  seat_violation_news: "Captain の席で許可なしの編集を止めた（%{tool}）"
+  proposal_title: "⚑ Captain の分解案 · %{n} 本"
+  proposal_goal: "目的: %{text}"
+  proposal_done_when: "完了: %{text}"
+  proposal_scope: "範囲: %{text}"
+  proposal_approve: "承認（%{n} 本を切る）"
+  proposal_reject: "却下"
+  proposal_pending_reply: "人間の承認待ち。承認されると necoder が Task を切って担当を起こし、最初の指示も送る（あなたは起こさなくてよい）。結果は次の知らせで届くので、このターンは待たずに終えてよい。"
+  proposal_err_tasks: "tasks に 1 本以上の Task を並べてください（title / goal / done_when は必須）"
+  proposal_err_too_many: "1 つの提案は %{max} 本まで。分けすぎると逐次の依存で遅くなるので、まとめてください"
+  proposal_err_field: "%{row} 行目の %{field} がありません（title / goal / done_when は必須）"
+  proposal_err_agent: "%{row} 行目のエージェント %{agent} は使えません（使える: %{known}）"
+  proposal_err_no_integration: "統合先（main の worktree）が開いていないので分解案を扱えません"
+  proposal_err_resolve: "分解案を裁けなかった: %{detail}"
+  facts_proposal: "Captain の分解案 %{n} 本が承認待ち"
+  delegation: |
+    %{title}
+
+    目的: %{goal}
+    完了条件: %{done_when}
+    完了条件を満たしたら、何を変えたかを 3 文でまとめて終えてください。
+  delegation_scope: "範囲: %{scope}"
 fleet:
   details_kind_task: Task
   details_kind_integration: 統合先
@@ -464,8 +496,14 @@ fleet:
   tab_diff: "変更"
   tab_terminal: "ターミナル"
   tab_files: "ファイル"
-  tab_add_thread: "＋ 会話"
-  tab_add_terminal: "＋ 端末"
+  tab_add_thread: "会話を足す（同じ worktree）"
+  tab_add_terminal: "ターミナルを足す"
+  side_tip: "会話の横に開く（もう一度押すと閉じる）"
+  diff_empty: "base からの変更はありません"
+  diff_files: "%{count} files"
+  tab_close_thread: "この会話を閉じる（⌘⇧T で戻せる）"
+  side_close: "閉じる"
+  files_hint: "クリックで Editor に開く"
   tasks_count: "%{n} Tasks"
   filter_placeholder: Task を絞り込む
   filter_none: 一致する Task はありません
@@ -494,11 +532,12 @@ fleet:
   stage_two: 舞台 2 列
   stage_three: 舞台 3 列
   lineage: 系譜グラフ
+  formation: "編隊図"
+  formation_tip: "ブリッジで編隊図を開く / 閉じる（⌘⇧G）"
   graph_fan: 扇形
   graph_tree: ツリー
   graph_card: カード
   graph_hub: ハブ
-  graph_collapse: グラフの表示/非表示
   graph_main: main
   graph_main_sub: IntegrationSpace
   graph_tree_caption: "base ・ %{count} エージェント並走"
@@ -626,6 +665,8 @@ rail:
   fleet: 編隊モード
   git: ソース管理  ⌃⇧G
   todos: Todo ボード
+  threads: AI スレッド一覧（全プロジェクト）
+  fleet_sidebar: Fleet サイドバー（Task 一覧）
   agent: AI エージェントの表示切替
   terminal: ターミナル  ⌘J
   remote: リモート SSH
@@ -832,6 +873,9 @@ settings:
   pref_keep_awake_sub: エージェントが作業している間は、放っておいてもスリープしません。画面は消えます。自分で選んだスリープと、ノートの蓋を閉じた時のスリープは止めません
   keep_awake_working: 作業中の間
   keep_awake_off: しない
+  pref_tabs_position: タブの既定位置
+  tabs_position_top: 上
+  tabs_position_left: 左
   appearance_heading: 外観
   appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
   locale_label: 表示言語
@@ -1603,47 +1647,6 @@ key:
   terminal_new_tab: ターミナルのタブを開く
   terminal_close_tab: ターミナルのタブを閉じる
   terminal_split: ターミナルを横に分割
-work:
-  repositories: リポジトリ / 作業
-  open_beside: 隣に開く
-  terminal: Terminal
-  agent: Agent
-  diff: 変更
-  add_worktree: ＋ 作業を追加
-  add_worktree_tip: 既存worktreeを開く / ブランチからworktreeを作る
-  choose_worktree: worktreeを選択 / 新しいブランチ名を入力
-  create_existing: このブランチのworktreeを作成
-  create_branch: 現在のHEADからworktreeを作成
-  empty: 左の一覧からworktreeを選ぶと、ここに開きます
-  empty_pane: ＋からAgent・Terminal・ファイルを開けます
-  unavailable: このworktreeは開かれていません。左の一覧から開き直してください。
-  columns: 横並び
-  grid: グリッド
-  toggle_layout: 横並び / グリッドを切り替え
-  restore: 配置に戻る
-  close_column: 列を隠す（セッションは継続）
-  close_pane: ペインを閉じる（タブは隣へ移動）
-  pane_menu: タブを追加 / ペインを配置
-  terminal_stopped: Terminalは停止しています。配置の復元ではコマンドを再実行しません。
-  start_terminal: シェルを起動
-  open_file: ファイルを開く…
-  new_thread: 新しいスレッド
-  new_terminal: 新しいTerminal
-  move_terminal: 下ドックのTerminalをここへ移動
-  split: 下に分割してTerminalを開く
-  tabs_top: タブを上に表示
-  tabs_left: タブを左に表示
-  focus: ペインに集中 / 配置に戻る
-  move_left: 列を左へ移動
-  move_right: 列を右へ移動
-  tab_previous: タブを前へ移動
-  tab_next: タブを後ろへ移動
-  hide_tab: タブを隠す（セッションは継続）
-  return_terminal: Terminalを下ドックへ移動
-  stop_terminal: Terminalセッションを終了
-  tabs_setting: タブの既定位置
-  top: 上
-  left: 左
 chat:
   destination: Chat
   new_chat: 新しいチャット

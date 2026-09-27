@@ -15,9 +15,6 @@ impl Workspace {
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_work_tab(window, cx) {
-            return;
-        }
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
@@ -39,9 +36,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.work_cycle_tab(1, window, cx) {
-            return;
-        }
         if self.tabs.len() > 1 {
             self.select_tab((self.active_tab + 1) % self.tabs.len(), window, cx);
         }
@@ -54,9 +48,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.work_cycle_tab(-1, window, cx) {
-            return;
-        }
         let count = self.tabs.len();
         if count > 1 {
             self.select_tab((self.active_tab + count - 1) % count, window, cx);
@@ -223,7 +214,8 @@ impl Workspace {
     ) {
         if (self.chrome.resizing_agent
             || self.chrome.resizing_explorer
-            || self.chrome.resizing_bottom)
+            || self.chrome.resizing_bottom
+            || self.chrome.resizing_side.is_some())
             && event.pressed_button != Some(MouseButton::Left)
         {
             // ウィンドウ外で mouse-up を離してイベントを取りこぼしても、戻ってきた最初の
@@ -231,6 +223,7 @@ impl Workspace {
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
             self.chrome.resizing_bottom = false;
+            self.chrome.resizing_side = None;
             cx.notify();
             return;
         }
@@ -255,6 +248,10 @@ impl Workspace {
             self.chrome.explorer_width =
                 (self.chrome.resize_start_width + dx).clamp(DOCK_MIN, DOCK_MAX);
             cx.notify();
+        } else if let Some((start_ratio, card_width)) = self.chrome.resizing_side {
+            // 境を左へ動かすとサイドペインが広がる（dx 負 → 割合増）。会話もサイドも潰れない範囲に留める。
+            self.chrome.side_pane_ratio = (start_ratio - dx / card_width.max(1.)).clamp(0.25, 0.65);
+            cx.notify();
         } else if self.chrome.resizing_bottom {
             // 上縁を上へ動かすと高くなる（dy 負 → 高さ増）。
             let dy = f32::from(event.position.y) - self.chrome.resize_start_y;
@@ -273,12 +270,14 @@ impl Workspace {
         if self.chrome.resizing_agent
             || self.chrome.resizing_explorer
             || self.chrome.resizing_bottom
+            || self.chrome.resizing_side.is_some()
         {
             // 左ドックの幅は窓の状態として残す（次に開いた時も同じ幅）。
             let save_width = self.chrome.resizing_explorer;
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
             self.chrome.resizing_bottom = false;
+            self.chrome.resizing_side = None;
             if save_width {
                 self.save_state(cx);
             }
@@ -608,10 +607,6 @@ impl Workspace {
             return;
         };
         self.active_tab = index;
-        // 端末のタブはファイルではない（作業面・⌘P の最近・エクスプローラの選択に出さない・O24）。
-        if !terminal {
-            self.reveal_work_file(path.clone(), cx);
-        }
         // 移った先のエディタの衝突の印を数える（O19・E05・帯をすぐ出す）。
         if let Some(editor) = editor.as_ref() {
             self.refresh_conflicts(editor, cx);

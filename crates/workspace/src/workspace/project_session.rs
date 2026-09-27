@@ -143,9 +143,21 @@ impl ProjectSessions {
     }
 }
 
+impl RepositoryController {
+    /// base からの `+N −M`（`task_files` の合計）。差分なし・未取得は `None`（表示しない）。
+    pub(crate) fn shortstat(&self) -> Option<(usize, usize)> {
+        let added: usize = self.task_files.iter().map(|file| file.added).sum();
+        let deleted: usize = self.task_files.iter().map(|file| file.deleted).sum();
+        (added + deleted > 0).then_some((added, deleted))
+    }
+}
+
 pub(crate) struct RepositoryController {
     pub(crate) status: HashMap<PathBuf, StatusKind>,
     pub(crate) refresh_generation: u32,
+    /// Task の base（無ければ HEAD）から作業ツリーまでに変わったファイル（コミット済み + 未コミット + untracked）。
+    /// git 更新と同じ background で取る（render 中に git を呼ばない）。「変更」ペインと `+N −M` の両方の正。
+    pub(crate) task_files: Vec<project::DiffFile>,
 }
 
 impl Deref for ProjectSessions {
@@ -228,6 +240,7 @@ impl Workspace {
             repository: RepositoryController {
                 status: HashMap::new(),
                 refresh_generation: 0,
+                task_files: Vec::new(),
             },
             git_panel,
             review,
@@ -410,6 +423,9 @@ impl Workspace {
                 if workspace.chrome.fleet_mode {
                     workspace.seed_fleet_cells(cx);
                 }
+                // Captain: 裁いていない分解案と ⚑ 帰属を戻し、未読があれば 1 回起こす（FLEET-V2 §5.3 / §5.5）。
+                workspace.restore_captain_proposals(cx);
+                workspace.resume_captains(cx);
                 cx.notify();
             });
         })
@@ -499,13 +515,7 @@ impl Workspace {
         // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。
         cx.defer(super::dock_badge::refresh_dock_badge);
         if phase == TaskPhase::Integrated {
-            self.wake_captain(
-                session_index,
-                "integrated",
-                record.title.clone().into(),
-                digest.map(|text| text.to_string().into()),
-                cx,
-            );
+            self.wake_captain(session_index, cx);
         }
         cx.notify();
         let Some(storage) = self.persistence.storage.clone() else {
@@ -779,6 +789,7 @@ impl Workspace {
                 repository: RepositoryController {
                     status: HashMap::new(),
                     refresh_generation: 0,
+                task_files: Vec::new(),
                 },
                 git_panel,
                 review: Some(review),
@@ -831,9 +842,8 @@ impl Workspace {
             theme,
             focus_handle,
             chrome: ChromeState {
-                work_layout: WorkLayoutState::default(),
-                work_menu: None,
-                work_embedded: None,
+                embedded_synced: None,
+                next_terminal_id: 1,
                 show_left: true,
                 show_right: true,
                 show_bottom: false,
@@ -851,9 +861,12 @@ impl Workspace {
                 pending_chat_mode: false,
                 fleet_cells: Vec::new(),
                 new_task: None,
-                captain_pending: HashMap::new(),
-                captain_space: None,
-                captain_tab: 0,
+                captain_proposals: Vec::new(),
+                captain_inflight: HashMap::new(),
+                captain_wake_scheduled: std::collections::HashSet::new(),
+                captain_wakes_since_rotation: HashMap::new(),
+                captain_recent: HashMap::new(),
+                captain_appointing: false,
                 stage_columns: 1,
                 stage_width: 1200.,
                 stage_pinned: Vec::new(),
@@ -879,16 +892,18 @@ impl Workspace {
                 pending_agent_full_screen_toggle: false,
                 bottom_height: BOTTOM_DOCK_HEIGHT,
                 resizing_bottom: false,
+                side_pane_ratio: 0.44,
+                resizing_side: None,
                 resize_start_y: 0.0,
                 resize_start_height: 0.0,
-                fleet_center_view: FleetCenterView::Graph,
+                // 既定はハブ: ブリッジのサイドペイン（縦長〜正方形）いっぱいに割合座標で描けるのはハブだけで、
+                // 扇形 / ツリー / カードは横長の版面（固定高）。Captain を任命していれば中心が Captain になる。
                 graph_view: match std::env::var("NECODER_GRAPH").as_deref() {
-                    Ok("hub") => GraphView::Hub,
+                    Ok("fan") => GraphView::Fan,
                     Ok("tree") => GraphView::Tree,
                     Ok("card") => GraphView::Card,
-                    _ => GraphView::Fan,
+                    _ => GraphView::Hub,
                 },
-                graph_collapsed: true,
                 fleet_clock: false,
                 rollup_index: 0,
                 rollup_ticker: false,
@@ -1163,7 +1178,6 @@ impl Workspace {
         cx.observe_global::<agent_panel::usage::UsageLimits>(|_workspace, cx| cx.notify())
             .detach();
         workspace.hydrate_restored_projects(restored_indexes, cx);
-        workspace.ensure_work_layout(cx);
         workspace.save_state(cx); // 起動時点で状態を書く（再起動復元のため）
         workspace
     }
@@ -1600,6 +1614,11 @@ impl Workspace {
         };
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
+        let base = self.project_sessions.projects[session_index]
+            .task_space
+            .base_oid
+            .clone()
+            .unwrap_or_else(|| "HEAD".to_string());
         let Some(session) = self.project_sessions.sessions.get_mut(session_index) else {
             return;
         };
@@ -1615,6 +1634,21 @@ impl Workspace {
                     let changes = project::git_changes_on(host.as_ref(), &root);
                     let history = project::git_log_graph_on(host.as_ref(), &root, 30);
                     let slug = project::github_slug_on(host.as_ref(), &root);
+                    let mut task_files =
+                        project::git_diff_files_on(host.as_ref(), &root, &base).unwrap_or_default();
+                    // untracked は git の diff に出ない。エージェントが作ったばかりのファイルを落とさない。
+                    for (path, kind) in &status {
+                        if *kind == StatusKind::Untracked
+                            && !task_files.iter().any(|file| &file.path == path)
+                        {
+                            task_files.push(project::DiffFile {
+                                path: path.clone(),
+                                kind: *kind,
+                                added: 0,
+                                deleted: 0,
+                            });
+                        }
+                    }
                     // linked worktree か（＝削除できる作業ツリーか）を **git に聞く**（2026-07-27）。
                     // 以前は「このセッションで worktree として開いたか」の記憶だけが根拠だったので、
                     // 再起動すると worktree なのに削除メニューが消え、消す手段が無くなっていた。
@@ -1632,7 +1666,7 @@ impl Workspace {
                             })
                             .map(|worktree| worktree.branch.clone())
                     };
-                    (status, branch, changes, history, slug, linked)
+                    (status, branch, changes, history, slug, linked, task_files)
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
@@ -1643,8 +1677,9 @@ impl Workspace {
                 if session.repository.refresh_generation != generation {
                     return; // 古い結果（その後に別の refresh が走った）
                 }
-                let (status, branch, changes, history, slug, linked) = snapshot;
+                let (status, branch, changes, history, slug, linked, task_files) = snapshot;
                 session.repository.status = status.into_iter().collect();
+                session.repository.task_files = task_files;
                 let git_panel = session.git_panel.clone();
                 git_panel.update(cx, |panel, cx| {
                     panel.set_snapshot(

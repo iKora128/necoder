@@ -365,6 +365,29 @@ pub fn discover_in(home: &Path) -> Vec<McpServerConfig> {
     found
 }
 
+/// Codex 自身の設定（`$CODEX_HOME/config.toml`・無ければ `~/.codex/config.toml`）に登録された MCP サーバの名前。
+/// off のものも含めて全部返す。Captain の席（FLEET-V2 §5.8）は、codex-acp が Codex 自身の設定の MCP サーバも
+/// そのまま立ち上げる（2026-09-25 に偽のサーバで確認）ので、席のセッションだけこれらを止めるのに使う。
+pub fn codex_configured_server_names() -> Vec<String> {
+    let config = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| paths::home_dir().map(|home| home.join(".codex")))
+        .map(|dir| dir.join("config.toml"));
+    let Some(text) = config.and_then(|path| std::fs::read_to_string(path).ok()) else {
+        return Vec::new();
+    };
+    codex_server_names_in(&text)
+}
+
+/// [`codex_configured_server_names`] の本体（テスト用に切り出す）。
+pub fn codex_server_names_in(text: &str) -> Vec<String> {
+    text.parse::<toml::Value>()
+        .ok()
+        .and_then(|value| value.get("mcp_servers").and_then(toml::Value::as_table).cloned())
+        .map(|table| table.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Codex CLI の `~/.codex/config.toml` から `[mcp_servers.<name>]` を読む。
 ///
 /// 対応するキー: `command` / `args` / `env` / `url` / `headers`（`http_headers` も可）/

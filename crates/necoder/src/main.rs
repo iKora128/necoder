@@ -603,7 +603,7 @@ fn open_planned_windows(
         if let Err(error) = handle.update(cx, |workspace, window, cx| {
             workspace.restore_open_file(&plan.open_files, window, cx);
             if let Some(payload) = &plan.layout_payload {
-                workspace.restore_work_layout(payload, cx);
+                workspace.restore_window_state(payload, cx);
             }
             workspace.check_hot_exit_restore(cx);
             let focus = workspace.focus_handle(cx);
@@ -1119,21 +1119,6 @@ fn main() {
                             let _ = handle.update(cx, |workspace, window, cx| {
                                 workspace.debug_fleet_probe(&probe, window, cx);
                             });
-                        })
-                        .detach();
-                    }
-                }
-                if let Ok(mode) = std::env::var("NECODER_WORKBENCH_PROBE") {
-                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                        cx.spawn(async move |_, cx| {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(1600))
-                                .await;
-                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
-                                workspace.debug_workbench_probe(&mode, window, cx)
-                            }) {
-                                eprintln!("workbench probe: {error:#}");
-                            }
                         })
                         .detach();
                     }

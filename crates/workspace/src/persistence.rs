@@ -36,8 +36,6 @@ pub(crate) struct PersistedState {
     #[serde(default)]
     pub(crate) active: usize,
     #[serde(default)]
-    pub(crate) work_layout: crate::workspace::WorkLayoutState,
-    #[serde(default)]
     pub(crate) fleet_mode: bool,
     /// Chat モードで閉じたか（`docs/CHAT.md` §4.3「最後に居た面へ戻る」）。
     #[serde(default)]
@@ -49,8 +47,6 @@ pub(crate) struct PersistedState {
     /// `0` は未保存＝既定の幅。
     #[serde(default)]
     pub(crate) left_dock_width: f32,
-    #[serde(default)]
-    pub(crate) fleet_view: String,
     /// Fleet の舞台にピンした Task（space id・左から・最大 3・O21）。無ければ書かない。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) stage_pinned: Vec<String>,
