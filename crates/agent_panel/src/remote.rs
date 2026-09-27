@@ -74,6 +74,7 @@ impl AgentPanel {
                         )),
                     ),
                     Entry::Checkpoint { label, .. } => ("checkpoint", text(label)),
+                    Entry::Notice(v) => ("notice", text(v)),
                 };
                 json!({ "id": index, "kind": kind, "text": content })
             })
