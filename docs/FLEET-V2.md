@@ -613,6 +613,11 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 
 順序は F0 → F1 → F2 → F3 → F4 → F5 → F6 → F7。F1 と F5 は独立。**各フェーズの終わりに本文書と JOURNAL を更新**。
 
+*2026-09-27（parity の統合）*: この作り（F0〜F7 + Captain の席・分解案）を parity の統合ブランチへ合わせた。parity で足した Fleet の機能は
+この作りの置き場へ載せ直した — 変更レビュー（O6）は「変更」サイドペイン、並べて比べる（O23）は列数トグル（最大 3）と各カードの「変更」、
+ピンと列数の保存（O21）は `restore_window_state`、作成中の行（O20）は ＋ Task・fan-out・分解案の承認の共通の流れ。経緯と分担は
+`ORCA-PARITY.md` §7.3、確かめたことは `UX-CODE-REVIEW.md` R09 / R10。
+
 F0 で追加した i18n キーは `captain.title`（Captain バーの見出し・ニュースの帰属名・**Captain スレッドの表示名**を兼ねる）/
 `captain.appoint`（未任命の行）/ `captain.prompt`（wake テンプレート）の 3 つ。§8 の残りは使う面（F1/F6）と同時に足す。
 *2026-09-24 訂正*: `captain.prompt` は `captain.role`（役割・規律・道具）/ `captain.facts`（現況表の見出し）/ `captain.event`（wake のイベント行）に分割。

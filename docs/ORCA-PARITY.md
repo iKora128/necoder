@@ -336,7 +336,38 @@
 - **台帳の残りで、この統合で直した物**: R12 の 2 つ目（ターミナル検索の入力欄を EditorView にし、日本語の変換・貼り付け・選択・カーソル移動を通す）。
 - **CI**: Remote control の WebKit の不安定な 3 本を直した。カメラの 2 本は、main の作業ツリーで別の会話が原因を突き止めていた未コミットの差分（偽カメラを `MediaDevices.prototype` に載せる）を取り込んだ。PWA の送信数の競走は、#30 のコメントの案で直した。手元の `cargo test` がテストバイナリごと落ちていた件（O19 のテストで本物の rust-analyzer が立つ）も直した。
 - **実機での確認**: `./scripts/bundle-mac.sh release dev` で `necoder Dev.app`（状態は `~/.necoder-dev`・常用と並べて動く）を作り、チェックリスト `docs/ORCA-PARITY-CHECKLIST.md`（149 項目）を回す。
-- **残り**: O18（Git パネルの基本）・O19 の残り・O24/O25 の残り・O27 の残り・O29 の残り・O37 の残り・O38（スマホ）・§6 の判断待ち。main の作業ツリーの Captain の未コミット作業との合流（台帳 R09・R10）。
+- **残り**: O18（Git パネルの基本）・O19 の残り・O24/O25 の残り・O27 の残り・O29 の残り・O37 の残り・O38（スマホ）・§6 の判断待ち。~~main の作業ツリーの Captain の未コミット作業との合流（台帳 R09・R10）~~ → §7.3 で合流済み。残りは R09 の条件 1（承認の後に終了した時の再開）と、実機での確認。
+
+### 7.3 Captain の作業との合流（2026-09-27・`parity/merge-captain-fleet`）
+
+main の作業ツリーに未コミットで残っていた作業は `captain/fleet-pane-and-seat`（`d7658ac`・親は main の `97e8666`）にコミットされた。
+これを統合ブランチの先頭（`db28c9d`）へ `git merge --no-ff` で合わせた（テキストの衝突 33 ファイル）。本人は Dev.app の Fleet が旧い
+Task タブ行（変更・ターミナルが会話と同じ行に横並び）に戻っていたのを見て、作り直した方を求めている。
+
+- **正にした物**: Fleet の見た目と構成は captain 側（FLEET-V2 §3: ペインバー = 左がスレッドタブ・右がサイドペインのトグル、変更 / ターミナル /
+  ファイルは会話の横の分割で幅 900px 未満は全面、統合先のカード = ブリッジ、`workbench.rs` / `work_layout.rs` の削除）。
+  Captain の任命席・分解案の台帳・承認・会話の交代もそのまま。
+- **載せ直した parity の機能**:
+  - O6「変更」= 変更レビュー → 「変更」サイドペインの中身（会話の横。見出しの件数と `+N −M` はレビューが出す）。O7 の注記は隣の会話へ送れる
+  - O23 並べて比べる → 列数トグル（最大 3・4 枚以上は並べない）に乗せ、各カードの「変更」サイドペインで比べる（狭いのでカードいっぱい）
+  - O21 ピンと列数の保存 → 窓の状態の復元（`restore_window_state`・旧 `restore_work_layout` の置き場が消えたので移した）
+  - O20 作成中の行 → Captain の分解案の承認も同じ行を通す（R09）。行ごとの委任文と案の id を `FanoutTask` で運び、`⚑` を付ける
+  - O13 ニュースのクリック・O12 質問だけの Task の「答える」・O19「競合を直させる」 → ブリッジと Task カードのヘッダにそのまま
+  - O12 の要対応の数（titlebar・Dock）に Captain の分解案を足した（数え方は `dock_badge::attention_count` の 1 か所）
+  - O24 端末タブの採番（`work_layout.allocate()`）→ `chrome.next_terminal_id`（`allocate_terminal_id`）
+- **1 つにまとめた物**:
+  - ターンの終わり方: captain 側の `completed` と parity 側の `TurnOutcome` を `outcome` 1 つに（R10 条件 2）
+  - エージェントの置き方: 組み込みの npm アダプタ = `acp_client::install`（`external_agents/npm/`）、足したエージェントの binary =
+    `acp_client::deploy`（`external_agents/binary/`）、足したエージェントの npx / uvx = 道具をそのまま起こす。解決は
+    `Agent::resolve_command_on` の 1 本（ARCHITECTURE §7.1）
+  - 設定の null: captain 側の「null はキーごと外す」を parity 側の `persist_user_values` に入れた（Captain の解任・表示言語の「OS に合わせる」）
+  - `clear_thread_session`: 両方が同じ名前で足していた。parity 側（前の会話を `thread_past_sessions` に退かせる）を採り、Captain の会話の交代も同じ関数
+- **落とした物**: 旧 workbench（`workbench.rs` の release の dead_code の cfg と、そこに入っていたピンの復元は上のとおり移した）、`work.*` の i18n キー、
+  captain 側の `create_task_in`（parity 側の作成の流れに置き換えた）。parity の機能で載せ直せなかった物は無い。
+- **見つけて直した物**: captain 側の Captain のテスト 2 本が、失敗したターンの後の ✳ 要約（一発生成）で本物の `claude -p` を起こしていた
+  （起動コマンドの上書きを通らない。本人の HOME なら本人のサブスクで動く）。テストの設定で要約と自動命名を止めた。
+- **確かめたこと**: 上の R09 / R10 の対応。隔離 offscreen の画面は、ブリッジ（⚑ タブ + 編隊図）・Task カード（会話 | 変更レビュー）・3 列の比べる・
+  サイドバーの絞り込みと複数選択の帯・作成中の行・分解案カードと `⚑`・再起動後に DB から戻る分解案。
 
 ## 付録 A: 調査の全 226 項目の行き先
 

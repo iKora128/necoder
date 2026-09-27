@@ -94,8 +94,8 @@ main取り込み済みの履歴を区別し、独自変更の主要経路を静�
 | R06 | 高 | 修正実装あり・検証待ち | SSH由来のlocalhost URLが手元のlocalhostとして扱われる |
 | R07 | 中 | 修正実装あり・検証待ち | 注記の送信メニューがスレッドの配列添字を保持する |
 | R08 | 中 | 修正実装あり・検証待ち | 使用量の共有キーがエージェント名だけ |
-| R09 | 高 | 要対応 | Captainの承認とTask作成の間に復旧可能な実行記録がない |
-| R10 | 高 | 要検証 | mainのCaptain変更とparity機能の統合契約 |
+| R09 | 高 | 一部修正実装あり・検証待ち（条件 1 は要対応） | Captainの承認とTask作成の間に復旧可能な実行記録がない |
+| R10 | 高 | 修正実装あり・検証待ち（統合済み・実機は未） | mainのCaptain変更とparity機能の統合契約 |
 | R11 | 高 | 要検証（一部の同期書き込みだけ修正） | イベントキュー・ファイル監視・同期DB処理の負荷時挙動 |
 | R12 | 中 | 要検証 | 端末検索がUI側で全履歴をロックして走査する |
 | R13 | 中 | 要対応 | 実行寿命・表示状態・送信先の責務が集中している |
@@ -248,6 +248,24 @@ main取り込み済みの履歴を区別し、独自変更の主要経路を静�
 - [ ] 3行中1行だけ失敗した際、成功済みのTaskを重複作成せず残りを再試行できる。
 - [ ] DB失敗後も案と選択内容が残る。
 
+- **対応（2026-09-27・統合 `parity/merge-captain-fleet`）**: Captain の作業（`captain/fleet-pane-and-seat` = `d7658ac`）を統合ブランチへ合わせる時に、
+  承認から Task 作成までを parity の ＋ Task の流れ（`task_creation.rs`・O20 の作成中の行）へ載せ直した。captain 側の
+  `create_task_in`（行ごとに背景の作成を並べて走らせる・失敗はトーストだけ）は、統合ブランチ側の作り直した ＋ Task
+  （`create_prompted_tasks`）と噛み合わないので無くし、`create_proposed_task_jobs` が行ごとの委任文を
+  `FanoutTask.captain_proposal`（案の id）と一緒に渡す。
+  - 条件 2: 行は 1 本ずつ順に作り（同じリポジトリへ `git worktree add` を並べると ref の lock でぶつかる）、作れなかった行は
+    サイドバーに「作れませんでした + やり直す」で残る。成功した行は作り直さず、その行だけやり直せる。やり直しでも
+    `⚑` 帰属と台帳の `captain_task` が付く（`register_created_task` が案の id を見る）。**同じ起動の間だけ**（作成中の行は保存しない）。
+  - 条件 3: 裁きを DB に書けなかった時、カードを印ごと戻す（何も切っていないので押し直せる）。別の窓が先に裁いた・DB に
+    無い案（`storage::ProposalNotPending`）は戻さない（押し直しても裁けないカードを残さない）。
+  - 条件 1 は未対応: 承認を DB に確定した後や worktree を作った後に終了すると、その案の残りの行は切られず、再開の記録も無い
+    （行ごとの待機 / 作成中 / 成功 / 失敗を DB に持つ設計が要る）。
+  - 検証: `approving_a_proposal_creates_only_the_chosen_rows_as_marked_tasks`（作成中の行を通って印の行だけ本物の worktree + `⚑` +
+    `captain_task`・舞台には並べない）、`only_a_database_failure_brings_the_card_back`、storage の往復テストに型の確認（二度目の裁き・
+    無い案）。隔離 offscreen: 分解案カードと `⚑` 行（`NECODER_FLEET_PROBE="graph;proposal:3;origin;captain"`）、GUI の無い時に MCP
+    （`necoder mcp --captain` の `fleet_propose_tasks`）で DB に置いた案が、起動するとカードと titlebar のバッジに戻ること。
+    DB の失敗そのものは再現していない（分け方だけを単体テスト）。本物のエージェントでの承認 → 担当の起動は未（課金あり）。
+
 ### R10 — mainとparityの統合契約
 
 - **対象/根拠**: main未コミット差分と統合 `2c80f83` の一時ファイル上の三者比較。
@@ -260,6 +278,29 @@ main取り込み済みの履歴を区別し、独自変更の主要経路を静�
 - [ ] TurnEndedの正常/中断/失敗の意味が、通知・Captain wake・使用量・次のキューで一致する。
 - [ ] Task別レビューと新Fleetの会話/サイドペインが共存し、対象Taskと表示を取り違えない。
 - [ ] 最終統合版でDB復元・全targetのcheck・関連test・隔離した画面検証を行う。
+
+- **対応（2026-09-27・統合 `parity/merge-captain-fleet`）**: `captain/fleet-pane-and-seat`（`d7658ac`・main の作業ツリーにあった
+  未コミットの作業をコミットにした物）を統合ブランチ（`db28c9d`）へ `--no-ff` で合わせた。テキストの衝突は 33 ファイル。
+  Fleet の見た目と構成は captain 側（FLEET-V2 §3・ペインバー + サイドペイン・ブリッジ・旧 workbench の削除）を正にし、
+  parity の Fleet の機能をその上へ載せ直した（ORCA-PARITY §7.3）。
+  - 条件 1（席）: parity で増えた送信の経路（`send_user_prompt_to` = 注記の送信 O7・競合を直させる O19、O15 の引き継ぎ）も
+    `send_prompt_entry` を通るので、席のスレッドなら席の決まり（モード・MCP）で立て直す。Codex の席が止める MCP サーバは、
+    アカウントを設定で切り替えている時（O14 の `agent_servers.codex.env.CODEX_HOME`）はその置き場の設定から読むように直した
+    （以前は necoder 自身の環境の `~/.codex` を見ていて、切り替えた先の設定のサーバは止まらなかった。道具の呼び出しは席の裁定が
+    断るので使われはしなかった）。
+  - 条件 2（TurnEnded）: captain 側の「正常に完了したか」（`completed: bool`）と parity 側の「終わり方」（`TurnOutcome`・O12）が
+    同じイベントに二重にあったので `outcome` 1 つに寄せた。Captain は `Completed` の時だけ采配を記録して読んだ位置を進め、OS の
+    通知と窓の中のトーストも同じ値で言い分ける。使用量（`turn_usage`）はどの終わり方でも記録し、送信待ちのキューもどの終わり方でも
+    流れる（どちらも従来どおり・中断の後の「今すぐ送る」がこれに乗っている）。
+  - 条件 3（レビュー）: 「変更」のサイドペインは、その Task の session の変更レビュー（`session.review`）をそのまま描く。開く時に
+    `set_stage_side` が `activate_review`（その Task の base を既定の比較）を呼ぶ。「変更」を開いている Task は、エディタのタブを
+    閉じても読み込みを止めない（`review_shown_in_fleet` は `stage_tabs` の `Diff` を見る＝サイドペインが開いていること）。注記の宛先は
+    その Task の session のスレッド。隔離 offscreen で 1 枚（会話 | 変更）と 3 列（各カードの変更がカードいっぱい）を撮って、カードと
+    中身の Task が合っていることを目視（ORCA-PARITY §7.3）。
+  - 条件 4: `cargo check --workspace --all-targets`（debug / release）警告 0、使い捨ての HOME で `cargo test --workspace` 全部通過、
+    `x86_64-pc-windows-msvc` の `acp_client` / `host`。DB の復元は分解案（上の R09）と舞台のピン・列数（`restore_window_state`
+    に移した・テスト）。
+  - 未検証: 実機（Dev.app）・本物のエージェントでの Captain の采配と承認（課金あり）・SSH。
 
 ### R11 — イベントとDB処理の負荷
 
