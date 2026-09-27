@@ -207,7 +207,8 @@ async function loadThread() {
 }
 function renderDetail() {
   if (!detail) return;
-  $('transcript').replaceChildren(...detail.entries.map(entry => {
+  // 新しい順（最新が入力欄のすぐ下）。スマホで毎回いちばん下までスクロールしなくて済む。
+  $('transcript').replaceChildren(...detail.entries.toReversed().map(entry => {
     const article = node('article', undefined, `entry ${entry.kind}`);
     article.append(node('div', t(entry.kind), 'label'), node('pre', entry.text)); return article;
   }));

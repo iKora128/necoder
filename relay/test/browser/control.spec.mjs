@@ -14,6 +14,8 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   await page.locator('#message').fill('スマホからのテスト指示');
   await page.locator('#send').click();
   await expect(page.locator('#transcript')).toContainText('スマホからのテスト指示');
+  // 新しい順: 送ったばかりの発話が入力欄のすぐ下（先頭）に来る。
+  await expect(page.locator('#transcript .entry').first()).toContainText('スマホからのテスト指示');
   expect((await (await request.get('http://127.0.0.1:8792/count')).json()).count).toBe(count + 1);
   await page.locator('#diff').click();
   await expect(page.locator('#diff-text')).toContainText('+remote ready');
