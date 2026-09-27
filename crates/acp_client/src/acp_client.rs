@@ -365,6 +365,179 @@ pub enum AgentEvent {
     /// （[`run_session_on`] が戻り、イベントチャネルも閉じる）。ターン中なら UI はそのターンを
     /// 畳み、以後の送信は新しいセッションを立ち上げる。待機中にも届く（EOF を待機中も見張るため）。
     SessionLost,
+    /// エージェントが起動してすぐ（セッションを開く前に）終わった。終わり方と stderr の末尾を画面に
+    /// 出すためのもので、**保存もログもしない**（[`AgentExited`]）。[`run_session_on`] はこれを流して
+    /// から同じ [`AgentExited`] のエラーで戻る（UI はそのエラーを `Failed` の文にする）。
+    ExitedAtStartup(AgentExited),
+}
+
+/// エージェントが起動してすぐ（`session/new` を終える前に）終わった。理由はエージェントが stderr に
+/// 書いた末尾。[`run_session_on`] はこの型のエラーで戻る。
+///
+/// **`Display` には stderr を入れない** — エラーの文はログや保存される transcript に載り得るので、秘密が
+/// 混ざり得る stderr は画面（[`Self::stderr`] を読む UI）にだけ出す。stderr の行は、エージェントへ渡した
+/// env のうち秘密らしい名前の値と、よく知られた鍵の形を伏せ字にしてある（[`mask_secrets`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExited {
+    /// 終了コード（シグナルで終わった等で無ければ `None`）。
+    pub code: Option<i32>,
+    /// 終わらせたシグナル（unix だけ・分からなければ `None`）。
+    pub signal: Option<i32>,
+    /// stderr の末尾（古い順・上限つき・伏せ字済み）。
+    pub stderr: Vec<String>,
+}
+
+impl std::fmt::Display for AgentExited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.code, self.signal) {
+            (Some(code), _) => write!(
+                formatter,
+                "エージェントが起動してすぐ終了した（終了コード {code}）"
+            ),
+            (None, Some(signal)) => write!(
+                formatter,
+                "エージェントが起動してすぐ終了した（シグナル {signal}）"
+            ),
+            (None, None) => write!(formatter, "エージェントが起動してすぐ終了した"),
+        }
+    }
+}
+
+impl std::error::Error for AgentExited {}
+
+/// 伏せ字（秘密らしい値の代わりに出す）。
+const MASK: &str = "••••";
+
+/// env の名前が秘密を持つ物らしいか（名前を `_` で区切った語で見る）。使用量の指紋の語
+/// （`agent_panel::usage` の `CREDENTIAL_WORDS`）のうち、値そのものが秘密になる語だけ。接続先や
+/// 置き場（URL・HOME）は理由を読むのに要るので伏せない。
+fn is_secret_variable(name: &str) -> bool {
+    const SECRET_WORDS: &[&str] = &[
+        "KEY",
+        "APIKEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "AUTH",
+        "OAUTH",
+        "BEARER",
+        "COOKIE",
+        "HEADER",
+        "HEADERS",
+    ];
+    name.to_ascii_uppercase()
+        .split('_')
+        .any(|word| SECRET_WORDS.contains(&word))
+}
+
+/// stderr の行から秘密らしい物を伏せる: エージェントへ渡した env のうち秘密らしい名前の値（6 文字以上）と、
+/// よく知られた鍵の形（`sk-…`・`ghp_…`・`xoxb-…`・`AKIA…`・`AIza…` 等 16 文字以上）と `Bearer` の後ろの語。
+/// 取りこぼしはあり得るので、伏せた後も画面にだけ出す（保存しない）のが前提。
+pub fn mask_secrets<'a>(
+    lines: Vec<String>,
+    env: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Vec<String> {
+    let mut secrets: Vec<&str> = env
+        .into_iter()
+        .filter(|(name, value)| is_secret_variable(name) && value.chars().count() >= 6)
+        .map(|(_, value)| value.as_str())
+        .collect();
+    // 長い値から伏せる（短い値が長い値の一部だと、長い方を伏せ損ねる）。
+    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    lines
+        .into_iter()
+        .map(|line| {
+            let line = secrets
+                .iter()
+                .fold(line, |line, secret| line.replace(secret, MASK));
+            mask_token_shapes(&line)
+        })
+        .collect()
+}
+
+/// よく知られた鍵の形の語と、`Bearer` の次の語を伏せる（区切りは空白・引用符・`=`・`:`・`,`）。
+fn mask_token_shapes(line: &str) -> String {
+    const PREFIXES: &[&str] = &[
+        "sk-",
+        "sk_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "AKIA",
+        "AIza",
+    ];
+    let is_delimiter =
+        |character: char| character.is_whitespace() || "\"'`=:,;()[]{}<>".contains(character);
+    let mut masked = String::with_capacity(line.len());
+    let mut word = String::new();
+    let mut after_bearer = false;
+    let flush = |word: &mut String, masked: &mut String, after_bearer: &mut bool| {
+        if word.is_empty() {
+            return;
+        }
+        let shaped =
+            word.chars().count() >= 16 && PREFIXES.iter().any(|prefix| word.starts_with(prefix));
+        if shaped || *after_bearer {
+            masked.push_str(MASK);
+        } else {
+            masked.push_str(word);
+        }
+        *after_bearer = word.eq_ignore_ascii_case("bearer");
+        word.clear();
+    };
+    for character in line.chars() {
+        if is_delimiter(character) {
+            flush(&mut word, &mut masked, &mut after_bearer);
+            masked.push(character);
+        } else {
+            word.push(character);
+        }
+    }
+    flush(&mut word, &mut masked, &mut after_bearer);
+    masked
+}
+
+/// セッションを開く前に失敗した時、子が終わっていればその終わり方と stderr の末尾を返す（まだ動いて
+/// いる＝無言ハングや ACP の食い違いなら `None`）。落ちた直後は終わりの回収と stderr の読み切りが
+/// 追いついていないことがあるので少しだけ待つ（終わりは最長 1.5 秒・stderr は最長 0.5 秒）。
+async fn startup_exit(
+    process: &mut host::HostProcess,
+    env: &std::collections::HashMap<String, String>,
+) -> Option<AgentExited> {
+    let mut status = process.try_exit_status();
+    for _ in 0..30 {
+        if status.is_some() {
+            break;
+        }
+        async_io::Timer::after(Duration::from_millis(50)).await;
+        status = process.try_exit_status();
+    }
+    let status = status?;
+    let tail = process.stderr_tail();
+    let waiting = tail.clone();
+    let closed = blocking::unblock(move || waiting.wait_closed(Duration::from_millis(500))).await;
+    if !closed {
+        eprintln!("起動してすぐ終わったエージェントの stderr を読み切れなかった（残りは捨てる）");
+    }
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+    #[cfg(not(unix))]
+    let signal = None;
+    Some(AgentExited {
+        code: status.code(),
+        signal,
+        stderr: mask_secrets(tail.lines(), env),
+    })
 }
 
 /// ターンの終わり方（ACP `StopReason` の簡約）。UI の「完了/中断」の出し分けに使う。
@@ -1634,6 +1807,10 @@ pub async fn run_session_on(
     );
 
     let cwd = command.cwd.clone();
+    // セッションを開けたか（開く前の失敗だけを「起動してすぐ終わった」として理由を見せる）。
+    let session_opened = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opened = session_opened.clone();
+    let exit_events = event_tx.clone();
     let outcome = acp::Client
         .builder()
         .connect_with(transport, async move |connection| {
@@ -1750,6 +1927,7 @@ pub async fn run_session_on(
                     (session, modes_state, config_options)
                 }
             };
+            opened.store(true, std::sync::atomic::Ordering::SeqCst);
             event_tx
                 .unbounded_send(AgentEvent::SessionStarted {
                     session_id: session.session_id().to_string(),
@@ -2078,8 +2256,19 @@ pub async fn run_session_on(
             }
             Ok::<(), acp::Error>(())
         })
-        .await
-        .context("ACP セッションが異常終了");
+        .await;
+    // 開く前に落ちた（initialize の前後でプロセスが終わった）なら、ACP の「Broken pipe」ではなく
+    // 終わり方と stderr の末尾を理由にする（何が悪いかはエージェントしか知らない）。
+    if outcome.is_err() && !session_opened.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(exited) = startup_exit(&mut process, &spec.env).await {
+            drop(process);
+            exit_events
+                .unbounded_send(AgentEvent::ExitedAtStartup(exited.clone()))
+                .ok();
+            return Err(anyhow::Error::new(exited));
+        }
+    }
+    let outcome = outcome.context("ACP セッションが異常終了");
 
     drop(process);
     outcome
@@ -3284,6 +3473,109 @@ sys.stdout.reconfigure(encoding='utf-8')\n";
             };
             futures::join!(session, collect)
         }))
+    }
+
+    /// 起動してすぐ落ちたエージェント（stderr に理由を書いて exit 1）: 終了コードと stderr の末尾を
+    /// `ExitedAtStartup` で流し、同じ理由のエラーで戻る。エラーの文（ログや保存される transcript に
+    /// 載る側）には stderr を入れない。渡した env の秘密らしい値と鍵の形は伏せる。
+    #[test]
+    fn an_agent_that_exits_at_startup_reports_its_stderr() {
+        let script = r#"
+import os, sys
+sys.stderr.write("error: DEEPSEEK_API_KEY is invalid\n")
+sys.stderr.write("got key " + os.environ.get("DEEPSEEK_API_KEY", "") + "\n")
+sys.stderr.write("Authorization: Bearer abcdefghijklmnopqrstu\n")
+sys.stderr.flush()
+sys.exit(1)
+"#;
+        let Some(mut command) = fake_agent_command(script) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        command.env.insert(
+            "DEEPSEEK_API_KEY".to_string(),
+            "ds-0123456789abcdef".to_string(),
+        );
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                drop(command_tx);
+                seen
+            };
+            futures::join!(session, collect)
+        });
+        let Err(error) = outcome else {
+            panic!("起動してすぐ落ちたら Err で戻る");
+        };
+        let exited = error
+            .downcast_ref::<AgentExited>()
+            .expect("理由の型（AgentExited）で戻る");
+        assert_eq!(exited.code, Some(1));
+        assert_eq!(
+            exited.stderr,
+            vec![
+                "error: DEEPSEEK_API_KEY is invalid".to_string(),
+                "got key ••••".to_string(),
+                "Authorization: Bearer ••••".to_string(),
+            ]
+        );
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains("invalid") && !text.contains("Bearer"),
+            "エラーの文に stderr を入れない: {text}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ExitedAtStartup(seen) if seen == exited
+            )),
+            "画面へ出す分を流す: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::SessionStarted { .. })),
+            "セッションは開いていない"
+        );
+    }
+
+    /// 伏せ字: 渡した env のうち秘密らしい名前の値・よく知られた鍵の形・`Bearer` の次の語。秘密でない
+    /// 名前の値（モデル・置き場）と短い語は残す（理由を読むのに要る）。
+    #[test]
+    fn secrets_in_stderr_are_masked() {
+        let env: BTreeMap<String, String> = [
+            ("OPENAI_API_KEY", "sk-live-abcdef123456"),
+            ("OPENAI_MODEL", "gpt-5-codex"),
+            ("CLAUDE_CONFIG_DIR", "/Users/me/.claude-work"),
+            ("MY_TOKEN", "short"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let masked = mask_secrets(
+            vec![
+                "key=sk-live-abcdef123456 model=gpt-5-codex dir=/Users/me/.claude-work".to_string(),
+                "token ghp_0123456789abcdef0123 and sk-12".to_string(),
+                "header \"Authorization: bearer eyJhbGciOiJIUzI1NiJ9\"".to_string(),
+                "short value is short".to_string(),
+            ],
+            &env,
+        );
+        assert_eq!(
+            masked,
+            vec![
+                "key=•••• model=gpt-5-codex dir=/Users/me/.claude-work".to_string(),
+                "token •••• and sk-12".to_string(),
+                "header \"Authorization: bearer ••••\"".to_string(),
+                "short value is short".to_string(),
+            ]
+        );
     }
 
     /// 偽エージェント: `session/prompt` を受けた瞬間にプロセスごと消える（SSH 切断で remote の
@@ -4518,6 +4810,8 @@ for line in sys.stdin:
                             ..
                         } => eprintln!("[session started] {session_id} resumed={resumed}"),
                         AgentEvent::SessionLost => eprintln!("[session lost]"),
+                        // stderr は画面だけの物なので、ここでも終わり方だけを出す。
+                        AgentEvent::ExitedAtStartup(exited) => eprintln!("[exited] {exited}"),
                     }
                 }
                 chunks

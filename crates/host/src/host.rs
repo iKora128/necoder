@@ -186,6 +186,7 @@ pub struct HostProcess {
     child: Child,
     stdin: Option<Box<dyn Write + Send>>,
     stdout: Option<Box<dyn Read + Send>>,
+    stderr: StderrTail,
     _transport: Option<Arc<SshTransport>>,
 }
 
@@ -203,6 +204,160 @@ impl HostProcess {
     pub fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// 終わっていればその終わり方（まだ動いていれば `None`）。remote では手元の `ssh` の終わり方
+    /// ＝リモートのコマンドの終了コード（ssh 自身の失敗は 255）。
+    pub fn try_exit_status(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
+    /// stderr の末尾（[`StderrTail`]）。remote では ssh 自身の知らせも混ざる。
+    pub fn stderr_tail(&self) -> StderrTail {
+        self.stderr.clone()
+    }
+}
+
+/// 長寿命の子（ACP エージェント・言語サーバ）の stderr の末尾。起動してすぐ落ちた子の理由を見せる
+/// ために持つ。**上限つきでメモリにだけ置き、ファイルにもログにも書かない**（秘密が混ざり得るので、
+/// 見せるかどうか・どう伏せるかは呼び手が決める）。子は止まらないよう、読む側は最後まで読み続けて
+/// 古い行から捨てる。色などの制御文字は落とす。
+#[derive(Clone, Default)]
+pub struct StderrTail {
+    shared: Arc<(Mutex<StderrTailState>, std::sync::Condvar)>,
+}
+
+#[derive(Default)]
+struct StderrTailState {
+    lines: std::collections::VecDeque<String>,
+    /// 子が stderr を閉じた（終わった）。
+    closed: bool,
+}
+
+impl StderrTail {
+    /// 持っておく行数（古い行から捨てる）。
+    pub const MAX_LINES: usize = 40;
+    /// 1 行に持つバイト数（超えた分は捨てて `…` を付ける）。改行の無い長い出力でメモリを食わない。
+    pub const MAX_LINE_BYTES: usize = 1000;
+
+    /// 今持っている行（古い順）。
+    pub fn lines(&self) -> Vec<String> {
+        let (state, _) = &*self.shared;
+        state
+            .lock()
+            .map(|state| state.lines.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// 子が stderr を閉じるまで最長 `timeout` 待つ（閉じたら `true`）。すぐ落ちた子の最後の行を、
+    /// 読む側が追いつく前に取りこぼさないため。
+    pub fn wait_closed(&self, timeout: Duration) -> bool {
+        let (state, closed) = &*self.shared;
+        let Ok(guard) = state.lock() else {
+            return false;
+        };
+        closed
+            .wait_timeout_while(guard, timeout, |state| !state.closed)
+            .map(|(state, _)| state.closed)
+            .unwrap_or(false)
+    }
+
+    fn push(&self, line: String) {
+        let (state, _) = &*self.shared;
+        if let Ok(mut state) = state.lock() {
+            if state.lines.len() == Self::MAX_LINES {
+                state.lines.pop_front();
+            }
+            state.lines.push_back(line);
+        }
+    }
+
+    fn close(&self) {
+        let (state, closed) = &*self.shared;
+        if let Ok(mut state) = state.lock() {
+            state.closed = true;
+        }
+        closed.notify_all();
+    }
+
+    /// `pipe` を別スレッドで最後まで読み、末尾を持つ。
+    fn capture(mut pipe: impl Read + Send + 'static) -> StderrTail {
+        let tail = StderrTail::default();
+        let writer = tail.clone();
+        let spawned = thread::Builder::new()
+            .name("stderr-tail".to_string())
+            .spawn(move || {
+                // 8 KB ずつ読む（行の区切りは自分で見る＝改行の無い長い出力でも 1 行ぶんしか持たない）。
+                let mut chunk = [0u8; 8192];
+                let mut line: Vec<u8> = Vec::new();
+                let mut truncated = false;
+                loop {
+                    let read = match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    for &byte in &chunk[..read] {
+                        if byte == b'\n' {
+                            writer.push(stderr_line(&line, truncated));
+                            line.clear();
+                            truncated = false;
+                        } else if line.len() < Self::MAX_LINE_BYTES {
+                            line.push(byte);
+                        } else {
+                            truncated = true;
+                        }
+                    }
+                }
+                if !line.is_empty() {
+                    writer.push(stderr_line(&line, truncated));
+                }
+                writer.close();
+            });
+        if let Err(error) = spawned {
+            eprintln!("stderr を読むスレッドを立てられない: {error}");
+            tail.close();
+        }
+        tail
+    }
+}
+
+/// stderr の 1 行を見せられる文字にする（UTF-8 に直し、色などの制御文字・エスケープ列を落とす）。
+fn stderr_line(bytes: &[u8], truncated: bool) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut line = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            // ESC [ … 終端（CSI・色）/ ESC ] … BEL か ESC \（OSC・題名）/ ESC と次の 1 文字。
+            '\u{1b}' => match characters.next() {
+                Some('[') => {
+                    for next in characters.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = characters.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' {
+                            characters.next_if_eq(&'\\');
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\t' => line.push(' '),
+            character if character.is_control() => {}
+            character => line.push(character),
+        }
+    }
+    if truncated {
+        line.push('…');
+    }
+    line
 }
 
 impl Drop for HostProcess {
@@ -1351,15 +1506,18 @@ fn spawn_process_local(
         .envs(&spec.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // 末尾だけを持つ（すぐ落ちた子の理由を見せる・[`StderrTail`]）。読む側は最後まで読み続ける。
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("process を起動できない: {}", spec.program))?;
     let stdin = child.stdin.take().context("process stdin が無い")?;
     let stdout = child.stdout.take().context("process stdout が無い")?;
+    let stderr = child.stderr.take().context("process stderr が無い")?;
     Ok(HostProcess {
         child,
         stdin: Some(Box::new(stdin)),
         stdout: Some(Box::new(stdout)),
+        stderr: StderrTail::capture(stderr),
         _transport: transport,
     })
 }
@@ -5137,7 +5295,8 @@ impl Host for RemoteHost {
             .standalone_command(false, &remote_command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // リモートの子の stderr と ssh 自身の知らせの末尾（[`StderrTail`]）。
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("remote process を起動できない: {}", spec.program))?;
         let stdin = child.stdin.take().context("remote process stdin が無い")?;
@@ -5145,10 +5304,15 @@ impl Host for RemoteHost {
             .stdout
             .take()
             .context("remote process stdout が無い")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("remote process stderr が無い")?;
         Ok(HostProcess {
             child,
             stdin: Some(Box::new(stdin)),
             stdout: Some(Box::new(stdout)),
+            stderr: StderrTail::capture(stderr),
             _transport: Some(transport),
         })
     }
@@ -5339,6 +5503,65 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+
+    /// 長寿命の子の stderr の末尾: すぐ落ちた子の最後の行と終わり方が取れる（読む側が追いつくまで
+    /// 待てる）。stdout は ACP 用にそのまま残る。
+    #[cfg(unix)]
+    #[test]
+    fn a_process_keeps_the_tail_of_its_stderr() {
+        let spec = CommandSpec::new("sh", std::env::temp_dir()).args([
+            "-c",
+            "echo 'first line' >&2; printf '\\033[31mDEEPSEEK_API_KEY is not set\\033[0m\\n' >&2; exit 3",
+        ]);
+        let mut process = LocalHost.spawn_process(&spec).expect("起動できる");
+        let tail = process.stderr_tail();
+        assert!(
+            tail.wait_closed(Duration::from_secs(5)),
+            "子が閉じるまで待てる"
+        );
+        assert_eq!(
+            tail.lines(),
+            vec![
+                "first line".to_string(),
+                "DEEPSEEK_API_KEY is not set".to_string()
+            ],
+            "色のエスケープ列は落とす"
+        );
+        let mut status = None;
+        for _ in 0..100 {
+            status = process.try_exit_status();
+            if status.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(status.and_then(|status| status.code()), Some(3));
+    }
+
+    /// 末尾は上限つき: 行数は最後の [`StderrTail::MAX_LINES`] 行・1 行は [`StderrTail::MAX_LINE_BYTES`]
+    /// まで（改行の無い長い出力でもメモリを食わない）。制御文字は落とし、タブは空白にする。
+    #[test]
+    fn the_stderr_tail_is_bounded() {
+        let mut text = String::new();
+        for number in 0..(StderrTail::MAX_LINES + 10) {
+            text.push_str(&format!("line {number}\n"));
+        }
+        text.push_str(&"x".repeat(StderrTail::MAX_LINE_BYTES * 3));
+        let tail = StderrTail::capture(std::io::Cursor::new(text.into_bytes()));
+        assert!(tail.wait_closed(Duration::from_secs(5)));
+        let lines = tail.lines();
+        assert_eq!(lines.len(), StderrTail::MAX_LINES);
+        assert_eq!(lines[0], "line 11", "古い行から捨てる");
+        let last = lines.last().expect("最後の行");
+        assert_eq!(last.chars().count(), StderrTail::MAX_LINE_BYTES + 1);
+        assert!(last.ends_with('…'), "切った印");
+        assert_eq!(stderr_line(b"a\tb\x07c\r", false), "a bc");
+        assert_eq!(
+            stderr_line(b"\x1b]0;title\x07done", false),
+            "done",
+            "題名の OSC も落とす"
+        );
+    }
 
     /// 取り消せる command（local）: 取り消さなければ出力と終わり方を返す。待っている間に取り消すと
     /// 子を止めてすぐ戻る（最後まで走らせない）。始める前に取り消されていれば起動もしない。

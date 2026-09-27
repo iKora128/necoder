@@ -1166,6 +1166,10 @@ struct Thread {
     /// 今のセッションへ **1 度でも prompt を送ったか**。先張りしただけで一度も使っていない
     /// セッションは、上限を超えたら畳んでよい（[`AgentPanel::retire_idle_prewarms`]）。
     session_used: bool,
+    /// エージェントが起動してすぐ終わった時の終わり方と stderr の末尾（[`acp_client::AgentExited`]）。
+    /// composer の上にカードで出す。**画面だけ・永続化しない**（stderr には秘密が混ざり得る）。次に
+    /// セッションが開いた時と「閉じる」で消える。
+    startup_exit: Option<acp_client::AgentExited>,
     /// 認証切れ（再ログインで直る失敗）で止まっている。composer 上部に「再ログインが必要」カードを
     /// 出す。**セッション（`command_tx`）は保持する**: claude-agent-acp は認証切れのセッションを
     /// 「sign-out respawn」として覚えており、次の prompt で Claude セッションを `resume` 付きで
@@ -1254,6 +1258,7 @@ impl Thread {
             queued_prompts: Vec::new(),
             acp_session_id: None,
             session_lost: false,
+            startup_exit: None,
             session_note: None,
             session_serial: 0,
             session_used: false,
@@ -4385,6 +4390,8 @@ PYEOF"#;
         }
         thread.command_tx = None;
         thread.session_lost = true;
+        // 「再開中…」の一言はもう当たらない（切れた印とカードが代わりに出る）。
+        thread.session_note = None;
         self.tidy_chat_dir(index);
         // 終端イベント無しでターン中に終わった場合の畳み（running=false なら何もしない）。
         self.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
@@ -4402,13 +4409,29 @@ PYEOF"#;
         thread.command_tx = None;
         thread.session_lost = true;
         thread.session_note = None;
-        self.abandon_turn(
-            thread_index,
-            &i18n::t!("agent.err_session_lost_transport"),
-            cx,
-        );
+        let message = self.session_lost_reason();
+        self.abandon_turn(thread_index, &message, cx);
         self.sync_running_registry(cx);
         cx.notify();
+    }
+
+    /// ターンの途中でセッションが切れた時に transcript へ残す 1 行。**手元で動くエージェントには SSH の
+    /// 話をしない**（落ちたのはプロセス）。SSH 先で動かしている時だけ SSH の切断の可能性を言う。
+    fn session_lost_reason(&self) -> String {
+        if self.dest_host.is_remote() {
+            i18n::t!("agent.err_session_lost_transport")
+        } else {
+            i18n::t!("agent.err_session_lost_process")
+        }
+    }
+
+    /// セッションが切れた印（composer の直上のバナー）の文。SSH の話は SSH 先の時だけ（上と同じ）。
+    fn session_lost_banner_text(&self) -> String {
+        if self.dest_host.is_remote() {
+            i18n::t!("agent.session_lost_banner")
+        } else {
+            i18n::t!("agent.session_lost_banner_local")
+        }
     }
 
     /// 「再開」ボタン: 送信を待たずにエージェントを立ち上げ直す。前回の会話は `session/load` で
@@ -6760,11 +6783,8 @@ PYEOF"#;
                     acp_client::run_session_on(host, command, preferences, prompt_rx, event_tx)
                         .await
                 {
-                    // `{:#}` で anyhow の原因鎖まで出す（例: 「ACP セッションが異常終了: ACP
-                    // initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context
-                    // だけになりハンドシェイクの無言ハングが埋もれるため。
                     error_tx
-                        .unbounded_send(AgentEvent::Failed(format!("{error:#}")))
+                        .unbounded_send(AgentEvent::Failed(session_error_text(&error)))
                         .ok();
                 }
             })
@@ -6861,6 +6881,8 @@ PYEOF"#;
                 resumable,
             } => {
                 thread.session_resumable = resumable;
+                // 開けた＝前に起動してすぐ終わった時のカードはもう要らない。
+                thread.startup_exit = None;
                 // 目標への操作は新しいセッションの広告で決め直す（届かなければ操作なし・O17）。
                 thread.goal_actions.clear();
                 // 再生を頼んだ起動はここで終わり（引き継げなかった時も下ろす＝次の起動では頼まない）。
@@ -6909,6 +6931,11 @@ PYEOF"#;
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
             AgentEvent::SessionLost => {}
+            // 起動してすぐ終わった: 終わり方と stderr の末尾をカードに出す（画面だけ・保存しない）。
+            // transcript に残る失敗の 1 行は、続いて届く `Failed`（stderr を含まない文）が書く。
+            AgentEvent::ExitedAtStartup(exited) => {
+                thread.startup_exit = Some(exited);
+            }
             // エージェント側の過去の会話の再生（O15）。開いた時点の transcript の**前**に積む
             // （load を待つ間に送った発話があっても順序を崩さない）。積むのは 1 つのスレッドにつき
             // 1 回だけ — 頼んでいないのに届いた物・2 回目は捨てる（同じ会話を二重に載せない）。
@@ -10642,7 +10669,12 @@ PYEOF"#;
         let thread = self.threads.get(self.active)?;
         let theme = self.theme.clone();
         if thread.session_lost {
+            // 起動してすぐ終わった時は理由のカード（[`Self::render_exit_card`]）が同じ役をする。
+            if thread.startup_exit.is_some() {
+                return None;
+            }
             let index = self.active;
+            let banner = self.session_lost_banner_text();
             return Some(
                 div()
                     .id("session-lost")
@@ -10663,7 +10695,7 @@ PYEOF"#;
                             .min_w_0()
                             .text_size(px(11.5))
                             .text_color(theme.fg1)
-                            .child(SharedString::from(i18n::t!("agent.session_lost_banner"))),
+                            .child(SharedString::from(banner)),
                     )
                     .child(
                         div()
@@ -10901,6 +10933,132 @@ PYEOF"#;
     /// 「再ログインが必要」カード（composer の直上・承認カードと同じ流儀）。認証切れは一般のエラーと
     /// 違い**ユーザーがターミナルで 1 行打てば直る**ので、打つべきコマンドと再接続導線をここに置く。
     /// 再接続は直近の指示を同じセッションへ送り直す（会話履歴も、adapter 側の文脈も捨てない）。
+    /// 起動してすぐ終わったエージェントのカード（composer の上）: 見出し「起動してすぐ終了しました」+
+    /// エージェント名、終わり方と「画面だけ・保存しません」の一文、stderr の末尾（等幅・高さの上限の中で
+    /// スクロール）、「再開」「閉じる」。stderr は保存も記録もしない（[`Thread::startup_exit`]）。
+    fn render_exit_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let exited = thread.startup_exit.as_ref()?;
+        let theme = self.theme.clone();
+        let index = self.active;
+        let stderr = if exited.stderr.is_empty() {
+            i18n::t!("agent.exit_no_stderr")
+        } else {
+            exited.stderr.join("\n")
+        };
+        let button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(10.5))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        Some(
+            div()
+                .id("exit-card")
+                .mx(px(12.))
+                .mb(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .rounded(px(9.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .px(px(11.))
+                .py(px(9.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.fg0)
+                                .child(SharedString::from(i18n::t!("agent.exit_title"))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.5))
+                                .text_color(theme.fg1)
+                                .child(thread.agent.clone()),
+                        )
+                        .child(
+                            button("exit-card-resume", i18n::t!("agent.session_resume"))
+                                .tooltip(Tooltip::text(
+                                    i18n::t!("agent.session_resume_tip"),
+                                    theme.clone(),
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |panel, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        panel.resume_session(index, cx);
+                                    }),
+                                ),
+                        )
+                        .child(
+                            button("exit-card-dismiss", i18n::t!("agent.exit_dismiss"))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |panel, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        panel.dismiss_exit_card(index, cx);
+                                    }),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(i18n::t!(
+                            "agent.exit_body",
+                            "status" => exit_status_text(exited)
+                        ))),
+                )
+                .child(
+                    div()
+                        .id("exit-card-stderr")
+                        .max_h(px(160.))
+                        .overflow_y_scroll()
+                        .rounded(px(6.))
+                        .bg(theme.bg1)
+                        .border_1()
+                        .border_color(theme.border)
+                        .px(px(8.))
+                        .py(px(6.))
+                        .font_family(ui::code_font(cx))
+                        .text_size(px(11.))
+                        .text_color(theme.fg0)
+                        .child(SharedString::from(stderr)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 起動してすぐ終わった時のカードを閉じる（理由を読んだ後）。セッションが切れた印は残るので、
+    /// 代わりにいつもの「切れました」のバナーが出る。
+    fn dismiss_exit_card(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            thread.startup_exit = None;
+        }
+        cx.notify();
+    }
+
     fn render_auth_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         if !thread.auth_required {
@@ -11869,6 +12027,8 @@ impl Render for AgentPanel {
             .children(self.render_auth_card(cx))
             .children(self.render_permission_card(cx))
             .children(self.render_elicitation_card(cx))
+            // 起動してすぐ終わったエージェントの理由（stderr の末尾・画面だけ）。
+            .children(self.render_exit_card(cx))
             // セッション断のバナー（再開ボタン）/ 再開の一言。
             .children(self.render_session_banner(cx))
             .children(self.render_queued_prompts(cx))
@@ -12757,6 +12917,27 @@ fn launch_error_text(error: &anyhow::Error) -> String {
     }
 }
 
+/// セッションが失敗した時に transcript へ残す 1 行。起動してすぐ終わった時（[`acp_client::AgentExited`]）
+/// は終わり方だけを書き、**stderr は入れない**（transcript は保存される・stderr は秘密が混ざり得るので
+/// カードで画面にだけ出す）。それ以外は `{:#}` で anyhow の原因鎖まで出す（例: 「ACP セッションが
+/// 異常終了: ACP initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context だけに
+/// なりハンドシェイクの無言ハングが埋もれるため。
+fn session_error_text(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<acp_client::AgentExited>() {
+        Some(exited) => i18n::t!("agent.err_agent_exited", "status" => exit_status_text(exited)),
+        None => format!("{error:#}"),
+    }
+}
+
+/// 終わり方の言葉（終了コード N / シグナル N / 分からない）。
+fn exit_status_text(exited: &acp_client::AgentExited) -> String {
+    match (exited.code, exited.signal) {
+        (Some(code), _) => i18n::t!("agent.exit_code", "code" => code),
+        (None, Some(signal)) => i18n::t!("agent.exit_signal", "signal" => signal),
+        (None, None) => i18n::t!("agent.exit_unknown"),
+    }
+}
+
 /// binary を置いた後に transcript へ出す知らせ（照合した / 検証の値が無かった・手元の古い版で起こした）。
 fn deploy_notes(outcome: &acp_client::DeployOutcome) -> Vec<String> {
     let mut notes = Vec::new();
@@ -12997,6 +13178,7 @@ fn seed_threads() -> Vec<Thread> {
         queued_prompts: Vec::new(),
         acp_session_id: None,
         session_lost: false,
+        startup_exit: None,
         session_note: None,
         session_serial: 0,
         session_used: false,
@@ -15493,6 +15675,97 @@ PYEOF"#;
             vec![i18n::t!("agent.deploy_verified")],
             "照合したことも 1 行出す"
         );
+    }
+
+    /// 起動してすぐ落ちるエージェント（stderr に理由を書いて exit 1）: 理由（stderr の末尾）は
+    /// カードに出し、transcript（保存される側）には終わり方だけを残して stderr を入れない。渡した鍵は
+    /// 伏せる。手元のエージェントなので SSH とは言わない。本物のプロセスを起こす（プロンプトは送らない）。
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_agent_that_exits_at_startup_shows_why(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_agent_exit_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"agent_auto_name":false,"sound_done":"off",
+                "default_agent":"Broken Agent",
+                "agent_servers":{"broken":{"name":"Broken Agent","command":"/bin/sh",
+                  "args":["-c","echo 'booting the fake agent' >&2; echo \"error: BROKEN_API_KEY=$BROKEN_API_KEY is invalid\" >&2; exit 1"],
+                  "env":{"BROKEN_API_KEY":"secret-0123456789"}}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        // 本物のプロセスの終わりを待つ（背景の I/O は実時間で進む）。
+        cx.executor().allow_parking();
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.dest_cwd = Some(root.clone());
+            let active = panel.active;
+            assert_eq!(panel.threads[active].agent.as_ref(), "Broken Agent");
+            panel.resume_session(active, cx);
+        });
+        let mut settled = false;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            settled = panel.read_with(cx, |panel, _| {
+                let thread = &panel.threads[panel.active];
+                thread.startup_exit.is_some() && thread.session_lost
+            });
+            if settled {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(settled, "起動してすぐ終わったことが画面に届く");
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let thread = &panel.threads[active];
+            let exited = thread.startup_exit.clone().expect("カードに出す");
+            assert_eq!(exited.code, Some(1));
+            assert_eq!(
+                exited.stderr,
+                vec![
+                    "booting the fake agent".to_string(),
+                    "error: BROKEN_API_KEY=•••• is invalid".to_string()
+                ],
+                "渡した鍵は伏せる"
+            );
+            let saved: Vec<String> = thread
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Agent(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+            let failure = saved.last().expect("失敗の 1 行を残す");
+            assert!(
+                failure.contains(&exit_status_text(&exited)),
+                "終わり方を残す: {failure}"
+            );
+            assert!(
+                saved.iter().all(|text| !text.contains("invalid")
+                    && !text.contains("booting")
+                    && !text.contains("secret-0123456789")),
+                "transcript（保存される側）に stderr を入れない: {saved:?}"
+            );
+            assert!(panel.render_exit_card(cx).is_some(), "カードを出す");
+            assert!(
+                panel.render_session_banner(cx).is_none(),
+                "カードが出ている間はバナーを重ねない"
+            );
+            // 手元のエージェントなので SSH とは言わない（閉じた後のバナーも・ターン中に切れた時の 1 行も）。
+            panel.dismiss_exit_card(active, cx);
+            assert!(panel.render_session_banner(cx).is_some());
+            assert!(!panel.session_lost_banner_text().contains("SSH"));
+            assert!(!panel.session_lost_reason().contains("SSH"));
+        });
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Modes も同じ規律で mode_id 一本。新規タブは直前タブの権限モードを引き継ぐ。
