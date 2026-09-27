@@ -292,6 +292,7 @@ cmd:
   split_right: "表示: 右に分割"
   open_localhost_preview: "プレビュー: localhost を開く…"
   toggle_design_mode: "プレビュー: Design モード（要素を選んで AI に渡す）"
+  toggle_web_inspector: "プレビュー: Web Inspector を開く / 閉じる"
   open_html_in_web_tab: "プレビュー: HTML を Web タブで開く（Design モードが使える）"
   new_thread: "AI: 新しいスレッド"
   new_thread_claude: "AI: 新しいスレッド（Claude Code）"
@@ -1011,7 +1012,9 @@ webtab:
   viewport_full: 全幅
   viewport_full_tip: ペインの幅いっぱいに表示
   viewport_tip: "幅 %{width}px で表示"
-  devtools_tip: DevTools（Web Inspector）を開く
+  devtools_tip: Web Inspector を開く（別の窓）
+  devtools_close_tip: Web Inspector を閉じる
+  devtools_needs_web_tab: Web Inspector は Web タブで使えます（HTML プレビューはページの右クリック →「要素の詳細を表示」）
   open_browser_tip: 既定のブラウザで開く
   unsupported: この環境では Web タブを表示できません（macOS / Windows のみ）
   picker_placeholder: "ポート番号か localhost の URL（例: 3000 / localhost:5173/app）"

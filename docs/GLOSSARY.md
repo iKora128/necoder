@@ -117,6 +117,7 @@
 | **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V。開発サーバを見るのは別のタブ＝下の Web タブ） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |
 | ↳ **Web タブ**（localhost の開発サーバを見るタブ。読み込めるのはループバックの http(s) だけ・汎用ブラウザではない。鍵は URL。入口はパレット「プレビュー: localhost を開く…」と transcript / Markdown のリンク） | `TabContent::Web` / `WebPreviewView` / `webview_view::localhost` / `Workspace::open_url` | Web タブ | Web tab |
 | ↳ **Design モード**（Web タブのページの要素を選び、切り抜きと説明を composer へ「要素のチップ」として添える。送信はしない。⌘⇧D） | `ToggleDesignMode` / `webview_view::design` / `ElementCapture` / `WebPreviewEvent::ElementPicked` | Design モード / 要素のチップ | Design Mode / element chip |
+| ↳ **Web Inspector**（Web タブのツールバーの `</>`・自分の localhost のアプリを調べる開発者向けの道具。Design モードは使わない。macOS は WebKit の物（窓の題名は OS が付ける「Webインスペクタ」）を necoder の窓の中に付けず**別の窓**で開く・Windows は WebView2 の DevTools。「DevTools」とは書かない） | `ToggleWebInspector` / `WebViewView::toggle_devtools` / `webview_view::inspector` | Web Inspector | Web Inspector |
 | ↳ **内蔵の配信**（HTML ファイルを Web タブで開くための、necoder の中の小さな静的配信。`127.0.0.1`・token 付きの URL・そのファイルのフォルダだけ・使う Web タブがある間だけ動く） | `webview_view::static_server` / `StaticHosting` / `StaticMount` / `Workspace::open_static_web_tab` / `OpenHtmlInWebTab` | 内蔵の配信 / Web タブで開く | Built-in server / Open in Web tab |
 | **ne コマンド**（ターミナルから開く CLI・`code`/`cursor` 相当） | `cli_shim`（シム生成）/ `necoder cli`（実体） | ne コマンド | ne command |
 | **ターミナル**（下ドックの統合ターミナル。Task タブの Terminal と同じ実体） | `terminal_view::TerminalView` / `TerminalDock` | ターミナル | Terminal |

@@ -223,6 +223,10 @@ impl CommandRegistry {
                 action_name: "workspace::ToggleDesignMode",
             },
             CommandEntry {
+                label_key: "cmd.toggle_web_inspector",
+                action_name: "workspace::ToggleWebInspector",
+            },
+            CommandEntry {
                 label_key: "cmd.open_html_in_web_tab",
                 action_name: "workspace::OpenHtmlInWebTab",
             },
