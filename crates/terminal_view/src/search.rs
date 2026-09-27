@@ -4,8 +4,17 @@
 //! 見えている範囲の一致は描画のたびに塗る（`sync` で表示範囲だけ探し直す＝出力が流れていても
 //! 位置がずれない）。全体の数え直しは出力が続く間は間引く（[`REFRESH_INTERVAL`]）。
 //!
-//! 見た目はエディタの ⌘F バー（workspace の `render_buffer_search_bar`）に合わせる。置換は無い。
-//! 入力欄は同じく手書き（IME の変換は通らない＝エディタの ⌘F バーと同じ制約）。
+//! 見た目はエディタの ⌘F バー（workspace の `render_buffer_search_bar`）の寸法に合わせる。置換は無い。
+//!
+//! 入力欄は IME の正しい 1 行入力（`EditorView::plain`・設定の検索欄や Todo の追加欄と同じ作り・R12）＝
+//! 日本語の変換・貼り付け・選択しての置き換え・カーソル移動が効く。キーの受け方（gpui は keymap の束が
+//! 先で、誰も受けなかった時だけ `on_key_down` に落ちる）:
+//!
+//! - ⏎ / ⇧⏎ = 次 / 前。入力欄の改行（`editor::Newline` / `InsertNewline`）より先に受ける。変換中に
+//!   届いたら何もしない＝確定の ⏎ は確定だけ
+//! - esc = 開いた位置へ戻って閉じる（入力欄が親へ流す `editor::Cancel`）
+//! - 変換中（未確定の文字がある間）は探し直さない。確定した時に探す
+//! - 端末そのものの束（⌘F・⌘K・⌘T・⌘W・⌘\）は入力欄の中でも端末の物（[`intercept_terminal_keys`]）
 
 use std::time::Duration;
 
@@ -13,13 +22,14 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Direction, Line, Point as AlacPoint};
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::Term;
+use editor_view::EditorView;
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, FocusHandle, KeyDownEvent, MouseButton, SharedString,
-    Window,
+    div, prelude::*, px, Action, AnyElement, App, Context, Entity, Focusable, MouseButton,
+    SharedString, Subscription, Window,
 };
 use ui::Tooltip;
 
-use crate::TerminalView;
+use crate::{actions, TerminalView};
 
 /// 全体の一致の上限。超えたら件数に `+` を付けて打ち切る。
 const MAX_MATCHES: usize = 1000;
@@ -27,12 +37,17 @@ const MAX_MATCHES: usize = 1000;
 /// 出力が続く間の全体の数え直しの間隔。
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_millis(200);
 
+/// 入力欄の字の大きさ（バーの件数・プレースホルダと同じ 12px）。
+const FIELD_FONT_SIZE: f32 = 12.0;
+
 /// 検索バーの状態。`None` = 閉じている。
 pub(crate) struct TerminalSearch {
+    /// 入力欄（IME の正しい `EditorView::plain`）。
+    pub(crate) input: Entity<EditorView>,
+    /// いま探している語（入力欄の写し。変換中は確定するまで前の語のまま）。
     pub(crate) query: String,
     pub(crate) case_sensitive: bool,
     pub(crate) is_regex: bool,
-    pub(crate) focus: FocusHandle,
     /// いまの語で組んだ正規表現（語が空・誤りなら None）。
     pub(crate) regex: Option<RegexSearch>,
     /// 全体の一致（上から順・最大 [`MAX_MATCHES`]）。
@@ -46,15 +61,22 @@ pub(crate) struct TerminalSearch {
     pub(crate) saved_offset: usize,
     /// 出力が増えた後の数え直しを予約済み。
     pub(crate) refresh_scheduled: bool,
+    /// 入力欄の購読（打つたびに探す）と端末の束の受け口。閉じると一緒に落ちる。
+    _subscriptions: Vec<Subscription>,
 }
 
 impl TerminalSearch {
-    pub(crate) fn new(focus: FocusHandle, saved_offset: usize) -> Self {
+    fn new(
+        input: Entity<EditorView>,
+        query: String,
+        saved_offset: usize,
+        subscriptions: Vec<Subscription>,
+    ) -> Self {
         Self {
-            query: String::new(),
+            input,
+            query,
             case_sensitive: false,
             is_regex: false,
-            focus,
             regex: None,
             matches: Vec::new(),
             truncated: false,
@@ -62,6 +84,7 @@ impl TerminalSearch {
             invalid: false,
             saved_offset,
             refresh_scheduled: false,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -154,8 +177,157 @@ pub(crate) fn nearest_match(matches: &[Match], viewport_bottom: Line) -> Option<
         .or_else(|| (!matches.is_empty()).then_some(0))
 }
 
+/// 端末そのものへの束（検索を開く・クリア・タブを開く / 閉じる・分割）。入力欄の操作
+/// （コピー・貼り付け・すべて選択）は含めない＝検索欄の中では入力欄の物。
+fn is_terminal_action(action: &dyn Action) -> bool {
+    let action = action.as_any();
+    action.is::<actions::Find>()
+        || action.is::<actions::Clear>()
+        || action.is::<actions::NewTab>()
+        || action.is::<actions::CloseTab>()
+        || action.is::<actions::Split>()
+}
+
+/// 検索欄にフォーカスがある間、端末そのものの束（[`is_terminal_action`]）を照合の前に受けて端末へ回す。
+///
+/// 検索欄（`Editor`）は `Terminal` より一段深い。gpui は文脈の無い束を一番深い文脈と同じ深さに置くので、
+/// 入力欄の中では全域の束（⌘F = バッファ内検索・⌘W = エディタのタブを閉じる・⌘\ = エディタの分割）と
+/// `Editor` の束（⌘T = シンボル）が端末の束より先に当たり、裏のエディタへ効いてしまう。押したキーを
+/// 「端末にフォーカスがある時の文脈」（入力欄の `Editor` を外した文脈）で引き直し、端末そのものの束に
+/// 当たれば端末で受ける（検索を開く前と同じ結果）。文字・矢印・⌘C / ⌘V / ⌘A はそのまま入力欄へ。
+fn intercept_terminal_keys(cx: &mut Context<TerminalView>) -> Subscription {
+    let terminal = cx.entity().downgrade();
+    cx.intercept_keystrokes(move |event, window, cx| {
+        let Some(terminal) = terminal.upgrade() else {
+            return;
+        };
+        let focus = {
+            let view = terminal.read(cx);
+            view.search.as_ref().map(|search| {
+                (
+                    search.input.read(cx).focus_handle(cx),
+                    view.focus_handle.clone(),
+                )
+            })
+        };
+        let Some((input_focus, terminal_focus)) = focus else {
+            return;
+        };
+        // 束の途中（⌘K の後など）は gpui の照合に任せる。
+        if !input_focus.is_focused(window) || window.has_pending_keystrokes() {
+            return;
+        }
+        let mut context_stack = event.context_stack.clone();
+        if context_stack
+            .last()
+            .is_some_and(|context| context.contains("Editor"))
+        {
+            context_stack.pop();
+        }
+        let action = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let (bindings, pending) =
+                keymap.bindings_for_input(std::slice::from_ref(&event.keystroke), &context_stack);
+            if pending {
+                return;
+            }
+            bindings
+                .first()
+                .map(|binding| binding.action().boxed_clone())
+        };
+        let Some(action) = action.filter(|action| is_terminal_action(action.as_ref())) else {
+            return;
+        };
+        // 受け手の居ない置き場（端末をタブにしない所）では、入力欄の束へ流す。
+        if !window.is_action_available_in(action.as_ref(), &terminal_focus) {
+            return;
+        }
+        terminal_focus.dispatch_action(action.as_ref(), window, cx);
+        cx.stop_propagation();
+    })
+}
+
 impl TerminalView {
-    /// ⌘F バー（開いている時だけ）。エディタの ⌘F バーと同じ寸法・部品（置換行なし）。
+    /// ⌘F バーを開く（`query` = 語の初期値）。入力欄を作り、打つたびに探すよう購読する。
+    pub(crate) fn open_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let input = cx.new(|cx| {
+            let mut input = EditorView::plain(theme, accent, true, cx);
+            // tab 幅は既定（4）のまま。
+            input.set_typography(FIELD_FONT_SIZE, 4, cx);
+            // 端末は出力が無ければ描き直さない（idle 0%）。キャレットは点滅させず常に出す（前と同じ）。
+            input.set_caret_blink_enabled(false, cx);
+            input.set_plain_text(&query, cx);
+            input
+        });
+        let subscriptions = vec![
+            cx.observe(&input, |view, _input, cx| view.on_search_input_changed(cx)),
+            intercept_terminal_keys(cx),
+        ];
+        self.search = Some(TerminalSearch::new(
+            input,
+            query,
+            self.content.display_offset,
+            subscriptions,
+        ));
+        self.refresh_search(true, cx);
+    }
+
+    /// 入力欄が変わった（打鍵・貼り付け・取り消し・変換の確定）。変換中は探し直さずに確定を待つ
+    /// （ローマ字・かなの途中の語で scrollback を全部走査し、表示を一致へ跳ねさせない）。
+    fn on_search_input_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let input = search.input.read(cx);
+        if input.has_marked_text() {
+            return;
+        }
+        let query = input.plain_text();
+        // キャレットの点滅などの notify（語は変わっていない）。
+        if query == search.query {
+            return;
+        }
+        search.query = query;
+        self.refresh_search(true, cx);
+    }
+
+    /// 検索欄で変換中（未確定の文字がある）か。
+    fn search_composing(&self, cx: &App) -> bool {
+        self.search
+            .as_ref()
+            .is_some_and(|search| search.input.read(cx).has_marked_text())
+    }
+
+    /// 検索欄にフォーカスがあるか。
+    pub(crate) fn search_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.search
+            .as_ref()
+            .is_some_and(|search| search.input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// 入力欄の ⏎ / ⇧⏎。変換中は何もしない（確定の ⏎ は確定だけ・次へ進まない）。
+    fn step_search_from_field(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.search_composing(cx) {
+            return;
+        }
+        self.step_search(delta, cx);
+    }
+
+    /// 検索欄へ貼る。1 行目だけ（改行を含む語は端末の行を跨いで当たらない）・選択は置き換える。
+    pub(crate) fn paste_into_search(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        let line = text.lines().next().unwrap_or_default();
+        search
+            .input
+            .update(cx, |input, cx| input.insert_text(line, cx));
+    }
+
+    /// ⌘F バー（開いている時だけ）。エディタの ⌘F バーと同じ寸法（置換行なし）で、入力欄だけ EditorView。
     pub(crate) fn render_search_bar(
         &self,
         window: &Window,
@@ -164,7 +336,11 @@ impl TerminalView {
         let search = self.search.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent;
-        let focused = search.focus.is_focused(window);
+        let (input_focus, input_empty) = {
+            let input = search.input.read(cx);
+            (input.focus_handle(cx), input.buffer().len_bytes() == 0)
+        };
+        let focused = input_focus.is_focused(window);
 
         let (counter, counter_color) = if search.invalid {
             (
@@ -188,16 +364,9 @@ impl TerminalView {
             (SharedString::from(text), theme.fg2)
         };
 
-        let (display, text_color) = if search.query.is_empty() {
-            (
-                SharedString::from(i18n::t!("search.find_placeholder")),
-                theme.fg2,
-            )
-        } else {
-            (SharedString::from(search.query.clone()), theme.fg0)
-        };
         let field = div()
             .id("tsearch-query")
+            .relative()
             .flex_1()
             .min_w_0()
             .flex()
@@ -211,10 +380,48 @@ impl TerminalView {
             .overflow_hidden()
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(px(12.))
-            .text_color(text_color)
-            .child(div().overflow_hidden().whitespace_nowrap().child(display))
-            .when(focused, |element| {
-                element.child(div().flex_none().w(px(1.5)).h(px(14.)).bg(accent))
+            // ⏎ / ⇧⏎ = 次 / 前。入力欄の改行より先に受ける（1 行の欄に改行は入れない）。
+            .capture_action(cx.listener(|this, _: &editor_view::Newline, _window, cx| {
+                cx.stop_propagation();
+                this.step_search_from_field(1, cx);
+            }))
+            .capture_action(
+                cx.listener(|this, _: &editor_view::InsertNewline, _window, cx| {
+                    cx.stop_propagation();
+                    this.step_search_from_field(-1, cx);
+                }),
+            )
+            // ⌘V は 1 行目だけ（前と同じ）。
+            .capture_action(cx.listener(|this, _: &editor_view::Paste, _window, cx| {
+                cx.stop_propagation();
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    this.paste_into_search(&text, cx);
+                }
+            }))
+            // esc = 開いた位置へ戻って閉じる（入力欄は複数カーソルを畳む時以外 `editor::Cancel` を
+            // 親へ流す）。変換中の esc は変換の取り消し（IME の物）。
+            .on_action(cx.listener(|this, _: &editor_view::Cancel, window, cx| {
+                if !this.search_composing(cx) {
+                    this.close_search(true, window, cx);
+                }
+            }))
+            // 入力欄はこの欄（高さ 24）いっぱい。親が高さを決めないと 0 に潰れる。
+            .child(search.input.clone())
+            .when(input_empty, |field| {
+                // 空の欄のキャレット（行頭・幅 2px）に重ならないよう、その右から。
+                field.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .pl(px(10.))
+                        .pr(px(8.))
+                        .flex()
+                        .items_center()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("search.find_placeholder"))),
+                )
             });
 
         let chip = |id: &'static str, label: &'static str, active: bool, tip: SharedString| {
@@ -321,7 +528,6 @@ impl TerminalView {
                 ),
             );
 
-        let focus = search.focus.clone();
         Some(
             div()
                 .id("terminal-search-bar")
@@ -344,56 +550,17 @@ impl TerminalView {
                 // 端末本体は等幅だが、バーはエディタの ⌘F バーと同じ UI フォント。
                 .font_family(ui::ui_font(cx))
                 .cursor(gpui::CursorStyle::Arrow)
-                .track_focus(&focus)
-                .on_key_down(cx.listener(Self::on_search_key_down))
                 // バー内のクリックは端末（選択・マウス報告）へ通さず、入力欄へフォーカスを戻す。
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |_this, _, window, cx| {
                         cx.stop_propagation();
-                        window.focus(&focus, cx);
+                        window.focus(&input_focus, cx);
                     }),
                 )
                 .child(row)
                 .into_any_element(),
         )
-    }
-
-    /// 検索欄のキー。どのキーも端末（PTY）へは流さない。
-    fn on_search_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.stop_propagation();
-        let modifiers = event.keystroke.modifiers;
-        match event.keystroke.key.as_str() {
-            "escape" => self.close_search(true, window, cx),
-            "enter" if modifiers.shift => self.step_search(-1, cx),
-            "enter" => self.step_search(1, cx),
-            "backspace" => {
-                if let Some(search) = self.search.as_mut() {
-                    search.query.pop();
-                }
-                self.refresh_search(true, cx);
-            }
-            _ => {
-                if modifiers.platform || modifiers.control || modifiers.function {
-                    return;
-                }
-                let Some(text) = event.keystroke.key_char.as_deref() else {
-                    return;
-                };
-                if text.is_empty() || text.chars().any(char::is_control) {
-                    return;
-                }
-                if let Some(search) = self.search.as_mut() {
-                    search.query.push_str(text);
-                }
-                self.refresh_search(true, cx);
-            }
-        }
     }
 
     /// 出力が増えた時の全体の数え直しを間引いて予約する（すぐには走らせない）。
@@ -488,5 +655,325 @@ mod tests {
         // 開いた直後に見る一致は、表示の下端に一番近いもの（最新）。
         assert_eq!(nearest_match(&matches, Line(4)), Some(11));
         assert_eq!(nearest_match(&[], Line(4)), None);
+    }
+}
+
+/// 検索欄（EditorView）のキーの受け方。既定の keymap と同じ並び（入力欄 → 全域 → 端末）で束を張る。
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+    use alacritty_terminal::index::Side;
+    use alacritty_terminal::selection::{Selection, SelectionType};
+    use gpui::{ClipboardItem, EntityInputHandler, KeyBinding, TestAppContext, VisualTestContext};
+    use theme_core::Theme;
+
+    // workspace の全域の束（⌘F = バッファ内検索・⌘W = タブを閉じる）の代わり。
+    gpui::actions!(search_field_test, [GlobalFind, GlobalClose]);
+
+    /// 端末を置く面（ドック・workspace の代わり）: 端末の ⌘W と、全域の束が届いた数を数える。
+    struct Host {
+        terminal: Entity<TerminalView>,
+        closed: usize,
+        global_find: usize,
+        global_close: usize,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .on_action(cx.listener(|host, _: &actions::CloseTab, _window, _cx| {
+                    host.closed += 1;
+                }))
+                .on_action(cx.listener(|host, _: &GlobalFind, _window, _cx| {
+                    host.global_find += 1;
+                }))
+                .on_action(cx.listener(|host, _: &GlobalClose, _window, _cx| {
+                    host.global_close += 1;
+                }))
+                // 下ドックくらいの高さ（十数行）。出力の上の方は scrollback に入る。
+                .child(div().w(px(800.)).h(px(240.)).child(self.terminal.clone()))
+        }
+    }
+
+    /// `item0 hit` 〜 `item39 hit` を出した端末（上の方は scrollback）にフォーカスした窓。
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Host>, Entity<TerminalView>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("enter", editor_view::Newline, Some("Editor")),
+                KeyBinding::new("shift-enter", editor_view::InsertNewline, Some("Editor")),
+                KeyBinding::new("escape", editor_view::Cancel, Some("Editor")),
+                KeyBinding::new("backspace", editor_view::Backspace, Some("Editor")),
+                KeyBinding::new("left", editor_view::MoveLeft, Some("Editor")),
+                KeyBinding::new("cmd-a", editor_view::SelectAll, Some("Editor")),
+                KeyBinding::new("cmd-c", editor_view::Copy, Some("Editor")),
+                KeyBinding::new("cmd-v", editor_view::Paste, Some("Editor")),
+                KeyBinding::new("cmd-f", GlobalFind, None),
+                KeyBinding::new("cmd-w", GlobalClose, None),
+                KeyBinding::new("cmd-a", actions::SelectAll, Some("Terminal")),
+                KeyBinding::new("cmd-c", actions::Copy, Some("Terminal")),
+                KeyBinding::new("cmd-v", actions::Paste, Some("Terminal")),
+                KeyBinding::new("cmd-f", actions::Find, Some("Terminal")),
+                KeyBinding::new("cmd-k", actions::Clear, Some("Terminal")),
+                KeyBinding::new("cmd-w", actions::CloseTab, Some("Terminal")),
+            ]);
+        });
+        let (host, cx) = cx.add_window_view(|_window, cx| Host {
+            terminal: cx.new(|cx| TerminalView::new_test(Theme::dark(), cx)),
+            closed: 0,
+            global_find: 0,
+            global_close: 0,
+        });
+        let terminal = host.read_with(cx, |host, _| host.terminal.clone());
+        terminal.update_in(cx, |terminal, window, cx| {
+            let output: String = (0..40)
+                .map(|index| format!("item{index} hit\r\n"))
+                .collect();
+            terminal.feed_output_for_test(output.as_bytes());
+            terminal.sync(cx);
+            window.focus(&terminal.focus_handle, cx);
+        });
+        (host, terminal, cx)
+    }
+
+    fn query(terminal: &Entity<TerminalView>, cx: &mut VisualTestContext) -> String {
+        terminal.read_with(cx, |terminal, _| {
+            terminal
+                .search
+                .as_ref()
+                .map(|search| search.query.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    fn field_text(terminal: &Entity<TerminalView>, cx: &mut VisualTestContext) -> String {
+        terminal.read_with(cx, |terminal, cx| {
+            terminal
+                .search
+                .as_ref()
+                .map(|search| search.input.read(cx).plain_text())
+                .unwrap_or_default()
+        })
+    }
+
+    fn match_state(
+        terminal: &Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+    ) -> (usize, Option<usize>) {
+        terminal.read_with(cx, |terminal, _| {
+            terminal
+                .search
+                .as_ref()
+                .map(|search| (search.matches.len(), search.current))
+                .unwrap_or_default()
+        })
+    }
+
+    fn display_offset(terminal: &Entity<TerminalView>, cx: &mut VisualTestContext) -> usize {
+        terminal.read_with(cx, |terminal, _| {
+            terminal.term.lock().grid().display_offset()
+        })
+    }
+
+    fn field_focused(terminal: &Entity<TerminalView>, cx: &mut VisualTestContext) -> bool {
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.search_input_focused(window, cx)
+        })
+    }
+
+    /// 打つたびに一致が更新される。選択しての置き換え・カーソル移動・貼り付け（1 行目だけ）も
+    /// 入力欄で効き、どの文字も PTY へは流れない。
+    #[gpui::test]
+    fn typing_in_the_field_updates_the_matches(cx: &mut TestAppContext) {
+        let (_host, terminal, cx) = fixture(cx);
+        cx.simulate_keystrokes("cmd-f");
+        assert!(field_focused(&terminal, cx), "⌘F で開いて入力欄へ");
+        cx.simulate_input("hit");
+        assert_eq!(query(&terminal, cx), "hit");
+        assert_eq!(
+            match_state(&terminal, cx),
+            (40, Some(39)),
+            "開いた所に一番近い一致"
+        );
+        // ⌘A で選んで打つと置き換わる。
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("item3");
+        assert_eq!(query(&terminal, cx), "item3");
+        assert_eq!(match_state(&terminal, cx).0, 11, "item3 と item30〜39");
+        // ← で戻った所へ入る。
+        cx.simulate_keystrokes("left");
+        cx.simulate_input("1");
+        assert_eq!(query(&terminal, cx), "item13");
+        assert_eq!(match_state(&terminal, cx).0, 1);
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(query(&terminal, cx), "item3");
+        // 貼り付けは 1 行目だけ（選択は置き換える）。
+        cx.update(|_window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("item25 hit\nsecond line".into()))
+        });
+        cx.simulate_keystrokes("cmd-a cmd-v");
+        assert_eq!(field_text(&terminal, cx), "item25 hit");
+        assert_eq!(match_state(&terminal, cx).0, 1);
+        assert!(
+            terminal.read_with(cx, |terminal, _| terminal.debug_written_input().is_empty()),
+            "検索欄に打った物は PTY へ流れない"
+        );
+    }
+
+    /// ⏎ / ⇧⏎ で次 / 前（端で折り返し・欄に改行は入らない）。esc で閉じて開いた位置へ戻り、
+    /// 打鍵は端末へ戻る。
+    #[gpui::test]
+    fn enter_steps_and_escape_returns_to_where_it_opened(cx: &mut TestAppContext) {
+        let (_host, terminal, cx) = fixture(cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("hit");
+        assert_eq!(match_state(&terminal, cx), (40, Some(39)));
+        cx.simulate_keystrokes("shift-enter");
+        assert_eq!(match_state(&terminal, cx).1, Some(38), "⇧⏎ = 前");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(match_state(&terminal, cx).1, Some(39), "⏎ = 次");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(match_state(&terminal, cx).1, Some(0), "端で先頭へ");
+        assert!(
+            display_offset(&terminal, cx) > 0,
+            "scrollback の一致まで遡る"
+        );
+        assert_eq!(field_text(&terminal, cx), "hit", "欄に改行は入らない");
+        assert!(field_focused(&terminal, cx));
+
+        cx.simulate_keystrokes("escape");
+        assert!(!terminal.read_with(cx, |terminal, _| terminal.search_open()));
+        assert_eq!(display_offset(&terminal, cx), 0, "開いた位置へ戻る");
+        let terminal_focused = terminal.update_in(cx, |terminal, window, _cx| {
+            terminal.focus_handle.is_focused(window)
+        });
+        assert!(terminal_focused, "閉じたら端末へ打鍵が戻る");
+        assert!(terminal.read_with(cx, |terminal, _| terminal.debug_written_input().is_empty()));
+    }
+
+    /// 変換中（未確定の文字がある間）は探し直さず、確定で探す。変換中に届いた ⏎ / ⇧⏎ は
+    /// 何もしない（次へ進まず、欄に改行も入れない）。esc も変換中は閉じない（取り消しは IME の物）。
+    #[gpui::test]
+    fn composition_is_searched_only_when_confirmed(cx: &mut TestAppContext) {
+        let (_host, terminal, cx) = fixture(cx);
+        terminal.update_in(cx, |terminal, _window, cx| {
+            terminal.feed_output_for_test("猫の hit\r\n犬\r\n猫\r\n".as_bytes());
+            terminal.sync(cx);
+        });
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("hit");
+        assert_eq!(match_state(&terminal, cx), (41, Some(40)));
+        let input = terminal.read_with(cx, |terminal, _| {
+            terminal
+                .search
+                .as_ref()
+                .map(|search| search.input.clone())
+                .expect("開いている")
+        });
+        // 語を選んで「ねこ」を変換中にする（確定するまで前の語「hit」のまま）。
+        cx.simulate_keystrokes("cmd-a");
+        input.update_in(cx, |input, window, cx| {
+            input.replace_and_mark_text_in_range(None, "ねこ", None, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(field_text(&terminal, cx), "ねこ");
+        assert_eq!(query(&terminal, cx), "hit", "変換中は探し直さない");
+        assert_eq!(match_state(&terminal, cx), (41, Some(40)));
+        for key in ["enter", "shift-enter", "escape"] {
+            cx.simulate_keystrokes(key);
+            assert_eq!(
+                match_state(&terminal, cx),
+                (41, Some(40)),
+                "変換中の {key} で進まない"
+            );
+            assert_eq!(field_text(&terminal, cx), "ねこ", "欄に改行は入らない");
+        }
+        assert!(
+            terminal.read_with(cx, |terminal, _| terminal.search_open()),
+            "変換中の esc で閉じない"
+        );
+
+        // 確定（IME の確定の ⏎ はこの経路で届く）。確定したら探すが、次へは進まない。
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "猫", window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(query(&terminal, cx), "猫");
+        assert_eq!(
+            match_state(&terminal, cx),
+            (2, Some(1)),
+            "一番新しい一致を見る（確定で次へ進まない）"
+        );
+        cx.simulate_keystrokes("shift-enter");
+        assert_eq!(
+            match_state(&terminal, cx).1,
+            Some(0),
+            "確定の後の ⇧⏎ は前へ"
+        );
+    }
+
+    /// 端末そのものの束は入力欄の中でも端末の物: ⌘F は全域の束（バッファ内検索）に取られず入力欄に
+    /// 残り、⌘K は画面を消し、⌘W は端末を閉じる（全域の ⌘W＝裏のタブを閉じる、に化けない）。
+    #[gpui::test]
+    fn terminal_keys_stay_with_the_terminal_in_the_field(cx: &mut TestAppContext) {
+        let (host, terminal, cx) = fixture(cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("hit");
+        cx.simulate_keystrokes("cmd-f");
+        assert!(field_focused(&terminal, cx), "⌘F は入力欄へ戻すだけ");
+        assert_eq!(query(&terminal, cx), "hit");
+        cx.simulate_keystrokes("cmd-k");
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.term.lock().grid().history_size()),
+            0,
+            "⌘K は端末を消す"
+        );
+        cx.simulate_keystrokes("cmd-w");
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.closed, 1, "⌘W は端末を閉じる");
+            assert_eq!(host.global_find, 0, "全域の ⌘F に取られない");
+            assert_eq!(host.global_close, 0, "全域の ⌘W に化けない");
+        });
+        // 端末にフォーカスがある時も同じ（検索を開く前からの振る舞い）。
+        terminal.update_in(cx, |terminal, window, cx| {
+            window.focus(&terminal.focus_handle, cx);
+        });
+        cx.simulate_keystrokes("cmd-w");
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.closed, 2);
+            assert_eq!(host.global_close, 0);
+        });
+        // 入力欄の ⌘A は入力欄の物（端末をすべて選択しない）。
+        cx.simulate_keystrokes("cmd-f cmd-a");
+        assert!(terminal.read_with(cx, |terminal, _| terminal.term.lock().selection.is_none()));
+    }
+
+    /// 欄の中の ⌘C は欄の選択をコピーし、欄に選択が無ければ端末の選択をコピーする。
+    #[gpui::test]
+    fn copy_in_the_field_prefers_the_field_selection(cx: &mut TestAppContext) {
+        let (_host, terminal, cx) = fixture(cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("item7");
+        cx.simulate_keystrokes("cmd-a cmd-c");
+        let copied = cx.update(|_window, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(copied.as_deref(), Some("item7"), "欄の選択");
+
+        // 欄の選択を外し、端末の 1 行を選んでおく。
+        cx.simulate_keystrokes("left");
+        terminal.update(cx, |terminal, _cx| {
+            let start = AlacPoint::new(Line(0), Column(0));
+            let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+            selection.update(AlacPoint::new(Line(0), Column(9)), Side::Right);
+            terminal.term.lock().selection = Some(selection);
+        });
+        cx.simulate_keystrokes("cmd-c");
+        let copied = cx.update(|_window, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        let expected =
+            terminal.read_with(cx, |terminal, _| terminal.term.lock().selection_to_string());
+        assert!(expected.as_deref().is_some_and(|text| !text.is_empty()));
+        assert_eq!(copied, expected, "欄に選択が無ければ端末の選択");
+        assert!(field_focused(&terminal, cx), "コピーしても入力欄のまま");
     }
 }
