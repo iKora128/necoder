@@ -250,28 +250,28 @@
 
 ## 7. 進捗
 
-状態・確かめたこと・確かめられなかったことは、各 PR の本文にある。夜の間は利用上限で担当が止まったため、同時に動かすのは 3 本までにしている。
+**2026-09-27: 全部を統合ブランチ `parity/integration`（#21）1 本にまとめ、個別の PR は閉じた**（§7.2）。main へは #21 で一度だけ入れる。下の表の PR 番号は経緯として残している（各 PR の本文に、確かめたこと・確かめられなかったことがある）。
 
 | # | ブランチ | PR | 状態 |
 |---|---|---|---|
-| O0 | `parity/o00-plan` | #13（この文書） | レビュー待ち |
-| O1 | `parity/o01-fixes` | #17 | レビュー待ち |
-| O2 | `parity/o02-slash-commands` | #14 | レビュー待ち |
-| O3 | `parity/o03-terminal-basics` | #20 | レビュー待ち（判断 3 点あり） |
-| O4 | `parity/o04-quit-guard` | #22 | レビュー待ち |
-| O6 | `parity/o06-review` | #15 | レビュー待ち |
-| O7 | `parity/o07-annotations`（O6 の上） | #16 | レビュー待ち |
-| O8 | `parity/o08-localhost-preview` | #18 | レビュー待ち |
-| O9 | `parity/o09-design-mode`（O8 の上） | #19 | レビュー待ち |
-| O11 | `parity/o11-usage`（O2 の上） | #24 | レビュー待ち |
-| O12 | `parity/o12-notifications`（O4 の上） | #23 | レビュー待ち |
-| O28 | `parity/o28-explorer-search` | #28 | レビュー待ち |
-| O30 | `parity/o30-languages` | #27 | レビュー待ち（バイナリ +11% の判断） |
-| O39 | `parity/o39-cli`（O40 の上） | #26 | レビュー待ち |
-| O40 | `parity/o40-skills` | #25 | レビュー待ち |
-| — | `parity/integration` | #21（draft） | 全部を重ねた確認用。ぶつかりを解いた状態でテストが通る |
-| O15 | `parity/o15-session-history`（O11 の上） | | 実装中（Mac の worktree・未 push） |
-| O18 | `parity/o18-git-panel`（O1 の上） | | 実装中（Mac の worktree・未 push） |
+| O0 | `parity/o00-plan` | #13（この文書） | #21 に統合済み |
+| O1 | `parity/o01-fixes` | #17 | #21 に統合済み |
+| O2 | `parity/o02-slash-commands` | #14 | #21 に統合済み |
+| O3 | `parity/o03-terminal-basics` | #20 | #21 に統合済み（判断 3 点あり） |
+| O4 | `parity/o04-quit-guard` | #22 | #21 に統合済み |
+| O6 | `parity/o06-review` | #15 | #21 に統合済み |
+| O7 | `parity/o07-annotations`（O6 の上） | #16 | #21 に統合済み |
+| O8 | `parity/o08-localhost-preview` | #18 | #21 に統合済み |
+| O9 | `parity/o09-design-mode`（O8 の上） | #19 | #21 に統合済み |
+| O11 | `parity/o11-usage`（O2 の上） | #24 | #21 に統合済み |
+| O12 | `parity/o12-notifications`（O4 の上） | #23 | #21 に統合済み |
+| O28 | `parity/o28-explorer-search` | #28 | #21 に統合済み |
+| O30 | `parity/o30-languages` | #27 | #21 に統合済み（バイナリ +11% の判断） |
+| O39 | `parity/o39-cli`（O40 の上） | #26 | #21 に統合済み |
+| O40 | `parity/o40-skills` | #25 | #21 に統合済み |
+| — | `parity/integration` | #21（draft） | **ここに全部まとめた**。実機での確認の後に main へ |
+| O15 | `parity/o15-on-30`（#30 の上） | #35 | #21 に統合済み |
+| O18 | `parity/o18-git-panel`（O1 の上） | | 未着手（担当が利用上限で止まり、コードは 0 行） |
 | O5 | `claude/sleepy-hamilton-gesxiq` | #30 | 手元のポート・接続先のポートの一覧と転送（`-O forward`・再接続で張り直す）・SSH のプロジェクトの localhost のリンクは転送してから開く。実機未確認（SSH 実機での転送は未確認）・Windows は未 |
 | O21（一部） | 同上 | #30 | 外部の worktree・取り込み・統合先の取り違え・消えた worktree・Task の絞り込み・パス / ブランチ名のコピー・ピンの保存・手動の休眠（⋯「休ませる」）・並べ替え（レール / 最近 / 要対応）・複数選択（⌘ / ⇧ クリック → まとめて休ませる・舞台に並べる・片付けへ）・詳細（右クリックの「詳細…」）・親子（別の Task のブランチから切ると子・親の下に字下げ・休ませる / 片付けは子ごと・`task_parents`）・削除のキー（⌘⌫ / Delete → 印を付けた片付けの画面） |
 | O26 | 同上 | #30 | 済: `path:行`・全部閉じる・外部アプリ・自動保存・プレビュータブ・ピン留め。実機未確認 |
@@ -321,6 +321,17 @@
   偽物（python）の起動込みで 10 秒の上限を持つテストで、元の PR（#14・#24）の Windows では通っていた。
   テストが増えて並ぶと Windows のランナーでは python の起動だけで上限に届くので、上限を 60 秒にした
   （条件がそろえばすぐ抜けるので、通る時は遅くならない）。
+
+### 7.2 統合ブランチ 1 本へ（2026-09-27）
+
+本人の判断（「developer branch を切ってそこに集約させるか」への答えとして、既にある `parity/integration` をその役にした）。
+
+- **入れたもの**: 個別の PR（#13〜#20・#22〜#28・#32）は既に `parity/integration` に入っていたので、その上へ #30（クラウド）・#34（HTML の内蔵サーバ・隠している間の通知）・#35（O15）をマージした。元の PR は「#21 に統合済み」とコメントして閉じた（ブランチは残している）。
+- **#30 の作者の付け替え**: #30 の 130 コミットは作者・コミッタが「Claude <noreply@anthropic.com>」で CLA を通らない。allowlist に足すと、外部の人の Claude 名義のコミットも CLA を素通りするので、代わりに中身（tree）を変えずに本人名義へ付け替えた版を取り込んだ（`git filter-branch` を使い捨てのクローンで・Claude は `Co-Authored-By` に残す）。#34・#35 は #30 の途中に乗っていたので、同じ付け替えを一緒に施した。#30 のブランチ自体には触れていない。
+- **同じ指摘を 2 回直していた分**: R04・R05・R06・R08 は個別 PR 側と #30 が別々に直していた。#30 の版を土台にし、台帳の確認条件のうち #30 の版で足りない所だけを個別 PR 側から移した（R06: SSH 先の `0.0.0.0`・`127.0.0.2`・`*.localhost`・`[::]`。R08: 報告の無い使用量・推定コスト・API キー等の認証環境の見分け）。R04・R05 は #30 の版で確認条件を満たすので、そのまま採用した。
+- **CI**: Remote control の WebKit の不安定な 3 本を直した。カメラの 2 本は、main の作業ツリーで別の会話が原因を突き止めていた未コミットの差分（偽カメラを `MediaDevices.prototype` に載せる）を取り込んだ。PWA の送信数の競走は、#30 のコメントの案で直した。手元の `cargo test` がテストバイナリごと落ちていた件（O19 のテストで本物の rust-analyzer が立つ）も直した。
+- **実機での確認**: `./scripts/bundle-mac.sh release dev` で `necoder Dev.app`（状態は `~/.necoder-dev`・常用と並べて動く）を作り、チェックリストを回す。
+- **残り**: O18（Git パネルの基本）・O19 の残り・O24/O25 の残り・O27 の残り・O29 の残り・O37 の残り・O38（スマホ）・§6 の判断待ち。main の作業ツリーの Captain の未コミット作業との合流（台帳 R09・R10）。
 
 ## 付録 A: 調査の全 226 項目の行き先
 

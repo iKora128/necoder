@@ -3467,3 +3467,30 @@
   Windows は開発者モードの有無）で、サイドバーの ⌘⌫、登録の ProxyJump を実際の踏み台で。CLA の判断。
   スマホから Task を作る（O38・G18）は、作った Task をその端末に共有する（`device.tasks` に足す）か・
   準備スクリプトが長い時の応答（IPC の待ち）をどうするかが「限定共有」の設計に関わるので、本人に聞いてから。
+
+## 2026-09-27 — parity の PR を統合ブランチ 1 本にまとめた（#21）
+- やったこと: 個別の PR 16 本と #30（クラウド）・#34・#35 を `parity/integration` に集め、元の PR は閉じた（`docs/ORCA-PARITY.md` §7.2）。
+  #30 は作者が「Claude」で CLA を通らないので、中身を変えずに本人名義へ付け替えた版を取り込んだ。
+  R04・R05・R06・R08 は個別 PR 側と #30 で二重に直していたので、#30 の版を土台に足りない所だけを移した。
+  Remote control の WebKit の不安定な 3 本を直し、`necoder Dev.app`（`./scripts/bundle-mac.sh release dev`）を足した。
+- 学び/罠:
+  - **テストで `.rs` を開くと本物の rust-analyzer が立つ**（手元に入っている機械だけ）。その読み取りスレッドが gpui の
+    テストスケジューラを起こして「Your test is not deterministic」→ 別スレッドでのタスク破棄で abort し、
+    `cargo test -p workspace` がテストバイナリごと止まる。CI の runner には言語サーバが無いので CI では出ない。
+    `ensure_lsp` を DB・ファイル監視と同じく `cfg!(test)` で素通りさせた。
+  - **CLA の allowlist に Claude を足すのは穴になる**: Claude Code on the web などは「Claude <noreply@anthropic.com>」
+    名義でコミットするので、外部の人のその名義のコミットも CLA を素通りする。本人のクラウドのセッションの分は、
+    使い捨てのクローンで `git filter-branch --env-filter`（作者とコミッタだけ・tree は同一）で付け替えるのが安全。
+    共有リポジトリで直接やると `refs/original` が残り、作業ツリーが汚れていると拒まれる（bare のクローンなら通る）。
+  - **main 自体が rustfmt から外れている**（17 ファイル・Captain / Fleet 周り）。統合ブランチで `cargo fmt` をかけると
+    main 由来の行まで書き換わり、main の作業ツリーの未コミット作業との衝突が増えるので、かけていない。
+    整形は main 側で Captain の作業と一緒に。CI は fmt を見ていない。
+  - **GUI ソケットは `NECODER_HOME` に従わない**（mac は `~/.necoder/gui.sock` が既定）。隔離するなら
+    `NECODER_GUI_SOCK` も必ず別に置く（Dev.app の LSEnvironment もそうしている）。
+  - **ディスク**: parity の worktree 14 個の `target/` だけで約 227GB あり、空きが 12GB まで減っていた。
+    使い終えた worktree の `target/` は消した（ソースと worktree は残している）。worktree を切って並走させる時は
+    `target/` の大きさ（1 つ 12〜27GB）に注意。
+- 検証: 手元の `cargo test --workspace` 1013 件すべて通過・`cargo check --workspace --all-targets` 警告 0。
+  #21 の CI（CLA・audit-deps・Linux・Windows・Remote control の macOS / Windows・リモートサーバのビルド）。
+- 次: 本人が `necoder Dev.app` でチェックリストを回す。見つかった物は統合ブランチで直す。
+  main の Captain の未コミット作業を先に main へ入れてもらい、統合ブランチ側で合わせてから #21 を main へ。
