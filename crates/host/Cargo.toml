@@ -20,3 +20,7 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
+
+# 人が打ったコマンド（`run_user_command`）をプロセスグループごと止める `killpg`。
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
