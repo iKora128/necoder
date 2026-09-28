@@ -3741,3 +3741,48 @@
   #21 の CI（CLA・audit-deps・Linux・Windows・Remote control の macOS / Windows・リモートサーバのビルド）。
 - 次: 本人が `necoder Dev.app` でチェックリストを回す。見つかった物は統合ブランチで直す。
   main の Captain の未コミット作業を先に main へ入れてもらい、統合ブランチ側で合わせてから #21 を main へ。
+
+## 2026-09-28 — Fleet のタブ行を会話だけに・Captain の残り（推薦 ✳・台帳の知らせ・トークン・承認後の再開）を取り込んだ
+
+- 本人の依頼: 「fleet が前回言ったように、なぜタブに ACP の AI と変更やファイルなどが同列に並んでいるのか困っています、
+  UX として最悪です」と「やりきってください」（Captain の残り）。`docs/necoder-router.md` は「いったんなし」＝公開しない
+  （CLAUDE.md のその行も入れない）。調査メモ（`reports/`・`research_notes/`）も本人が決めるまで上げない。
+- **Fleet のタブ行（`cb6a679`）**: 2026-09-19 のペインバーは、スレッドタブと 変更 / ターミナル / ファイル のトグルを
+  同じ行の左右に分けただけで、本人には「同じ段に同列」だった（09-16 に一度「変更やファイルも同じ様にタブになってる」と
+  差し戻し済み）。スレッドタブ行（`render_thread_tabs`）は**会話の列の頭**へ移し、スレッドと ＋ だけにした。トグル
+  （`render_side_toggles`・ブリッジは 編隊図 / 采配ログ も）は **Task 見出しの右**へ（Task＝worktree の持ち物なので）。
+  見出しの右側（次へ・トグル・⤢ ⋯）は 1 つの塊で、狭いカード（2〜3 列）では塊ごと 2 行目へ折り返す。サイドペインの見出しは
+  30px にして会話の列の頭と揃えた。FLEET-V2 §3.5 / §3.6・UI-SPEC・GLOSSARY・MANUAL・mock を同じ形に。
+- **`+N −M` の食い違い（`f75cba8`）**: 見出しのトグルとサイドバーは追跡外のファイルを 0 行と数え、変更レビューの見出しは
+  全行追加と数えていた（トグル +3 −1 / レビュー +6 −1）。`project::review::untracked_line_count`（レビューと同じ規則）で
+  数える。読む量は 1 回の git 更新で 4MB まで。
+- **UI-SPEC §11 の全面置換（`ee1cb0a`・F7 の残り）**: 管制タブ・herd サイドバー・N セルのグリッドの記述を消し、FLEET-V2 §3 の
+  要約と Fleet の外と共通の決まり（色・状態・✳・ニュース・音・片付け・削除の確認）だけにした。FLEET-CONTROL-PLAN P3 に
+  廃止の注記。⋯ の「セルを閉じる」とトースト「herd から戻せます」を「カード」「サイドバーの Task 行」へ。
+- **Captain の残りを 3 本の worktree で並行に作って取り込んだ**（どれも be300bb から・統合時に直した物は各マージの本文）:
+  - 承認待ちへの推薦 ✳（`442c5a0`）: Captain 専用の MCP の道具 `fleet_recommend` と IPC `recommend`。推薦は「Task と承認要求の
+    id（`PermissionCard::id` = 既存の `remote_id`）」で持ち、今の要求にだけ付く。要対応カードに `✳ Captain: 許可してよい` と
+    理由（統合時に**見立ての下へ 2 行まで**に直した — 同じ行ではサイドバー 256px で理由が 10 字ほどで切れた）。表示だけで、
+    許可・拒否の働きは変えない。台帳に `captain`、ニュースに丸チップ。リモート管制には載せていない（FLEET-V2 §5.5 に理由）。
+  - 台帳の知らせの灰色カードと Captain のトークン（`7460a37`）: 汎用の necoder の知らせ `Entry::AutoPrompt` /
+    `send_auto_prompt_to`（agent_panel に Fleet の語を持ち込まない）。DB の role `auto_prompt` と送る本文の印
+    `<necoder-event>` で、再起動と `session/load` の再生を越えて灰色のまま。前置きは `<necoder-context>` で囲み、再生で外す。
+    知らせは「頼んだこと」に数えない。Captain バーの右端にトークン、Fleet 中の statusbar に Σ（Captain は 1 回だけ）。
+  - 承認後の再開（`b4d8c49`・R09 条件 1）: 行ごとの実行記録 `captain_proposal_rows`（待機 / 作成中 / 成功 / 失敗 / やめた・
+    段）。名前と場所は作る前に書き、Task の登録は行の記録と 1 トランザクション。起動時はサイドバーに「中断: <段> + 再開 / ×」
+    を出すだけで、押した行だけ続ける（既にある worktree・Task は使い回す）。同じリポジトリの ＋ Task と分解案の行は順に作る。
+  - 前回「残り」に数えた MCP の `fleet_digest` の台帳フォールバックは、2026-09-25 に済んでいた（数え間違い）。
+- 学び/罠:
+  - **左右に分けても同じ段なら本人には「同列」**。会話の相手（スレッド）とそれ以外（Task の持ち物）は段を分ける。
+  - 見出しの右の要素を 1 つずつ `flex_wrap` させると `⋯` だけが 2 行目に落ちる。右側を 1 つの塊にして `ml_auto` で折り返す。
+  - **UI-SPEC の本文には衝突の印（`<<<<<<<`）の説明がある**。衝突を解いたかを「`<<<<<<<` が無い」で確かめると誤検知する
+    （`<<<<<<< HEAD` と `>>>>>>> <ブランチ>` の組で見る）。確かめる前に `git add` まで流すと印ごと積まれる。
+  - 知らせ（`send_auto_prompt_to`）は `last_prompt` に入らない。テストで Captain に届いた文を読むなら transcript の `◇` の行から。
+  - 並行の 3 本は、FLEET-V2 の F6 行・ROADMAP の F6 行・UI-SPEC §11・locales・dev_probes のプローブ一覧で必ずぶつかった。
+    どれも「両方を残す」で解けた（rerere に記録済み）。
+- 検証: `cargo test -p workspace -p necoder -p agent_panel -p acp_client -p i18n -p project -p storage`（使い捨ての HOME・
+  workspace 291 件ほか全部通過・HOME には python のキャッシュだけ）、`relay` の `npm test` 18 件、`cargo check --workspace
+  --all-targets` 警告 0。隔離 offscreen で 1 列（変更を開いた Task・ブリッジ）・2〜3 列（並べて比べる・ピン 3 枚）・
+  `+N −M` の一致・推薦（2 行）・台帳のカード・Captain バーのトークン・Σ・中断した行を撮って目視。
+- 次: 本人が Dev.app（`./scripts/bundle-mac.sh release dev`）で ORCA-PARITY-CHECKLIST（158 項目）を回す。Captain の実 e2e・
+  推薦・再開は本物のエージェントが要る（課金）。Gemini / OpenCode を Captain にした時の MCP の承認の形は未確認のまま。
