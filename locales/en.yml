@@ -58,6 +58,8 @@ agent:
   input_expand: "Show all %{n} lines"
   input_expand_tip: Show this input in full
   input_collapse_tip: Collapse this input
+  auto_prompt: Event
+  auto_prompt_source: "%{label} (%{source})"
   jump_to_previous_user: Previous instruction
   jump_to_latest: Jump to latest
   pill_agent: Agent (which AI to talk to)
@@ -394,7 +396,7 @@ news:
 captain:
   log: "Decision log"
   human_gate: "Coordination only · Integration and approvals require a human"
-  ledger_event: "Ledger event"
+  ledger_source: "ledger"
   title: Captain
   appoint: "Not appointed — click to appoint"
   appoint_tab: "Appoint a Captain"
@@ -422,7 +424,7 @@ captain:
   line_human_send: "the human instructed directly: “%{text}”"
   line_approved: "proposal approved — necoder created the Tasks and started their agents (first instructions already sent). Created: %{approved} / left out: %{skipped}"
   line_rejected: "proposal rejected (nothing was created)"
-  rotated: "── Conversation rotated. Continuing in a fresh conversation (the state and recent decisions come in the preamble)"
+  rotated: "Conversation rotated (the state and recent decisions come in the preamble)"
   retired_name: "Captain (%{agent} · before the change)"
   seat_denied: "⚑ Not allowed in the Captain seat, refused:"
   seat_violation: "⚑ Edited without asking in the Captain seat, stopped:"

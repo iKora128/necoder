@@ -415,7 +415,12 @@ impl Workspace {
             .captain_inflight
             .insert(repository.to_string(), last_event_id);
         let message = format!("{}\n{}", i18n::t!("captain.wake_header"), lines.join("\n"));
-        panel.update(cx, |panel, cx| panel.send_ledger_event_to(index, message, cx));
+        // 人の発話ではなく necoder の知らせとして送る（transcript では「イベント · 14:05（台帳）」の
+        // 灰色のカード・再起動と再生を越えて見分けが残る・FLEET-V2 §3.6）。
+        let source = i18n::t!("captain.ledger_source");
+        panel.update(cx, |panel, cx| {
+            panel.send_auto_prompt_to(index, &source, message, cx)
+        });
         cx.notify();
     }
 

@@ -82,7 +82,9 @@
 | ↳ **本文の一致**（全スレッドの発言の全文検索の結果。1 スレッド 1 件） | `Storage::search_thread_turns` / `storage::TurnSearchHit` | 本文の一致 | Message matches |
 | ↳ **再生**（`session/load` でエージェントが送り直す過去の会話。開いた時だけ transcript に積む） | `AgentEvent::HistoryReplayed` / `acp_client::history::ReplayLog` | —（「以前の N 件は省略しました」の区切りだけ出る） | — |
 | ↳ **新しいセッションで続ける**（handoff。今の会話の抜粋を前置きに、同じタブで新しいセッションへ。要約はしない） | `AgentPanel::continue_in_new_session` / `Thread.handoff_preamble`（action `ContinueInNewSession`） | 新しいセッションで続ける | Continue in a new session |
-| ↳ **区切り**（transcript の会話ではない一行: 省略・新しいセッション。検索・前置きに入れない） | `Entry::Notice`（DB の role `notice`） | （文そのもの） | （the text itself） |
+| ↳ **区切り**（transcript の会話ではない一行: 省略・新しいセッション・Captain の会話の交代。エージェントには送らない。検索・前置きに入れない） | `Entry::Notice`（DB の role `notice`） | （文そのもの） | （the text itself） |
+| ↳ **necoder の知らせ**（人ではなく necoder が書いてスレッドへ送った発話。Captain を起こす台帳の未読など。エージェントには user ターンとして届くが、transcript では人の発話と分けた灰色のカード。出所の名前は呼び手が渡す。「頼んだこと」「最終入力」・本文の一致には数えない。送る本文は `<necoder-event>` の印つき・DB は role `auto_prompt`＝再起動と再生を越えて残る・FLEET-V2 §3.6） | `Entry::AutoPrompt` / `AgentPanel::send_auto_prompt_to` | イベント · 〈時刻〉（〈出所〉） | Event · 〈time〉 (〈source〉) |
+| ↳ **前置き**（スレッドの送信に毎回付ける necoder の文脈。Captain の役割・現況・直近の采配。transcript には出さない・送る本文では `<necoder-context>` で囲み、再生では外す） | `AgentPanel::set_prompt_context` | （UI には出さない語） | — |
 | ↳ **前の会話**（新しいセッションで続けた・引き継げずに替わった会話 id。履歴で重ねて出さない鍵） | `thread_past_sessions`（storage） | — | — |
 | ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。**推定コストは実際の請求額ではない**。報告の無い値は NULL＝`—`（0 と書かない）・一部のターンにしか報告が無い合計は `≥`（下限）。台帳に 1 ターン 1 行・O11・R08） | `turn_usage`（storage）/ `storage::TurnTokenCounts` / `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` / `usage::reported_total_label` | 使用量 / 推定コスト | Usage / Est. cost |
 | ↳ **レート制限**（プランの利用上限の窓と使用率。エージェントが知らせてきた**最後の値**・O11） | `acp_client::usage::RateLimits` / `AgentEvent::RateLimits` / `agent_panel::usage::UsageLimits` | レート制限 | Rate limits |
@@ -101,6 +103,7 @@
 | ↳ **会話の交代**（膨らんだ Captain の会話を捨て、同じタブで新しい会話を始める。前置きが続きを渡す） | `AgentPanel::rotate_thread_session` | （transcript の区切り 1 行） | — |
 | ↳ **介入**（Captain を通さず Task に直接書く。台帳に残る） | `human_send`（`NewsKind::HumanSend`） | （宛先チップで示す） | — |
 | ↳ **采配ログ**（Captain の判断と実行の履歴） | `NewsKind::Captain` | 采配ログ | Captain log |
+| ↳ **台帳の知らせ**（Captain を起こす 1 通 = 台帳の未読。necoder の知らせの 1 つで、出所は「台帳」） | `send_captain_wake` / `captain.ledger_source` | イベント · 14:05（台帳） | Event · 14:05 (ledger) |
 | **集約気分**（編隊の最悪状態に追従する 1 匹） | `fleet_mood_mascot` | — | — |
 | **常駐**（Herdr sidecar 実行形態・P7） | `HerdrRuntime`（予定） | 常駐 | Resident (Herdr) |
 | **リモート管制**（スマホから見る/裁く・P9） | `serve --control` / `remote_control` | リモート管制 | Remote control |

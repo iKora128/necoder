@@ -61,7 +61,11 @@ impl AgentPanel {
             .map(|(index, entry)| {
                 let (kind, content) = match entry {
                     Entry::User(v) => ("user", text(v)),
-                    Entry::LedgerEvent(v) => ("ledger_event", text(v)),
+                    // necoder の知らせ（人の発話と分ける）。見出しの時刻と出所を本文の頭に載せる。
+                    Entry::AutoPrompt(auto) => (
+                        "auto_prompt",
+                        text(&format!("{}\n{}", auto.label(), auto.text)),
+                    ),
                     Entry::Agent(v) => ("agent", text(v)),
                     Entry::Thinking(v) => ("thinking", text(v)),
                     Entry::Step {

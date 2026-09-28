@@ -600,6 +600,26 @@ impl Workspace {
                 self.toggle_stage_pin(space, cx);
             }
             "captain" => self.focus_captain(&FocusCaptain, window, cx),
+            // Captain の会話に見本（人の発話・台帳の知らせの灰色のカード・采配の本文）とトークンを仕込む
+            // （FLEET-V2 §3.6 のカードと §5.6 の Captain バーのトークンの見た目・エージェントには送らない）。
+            // 任命済みの時だけ（`"captain_agent"` を settings.json に書いて撮る）。
+            "captain-transcript" => {
+                let Some(integration) = self
+                    .fleet_repository_key()
+                    .and_then(|key| self.captain_integration_index(&key))
+                else {
+                    eprintln!("FLEET_PROBE: 統合先が開いていない");
+                    return;
+                };
+                let Some((panel, thread)) = self.ensure_captain_thread(integration, cx) else {
+                    eprintln!("FLEET_PROBE: Captain が未任命（settings.json の captain_agent）");
+                    return;
+                };
+                let source = i18n::t!("captain.ledger_source");
+                panel.update(cx, |panel, cx| {
+                    panel.debug_seed_auto_prompts(thread, &source, cx)
+                });
+            }
             // Captain の分解案を 1 件、要対応に仕込む（FLEET-V2 §5.5 のカードの見た目・DB には書かない）。
             // `proposal:<n>` で行数（既定 2・2 行目は印を外した状態）。
             "proposal" => {

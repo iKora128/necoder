@@ -59,6 +59,8 @@ agent:
   input_expand: "全 %{n} 行を表示"
   input_expand_tip: この入力を全文表示
   input_collapse_tip: この入力を折り畳む
+  auto_prompt: イベント
+  auto_prompt_source: "%{label}（%{source}）"
   jump_to_previous_user: 前の指示へ
   jump_to_latest: 最新へ
   pill_agent: エージェント（どの AI で話すか）
@@ -395,7 +397,7 @@ news:
 captain:
   log: "采配ログ"
   human_gate: "采配のみ · 統合と承認は人間が操作"
-  ledger_event: "台帳イベント"
+  ledger_source: "台帳"
   title: Captain
   appoint: "未任命 — 押して任命する"
   appoint_tab: "Captain を任命"
@@ -423,7 +425,7 @@ captain:
   line_human_send: "人間が直接指示した「%{text}」"
   line_approved: "分解案が承認され、necoder が Task を切って担当を起こした（最初の指示は送り済み）。切った: %{approved}／外した: %{skipped}"
   line_rejected: "分解案が却下された（何も切っていない）"
-  rotated: "── 会話を交代した。ここから新しい会話で続ける（現況と直近の采配は前置きで渡す）"
+  rotated: "会話を交代しました（現況と直近の采配は前置きで渡します）"
   retired_name: "Captain（%{agent}・交代前）"
   seat_denied: "⚑ Captain の席では使えないので断った:"
   seat_violation: "⚑ Captain の席で許可なしに編集されたので止めた:"

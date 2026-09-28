@@ -590,8 +590,12 @@ fn chat_markdown(name: &str, entries: &[Entry]) -> String {
     let mut markdown = format!("# {name}\n");
     for entry in entries {
         match entry {
-            Entry::User(text) | Entry::LedgerEvent(text) => {
+            Entry::User(text) => {
                 markdown.push_str(&format!("\n## {}\n\n{text}\n", i18n::t!("chat.export_you")));
+            }
+            // necoder の知らせは「あなた」とは書かない（人が書いた文ではない）。
+            Entry::AutoPrompt(auto) => {
+                markdown.push_str(&format!("\n## {}\n\n{}\n", auto.label(), auto.text));
             }
             Entry::Agent(text) => {
                 markdown.push_str(&format!(
