@@ -3783,6 +3783,10 @@
   - **準備スクリプトを本当に流すテストは Windows の CI で落ちる**（手元の Windows は POSIX shell 無し＝`LocalHost::has_posix_shell`
     が false で、準備はいつも失敗する）。「直したら通る」を確かめる部分は `has_posix_shell()` の時だけ流す（`64324ca`）。
     macOS の手元では通るので、check-windows で初めて分かった。
+  - **macOS の bash 3.2 は `$VAR（` の全角の 1 バイト目まで変数名と読む**（UTF-8 のロケール）。`set -u` のスクリプトでは
+    `DEV_HOME�: unbound variable` で止まる。`bundle-mac.sh release dev` が最後の表示で失敗し、`&& open` まで進まず
+    Dev.app が開かなかった（09-27 の「開かない」も同じ原因）。日本語の直前の変数は `${…}` で囲む（`d5123ea`）。
+    探し方: `perl -ne 'print if /\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]/' scripts/*.sh`。
 - 検証: `cargo test -p workspace -p necoder -p agent_panel -p acp_client -p i18n -p project -p storage`（使い捨ての HOME・
   workspace 291 件ほか全部通過・HOME には python のキャッシュだけ）、`relay` の `npm test` 18 件、`cargo check --workspace
   --all-targets` 警告 0。隔離 offscreen で 1 列（変更を開いた Task・ブリッジ）・2〜3 列（並べて比べる・ピン 3 枚）・
