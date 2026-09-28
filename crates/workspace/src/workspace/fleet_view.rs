@@ -2527,21 +2527,27 @@ impl Workspace {
                 this.agent_active = agent_surface;
             }));
         }
-        if let Some(session_index) = session_index {
-            cell = cell.child(self.render_pane_bar(session_index, cx));
-        }
         let body = session_index
             .map(|session_index| {
                 let appointing = self.chrome.captain_appointing
                     && self.is_bridge(session_index)
                     && settings::get(cx).captain_agent.is_none();
-                let conversation = if appointing {
+                let transcript = if appointing {
                     self.render_captain_appoint(cx)
                 } else {
                     self.conversation_panel(session_index)
                         .cached(StyleRefinement::default().flex().flex_col().size_full())
                         .into_any_element()
                 };
+                // スレッドタブ行は会話の列の頭（会話の相手を選ぶ行）。サイドペインは自分の見出しを持ち、
+                // 開け閉めは Task 見出しのトグル（FLEET-V2 §3.5）。
+                let conversation = div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_thread_tabs(session_index, cx))
+                    .child(div().flex_1().min_h_0().child(transcript))
+                    .into_any_element();
                 let side = self
                     .stage_side(space)
                     .map(|side| self.render_side_pane(session_index, side, cx));

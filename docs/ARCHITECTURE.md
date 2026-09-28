@@ -346,7 +346,7 @@ Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs` / `wo
   左ドック幅だけを戻す。保存形式から `work_layout` / `fleet_view` は外した（旧 payload の余分なキーは serde が無視する）。
 
 Fleet の描画は `fleet_view.rs`（枠・系譜ヘッダ・編隊図の 4 表示・下段）+ `fleet_stage.rs`（舞台 / Task カード /
-ペインバー / サイドペイン / ブリッジ）+ `fleet_sidebar.rs`（Task 一覧・要対応・Captain バー）+ `new_task_dialog.rs`
+スレッドタブ行 / 見出しのトグル / サイドペイン / ブリッジ）+ `fleet_sidebar.rs`（Task 一覧・要対応・Captain バー）+ `new_task_dialog.rs`
 （＋Task）+ `captain.rs`（wake・任命の面・采配ログ）の 5 枚。**同じ Entity を 1 フレームに 2 回描かない**のは舞台側の責任
 （1 Task = 1 カード・会話ペインは 1 枚・`AgentPanel` の自前タブ行は `sync_embedded_panels` が Fleet 中だけ畳む）。
 周りに parity の部品（2026-09-26〜27）: `task_creation.rs`（作成中の行・取り消し・やり直し・O20。＋Task・fan-out・

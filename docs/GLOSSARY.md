@@ -32,8 +32,8 @@
 | ↳ 表示（4 種） | `GraphView::{Fan,Tree,Card,Hub}` | 扇形 / ツリー / カード / ハブ | Fan / Tree / Card / Hub |
 | **舞台**（Fleet 中央。Task カードを 1〜3 枚） | `stage` / `StageLayout::{One,Two,Three}` | 舞台 | Stage |
 | **Task カード**（舞台の 1 枚 = 1 Task。← セル） | `TaskCard` | Task カード | Task card |
-| ↳ **スレッドタブ**（カードの中の会話。ペインバーの左） | `FleetPane::Agent` + `AgentPanel` の thread | スレッド名 | Thread name |
-| ↳ **サイドペイン**（会話の横に開く面。ペインバーの右のトグル。← Task タブ / FleetPane / 面） | `stage_side()`（`FleetPane::{Diff,Shell,Editor}`） | 変更 / ターミナル / ファイル | Changes / Terminal / Files |
+| ↳ **スレッドタブ**（カードの中の会話。会話の列の頭の行。スレッドだけが並ぶ） | `FleetPane::Agent` + `AgentPanel` の thread | スレッド名 | Thread name |
+| ↳ **サイドペイン**（会話の横に開く面。開け閉めは Task 見出しの右のトグル。← Task タブ / FleetPane / 面・ペインバー（2026-09-28 廃止: スレッドとトグルを同じ段に並べていた）） | `stage_side()`（`FleetPane::{Diff,Shell,Editor}`） | 変更 / ターミナル / ファイル | Changes / Terminal / Files |
 | **ブリッジ**（統合先 main のカード = Fleet の家。← Captain カード。2026-09-20: Captain は main に住むスレッドなので別カードにしない） | 統合先の slot + `FleetPane::{Formation,CaptainLog}` | ブリッジ（UI には出さない語。見えるのは `⚑ Captain` タブと `編隊図`） | Bridge |
 | ↳ **編隊図**（ブリッジのサイドペイン。ハブ / 扇形 / ツリー / カード。← 系譜グラフの展開表示。舞台の上に縦に展開する旧表示は廃止・系譜の帯は 1 行のまま残る） | `FleetPane::Formation` / `render_formation` | 編隊図 | Formation |
 | **変更レビュー**（worktree の全変更を 1 画面で読む面。Fleet の「変更」サイドペインの中身もこれ・session に 1 枚） | `review_view::ReviewView` / `OpenReview` | 変更レビュー | Review |

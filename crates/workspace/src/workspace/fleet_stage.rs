@@ -198,9 +198,10 @@ impl Workspace {
     }
 
     /// サイドペインの見出し（名前 + 補足 + 右端 ×）。`extras` は名前の直後に並べる（ターミナルの通番チップなど）。
+    /// 高さは会話の列のスレッドタブ行と同じ 30px（分割した時に 2 つの列の頭が揃う）。
     pub(super) fn side_header(&self, id: impl Into<gpui::ElementId>, title: SharedString, extras: Vec<gpui::AnyElement>, detail: Option<SharedString>,
         close: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static, cx: &mut Context<Self>) -> gpui::Div {
-        div().flex_none().flex().items_center().gap(px(6.)).h(px(28.)).pl(px(12.)).pr(px(6.)).border_b_1().border_color(self.theme.border)
+        div().flex_none().flex().items_center().gap(px(6.)).h(px(30.)).pl(px(12.)).pr(px(6.)).border_b_1().border_color(self.theme.border)
             .child(div().flex_none().text_size(px(11.)).text_color(self.theme.fg0).child(title))
             .children(extras)
             .when_some(detail, |element, detail| element.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_size(px(10.)).text_color(self.theme.fg2).child(detail)))
@@ -210,9 +211,10 @@ impl Workspace {
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| close(this, window, cx))))
     }
 
-    /// ペインバー: 左 = スレッドタブ + ＋（会話を足す）/ 右 = サイドペインのトグル（FLEET-V2 §3.5）。
-    /// 「誰と話すか」と「何を横に置くか」は別の軸なので 1 本のタブに混ぜない。
-    pub(super) fn render_pane_bar(&self, session_index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// スレッドタブ行: 会話の列の頭に置く、スレッド（AI との会話）だけのタブ + ＋（会話を足す）（FLEET-V2 §3.5）。
+    /// 「誰と話すか」と「何を横に置くか」は別の軸なので、変更 / ターミナル / ファイルはここに並べない（Task 見出しの
+    /// `render_side_toggles`）。狭いカードでサイドペインが全面に出ている間は、会話の列ごと隠れる。
+    pub(super) fn render_thread_tabs(&self, session_index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let session = &self.project_sessions.sessions[session_index];
         let space = self.project_sessions.projects[session_index].task_space.id.clone();
         let wide = self.stage_card_is_wide();
@@ -286,10 +288,20 @@ impl Workspace {
                 this.switch_project(session_index, window, cx);
                 this.add_fleet_agent(cx);
             })));
+        bar.into_any_element()
+    }
 
+    /// サイドペインのトグル（Task 見出しの右・FLEET-V2 §3.5）。変更 / ターミナル / ファイルは Task（worktree）の持ち物で、
+    /// 会話の相手ではないので、スレッドタブ行とは別の段に置く。ブリッジは先頭に編隊図と采配ログ。
+    pub(super) fn render_side_toggles(&self, session_index: usize, cx: &mut Context<Self>) -> gpui::Div {
+        let session = &self.project_sessions.sessions[session_index];
+        let space = self.project_sessions.projects[session_index].task_space.id.clone();
+        let side = self.stage_side(&space);
+        let bridge = self.is_bridge(session_index);
         let shells = self.task_shells(&space).len();
-        let mut toggles = div().flex_none().flex().items_center().gap(px(2.)).ml_auto().pl(px(8.))
-            .child(div().flex_none().mr(px(4.)).text_size(px(11.)).text_color(self.theme.fg2).child("◨"));
+        // 先頭の縦線で、左の Task の状態・次へと分ける（押すと開く面の塊だと読める）。
+        let mut toggles = div().flex_none().flex().items_center().gap(px(2.))
+            .child(div().flex_none().w(px(1.)).h(px(12.)).mr(px(4.)).bg(self.theme.border));
         if bridge {
             toggles = toggles.child(self.side_toggle(("task-side-formation", session_index), i18n::t!("fleet.formation").into(), None, matches!(side, Some(FleetPane::Formation { .. })))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
@@ -333,7 +345,7 @@ impl Workspace {
                 let open = matches!(this.stage_side(&space), Some(FleetPane::Editor { .. }));
                 this.set_stage_side(session_index, (!open).then_some(FleetPane::Editor { space }), cx);
             })));
-        bar.child(toggles).into_any_element()
+        toggles
     }
 
     /// サイドペイン本体（見出し + 中身）。ターミナルの追加は見出しの通番チップの ＋ から。
@@ -533,12 +545,10 @@ impl Workspace {
                     if event.click_count == 2 { this.start_task_rename(index, RenameSite::Cell, window, cx); }
                 })).into_any_element()
         };
-        div().flex_none().flex().items_center().gap(px(7.)).px(px(10.)).py(px(6.)).border_b_1().border_color(self.theme.border)
-            .child(div().size(px(7.)).rounded_full().bg(slot.color))
-            .child(div().flex_1().min_w_0().child(title))
-            .child(div().text_size(px(10.)).text_color(self.theme.fg2).child(SharedString::from(format!("⎇ {}", slot.branch.as_deref().unwrap_or("")))))
-            .child(div().text_size(px(9.)).text_color(self.theme.fg2).child(SharedString::from(i18n::t!(phase_key))))
-            .when(index == self.project_sessions.active && !slot.task_space.is_integration(), |header| header.child(
+        // 右側（次へ・サイドペインのトグル・⤢ ⋯）は 1 つの塊。狭いカード（2〜3 列）で入りきらなければ塊ごと 2 行目の右へ
+        // 折り返す。題名は読める幅を残して縮み、ブランチ名は省略で縮む。
+        let actions = div().flex_none().ml_auto().flex().items_center().gap(px(7.))
+            .when(index == self.project_sessions.active && !slot.task_space.is_integration(), |actions| actions.child(
                 div().id(("task-next", index)).cursor_pointer().text_size(px(10.)).text_color(self.theme.fg1).child(SharedString::from(i18n::t!(action_key)))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
@@ -568,12 +578,20 @@ impl Workspace {
                             _ => this.review_task_for_merge(space, cx),
                         }
                     }))))
+            .child(self.render_side_toggles(index, cx))
             .child(div().id(("task-expand", index)).cursor_pointer().text_color(self.theme.fg2).child("⤢")
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                     this.chrome.stage_columns = 1; this.switch_project(index, window, cx); cx.notify();
                 })))
             .child(div().id(("task-menu", index)).cursor_pointer().text_color(self.theme.fg2).child("⋯")
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| this.open_fleet_cell_menu(cell, event.position, cx))))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| this.open_fleet_cell_menu(cell, event.position, cx))));
+        div().flex_none().flex().flex_wrap().items_center().gap(px(7.)).px(px(10.)).py(px(6.)).border_b_1().border_color(self.theme.border)
+            .child(div().size(px(7.)).rounded_full().bg(slot.color))
+            .child(div().flex_1().min_w(px(72.)).child(title))
+            .child(div().min_w_0().flex_shrink(1.).overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(10.)).text_color(self.theme.fg2)
+                .child(SharedString::from(format!("⎇ {}", slot.branch.as_deref().unwrap_or("")))))
+            .child(div().flex_none().text_size(px(9.)).text_color(self.theme.fg2).child(SharedString::from(i18n::t!(phase_key))))
+            .child(actions)
             .into_any_element()
     }
 }

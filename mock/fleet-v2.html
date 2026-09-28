@@ -186,20 +186,22 @@ body.strip-hidden .strip { display: none; }
 .tcard { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-radius: 8px; border: 1px solid var(--border); background: var(--bg0); overflow: hidden; --tc: var(--th1); }
 .tcard.focus { border-color: color-mix(in srgb, var(--tc) 55%, var(--border)); }
 .tcard .top { flex: none; height: 2px; background: var(--tc); }
-.thead { flex: none; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.thead { flex: none; display: flex; flex-wrap: wrap; row-gap: 4px; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+/* 右側（次へ・トグル・⤢ ⋯）は 1 つの塊。狭いカードで入りきらなければ塊ごと 2 行目の右へ折り返す */
+.thead .acts { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .thead .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tc); }
 .thead .nm { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
 .thead .br { font-family: var(--mono); font-size: 10.5px; color: var(--fg2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thead .phase { white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--fg1); padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg1); }
 .thead .phase i { width: 6px; height: 6px; border-radius: 50%; background: var(--tc); display: block; }
 .thead .phase.rev { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
-.thead .next { margin-left: auto; font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--fg2); background: var(--bg2); color: var(--fg0); cursor: pointer; white-space: nowrap; }
+.thead .next { font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--fg2); background: var(--bg2); color: var(--fg0); cursor: pointer; white-space: nowrap; }
 .thead .next.quiet { border-color: var(--border); color: var(--fg1); }
 .thead .ic { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: var(--fg2); font-size: 12px; }
 .thead .ic:hover { background: var(--bg2); color: var(--fg0); }
 .tcard:not(.focus) .thead .next { display: none; }
 
-/* Task のペインバー: 左 = スレッド（タブ）+ ＋ / 右 = サイドペインのトグル（変更 / ターミナル / ファイル） */
+/* スレッドタブ行（2026-09-28）: 会話の列の頭。AI との会話（スレッド）+ ＋ だけ。変更 / ターミナル / ファイルは見出しへ */
 .ttabs { flex: none; display: flex; align-items: stretch; height: 30px; border-bottom: 1px solid var(--border); padding: 0 6px; font-size: 11.5px; }
 .ttabs .t { display: flex; align-items: center; gap: 6px; padding: 0 10px; color: var(--fg1); border-top: 2px solid transparent; white-space: nowrap; cursor: pointer; }
 .ttabs .t.on { color: var(--fg0); border-top-color: var(--tc); background: var(--bg1); }
@@ -213,21 +215,21 @@ body.strip-hidden .strip { display: none; }
 /* ＋ は最後のスレッドの隣 = 会話を足す、だけ（何が足されるか迷わない位置） */
 .ttabs .add { display: flex; align-items: center; padding: 0 8px; color: var(--fg2); cursor: pointer; }
 .ttabs .add:hover { color: var(--fg0); }
-/* 右 = サイドペインのトグル（タブではない。会話の横に分割で開く = マルチプレクサの split） */
-.ttabs .views { margin-left: auto; display: flex; align-items: center; gap: 2px; }
-.ttabs .views .sp { color: var(--fg2); font-size: 11px; margin-right: 4px; }
-.ttabs .v { display: flex; align-items: center; gap: 5px; height: 20px; padding: 0 9px; border-radius: 5px; color: var(--fg1); font-size: 11px; white-space: nowrap; cursor: pointer; }
-.ttabs .v:hover { background: var(--bg2); color: var(--fg0); }
-.ttabs .v.on { background: var(--bg2); color: var(--fg0); box-shadow: inset 0 0 0 1px var(--border); }
-.ttabs .v .n { color: var(--fg2); font-size: 10px; font-family: var(--mono); }
-.ttabs .v .n.add { color: var(--ok); } .ttabs .v .n.del { color: var(--err); }
+/* サイドペインのトグル（Task 見出しの右。タブではない。会話の横に分割で開く = マルチプレクサの split）。
+   変更 / ターミナル / ファイルは Task（worktree）の持ち物なので、会話のタブと同じ段に並べない */
+.thead .views { display: flex; align-items: center; gap: 2px; padding-left: 8px; border-left: 1px solid var(--border); }
+.thead .v { display: flex; align-items: center; gap: 5px; height: 20px; padding: 0 9px; border-radius: 5px; color: var(--fg1); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.thead .v:hover { background: var(--bg2); color: var(--fg0); }
+.thead .v.on { background: var(--bg2); color: var(--fg0); box-shadow: inset 0 0 0 1px var(--border); }
+.thead .v .n { color: var(--fg2); font-size: 10px; font-family: var(--mono); }
+.thead .v .n.add { color: var(--ok); } .thead .v .n.del { color: var(--err); }
 
-/* カード本体 = 会話 | サイドペイン。幅が足りない（2〜3 列）ときはサイドペインが全面に出る */
+/* カード本体 = 会話の列（スレッドタブ行 + 会話）| サイドペイン。幅が足りない（2〜3 列）ときはサイドペインが全面に出る（会話の列ごと隠れる） */
 .tbody { flex: 1; min-height: 0; display: flex; }
 .conv { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .sidep { display: none; flex: 0 0 44%; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid var(--border); }
 .sidep.on { display: flex; }
-.sidep .sh { flex: none; display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--fg1); }
+.sidep .sh { flex: none; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--fg1); }
 .sidep .sh b { color: var(--fg0); font-weight: 600; }
 .sidep .sh .d { color: var(--fg2); font-family: var(--mono); font-size: 10px; }
 .sidep .sh .k { min-width: 18px; height: 18px; padding: 0 5px; display: grid; place-items: center; border-radius: 4px; color: var(--fg2); font-family: var(--mono); font-size: 10px; cursor: pointer; }
@@ -244,7 +246,6 @@ body.strip-hidden .strip { display: none; }
 .sidep .term { padding: 0; }
 body.l2 .tcard .sidep.on, body.l3 .tcard .sidep.on { flex: 1; border-left: 0; }
 body.l2 .tcard.split .conv, body.l3 .tcard.split .conv { display: none; }
-body.l2 .tcard.split .ttabs .t.on, body.l3 .tcard.split .ttabs .t.on { color: var(--fg1); background: none; border-top-color: transparent; }
 
 /* transcript */
 .tr { flex: 1; min-height: 0; overflow: hidden; padding: 10px 14px; font-size: 12.5px; line-height: 1.6; display: flex; flex-direction: column; gap: 6px; }
@@ -503,21 +504,23 @@ body.l1 .task.pinned::after { display: none; }
           <div class="thead">
             <span class="dot"></span><span class="nm">necoder</span><span class="br">⎇ main</span>
             <span class="phase"><i></i>統合先 · 保護</span>
-            <span class="ic" style="margin-left:auto">⤢</span><span class="ic">⋯</span>
+            <span class="acts">
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v on" data-v="formation">編隊図</span>
+                <span class="v" data-v="log">采配ログ <span class="n">12</span></span>
+                <span class="v" data-v="diff">変更</span>
+                <span class="v" data-v="term">ターミナル</span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic">⤢</span><span class="ic">⋯</span>
+            </span>
           </div>
+          <div class="tbody"><div class="conv">
           <div class="ttabs">
             <span class="t on cap-tab"><span class="flag">⚑</span>Captain</span>
             <span class="t" style="--tc2:#8b90a0"><span class="th"></span>スレッド1</span>
             <span class="add" title="会話を足す">＋</span>
-            <span class="views"><span class="sp">◨</span>
-              <span class="v on" data-v="formation">編隊図</span>
-              <span class="v" data-v="log">采配ログ <span class="n">12</span></span>
-              <span class="v" data-v="diff">変更</span>
-              <span class="v" data-v="term">ターミナル</span>
-              <span class="v" data-v="files">ファイル</span>
-            </span>
           </div>
-          <div class="tbody"><div class="conv">
           <div class="tr">
             <div class="u"><span class="who">あなた · 13:40</span>M2 の編集コアを仕上げたい。buffer を rope にして undo を Transaction 単位に、タブの上線をスレッド色に、gpui の起動経路を通す。並走でいい。</div>
             <div class="th">Thinking… 3 件は独立。rope と undo は同じ buffer.rs を触るので 1 Task に束ねる</div>
@@ -576,20 +579,22 @@ body.l1 .task.pinned::after { display: none; }
           <div class="thead">
             <span class="dot"></span><span class="nm">rope設計</span><span class="br">⎇ task/rope</span>
             <span class="phase"><i></i>稼働中 · plan 3/5</span>
-            <span class="next quiet">レビューへ</span>
-            <span class="ic" title="拡大">⤢</span><span class="ic" title="片付け">⋯</span>
+            <span class="acts">
+              <span class="next quiet">レビューへ</span>
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v on" data-v="diff">変更 <span class="n add">+214</span> <span class="n del">−87</span></span>
+                <span class="v" data-v="term">ターミナル <span class="n">2</span></span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic" title="拡大">⤢</span><span class="ic" title="片付け">⋯</span>
+            </span>
           </div>
+          <div class="tbody"><div class="conv">
           <div class="ttabs">
             <span class="t on"><span class="th"></span>rope設計<span class="x" title="この会話を閉じる">×</span></span>
             <span class="t" style="--tc2:#56b6c2"><span class="th"></span>レビュー</span>
             <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
-            <span class="views"><span class="sp" title="会話の横に開く">◨</span>
-              <span class="v on" data-v="diff">変更 <span class="n add">+214</span> <span class="n del">−87</span></span>
-              <span class="v" data-v="term">ターミナル <span class="n">2</span></span>
-              <span class="v" data-v="files">ファイル</span>
-            </span>
           </div>
-          <div class="tbody"><div class="conv">
           <div class="tr">
             <div class="u"><span class="who">あなた · 14:02</span>buffer を rope に置き換えて、undo を Transaction 単位にして。<code>edit()</code> の呼び出し側は変えない。</div>
             <div class="th">Thinking… ropey の Rope を薄く包んで、既存の Range&lt;usize&gt; API を保つのが最小差分</div>
@@ -663,19 +668,21 @@ test history::tests::undo_restores_snapshot ... ok
           <div class="thead">
             <span class="dot"></span><span class="nm">tab色分け</span><span class="br">⎇ task/tabs</span>
             <span class="phase"><i></i>承認待ち 45s</span>
-            <span class="next">許可</span>
-            <span class="ic">⤢</span><span class="ic">⋯</span>
-          </div>
-          <div class="ttabs">
-            <span class="t on"><span class="th"></span>tab色分け</span>
-            <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
-            <span class="views"><span class="sp" title="会話の横に開く">◨</span>
-              <span class="v" data-v="diff">変更 <span class="n add">+38</span> <span class="n del">−6</span></span>
-              <span class="v" data-v="term">ターミナル</span>
-              <span class="v" data-v="files">ファイル</span>
+            <span class="acts">
+              <span class="next">許可</span>
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v" data-v="diff">変更 <span class="n add">+38</span> <span class="n del">−6</span></span>
+                <span class="v" data-v="term">ターミナル</span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic">⤢</span><span class="ic">⋯</span>
             </span>
           </div>
           <div class="tbody"><div class="conv">
+          <div class="ttabs">
+            <span class="t on"><span class="th"></span>tab色分け</span>
+            <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
+          </div>
           <div class="tr">
             <div class="u"><span class="who">あなた · 13:58</span>タブの上線をスレッド色にして。</div>
             <div class="s"><div>Read <code>crates/ui/src/tabs.rs</code></div><div class="r">88 行</div></div>
@@ -716,19 +723,21 @@ test history::tests::undo_restores_snapshot ... ok
           <div class="thead">
             <span class="dot"></span><span class="nm">gpui起動</span><span class="br">⎇ task/gpui</span>
             <span class="phase rev"><i></i>レビュー待ち · radar ✓</span>
-            <span class="next">Integrate</span>
-            <span class="ic">⤢</span><span class="ic">⋯</span>
-          </div>
-          <div class="ttabs">
-            <span class="t on"><span class="th"></span>gpui起動</span>
-            <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
-            <span class="views"><span class="sp" title="会話の横に開く">◨</span>
-              <span class="v on" data-v="diff">変更 <span class="n add">+120</span> <span class="n del">−4</span></span>
-              <span class="v" data-v="term">ターミナル</span>
-              <span class="v" data-v="files">ファイル</span>
+            <span class="acts">
+              <span class="next">Integrate</span>
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v on" data-v="diff">変更 <span class="n add">+120</span> <span class="n del">−4</span></span>
+                <span class="v" data-v="term">ターミナル</span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic">⤢</span><span class="ic">⋯</span>
             </span>
           </div>
           <div class="tbody"><div class="conv">
+          <div class="ttabs">
+            <span class="t on"><span class="th"></span>gpui起動</span>
+            <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
+          </div>
           <div class="tr">
             <div class="u"><span class="who">あなた · 13:41</span>gpui の起動経路を通して。window を 1 枚開くところまで。</div>
             <div class="s"><div>Write <code>crates/necoder/src/main.rs</code></div><div class="r">+42 −0</div></div>
@@ -839,7 +848,7 @@ function focusTask(id) {
   // 1 枚表示なら差し替え、列表示なら先頭へ寄せる
   document.getElementById('stage').prepend(target);
 }
-// サイドペイン: 同じものをもう一度押すと閉じる。スレッドタブを押すと会話へ戻る（狭いカード用）。
+// サイドペイン: 見出しのトグルをもう一度押すか、ペインの × で閉じる。
 function setSide(card, view) {
   card.querySelectorAll('.sidep').forEach(p => p.classList.toggle('on', p.dataset.v === view));
   card.querySelectorAll('.views .v').forEach(v => v.classList.toggle('on', v.dataset.v === view));
@@ -848,7 +857,6 @@ function setSide(card, view) {
 document.querySelectorAll('.tcard').forEach(card => {
   card.querySelectorAll('.views .v').forEach(v => v.addEventListener('click', () => setSide(card, v.classList.contains('on') ? null : v.dataset.v)));
   card.querySelectorAll('.sidep .x').forEach(x => x.addEventListener('click', () => setSide(card, null)));
-  card.querySelectorAll('.ttabs .t').forEach(t => t.addEventListener('click', () => { if (document.body.classList.contains('l2') || document.body.classList.contains('l3')) setSide(card, null); }));
 });
 (function () {
   const h = location.hash.replace('#', '');
