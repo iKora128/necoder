@@ -162,6 +162,12 @@ Herdr / Orca の深掘り・采配役（Captain 型エージェント）の製�
      Host に無いので、止めずに捨てる）。作れなかった行は `作れませんでした: <理由の 1 行目>`（warn）+ `やり直す`（同じ依頼・
      同じ詳細で、その行のリポジトリの統合先からもう一度）+ `×`（閉じる）で残る。全文はトーストにも出す。窓を閉じるまで。
      Captain の分解案の承認（§5.5）で切る Task も同じ行で出る（行ごとに順に作り、作れなかった行だけやり直せる）。
+     同じリポジトリの ＋ Task・fan-out・分解案の行は、別々に押しても 1 回ずつ順に作る（前の回が終わるまで
+     「順番を待っています…」・2026-09-28・R09）。
+     **中断した行**（R09・2026-09-28）: 分解案の行（題名の前に `⚑`）は終了を越えて残る（§5.5）。起動すると、前の起動で
+     途中のまま終わった行が `中断: 未着手 / worktree 作成 / 準備 / Task 登録 / 担当の起動 / 委任文の送信`（fg1・ドットは
+     止まった形）+ `再開` + `×`（やめる）で出る。作れなかった行は `作れませんでした: <理由の 1 行目>` + `やり直す`。
+     ボタンの説明に、止まった段（作れなかった行は理由の全文）と `⎇ <決めてあったブランチ>`。起動しただけでは何も続けない。
 3.5 **外部の worktree**（O21・Task 行の下・`▾ 外部の worktree（N）` で畳める）: 選んでいるリポジトリの worktree のうち
    Task になっていないもの = レールに無いもの（**Orca・Claude Code・手で `git worktree add` したもの**も git の一覧から拾う）と、
    レールにあるが統合先扱いのもの（メイン以外）。行 = `◌`（中立）+ フォルダ名 + `⎇ branch` + `取り込む`。
@@ -381,7 +387,32 @@ Captain が実行中ならターン終了で未読を確かめて続けて渡す
 - **承認**: 印の付いた行だけ、＋ Task と同じ流れ（作成中の行・O20・§3.2）でブランチと worktree を 1 本ずつ切り、準備スクリプトを回し、
   担当を起こして、目的・完了条件・範囲をそのまま最初の指示として送る。作られた Task は `⚑` 帰属（サイドバー行の題名の前）。
   作れなかった行はサイドバーに「やり直す」で残り、その行だけやり直せる（成功した行は作り直さない）。舞台には並べない（fan-out ではない）。
-  裁きを DB に書けなかった時はカードが印ごと戻る（押し直せる）。*残り*: 承認の後に終了した時の再開の記録（UX-CODE-REVIEW R09）。
+  裁きを DB に書けなかった時はカードが印ごと戻る（押し直せる）。
+- **終了を越えて続ける**（*2026-09-28*・UX-CODE-REVIEW R09 の条件 1）: 承認した行ごとの実行記録を DB（`captain_proposal_rows`・
+  鍵は案の id + 行の番号）に持つ。状態は 待機 / 作成中 / 成功（Task の id）/ 失敗（理由）/ やめた、と段
+  （worktree 作成 → 準備 → Task 登録 → 担当の起動 → 委任文の送信）。待機の行は裁きと同じトランザクションで置く
+  （承認の直後に落ちても、切る行が残る）。
+  - **段の前に書く**（DB と git は 1 つのトランザクションにできない）: ブランチ名と worktree の場所は `git worktree add` の
+    前に空いている物から決めて書く。Task の登録（Task の snapshot・作った遷移・`⚑` 帰属の `captain_task`）は行の記録
+    （Task の id と次の段）と 1 トランザクション。
+  - **やり直しは既にある物を使う**: その場所にそのブランチの worktree があればそれ、ブランチだけならその worktree
+    （＋ Task の「既にあるブランチ」と同じ）、どちらも無ければ切る。行に Task の id があれば台帳には書き直さない
+    （出来事を二重に積まない）。担当は空のスレッドを使い回す。委任文は Task の会話に人の発話が無い時だけ送る。
+    取り違えそうな時は作らずに断る: その場所に別のブランチの worktree・worktree でない物がある、そのブランチを別の
+    場所で使っている、行が登録する前からその worktree が別の Task として台帳に載っている（中断の後に同じ名前で
+    ＋ Task を作った・別の窓で取り込んだ）。行の worktree は「外部の worktree」に出さない（行が引き受ける）。
+  - **起動時は出すだけ**: 終わっていない行をサイドバーに中断した行として戻す（§3.2）。**自動では続けない**（起動した
+    だけでエージェントを起こして課金しない）。`再開` / `やり直す` はその行だけ、押した時に DB の記録を読み直して
+    （別の窓で済んだ・やめた行は動かさない）記録した段から続ける。成功した行は出ない＝作り直さない。
+    `×`（やめる）は記録を閉じる。作ってあった worktree・Task は消さない（外部の worktree・Task として残る）。
+    片付けた（archived）・worktree を消した Task の行も閉じる。
+  - **準備に失敗した行**: Task は出して委任文を控える（＋ Task と同じ・§6.2）。行は「準備で失敗」（Task の id つき）で、
+    Task のカードの「準備をやり直す」/「準備を飛ばして始める」で送ると成功になる。送らずに終了したら、次の起動で
+    `作れませんでした + やり直す` の行になり、押すと準備から続けて同じ Task へ送る（控えは起動の間だけ＝§6.2 の
+    Task のカードではなく、行が引き受ける）。準備の途中で落ちた行は、再開で準備スクリプトをもう一度流す。
+  - 同じ起動の中では、同じ行を 2 つの窓で同時に動かさない（動かしている行はほかの窓の起動時に出さない）。
+  - 残る穴: 委任文を担当に渡した直後、成功を書くまでの間（ミリ秒）に落ちた行は「委任文の送信」で止まって見え、
+    その会話が保存されていなければ再開でもう一度送る（届いたかを necoder は確かめようがない・ボタンの説明に書く）。
 - **却下**: 何も作らない。
 - どちらも台帳に `proposal_approved` / `proposal_rejected` を積み、Captain を起こす（§5.3）。
 - 道具の返り値は「承認待ち」。Captain はそのターンを終えてよい（待たない）。
@@ -471,6 +502,7 @@ worktree 作成直後に 1 回、Task の worktree を cwd にして実行する
 失敗した時の依頼は**送らずに控え**、要対応の失敗カードに **「準備をやり直す」**（`.worktreeinclude` と準備スクリプトを
 もう一度流し、通ったら控えた依頼を送る・また失敗したら理由を差し替えて failed のまま）と **「準備を飛ばして始める」**
 （流さずに送る）を出す（O20・2026-09-26）。控えは起動している間だけ（再起動後は「直す指示」から書き直す）。
+Captain の分解案の行は、行の記録が控えの代わりに残る（再起動の後はサイドバーの「やり直す」で準備から続けて送る・§5.5）。
 用途は 3 つで、テンプレ（「作る」ボタンが書く内容）もこの 3 つ:
 
 ```sh
@@ -608,7 +640,7 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 | **F3 要対応をサイドバーへ・中央タブ廃止 ✅ 2026-09-16** | `render_stage_attention`（Captain バーの直下・選択リポジトリの分だけ）が `render_attention_card` を再利用。サイドバー全体を `FleetControl` key context にして ⏎ / ⌘⇧U（`ControlNext`）が効く。管制タブ本体（ヘッダ / Captain バー / 稼働カード / パイプライン）・中央タブ帯・`ToggleControl`・`NECODER_CONTROL`・`fleet_mascot`・`control.*` の死キー 26 個を削除。*実装時の訂正*: `FleetCenterView` enum は `Work` が `workbench.rs` に残るため **F7 まで据え置き**（描画経路からは外れている） | 全 test green・`cargo check --workspace --all-targets` の警告は workbench 由来 5 件のみ（F7 で消える） |
 | **F4 ＋ Task ダイアログ + 準備スクリプト + task.env ✅ 2026-09-16** | `new_task_dialog.rs`（⌘N / サイドバーの ＋Task）: 1 入力（EditorView・⌘⏎）→ `project::task_slug` → `create_named_task_on`（`<repo>-worktrees/<slug>`・衝突は `-2`）→ `run_task_setup_on`（`.necoder/worktree-setup.sh`・失敗は `failed` + 要対応）→ `ipc_spawn_into` で 1 行目を Task 名にしてプロンプト送信。`host::task_environment` が `.necoder/task.env` を ACP（`acp_client`）とターミナル（`terminal_view`）の環境に注入。ダイアログに branch / worktree パス / 準備スクリプトの有無（無ければ「作る」= §6.2 テンプレを書いてエディタで開く）。CLI の `fleet create` も同じ関数。*未実装*: エージェント/model ピル（sticky 既定が自動で効く）・「詳細 ▾」・設定 `worktree_dir` | `task_slug` / `task_worktree_dir` / `task_environment` の unit test。**necoder 自身での `CARGO_TARGET_DIR` 共有の体感（2 本目の `cargo check`）は本人の実機の手番** |
 | **F5 系譜の帯 ✅ 2026-09-16** | 畳んだ系譜ヘッダの下に `render_lineage_strip`（Task 色の `┬━ 名前` / 統合済み `╰━` / main `━`・クリックで舞台の選択へ）。⌄ で従来 4 表示に展開・`ToggleLineage`（⌘⇧G・非 mac は ctrl-alt-g = Git パネルとの衝突回避）。*実装時の訂正*: 曲線描画の 64px 帯ではなくテキストの 1 行（34px）から始めた。既定は畳み | 帯の名前クリックで舞台が切り替わる（offscreen 目視は本人の手番） |
-| **F6 Captain の玄関（一部 2026-09-16・*2026-09-20*: Captain カードはブリッジ（§3.6）に統合・任命 UI と設定の交代/解任を追加（§5.7））** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。*2026-09-24*: **Captain の席（§5.8）と分解案の承認（§5.5）**・台帳の未読と読んだ位置（`captain_cursors`・§5.3・`captain_pending` は削除）・会話の交代（§5.6）・前置きの直近の采配（§5.9）・`⚑` 帰属・知らせが表示中のタブを奪わない（`send_ledger_event_to`）・ターン終了の通知に `completed`（失敗したターンで読んだ位置を進めない）。残: 台帳イベントの灰色カード表示・承認の推薦（✳）を要対応カードへ・トークン表示 | storage / agent_panel / workspace / necoder の test（読んだ位置と分解案の往復・席の裁定・見張り・交代・MCP の Captain 版・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`）。実機: /tmp の練習用 repo で Opus 5 が「分けて提案 → 承認待ちで止まる → 承認の知らせで起こし直さない」。隔離 offscreen で分解案カードと `⚑` 行を目視。**necoder 本体での実 e2e（目標 1 つ → 承認 → 2 Task）は本人の目視待ち** |
+| **F6 Captain の玄関（一部 2026-09-16・*2026-09-20*: Captain カードはブリッジ（§3.6）に統合・任命 UI と設定の交代/解任を追加（§5.7））** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。*2026-09-24*: **Captain の席（§5.8）と分解案の承認（§5.5）**・台帳の未読と読んだ位置（`captain_cursors`・§5.3・`captain_pending` は削除）・会話の交代（§5.6）・前置きの直近の采配（§5.9）・`⚑` 帰属・知らせが表示中のタブを奪わない（`send_ledger_event_to`）・ターン終了の通知に `completed`（失敗したターンで読んだ位置を進めない）。*2026-09-28*: 承認した行の実行記録と、終了を越えた再開（§5.5・中断した行 §3.2・UX-CODE-REVIEW R09 の条件 1）。残: 台帳イベントの灰色カード表示・承認の推薦（✳）を要対応カードへ・トークン表示 | storage / agent_panel / workspace / necoder の test（読んだ位置と分解案の往復・席の裁定・見張り・交代・MCP の Captain 版・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`・行の記録の往復・落ちた段ごとの再開が 1 本ずつ・3 行中 1 行の失敗と途中の終了の組み合わせ・やめる・準備の失敗・別の Task に取られた worktree・別々の再開の順番・同じ回の途中のやり直し）。実機: /tmp の練習用 repo で Opus 5 が「分けて提案 → 承認待ちで止まる → 承認の知らせで起こし直さない」。隔離 offscreen で分解案カードと `⚑` 行を目視。**necoder 本体での実 e2e（目標 1 つ → 承認 → 2 Task）は本人の目視待ち** |
 | **F7 掃除 ✅ 2026-09-20** | `workbench.rs` / `work_layout.rs` / `FleetCenterView` / `work.*` の死キー 37 個 / `NECODER_WORKBENCH_PROBE` を削除。窓の状態の復元は `restore_window_state`（`persisted_state` の対・`explorer_controller.rs`）へ改名して残し、保存形式から `work_layout` / `fleet_view` を外した（旧 payload の余分なキーは serde が無視する）。端末の名札は `chrome.next_terminal_id`（プロセス内単調増加・PTY は再起動を越えないので保存しない）。生きていた 3 キーは `settings.pref_tabs_position` / `tabs_position_top` / `tabs_position_left` へ。設定キー `work_tabs_position` の名前は未決のまま据え置き。**残: UI-SPEC §11 の置換・FLEET-CONTROL-PLAN P3 の注記** | `cargo check --workspace --all-targets` **と `--release`** で警告 0（`WorkAction` の未使用警告は debug 専用プローブからしか構築されず、release ビルドでだけ出ていた） |
 
 順序は F0 → F1 → F2 → F3 → F4 → F5 → F6 → F7。F1 と F5 は独立。**各フェーズの終わりに本文書と JOURNAL を更新**。
@@ -658,6 +690,7 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
 | `columns:<n>` / `pin` | 舞台の列数 / 選択中の Task をピン |
 | `filter:<語>` / `select:<n>` | サイドバーの絞り込み欄に語を入れる / n 本目の Task を複数選択に足す（O21・`select:1;select:3` で帯が出る） |
 | `creating` | ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない） |
+| `interrupted` | Captain の分解案の中断した行を段ごとに仕込む（未着手 / Task 登録 / 委任文の送信 / 作れなかった・R09・DB には書かず worktree も作らない） |
 | `compare:<n>` | 先頭から n 本（2〜3）の Task を舞台に並べ、各カードの「変更」を開く（O23 の並べて比べる） |
 | `menu` / `rename` / `maximize` / `terminal` / `tall` / `close-all` | 従来の片付け UI・下段の検証 |
 

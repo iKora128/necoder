@@ -97,6 +97,7 @@
 | ↳ **Captain の席**（Captain スレッドに付く決まり: 道具は Captain 用の MCP だけ・権限の問いには necoder が答える・編集と shell は断る） | `agent_panel::SeatPolicy`（id `captain`）・`necoder mcp --captain` | （UI には出さない語） | — |
 | ↳ **分解案**（Captain が出す「この N 本に分けたい」。承認した行だけ worktree とブランチになる） | `CaptainProposal`・`fleet_propose_tasks`・DB `captain_proposals` | 分解案 | Split / proposal |
 | ↳ **分解案カード**（要対応に出る承認の面。行ごとの印・承認 / 却下） | `AttentionKind::Proposal` | ⚑ Captain の分解案 · N 本 | ⚑ Captain's split · N Tasks |
+| ↳ **中断した行**（承認した分解案の行のうち、前の起動で途中のまま終わった物。起動時にサイドバーへ戻し、押した時だけ記録した段から続ける。行ごとの実行記録は DB に持つ） | `CreationStage::Interrupted`・DB `captain_proposal_rows`（`ProposalRowStatus` / `ProposalRowStep`） | 中断: <段> / 再開 | <Step> · stopped / Resume |
 | ↳ **読んだ位置**（Captain が台帳をどこまで読んだか。再起動を跨いで未配達の知らせを残す） | DB `captain_cursors` | （UI には出さない語） | — |
 | ↳ **会話の交代**（膨らんだ Captain の会話を捨て、同じタブで新しい会話を始める。前置きが続きを渡す） | `AgentPanel::rotate_thread_session` | （transcript の区切り 1 行） | — |
 | ↳ **介入**（Captain を通さず Task に直接書く。台帳に残る） | `human_send`（`NewsKind::HumanSend`） | （宛先チップで示す） | — |
