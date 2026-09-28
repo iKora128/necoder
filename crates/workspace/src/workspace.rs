@@ -115,7 +115,13 @@ pub use control_transport::{ControlListener, ControlStream};
 mod captain;
 mod captain_proposals;
 pub use captain_proposals::{
-    new_proposal_id, validate_proposed_tasks, ProposedTask, CAPTAIN_MCP_TOOLS, MAX_PROPOSED_TASKS,
+    new_proposal_id, validate_proposed_tasks, ProposedTask, CAPTAIN_MCP_TOOLS,
+    CAPTAIN_ONLY_MCP_TOOLS, MAX_PROPOSED_TASKS,
+};
+mod captain_recommendations;
+pub use captain_recommendations::{
+    validate_recommendation, RecommendationRequest, RecommendationVerdict,
+    MAX_RECOMMENDATION_REASON_CHARS,
 };
 mod chat_view;
 pub(crate) use captain::is_captain_thread_name;
@@ -1369,6 +1375,9 @@ struct ChromeState {
     new_task: Option<new_task_dialog::NewTaskDialog>,
     /// 要対応に出している Captain の分解案（FLEET-V2 §5.5）。DB（`captain_proposals`）の鏡。
     captain_proposals: Vec<captain_proposals::CaptainProposal>,
+    /// 承認待ちの要求への Captain の推薦（FLEET-V2 §5.5 の末尾）。どの Task の、どの要求への推薦かと一緒に
+    /// 画面の上にだけ持つ（承認待ちと同じく再起動を越えない）。
+    captain_recommendations: Vec<captain_recommendations::CaptainRecommendation>,
     /// いま Captain に渡している 1 通が含む台帳の末尾の通し番号（リポジトリ別）。Captain のターンが
     /// 終わったらこの位置まで「読んだ」と DB に書く（途中で落ちたら同じ出来事をもう一度渡す・§5.3）。
     captain_inflight: HashMap<String, i64>,

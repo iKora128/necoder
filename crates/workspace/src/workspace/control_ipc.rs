@@ -773,6 +773,17 @@ impl Workspace {
                 })
                 .detach();
             }
+            // Captain の推薦（FLEET-V2 §5.5 の末尾）。今の承認待ちの要求にだけ添え、応答はしない。
+            // 推薦は今の承認待ちにだけ意味があるので DB には置かない（GUI が居なければ CLI 側で断られる）。
+            "recommend" => {
+                let response = match self.accept_captain_recommendation(&params, cx) {
+                    Ok(value) => ok(value),
+                    Err(message) => err(message),
+                };
+                if let Err(error) = respond.send(response) {
+                    eprintln!("推薦の応答を返せない（要求元が先に切れた）: {error}");
+                }
+            }
             "set_depends" => {
                 let depends_on: Vec<String> = params
                     .get("depends_on")
@@ -1196,12 +1207,28 @@ impl Workspace {
     }
 
     /// 事実層 + Tier1（+キャッシュ済み Tier2）。**フル transcript は返さない**（3 段圧縮・計画 §P5）。
+    /// 承認待ちのスレッドには要求の id と文（`fleet_recommend` に渡す・FLEET-V2 §5.5）と、付けた推薦を添える。
     fn ipc_digest(&self, index: usize, cx: &mut Context<Self>) -> serde_json::Value {
         let slot = &self.project_sessions.projects[index];
         let statuses = self.project_sessions.sessions[index].agent_statuses(cx);
         let threads: Vec<serde_json::Value> = statuses
             .iter()
-            .map(|(_, _, status)| {
+            .map(|(panel, thread_index, status)| {
+                let permission = panel.read(cx).permission_card(*thread_index).map(|card| {
+                    let recommendation = self
+                        .captain_recommendation_for(&slot.task_space.id, &card.id)
+                        .map(|recommendation| {
+                            serde_json::json!({
+                                "verdict": recommendation.verdict.as_str(),
+                                "reason": recommendation.reason.as_ref(),
+                            })
+                        });
+                    serde_json::json!({
+                        "id": card.id.as_ref(),
+                        "title": card.title.as_ref(),
+                        "recommendation": recommendation,
+                    })
+                });
                 serde_json::json!({
                     "name": status.name.as_ref(),
                     "activity": match status.activity {
@@ -1219,6 +1246,7 @@ impl Workspace {
                     "files_touched": status.files_touched,
                     "tokens_used": status.tokens_used,
                     "turn_elapsed_secs": status.turn_elapsed_secs,
+                    "permission": permission,
                 })
             })
             .collect();
@@ -1602,6 +1630,87 @@ mod tests {
         let active = request(&workspace, cx, "active_task", serde_json::json!({}));
         assert_eq!(active["ok"], true, "{active}");
         assert_eq!(active["result"]["task_id"], task_id.as_str());
+        std::fs::remove_dir_all(&directory).expect("片付けられる");
+    }
+
+    /// Captain の推薦（FLEET-V2 §5.5）: `digest` が承認待ちの要求の id を返し（Captain が permission_id を知る道）、
+    /// `recommend` はその要求にだけ付く。付けた推薦は `digest` にも出る。知らない要求の id は断る。
+    #[gpui::test]
+    fn recommend_attaches_to_the_waiting_request_named_by_digest(cx: &mut gpui::TestAppContext) {
+        let directory = scratch("recommend");
+        // Captain 任命済み・エージェントの起動コマンドは存在しないパス（本物のエージェントを起こさない）。
+        std::fs::write(
+            directory.join("settings.json"),
+            r#"{"onboarded":true,"agent_prewarm":false,"captain_agent":"Claude Code",
+                "tier2_summaries":false,"agent_auto_name":false,
+                "agent_servers":{"claude":{"type":"custom","command":"/nonexistent/necoder-test-agent"}}}"#,
+        )
+        .expect("書ける");
+        let (workspace, cx) = open_workspace(&directory, cx);
+        let (task_id, panel) = workspace.update(cx, |workspace, _| {
+            let slot = &mut workspace.project_sessions.projects[0];
+            slot.task_space.kind = SpaceKind::Task;
+            (
+                slot.task_space.id.0.clone(),
+                workspace.project_sessions.sessions[0].fleet_agents[0].clone(),
+            )
+        });
+        let _answers = panel.update(cx, |panel, cx| {
+            panel.debug_request_permission("Bash: cargo test", cx)
+        });
+        cx.run_until_parked();
+
+        let digest = request(
+            &workspace,
+            cx,
+            "digest",
+            serde_json::json!({ "task_id": task_id }),
+        );
+        let permission = digest["result"]["threads"][0]["permission"].clone();
+        assert_eq!(permission["title"], "Bash: cargo test", "{digest}");
+        assert!(permission["recommendation"].is_null());
+        let permission_id = permission["id"]
+            .as_str()
+            .expect("承認待ちの id")
+            .to_string();
+
+        let accepted = request(
+            &workspace,
+            cx,
+            "recommend",
+            serde_json::json!({
+                "task_id": task_id, "permission_id": permission_id,
+                "verdict": "allow", "reason": "worktree の中で読むだけ",
+            }),
+        );
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        assert_eq!(accepted["result"]["status"], "shown");
+        let digest = request(
+            &workspace,
+            cx,
+            "digest",
+            serde_json::json!({ "task_id": task_id }),
+        );
+        assert_eq!(
+            digest["result"]["threads"][0]["permission"]["recommendation"]["verdict"],
+            "allow"
+        );
+
+        let stale = request(
+            &workspace,
+            cx,
+            "recommend",
+            serde_json::json!({
+                "task_id": task_id, "permission_id": "0-0", "verdict": "deny", "reason": "r",
+            }),
+        );
+        assert_eq!(stale["ok"], false, "{stale}");
+        assert!(
+            stale["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(&permission_id)),
+            "今の要求の id を添えて断る: {stale}"
+        );
         std::fs::remove_dir_all(&directory).expect("片付けられる");
     }
 

@@ -307,6 +307,23 @@ pub(crate) fn propose_tasks(root: &Path, arguments: &Value) -> Result<Value> {
     }
 }
 
+/// Captain の承認待ちへの推薦（FLEET-V2 §5.5）。推薦は今の承認待ちにだけ意味があるので DB には置かず、
+/// 起動中の GUI に渡すだけ（GUI が居なければ `gui_request` が断る）。引数は GUI に触れる前に確かめる。
+/// CLI の対（`ne fleet recommend`）は作らない: 分解案と同じく Captain の席の MCP からだけ使う道具。
+pub(crate) fn recommend(arguments: &Value) -> Result<Value> {
+    let request = workspace::validate_recommendation(arguments)
+        .map_err(|message| anyhow::anyhow!(message))?;
+    gui_request(
+        "recommend",
+        json!({
+            "task_id": request.task_id,
+            "permission_id": request.permission_id,
+            "verdict": request.verdict.as_str(),
+            "reason": request.reason,
+        }),
+    )
+}
+
 pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
     let root = paths::canonicalize(root).context("IntegrationSpace を開けません")?;
     let host = LocalHost::shared();

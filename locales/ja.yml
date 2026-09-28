@@ -449,6 +449,24 @@ captain:
     完了条件: %{done_when}
     完了条件を満たしたら、何を変えたかを 3 文でまとめて終えてください。
   delegation_scope: "範囲: %{scope}"
+  recommend_allow: "許可してよい"
+  recommend_deny: "拒否を勧める"
+  recommend_ask_human: "判断はあなたに"
+  recommend_card: "Captain: %{verdict}"
+  recommend_news: "推薦 · %{task}: %{verdict} — %{reason}"
+  recommend_reply: "要対応のカードに添えた（人間が読むための 1 行）。許可・拒否は人間が押すので、あなたは応答しない。このターンは待たずに終えてよい。"
+  recommend_wake_header: "承認待ち（Task の担当が許可を求めて止まっている・まだ推薦していない要求）。許可してよいか判断できる要求には、fleet_recommend（task_id・permission_id・verdict = allow / deny / ask_human・reason は 1 行）で推薦を 1 行だけ返してよい。応答はしない — 許可・拒否は人間が押す:"
+  recommend_wake_line: "- %{task} %{title}: 「%{request}」 permission_id=%{permission}"
+  recommend_err_field: "%{field} がありません（task_id・permission_id・verdict・reason は必須）"
+  recommend_err_verdict: "verdict %{verdict} は使えません（使える: %{known}）"
+  recommend_err_line: "reason は 1 行で書いてください（改行なし）"
+  recommend_err_long: "reason は %{max} 字までにしてください（1 行の見立て）"
+  recommend_err_no_captain: "Captain が任命されていないので推薦を受けません"
+  recommend_err_task: "Task %{id} が開いていません（推薦は今の承認待ちにだけ付く）"
+  recommend_err_integration: "統合先のスレッドには推薦しません（推薦するのは Task の承認待ちだけ）"
+  recommend_err_stale: "承認要求 %{permission} はもう解決したか、取り消されたか、別の要求に替わった（推薦は付けない）。%{current}"
+  recommend_err_stale_current: "今の承認待ち: permission_id=%{permission}「%{request}」"
+  recommend_err_stale_none: "この Task は今は承認待ちではない"
 fleet:
   details_kind_task: Task
   details_kind_integration: 統合先

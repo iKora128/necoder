@@ -34,6 +34,7 @@ const CAPTAIN_TOOLS: &[&str] = &[
     "fleet_send",
     "fleet_set_depends",
     "fleet_review_task",
+    "fleet_recommend",
     "list_files",
     "read_file",
     "search",

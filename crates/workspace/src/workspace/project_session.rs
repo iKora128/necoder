@@ -865,6 +865,7 @@ impl Workspace {
                 fleet_cells: Vec::new(),
                 new_task: None,
                 captain_proposals: Vec::new(),
+                captain_recommendations: Vec::new(),
                 captain_inflight: HashMap::new(),
                 captain_wake_scheduled: std::collections::HashSet::new(),
                 captain_wakes_since_rotation: HashMap::new(),

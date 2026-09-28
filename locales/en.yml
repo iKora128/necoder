@@ -448,6 +448,24 @@ captain:
     Done when: %{done_when}
     When the done condition holds, finish by summarizing what you changed in 3 sentences.
   delegation_scope: "Scope: %{scope}"
+  recommend_allow: "OK to allow"
+  recommend_deny: "Suggest denying"
+  recommend_ask_human: "Your call"
+  recommend_card: "Captain: %{verdict}"
+  recommend_news: "Recommendation · %{task}: %{verdict} — %{reason}"
+  recommend_reply: "Added to the Attention card (a line for the human to read). The human presses allow or deny, so you do not answer the request. End this turn without waiting."
+  recommend_wake_header: "Waiting for approval (a Task's agent stopped to ask for permission; requests you have not recommended on yet). For a request you can judge, you may return one line with fleet_recommend (task_id, permission_id, verdict = allow / deny / ask_human, a one-line reason). Do not answer it — the human presses allow or deny:"
+  recommend_wake_line: "- %{task} %{title}: “%{request}” permission_id=%{permission}"
+  recommend_err_field: "%{field} is missing (task_id, permission_id, verdict and reason are required)"
+  recommend_err_verdict: "verdict %{verdict} is not allowed (use: %{known})"
+  recommend_err_line: "Write the reason on one line (no line breaks)"
+  recommend_err_long: "Keep the reason within %{max} characters (a one-line judgement)"
+  recommend_err_no_captain: "No Captain is appointed, so recommendations are not accepted"
+  recommend_err_task: "Task %{id} is not open (a recommendation only attaches to a request that is waiting now)"
+  recommend_err_integration: "Threads on the integration space get no recommendations (only Task approval requests do)"
+  recommend_err_stale: "Approval request %{permission} was already answered, cancelled or replaced (no recommendation attached). %{current}"
+  recommend_err_stale_current: "Waiting now: permission_id=%{permission} “%{request}”"
+  recommend_err_stale_none: "This Task is not waiting for approval now"
 fleet:
   details_kind_task: Task
   details_kind_integration: Integration

@@ -541,7 +541,8 @@ impl Workspace {
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
     /// 画面の組み立て（`;` 区切り）: `graph` / `formation` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
     /// `side:<diff|terminal|files>`（その Task カードのサイドペイン。diff = 変更レビュー）/ `columns:<n>` / `pin` / `captain` /
-    /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `compare:<n>`（O23）。
+    /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `compare:<n>`（O23）/
+    /// `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -678,6 +679,9 @@ impl Workspace {
                     cx,
                 );
             }
+            // 承認待ちの最初の Task に Captain の推薦を仕込む（FLEET-V2 §5.5 の要対応カードの ✳ 行・DB には書かない）。
+            // `recommend:allow|deny|ask_human`（既定 deny = CONTROL_PROBE の `cargo publish` に合う見立て）。
+            "recommend" => self.debug_seed_captain_recommendation(argument, cx),
             // 1 本目の Task に ⚑ 帰属を付ける（分解案の承認で作られた Task の行の見た目）。
             "origin" => {
                 if let Some(slot) = self
