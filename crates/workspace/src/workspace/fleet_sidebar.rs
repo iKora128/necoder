@@ -248,10 +248,23 @@ impl Workspace {
             .filter(|(_, slot)| slot.repository_key() == key)
             .map(|(index, slot)| (index, canonical(slot.worktree.root())))
             .collect();
+        // Captain の分解案の中断した行・作れなかった行が使う worktree は、その行が引き受ける（「再開」で Task に
+        // する）。取り込むと別の Task になり、行の再開と食い違うので出さない（R09）。
+        let claimed: Vec<PathBuf> = self
+            .chrome
+            .task_creations
+            .iter()
+            .filter(|creation| creation.repository_key == key)
+            .filter_map(|creation| creation.proposal_row.as_ref()?.target.as_deref())
+            .map(canonical)
+            .collect();
         let mut rows = Vec::new();
         if let Some(Some(listed)) = self.chrome.fleet_worktrees.get(&key) {
             for worktree in listed {
                 let path = canonical(&worktree.path);
+                if claimed.contains(&path) {
+                    continue;
+                }
                 match rail.iter().find(|(_, root)| *root == path) {
                     None => rows.push((worktree.path.clone(), worktree.branch.clone(), None)),
                     // レールにあるが Task でも統合先でもない（`task/` でない linked worktree を ⌘O で開いた）。

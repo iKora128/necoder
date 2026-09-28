@@ -30,6 +30,9 @@ pub(crate) struct TaskCreation {
     pub(crate) task: FanoutTask,
     /// 起点が別の Task のブランチなら、その Task（O21・A07・親子）。作れたら子の台帳に残す。
     pub(crate) parent: Option<SpaceId>,
+    /// Captain の分解案の行なら、その実行記録（DB `captain_proposal_rows` の写し・R09）。段ごとに記録を
+    /// 書いてから進み、終了を越えて「中断した行」として戻る。＋ Task・fan-out は `None`。
+    pub(crate) proposal_row: Option<storage::ProposalRowRecord>,
 }
 
 /// 作成中の Task がどの段にいるか。
@@ -45,6 +48,9 @@ pub(crate) enum CreationStage {
     Setup,
     /// 作れなかった（理由の 1 行目）。やり直す / 閉じる。
     Failed(SharedString),
+    /// 前の起動で途中のまま終わった Captain の分解案の行（R09）。どの段かは `proposal_row` の記録。
+    /// 自動では続けない（起動しただけでエージェントを起こさない）。再開 / やめる。
+    Interrupted,
 }
 
 /// 自動で名付けたブランチの改名の予約（O23・A23）。依頼の 1 行目に英数字が無いと、ブランチは
@@ -77,15 +83,15 @@ pub(crate) fn auto_branch_plan(task: &FanoutTask, branch: &str) -> Option<AutoBr
 }
 
 /// 1 本分の worktree を作った結果（背景から前景へ渡す）。
-struct CreatedWorktree {
-    target: PathBuf,
-    branch: String,
+pub(super) struct CreatedWorktree {
+    pub(super) target: PathBuf,
+    pub(super) branch: String,
     /// このブランチを今切った（取り消したら消してよい）。既にあったブランチの worktree なら false。
-    new_branch: bool,
+    pub(super) new_branch: bool,
     /// `.worktreeinclude` の持ち込みの失敗（準備の失敗と同じ扱いで依頼を控える）。
-    include_failure: Option<String>,
+    pub(super) include_failure: Option<String>,
     /// 準備スクリプトを流す（置いてあって、今回は飛ばさない）。
-    run_setup: bool,
+    pub(super) run_setup: bool,
 }
 
 /// worktree を作り、`.worktreeinclude` を持ち込む（準備スクリプトはまだ流さない）。背景で呼ぶ。
@@ -129,6 +135,24 @@ fn discard_worktree(
     Ok(())
 }
 
+/// Task を作る回の順番（リポジトリごと・この起動の全窓で共有）。＋ Task・fan-out・Captain の分解案の行
+/// （承認・別々に押した「再開」）を 1 回ずつ順に走らせる: 同じリポジトリへ `git worktree add` を並べない
+/// （ref の lock でぶつかる）のと、2 つの回が同じブランチ名を空いていると見て 1 つの worktree を取り合わない
+/// （名前は作る直前に空いている物から決める・R09）ため。
+#[derive(Default)]
+struct CreationTurns(HashMap<String, Arc<futures::lock::Mutex<()>>>);
+
+impl gpui::Global for CreationTurns {}
+
+/// リポジトリの順番（回の最初に `lock` して、終わるまで持つ）。
+pub(super) fn creation_turn(repository_key: &str, cx: &mut App) -> Arc<futures::lock::Mutex<()>> {
+    cx.default_global::<CreationTurns>()
+        .0
+        .entry(repository_key.to_string())
+        .or_default()
+        .clone()
+}
+
 /// 持ち込みの失敗と準備の失敗を 1 つの理由にまとめる（Task のカードに出す）。
 fn join_failures(first: Option<String>, second: Option<String>) -> Option<String> {
     match (first, second) {
@@ -159,24 +183,6 @@ impl Workspace {
             .map(|task| (prompt.clone(), task))
             .collect();
         self.create_tasks_in(integration_index, start, jobs, fanout, cx);
-    }
-
-    /// Captain の分解案の承認（FLEET-V2 §5.5）: 印の付いた行を ＋ Task と同じ流れで切る（作成中の行・
-    /// 取り消し・やり直しも同じ）。行ごとに依頼（委任文）が違うので `jobs` で渡す。舞台は奪わない
-    /// （承認はブリッジの Captain の会話の横で押すので、列を増やして会話を押し出さない）。
-    pub(crate) fn create_proposed_task_jobs(
-        &mut self,
-        integration_index: usize,
-        jobs: Vec<(String, FanoutTask)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.create_tasks_in(
-            integration_index,
-            project::TaskStart::default(),
-            jobs,
-            false,
-            cx,
-        );
     }
 
     /// 依頼から Task を切る（`jobs` = 1 本ごとの依頼と切り方）。worktree は**順に**作り、1 本ごとに作成中の
@@ -214,8 +220,11 @@ impl Workspace {
                 (id, prompt, task)
             })
             .collect();
+        let turn = creation_turn(&repository_key, cx);
         cx.notify();
         cx.spawn(async move |workspace, cx| {
+            // 同じリポジトリの前の回（＋ Task・分解案の行）が終わるまで待つ。
+            let _turn = turn.lock().await;
             // 土台（統合先の checked-out branch）を先に upstream へ早送りして、Task が古い base から
             // 切られるのを防ぐ（Orca の default branch 自動同期を参考・2026-08-30）。オフライン・dirty・
             // diverged では黙って現 HEAD から続行する。
@@ -320,7 +329,11 @@ impl Workspace {
     }
 
     /// 早送りできた時だけ知らせる（最新から切れた安心情報。スキップは無言＝作成を汚さない）。
-    fn report_base_sync(&mut self, sync: project::BranchSyncOutcome, cx: &mut Context<Self>) {
+    pub(super) fn report_base_sync(
+        &mut self,
+        sync: project::BranchSyncOutcome,
+        cx: &mut Context<Self>,
+    ) {
         if let project::BranchSyncOutcome::FastForwarded {
             branch: base,
             commits,
@@ -340,7 +353,7 @@ impl Workspace {
     }
 
     /// 作成中の行を足す（id を返す）。
-    fn begin_task_creation(
+    pub(super) fn begin_task_creation(
         &mut self,
         repository_key: &str,
         prompt: &str,
@@ -377,6 +390,7 @@ impl Workspace {
             start: start.clone(),
             task,
             parent,
+            proposal_row: None,
         });
         id
     }
@@ -398,7 +412,7 @@ impl Workspace {
     }
 
     /// 次の段へ進める。行が無い・取り消されていたら false（作らない / 流さない）。
-    fn enter_creation_stage(
+    pub(super) fn enter_creation_stage(
         &mut self,
         id: u64,
         stage: CreationStage,
@@ -421,7 +435,12 @@ impl Workspace {
     }
 
     /// worktree を作れなかった: 行を「作れませんでした」にしてやり直しを出す（取り消されていたら外す）。
-    fn fail_task_creation(&mut self, id: u64, error: &anyhow::Error, cx: &mut Context<Self>) {
+    pub(super) fn fail_task_creation(
+        &mut self,
+        id: u64,
+        error: &anyhow::Error,
+        cx: &mut Context<Self>,
+    ) {
         let Some(position) = self
             .chrome
             .task_creations
@@ -486,7 +505,7 @@ impl Workspace {
 
     /// 取り消した Task の worktree を背景で消す。消せなければトーストで場所を知らせる
     /// （残った worktree はサイドバーの「外部の worktree」に出る）。
-    fn discard_created_task(
+    pub(super) fn discard_created_task(
         &mut self,
         host: Arc<dyn host::Host>,
         root: PathBuf,
@@ -621,8 +640,16 @@ impl Workspace {
             return;
         };
         match self.chrome.task_creations[position].stage {
-            CreationStage::Waiting | CreationStage::Syncing | CreationStage::Failed(_) => {
-                self.chrome.task_creations.remove(position);
+            CreationStage::Waiting
+            | CreationStage::Syncing
+            | CreationStage::Failed(_)
+            | CreationStage::Interrupted => {
+                let creation = self.chrome.task_creations.remove(position);
+                // Captain の分解案の行は、やめたことを記録に残す（再起動しても戻さない・R09）。
+                // 作ってあった worktree・Task は消さない（外部の worktree・Task として残る）。
+                if let Some(record) = creation.proposal_row {
+                    self.close_proposal_row(&record, cx);
+                }
             }
             CreationStage::Worktree | CreationStage::Setup => {
                 self.chrome.task_creations[position].cancelled = true;
@@ -632,6 +659,7 @@ impl Workspace {
     }
 
     /// 作れなかった行の「やり直す」: 同じ入力でもう一度作る（その行のリポジトリの統合先から）。
+    /// Captain の分解案の行（と中断した行の「再開」）は、記録した段から続ける（R09）。
     pub(crate) fn retry_task_creation(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(position) = self
             .chrome
@@ -641,6 +669,10 @@ impl Workspace {
         else {
             return;
         };
+        if self.chrome.task_creations[position].proposal_row.is_some() {
+            self.resume_proposal_row(id, cx);
+            return;
+        }
         if !matches!(
             self.chrome.task_creations[position].stage,
             CreationStage::Failed(_)
@@ -689,7 +721,6 @@ impl Workspace {
                 branch: None,
                 agent: None,
                 title_suffix: None,
-                captain_proposal: None,
             };
             self.begin_task_creation(
                 &repository_key,
@@ -719,6 +750,8 @@ impl Workspace {
             .map(|creation| {
                 let id = creation.id;
                 let failed = matches!(creation.stage, CreationStage::Failed(_));
+                let interrupted = creation.stage == CreationStage::Interrupted;
+                let proposal_row = creation.proposal_row.as_ref();
                 let (status, status_color) = match &creation.stage {
                     _ if creation.cancelled => (i18n::t!("fleet.creating_cancelling"), theme.fg2),
                     CreationStage::Waiting => (i18n::t!("fleet.creating_waiting"), theme.fg2),
@@ -729,6 +762,24 @@ impl Workspace {
                         i18n::t!("fleet.creating_failed", "reason" => reason),
                         theme.warn,
                     ),
+                    CreationStage::Interrupted => (
+                        i18n::t!(
+                            "fleet.creating_interrupted",
+                            "step" => proposal_row
+                                .map(super::captain_proposals::interrupted_step_label)
+                                .unwrap_or_default()
+                        ),
+                        theme.fg1,
+                    ),
+                };
+                // ⚑ = Captain の分解案から切る行（Task 行の `⚑` 帰属と同じ印・色は付けない）。
+                let title = match proposal_row {
+                    Some(_) => SharedString::from(format!("⚑ {}", creation.title)),
+                    None => creation.title.clone(),
+                };
+                let retry_tip = match proposal_row {
+                    Some(record) => super::captain_proposals::resume_tip(record, interrupted),
+                    None => i18n::t!("fleet.creating_retry_tip"),
                 };
                 let button =
                     |element_id: (&'static str, usize), label: SharedString, tip: String| {
@@ -772,7 +823,7 @@ impl Workspace {
                                 ("fleet-creating-dot", id as usize),
                                 9.0,
                                 theme.fg2,
-                                if failed {
+                                if failed || interrupted {
                                     agent_panel::ThreadActivity::Idle
                                 } else {
                                     agent_panel::ThreadActivity::Working
@@ -790,25 +841,32 @@ impl Workspace {
                                 div()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .text_size(px(12.))
                                     .text_color(theme.fg1)
-                                    .child(creation.title.clone()),
+                                    .child(title),
                             )
                             .child(
                                 div()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .text_size(px(10.))
                                     .text_color(status_color)
                                     .child(SharedString::from(status)),
                             ),
                     )
-                    .when(failed, |row| {
+                    .when(failed || interrupted, |row| {
+                        let label = if interrupted {
+                            i18n::t!("fleet.creating_resume")
+                        } else {
+                            i18n::t!("fleet.creating_retry")
+                        };
                         row.child(
                             button(
                                 ("fleet-creating-retry", id as usize),
-                                SharedString::from(i18n::t!("fleet.creating_retry")),
-                                i18n::t!("fleet.creating_retry_tip"),
+                                SharedString::from(label),
+                                retry_tip,
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -820,7 +878,9 @@ impl Workspace {
                         )
                     })
                     .when(!creation.cancelled, |row| {
-                        let tip = if failed {
+                        let tip = if proposal_row.is_some() && (failed || interrupted) {
+                            i18n::t!("fleet.creating_proposal_discard_tip")
+                        } else if failed {
                             i18n::t!("fleet.creating_dismiss_tip")
                         } else {
                             i18n::t!("fleet.creating_cancel_tip")
@@ -896,7 +956,6 @@ mod tests {
             branch: branch.map(str::to_string),
             agent: None,
             title_suffix: None,
-            captain_proposal: None,
         }
     }
 
@@ -933,7 +992,6 @@ mod tests {
             branch: None,
             agent: Some("Codex".to_string()),
             title_suffix: Some("Codex".to_string()),
-            captain_proposal: None,
         };
         assert_eq!(
             auto_branch_plan(&fanout, "task/codex"),

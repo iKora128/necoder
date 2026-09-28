@@ -1234,6 +1234,23 @@ impl TaskSpace {
         }
     }
 
+    /// 台帳（`task_spaces`）の中身を重ねる。lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
+    /// ただし Fleet で取り込んだ linked worktree（`task/` でないブランチ）は台帳の Task を正にする（O21・再起動で
+    /// 統合先扱いへ戻さない）。メインの作業ツリーは Task にしない。
+    fn overlay_stored(&mut self, record: &storage::TaskSpaceRecord) {
+        if record.kind == SpaceKind::Task && self.linked {
+            self.kind = SpaceKind::Task;
+        }
+        self.repository_id = record.repository_id.clone();
+        self.title = SharedString::from(record.title.clone());
+        self.phase = record.phase;
+        self.base_oid = record.base_oid.clone();
+        self.head_oid = record.head_oid.clone();
+        self.result_summary = record.result_summary.clone().map(SharedString::from);
+        self.created_at_ms = record.created_at;
+        self.parent = record.parent.clone().map(SpaceId);
+    }
+
     fn to_record(&self, slot: &ProjectSlot) -> storage::TaskSpaceRecord {
         storage::TaskSpaceRecord {
             id: self.id.0.clone(),
@@ -1420,6 +1437,9 @@ struct ChromeState {
     pending_task_prompts: HashMap<SpaceId, String>,
     /// 上の依頼を送るエージェント（fan-out で選んだ物・無ければ既定・O23）。
     pending_task_agents: HashMap<SpaceId, String>,
+    /// 上の依頼が Captain の分解案の行の委任文なら、その行の記録（R09）。依頼を送ったら行を成功に、
+    /// Task を片付けたら行を閉じる。
+    held_proposal_rows: HashMap<SpaceId, storage::ProposalRowRecord>,
     /// 統合の下見で競合した Task と、競合したファイル（O19）。Task の「次へ」が「競合を直させる」に
     /// なる。頼んだら外す（直った後の「統合」でまた下見する）。起動している間だけ。
     task_conflicts: HashMap<SpaceId, Vec<String>>,
@@ -1428,6 +1448,13 @@ struct ChromeState {
     task_creations: Vec<task_creation::TaskCreation>,
     /// 上の行の通し番号（最後に振った物）。
     next_task_creation_id: u64,
+    /// テスト: Captain の分解案の行がこの区切りに来たら、necoder が落ちたことにしてその回を止める
+    /// （R09 の確かめ方。記録と git はその時点のまま残る）。
+    #[cfg(test)]
+    proposal_row_crash: Option<(
+        captain_proposals::ProposalRowKey,
+        captain_proposals::RowCheckpoint,
+    )>,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。
     control_focus: FocusHandle,
     /// 編隊モードの herd で solo（Integration リポジトリ）のスレッド群を展開しているか。

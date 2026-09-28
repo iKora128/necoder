@@ -363,6 +363,135 @@ pub struct CaptainProposalRecord {
     pub resolved_at: Option<i64>,
 }
 
+/// 承認した分解案の 1 行の実行の様子（FLEET-V2 §5.5・UX-CODE-REVIEW R09）。承認と同じトランザクションで
+/// `Waiting` を置き、段ごとに書き進める。necoder が途中で落ちると `Waiting` / `Creating` のまま残る
+/// （起動時に「中断した行」として戻す）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalRowStatus {
+    /// 承認した。まだ何も作っていない。
+    Waiting,
+    /// 作っている途中（`step` の段）。
+    Creating,
+    /// 担当に委任文を渡し終えた。
+    Succeeded,
+    /// `step` の段で作れなかった（`reason`）。その段からやり直せる。
+    Failed,
+    /// 人がやめた（記録を閉じた）。
+    Discarded,
+}
+
+impl ProposalRowStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Creating => "creating",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Discarded => "discarded",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "waiting" => Some(Self::Waiting),
+            "creating" => Some(Self::Creating),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "discarded" => Some(Self::Discarded),
+            _ => None,
+        }
+    }
+
+    /// まだ終わっていない（起動時に戻す・再開できる）。
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Waiting | Self::Creating | Self::Failed)
+    }
+}
+
+/// 分解案の行の段（宣言順に進む）。`Creating` / `Failed` の行では**次にやる段**（失敗した段）。
+/// 段の前に書くので、落ちたらその段をやり直す。やり直しは既にある物を使う（同じ行で 2 本作らない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ProposalRowStep {
+    /// ブランチと worktree（名前と場所は作る前に `branch` / `target` へ書く）。
+    Worktree,
+    /// `task_shared` のリンク・`.worktreeinclude`・準備スクリプト。
+    Setup,
+    /// レールに開いて台帳に載せる（Task の id は登録と同じトランザクションで書く）。
+    Register,
+    /// 担当のスレッドを起こす。
+    Spawn,
+    /// 委任文を送る。
+    Send,
+}
+
+impl ProposalRowStep {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worktree => "worktree",
+            Self::Setup => "setup",
+            Self::Register => "register",
+            Self::Spawn => "spawn",
+            Self::Send => "send",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "worktree" => Some(Self::Worktree),
+            "setup" => Some(Self::Setup),
+            "register" => Some(Self::Register),
+            "spawn" => Some(Self::Spawn),
+            "send" => Some(Self::Send),
+            _ => None,
+        }
+    }
+}
+
+/// 分解案の 1 行の実行記録（DB `captain_proposal_rows`・鍵は案の id + 行の番号）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalRowRecord {
+    pub proposal_id: String,
+    /// 案の `tasks` の中の位置（0 始まり）。
+    pub row: usize,
+    pub status: ProposalRowStatus,
+    pub step: ProposalRowStep,
+    /// 決めたブランチ名と worktree の場所。worktree を作る**前**に書く（再開で同じ名前を使う）。
+    pub branch: Option<String>,
+    pub target: Option<PathBuf>,
+    /// 登録した Task の id（登録と同じトランザクションで書く）。
+    pub task_id: Option<String>,
+    /// 失敗の理由。`Creating` で `Register` の段なら、準備が失敗した理由（登録した後に依頼を控える）。
+    pub reason: Option<String>,
+    pub updated_at: i64,
+}
+
+impl ProposalRowRecord {
+    /// 承認した直後の行（まだ何も作っていない）。
+    pub fn waiting(proposal_id: &str, row: usize) -> Self {
+        Self {
+            proposal_id: proposal_id.to_string(),
+            row,
+            status: ProposalRowStatus::Waiting,
+            step: ProposalRowStep::Worktree,
+            branch: None,
+            target: None,
+            task_id: None,
+            reason: None,
+            updated_at: 0,
+        }
+    }
+}
+
+/// 起動時に戻す行（[`Storage::load_open_proposal_rows`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenProposalRow {
+    pub record: ProposalRowRecord,
+    /// 行の案（行の中身 = `tasks` の JSON と、統合先のリポジトリ）。
+    pub proposal: CaptainProposalRecord,
+    /// 行が登録した Task の今の phase（未登録・台帳に無ければ `None`）。
+    pub task_phase: Option<TaskPhase>,
+}
+
 /// 既定の DB パス。置き場の決定は `paths` crate に集約している（WINDOWS-PORT.md §D1）。
 /// Windows では Roaming ではなく Local（数百 MB になりうるため）。
 pub fn default_db_path() -> Option<PathBuf> {
@@ -1142,14 +1271,22 @@ impl Storage {
 
     /// 分解案を裁く（承認 / 却下）。台帳に `proposal_approved` / `proposal_rejected` を積み、その通し番号を返す。
     /// 裁き済みの案をもう一度裁こうとしたらエラー（カードの二度押し・別窓との競合で二重に worktree を切らない）。
+    /// 承認なら、切る行（`rows` = 案の `tasks` の中の位置）の実行記録を**同じトランザクションで**待機として置く
+    /// （承認を確定した直後に落ちても、切る行が記録に残る・R09）。
     pub fn resolve_captain_proposal(
         &self,
         id: &str,
         status: ProposalStatus,
         outcome: &str,
+        rows: &[usize],
     ) -> Result<i64> {
         anyhow::ensure!(status != ProposalStatus::Pending, "pending へは戻せない");
+        anyhow::ensure!(
+            status == ProposalStatus::Approved || rows.is_empty(),
+            "却下した案に切る行は無い"
+        );
         let (id, outcome) = (id.to_string(), outcome.to_string());
+        let rows = rows.to_vec();
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
@@ -1195,6 +1332,23 @@ impl Storage {
                     )
                     .await
                     .context("captain_proposals の更新に失敗")?;
+                    for row in &rows {
+                        let row = i64::try_from(*row).context("行の番号")?;
+                        conn.execute(
+                            "INSERT INTO captain_proposal_rows
+                             (proposal_id, row_index, status, step, branch, target, task_id, reason, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, ?5)",
+                            (
+                                id.as_str(),
+                                row,
+                                ProposalRowStatus::Waiting.as_str(),
+                                ProposalRowStep::Worktree.as_str(),
+                                now,
+                            ),
+                        )
+                        .await
+                        .context("captain_proposal_rows の追加に失敗")?;
+                    }
                     let kind = match status {
                         ProposalStatus::Approved => "proposal_approved",
                         _ => "proposal_rejected",
@@ -1241,6 +1395,226 @@ impl Storage {
                     result.push(row.get_value(0)?.as_text().context("task_id")?.clone());
                 }
                 Ok(result)
+            })
+        })
+    }
+
+    // ── 分解案の行の実行記録（FLEET-V2 §5.5・UX-CODE-REVIEW R09） ──
+
+    /// 行の今の記録。無ければ `None`。再開の直前に読み直す（別の窓が先に進めた・閉じた行を、起動時の
+    /// 写しのまま動かさない）。
+    pub fn load_proposal_row(
+        &self,
+        proposal_id: &str,
+        row: usize,
+    ) -> Result<Option<ProposalRowRecord>> {
+        let proposal_id = proposal_id.to_string();
+        let row = i64::try_from(row).context("行の番号")?;
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        &format!(
+                            "SELECT {PROPOSAL_ROW_COLUMNS} FROM captain_proposal_rows
+                             WHERE proposal_id = ?1 AND row_index = ?2"
+                        ),
+                        (proposal_id.as_str(), row),
+                    )
+                    .await
+                    .context("captain_proposal_rows の読み出しに失敗")?;
+                match rows
+                    .next()
+                    .await
+                    .context("captain_proposal_rows 行の取得に失敗")?
+                {
+                    Some(row) => Ok(Some(proposal_row_from(&row, 0)?)),
+                    None => Ok(None),
+                }
+            })
+        })
+    }
+
+    /// 案の行の記録（行の番号の順）。
+    pub fn load_proposal_rows(&self, proposal_id: &str) -> Result<Vec<ProposalRowRecord>> {
+        let proposal_id = proposal_id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        &format!(
+                            "SELECT {PROPOSAL_ROW_COLUMNS} FROM captain_proposal_rows
+                             WHERE proposal_id = ?1 ORDER BY row_index ASC"
+                        ),
+                        (proposal_id.as_str(),),
+                    )
+                    .await
+                    .context("captain_proposal_rows の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("captain_proposal_rows 行の取得に失敗")?
+                {
+                    result.push(proposal_row_from(&row, 0)?);
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// まだ終わっていない行（待機 / 作成中 / 失敗）を、その案と、登録した Task の phase と一緒に返す
+    /// （案の古い順・行の番号の順）。起動時に「中断した行」としてサイドバーへ戻す。
+    pub fn load_open_proposal_rows(&self) -> Result<Vec<OpenProposalRow>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT r.proposal_id, r.row_index, r.status, r.step, r.branch, r.target,
+                                r.task_id, r.reason, r.updated_at,
+                                p.id, p.repository_id, p.root, p.note, p.tasks, p.status, p.outcome,
+                                p.created_at, p.resolved_at,
+                                t.phase
+                         FROM captain_proposal_rows r
+                         JOIN captain_proposals p ON p.id = r.proposal_id
+                         LEFT JOIN task_spaces t ON t.id = r.task_id
+                         WHERE r.status IN ('waiting', 'creating', 'failed')
+                         ORDER BY p.created_at ASC, r.proposal_id ASC, r.row_index ASC",
+                        (),
+                    )
+                    .await
+                    .context("captain_proposal_rows（未完了）の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("captain_proposal_rows 行の取得に失敗")?
+                {
+                    let record = proposal_row_from(&row, 0)?;
+                    let status = row.get_value(14)?.as_text().context("status")?.clone();
+                    let proposal = CaptainProposalRecord {
+                        id: row.get_value(9)?.as_text().context("id")?.clone(),
+                        repository_id: row
+                            .get_value(10)?
+                            .as_text()
+                            .context("repository_id")?
+                            .clone(),
+                        root: PathBuf::from(row.get_value(11)?.as_text().context("root")?),
+                        note: row.get_value(12)?.as_text().cloned(),
+                        tasks: row.get_value(13)?.as_text().context("tasks")?.clone(),
+                        status: ProposalStatus::from_str(&status).context("status の値")?,
+                        outcome: row.get_value(15)?.as_text().cloned(),
+                        created_at: *row.get_value(16)?.as_integer().context("created_at")?,
+                        resolved_at: row.get_value(17)?.as_integer().copied(),
+                    };
+                    let task_phase = row
+                        .get_value(18)?
+                        .as_text()
+                        .map(|phase| TaskSpaceRecord::parse_phase_column(phase).1);
+                    result.push(OpenProposalRow {
+                        record,
+                        proposal,
+                        task_phase,
+                    });
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// 行の記録を書き換える（段の前後で呼ぶ）。行が無ければエラー（承認の時に置いていない行は進めない）。
+    pub fn save_proposal_row(&self, record: &ProposalRowRecord) -> Result<()> {
+        let record = record.clone();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async { save_proposal_row_on(conn, &record, now).await })
+        })
+    }
+
+    /// 行をやめる（記録を閉じる）。**まだ終わっていない行だけ**を閉じ、閉じたかを返す（別の窓が先に作り終えた
+    /// 行を、古い写しから「やめた」で上書きしない）。
+    pub fn discard_proposal_row(&self, proposal_id: &str, row: usize) -> Result<bool> {
+        let proposal_id = proposal_id.to_string();
+        let row = i64::try_from(row).context("行の番号")?;
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let changed = conn
+                    .execute(
+                        "UPDATE captain_proposal_rows SET status = 'discarded', updated_at = ?3
+                         WHERE proposal_id = ?1 AND row_index = ?2
+                           AND status IN ('waiting', 'creating', 'failed')",
+                        (proposal_id.as_str(), row, now),
+                    )
+                    .await
+                    .context("captain_proposal_rows を閉じられない")?;
+                Ok(changed > 0)
+            })
+        })
+    }
+
+    /// 分解案の行から作った Task を台帳に載せる（**1 トランザクション**）: Task の snapshot・親（無ければ消す）・
+    /// `phase_changed`（作った時の遷移）・`⚑` 帰属の出来事（`attribution_kind`）・行の記録（Task の id と次の段）。
+    /// どれかだけが残ることは無いので、再開は「行に Task の id があるか」だけで登録をやり直すかを決められる
+    /// （台帳の出来事を二重に積まない）。
+    pub fn commit_proposal_row_task(
+        &self,
+        task: &TaskSpaceRecord,
+        transition_payload: &str,
+        attribution_kind: &str,
+        attribution_payload: &str,
+        row: &ProposalRowRecord,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            task.kind == SpaceKind::Task,
+            "IntegrationSpace は分解案の行にしない: {}",
+            task.id
+        );
+        let task = task.clone();
+        let row = row.clone();
+        let (transition_payload, attribution_kind, attribution_payload) = (
+            transition_payload.to_string(),
+            attribution_kind.to_string(),
+            attribution_payload.to_string(),
+        );
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("BEGIN", ())
+                    .await
+                    .context("proposal row task begin")?;
+                let outcome = async {
+                    upsert_task_space_on(conn, &task, now).await?;
+                    if task.parent.is_none() {
+                        conn.execute(
+                            "DELETE FROM task_parents WHERE task_id = ?1",
+                            (task.id.as_str(),),
+                        )
+                        .await
+                        .context("task_parents の削除に失敗")?;
+                    }
+                    conn.execute(
+                        "INSERT INTO task_events (task_id, kind, payload, created_at)
+                         VALUES (?1, 'phase_changed', ?2, ?3)",
+                        (task.id.as_str(), transition_payload.as_str(), now),
+                    )
+                    .await
+                    .context("task event の追記に失敗")?;
+                    conn.execute(
+                        "INSERT INTO task_events (task_id, kind, payload, created_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        (
+                            task.id.as_str(),
+                            attribution_kind.as_str(),
+                            attribution_payload.as_str(),
+                            now,
+                        ),
+                    )
+                    .await
+                    .context("⚑ 帰属の追記に失敗")?;
+                    save_proposal_row_on(conn, &row, now).await
+                }
+                .await;
+                finish_transaction(conn, outcome).await
             })
         })
     }
@@ -3142,6 +3516,25 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("captain_proposals 作成に失敗")?;
+    // 承認した分解案の行ごとの実行記録（UX-CODE-REVIEW R09）。DB と git を 1 つのトランザクションにできないので、
+    // 段の前に書いて、落ちたらその段から（既にある物を使って）やり直す。行は承認と同じトランザクションで置く。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS captain_proposal_rows (
+            proposal_id TEXT NOT NULL,
+            row_index INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            step TEXT NOT NULL,
+            branch TEXT,
+            target TEXT,
+            task_id TEXT,
+            reason TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (proposal_id, row_index)
+        )",
+        (),
+    )
+    .await
+    .context("captain_proposal_rows 作成に失敗")?;
     Ok(())
 }
 
@@ -3204,6 +3597,87 @@ async fn upsert_task_space_on(
         .await
         .context("task_parents の書き込みに失敗")?;
     }
+    Ok(())
+}
+
+/// `captain_proposal_rows` を読む時の列の並び（[`proposal_row_from`] と対）。
+const PROPOSAL_ROW_COLUMNS: &str =
+    "proposal_id, row_index, status, step, branch, target, task_id, reason, updated_at";
+
+/// [`PROPOSAL_ROW_COLUMNS`] の並びで `offset` 列目から読む。
+fn proposal_row_from(row: &turso::Row, offset: usize) -> Result<ProposalRowRecord> {
+    let status = row
+        .get_value(offset + 2)?
+        .as_text()
+        .context("row status")?
+        .clone();
+    let step = row
+        .get_value(offset + 3)?
+        .as_text()
+        .context("row step")?
+        .clone();
+    Ok(ProposalRowRecord {
+        proposal_id: row
+            .get_value(offset)?
+            .as_text()
+            .context("row proposal_id")?
+            .clone(),
+        row: usize::try_from(
+            *row.get_value(offset + 1)?
+                .as_integer()
+                .context("row_index")?,
+        )
+        .context("row_index の値")?,
+        status: ProposalRowStatus::from_str(&status).context("row status の値")?,
+        step: ProposalRowStep::from_str(&step).context("row step の値")?,
+        branch: row.get_value(offset + 4)?.as_text().cloned(),
+        target: row.get_value(offset + 5)?.as_text().map(PathBuf::from),
+        task_id: row.get_value(offset + 6)?.as_text().cloned(),
+        reason: row.get_value(offset + 7)?.as_text().cloned(),
+        updated_at: *row
+            .get_value(offset + 8)?
+            .as_integer()
+            .context("row updated_at")?,
+    })
+}
+
+/// 行の記録の書き換え（単発とトランザクションの中の共通実体）。行が無ければエラー。
+async fn save_proposal_row_on(
+    conn: &turso::Connection,
+    record: &ProposalRowRecord,
+    now: i64,
+) -> Result<()> {
+    let row = i64::try_from(record.row).context("行の番号")?;
+    let target = record
+        .target
+        .as_ref()
+        .map(|target| target.to_string_lossy().into_owned());
+    let changed = conn
+        .execute(
+            "UPDATE captain_proposal_rows
+             SET status = ?3, step = ?4, branch = ?5, target = ?6, task_id = ?7, reason = ?8,
+                 updated_at = ?9
+             WHERE proposal_id = ?1 AND row_index = ?2",
+            (
+                record.proposal_id.as_str(),
+                row,
+                record.status.as_str(),
+                record.step.as_str(),
+                record.branch.as_deref(),
+                target.as_deref(),
+                record.task_id.as_deref(),
+                record.reason.as_deref(),
+                now,
+            ),
+        )
+        .await
+        .context("captain_proposal_rows の更新に失敗")?;
+    anyhow::ensure!(
+        changed > 0,
+        "分解案の行の記録が無い: {} の {} 行目",
+        record.proposal_id,
+        record.row + 1
+    );
     Ok(())
 }
 
@@ -4524,12 +4998,13 @@ mod tests {
                 "proposal-1",
                 ProposalStatus::Approved,
                 r#"{"approved":["割り算"]}"#,
+                &[0],
             )
             .unwrap();
         assert!(resolved > human);
         assert!(storage.load_pending_captain_proposals().unwrap().is_empty());
         let twice = storage
-            .resolve_captain_proposal("proposal-1", ProposalStatus::Rejected, "{}")
+            .resolve_captain_proposal("proposal-1", ProposalStatus::Rejected, "{}", &[])
             .expect_err("二度は裁けない");
         assert_eq!(
             twice.downcast_ref::<ProposalNotPending>(),
@@ -4540,13 +5015,25 @@ mod tests {
             "DB の失敗と見分けられる（画面はカードを戻さない）"
         );
         assert!(storage
-            .resolve_captain_proposal("proposal-none", ProposalStatus::Approved, "{}")
+            .resolve_captain_proposal("proposal-none", ProposalStatus::Approved, "{}", &[0])
             .expect_err("無い案は裁けない")
             .downcast_ref::<ProposalNotPending>()
             .is_some_and(|error| error.missing));
         assert!(storage
-            .resolve_captain_proposal("proposal-1", ProposalStatus::Pending, "{}")
+            .resolve_captain_proposal("proposal-1", ProposalStatus::Pending, "{}", &[])
             .is_err());
+        assert_eq!(
+            storage.load_proposal_rows("proposal-1").unwrap(),
+            vec![ProposalRowRecord {
+                updated_at: storage.load_proposal_rows("proposal-1").unwrap()[0].updated_at,
+                ..ProposalRowRecord::waiting("proposal-1", 0)
+            }],
+            "承認で置いた行だけ（二度目の裁きは行を足さない）"
+        );
+        assert!(storage
+            .load_proposal_rows("proposal-none")
+            .unwrap()
+            .is_empty());
         let unread = storage
             .load_repository_events_since("repo-a", human, 100)
             .unwrap();
@@ -4566,6 +5053,206 @@ mod tests {
             storage.load_task_ids_with_event("captain_task").unwrap(),
             vec!["space-a".to_string()]
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 分解案の行の実行記録（R09）: 承認と同じトランザクションで待機の行が置かれ、段ごとに書き進められる。
+    /// 登録は 1 トランザクション（Task・遷移・⚑ 帰属・行）で、行が無ければ何も残さない。起動時の読み出しには
+    /// 終わっていない行だけが、案と登録した Task の phase と一緒に出る。
+    #[test]
+    fn proposal_rows_record_each_step_and_only_open_rows_come_back() {
+        let path = temp_db("proposal_rows");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        let proposal = |id: &str, created_at: i64| CaptainProposalRecord {
+            id: id.into(),
+            repository_id: "repo-a".into(),
+            root: PathBuf::from("/work/main"),
+            note: None,
+            tasks: r#"[{"title":"rope"},{"title":"README"},{"title":"割り算"}]"#.into(),
+            status: ProposalStatus::Pending,
+            outcome: None,
+            created_at,
+            resolved_at: None,
+        };
+        for (id, created_at) in [("proposal-1", 5), ("proposal-2", 6), ("proposal-3", 7)] {
+            storage
+                .insert_captain_proposal(&proposal(id, created_at))
+                .unwrap();
+        }
+        storage
+            .resolve_captain_proposal("proposal-1", ProposalStatus::Approved, "{}", &[0, 2])
+            .unwrap();
+        storage
+            .resolve_captain_proposal("proposal-2", ProposalStatus::Rejected, "{}", &[])
+            .unwrap();
+        assert!(
+            storage
+                .resolve_captain_proposal("proposal-3", ProposalStatus::Rejected, "{}", &[0])
+                .is_err(),
+            "却下に切る行は付かない"
+        );
+        assert_eq!(
+            storage.load_pending_captain_proposals().unwrap().len(),
+            1,
+            "断った裁きは何も書かない"
+        );
+        let rows = storage.load_proposal_rows("proposal-1").unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.row, row.status, row.step))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, ProposalRowStatus::Waiting, ProposalRowStep::Worktree),
+                (2, ProposalRowStatus::Waiting, ProposalRowStep::Worktree),
+            ],
+            "印の付いた行だけ・まだ何も作っていない"
+        );
+        let open = storage.load_open_proposal_rows().unwrap();
+        assert_eq!(open.len(), 2);
+        assert_eq!(open[0].proposal.id, "proposal-1");
+        assert_eq!(open[0].proposal.repository_id, "repo-a");
+        assert_eq!(open[0].task_phase, None);
+
+        // worktree を作る前に、名前と場所を書く。
+        let mut first = rows[0].clone();
+        first.status = ProposalRowStatus::Creating;
+        first.branch = Some("task/rope".into());
+        first.target = Some(PathBuf::from("/work/main-worktrees/rope"));
+        storage.save_proposal_row(&first).unwrap();
+        assert_eq!(
+            storage
+                .load_proposal_row("proposal-1", 0)
+                .unwrap()
+                .map(|row| (row.status, row.branch, row.target)),
+            Some((
+                ProposalRowStatus::Creating,
+                Some("task/rope".to_string()),
+                Some(PathBuf::from("/work/main-worktrees/rope"))
+            ))
+        );
+        assert!(
+            storage
+                .save_proposal_row(&ProposalRowRecord::waiting("proposal-1", 1))
+                .is_err(),
+            "承認で置いていない行は進めない"
+        );
+        assert!(storage
+            .load_proposal_row("proposal-1", 1)
+            .unwrap()
+            .is_none());
+
+        // 登録: Task・遷移・⚑ 帰属・行を 1 トランザクションで。同じフォルダに前に居た Task の親は外す。
+        let task = |id: &str| TaskSpaceRecord {
+            id: id.into(),
+            repository_id: "repo-a".into(),
+            root: PathBuf::from("/work/main-worktrees/rope"),
+            branch: Some("task/rope".into()),
+            title: "rope".into(),
+            kind: SpaceKind::Task,
+            phase: TaskPhase::Planned,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            parent: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        storage
+            .set_task_parent("space-rope", Some("space-old"))
+            .unwrap();
+        first.step = ProposalRowStep::Spawn;
+        first.task_id = Some("space-rope".into());
+        storage
+            .commit_proposal_row_task(
+                &task("space-rope"),
+                r#"{"phase":"planned","reason":"task_created"}"#,
+                "captain_task",
+                r#"{"proposal":"proposal-1","row":0}"#,
+                &first,
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .load_task_events("space-rope")
+                .unwrap()
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["phase_changed", "captain_task"]
+        );
+        let registered = storage
+            .load_task_spaces()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.id == "space-rope")
+            .expect("台帳に載る");
+        assert_eq!(registered.parent, None, "前の Task の親を引き継がない");
+        assert_eq!(
+            storage
+                .load_proposal_row("proposal-1", 0)
+                .unwrap()
+                .map(|row| (row.step, row.task_id)),
+            Some((ProposalRowStep::Spawn, Some("space-rope".to_string())))
+        );
+        // 行が無ければ全部を戻す（Task も出来事も残さない）。
+        let ghost = ProposalRowRecord {
+            task_id: Some("space-ghost".into()),
+            ..ProposalRowRecord::waiting("proposal-1", 1)
+        };
+        assert!(storage
+            .commit_proposal_row_task(&task("space-ghost"), "{}", "captain_task", "{}", &ghost)
+            .is_err());
+        assert!(storage.load_task_events("space-ghost").unwrap().is_empty());
+        assert!(!storage
+            .load_task_spaces()
+            .unwrap()
+            .iter()
+            .any(|record| record.id == "space-ghost"));
+
+        // 起動時の読み出しは、登録した Task の phase も返す（片付けた Task の行は呼び手が閉じる）。
+        let open = storage.load_open_proposal_rows().unwrap();
+        assert_eq!(open[0].task_phase, Some(TaskPhase::Planned));
+
+        // 成功・失敗・やめた: 終わった行は出ない。失敗は理由つきで出る。
+        first.status = ProposalRowStatus::Succeeded;
+        storage.save_proposal_row(&first).unwrap();
+        let mut last = open[1].record.clone();
+        last.status = ProposalRowStatus::Failed;
+        last.reason = Some("fatal: cannot lock ref".into());
+        storage.save_proposal_row(&last).unwrap();
+        let open = storage.load_open_proposal_rows().unwrap();
+        assert_eq!(
+            open.iter()
+                .map(|open| (
+                    open.record.row,
+                    open.record.status,
+                    open.record.reason.clone()
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                2,
+                ProposalRowStatus::Failed,
+                Some("fatal: cannot lock ref".to_string())
+            )]
+        );
+        // やめる: 終わっていない行だけ閉じる（作り終えた行を古い写しから「やめた」にしない）。
+        assert!(!storage.discard_proposal_row("proposal-1", 0).unwrap());
+        assert_eq!(
+            storage
+                .load_proposal_row("proposal-1", 0)
+                .unwrap()
+                .map(|row| row.status),
+            Some(ProposalRowStatus::Succeeded)
+        );
+        assert!(storage.discard_proposal_row("proposal-1", 2).unwrap());
+        assert!(!storage.discard_proposal_row("proposal-1", 2).unwrap());
+        assert!(
+            !storage.discard_proposal_row("proposal-1", 1).unwrap(),
+            "無い行"
+        );
+        assert!(storage.load_open_proposal_rows().unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

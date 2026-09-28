@@ -904,7 +904,7 @@ impl Workspace {
 
     /// 開けた worktree をレールの slot にする（`open_folder_in_rail` の後半。host への
     /// 問い合わせは済んでいる前提＝ここは UI スレッドで完結する）。
-    fn add_worktree_to_rail(
+    pub(super) fn add_worktree_to_rail(
         &mut self,
         worktree: Worktree,
         mut task_space_preview: TaskSpace,
@@ -1181,6 +1181,8 @@ impl Workspace {
                                 .id
                                 .clone();
                             workspace.remove_fleet_cells_for(&space);
+                            // その Task の Captain の分解案の行も閉じる（「やり直す」で消した Task を作り直さない・R09）。
+                            workspace.close_proposal_rows_for_task(&space, &target_for_id, cx);
                             workspace.remove_project_slot(index, window, cx);
                         }
                     }

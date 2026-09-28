@@ -596,6 +596,23 @@ fleet:
   creating_cancel_tip: "Cancel (anything already created is removed)"
   creating_dismiss_tip: "Dismiss"
   creating_discard_failed: "Couldn't remove the cancelled Task's worktree (%{path}): %{error}"
+  creating_interrupted: "%{step}"
+  creating_step_waiting: "Not started"
+  creating_step_worktree: "Worktree · stopped"
+  creating_step_setup: "Setup · stopped"
+  creating_step_register: "Register · stopped"
+  creating_step_spawn: "Agent · stopped"
+  creating_step_send: "Sending · stopped"
+  creating_resume: "Resume"
+  creating_resume_tip: "Continue from the step where it stopped (the worktree and Task already made are reused)"
+  creating_resume_send_tip: "It is unknown whether the instructions reached the agent. They are sent again only if the Task's conversation has no message"
+  creating_proposal_retry_tip: "Continue from the step that failed (the worktree and Task already made are reused)"
+  creating_proposal_discard_tip: "Drop this row (closes the record; the worktree and Task already made stay)"
+  creating_proposal_running_elsewhere: "Another window is creating this row"
+  creating_proposal_done_elsewhere: "This row is already settled (created or dropped in another window)"
+  creating_proposal_no_panel: "Couldn't open the Task's conversation"
+  creating_proposal_not_task: "This worktree can't be opened as a Task"
+  creating_proposal_taken: "Another Task (%{title}) uses this worktree, so this row does not take it over: %{path}"
 worktree_delete:
   title: Delete this worktree?
   title_branch: Delete the worktree and its branch?
