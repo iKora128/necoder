@@ -552,8 +552,8 @@ fleet:
   delete_worktree_tip: Delete worktree…
   cleanup_tip: Clean up — close / stop / finish / delete
   cleanup_title: How do you want to clean up this Task?
-  cleanup_close: Close cell
-  cleanup_close_sub: Hides it only. The agent keeps running
+  cleanup_close: Close card
+  cleanup_close_sub: Takes it off the stage only. The agent keeps running
   cleanup_stop: Stop the agent
   cleanup_stop_sub: Interrupt the running turn (same as esc). The Task stays
   cleanup_sleep: Put to sleep
@@ -575,7 +575,7 @@ fleet:
   cleanup_remove_worktree_sub: ⚠ Erases it from disk. Uncommitted changes are lost
   cleanup_delete_branch: Delete worktree and branch
   cleanup_delete_branch_sub: ⚠ Erases both the working tree and the branch. No way back
-  closed_still_running: Cell closed. The agent is still running (bring it back from herd)
+  closed_still_running: Card closed. The agent is still running (bring it back from its row in the sidebar)
   stopped_agents: "Interrupted %{n} agent(s)"
   no_running_agent: No agent is running
   task_archived: Task finished (the worktree is still on disk)
