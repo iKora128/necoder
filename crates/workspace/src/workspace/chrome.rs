@@ -2368,6 +2368,11 @@ impl Workspace {
         let branch = branch.filter(|_| show_branch);
         let cursor = cursor.filter(|_| show_cursor);
         let language = language.filter(|_| show_language);
+        // Fleet の Σ（FLEET-V2 §5.6）: サイドバーの Task 行と Captain バーのトークンの合計。エージェントの
+        // 状況（中央のロールアップ）と一緒に出し入れする。0 なら出さない。
+        let fleet_tokens = (self.chrome.fleet_mode && show_activity)
+            .then(|| self.fleet_tokens_total(cx))
+            .filter(|total| *total > 0);
         let left = div()
             .flex()
             .items_center()
@@ -2614,6 +2619,20 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_3()
+            .when_some(fleet_tokens, |element, total| {
+                element.child(
+                    div()
+                        .id("statusbar-fleet-tokens")
+                        .child(SharedString::from(i18n::t!(
+                            "fleet.tokens_total",
+                            "tokens" => agent_panel::human_tokens(total)
+                        )))
+                        .tooltip(Tooltip::text(
+                            i18n::t!("fleet.tokens_total_tip"),
+                            theme.clone(),
+                        )),
+                )
+            })
             // 使用量（O11）: いまのスレッドのエージェントの「5h 42% · 週 18%」。値が無ければ出さない。
             .children(show_usage.then(|| self.render_usage_chip(cx)).flatten())
             // 前回クラッシュの通知チップ（M13）: クリックでログ抜粋つきのバグ報告 Issue を開く。

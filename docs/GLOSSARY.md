@@ -27,6 +27,7 @@
 | ↳ **引用**（エディタで選んだ行を `path:10-14` と抜粋のコードブロックにして composer の末尾へ足す。送信はしない・その下に注記を書く。⌥⌘K・O29 / D04。変更レビューの**注記**とは別＝保存しない） | `QuoteSelectionInThread` / `quote_lines` / `AgentPanel::append_quote_to_composer` | 引用 | Quote |
 | ↳ **プレビューチップ**（ツールカードからプレビュー表示で開く） | `preview_chip` | プレビュー | Preview |
 | **Fleet サイドバー**（状態一覧） | `fleet_sidebar`（← `herd`） | Fleet サイドバー | Fleet sidebar |
+| ↳ **Fleet の Σ**（Fleet 中の statusbar。サイドバーの Task 行と Captain バーのトークンの合計＝各会話の文脈の使用量の合計で、使った量の累計ではない。累計は使用量の統計） | `fleet_tokens_total` / `fleet.tokens_total` | Σ 〈トークン〉 | Σ 〈tokens〉 |
 | **AI スレッド一覧**（Editor の左カラム・全プロジェクトのスレッド状態。レールの activity アイコン・2026-09-24） | `render_herd_sidebar` / `show_herd`（`herd` は code 専用）・設定 `rail.threads` | AI スレッド一覧 | AI threads |
 | **系譜グラフ** | `lineage` / `graph` | 系譜 | Lineage |
 | ↳ 表示（4 種） | `GraphView::{Fan,Tree,Card,Hub}` | 扇形 / ツリー / カード / ハブ | Fan / Tree / Card / Hub |
@@ -104,6 +105,7 @@
 | ↳ **介入**（Captain を通さず Task に直接書く。台帳に残る） | `human_send`（`NewsKind::HumanSend`） | （宛先チップで示す） | — |
 | ↳ **采配ログ**（Captain の判断と実行の履歴） | `NewsKind::Captain` | 采配ログ | Captain log |
 | ↳ **台帳の知らせ**（Captain を起こす 1 通 = 台帳の未読。necoder の知らせの 1 つで、出所は「台帳」） | `send_captain_wake` / `captain.ledger_source` | イベント · 14:05（台帳） | Event · 14:05 (ledger) |
+| ↳ **Captain のトークン**（Captain スレッドの文脈の使用量。Captain バーの右端・Fleet の statusbar の Σ に 1 回だけ入り、Task 行には入らない・FLEET-V2 §5.6） | `captain_tokens` | （数そのもの） | (the number) |
 | **集約気分**（編隊の最悪状態に追従する 1 匹） | `fleet_mood_mascot` | — | — |
 | **常駐**（Herdr sidecar 実行形態・P7） | `HerdrRuntime`（予定） | 常駐 | Resident (Herdr) |
 | **リモート管制**（スマホから見る/裁く・P9） | `serve --control` / `remote_control` | リモート管制 | Remote control |

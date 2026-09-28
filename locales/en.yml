@@ -506,6 +506,8 @@ fleet:
   side_close: "Close"
   files_hint: "Click to open in Editor"
   tasks_count: "%{n} Tasks"
+  tokens_total: "Σ %{tokens}"
+  tokens_total_tip: "Fleet tokens: the Task rows plus the Captain (the context each conversation holds right now, not a running total. For totals, use \"Usage: Open statistics\" in the palette)"
   filter_placeholder: Filter Tasks
   filter_none: No Tasks match
   sort_rail: "Order: rail"

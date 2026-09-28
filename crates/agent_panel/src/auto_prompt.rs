@@ -290,6 +290,23 @@ impl AgentPanel {
         }
         cx.notify();
     }
+
+    /// 開発用: スレッドのトークン（文脈の使用量）を直に置く（workspace のテスト・offscreen 撮影用）。
+    #[cfg(debug_assertions)]
+    pub fn debug_set_thread_tokens(
+        &mut self,
+        thread_index: usize,
+        used: u32,
+        max: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            thread.tokens_used = used;
+            thread.tokens_shown = used as f32;
+            thread.tokens_max = max;
+        }
+        cx.notify();
+    }
 }
 
 #[cfg(test)]

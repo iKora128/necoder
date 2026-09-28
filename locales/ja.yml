@@ -507,6 +507,8 @@ fleet:
   side_close: "閉じる"
   files_hint: "クリックで Editor に開く"
   tasks_count: "%{n} Tasks"
+  tokens_total: "Σ %{tokens}"
+  tokens_total_tip: "Fleet のトークン: Task 行と Captain の合計（いま各会話が持っている文脈の量で、使った量の累計ではない。累計はパレットの「使用量: 統計を開く」）"
   filter_placeholder: Task を絞り込む
   filter_none: 一致する Task はありません
   sort_rail: "並び: レール"

@@ -105,7 +105,7 @@ Herdr / Orca の深掘り・采配役（Captain 型エージェント）の製�
 
 上から 5 段。左カラムの排他規則（Todo / git / エクスプローラを開いていればそれ）は solo と同じで変えない。
 
-0. **Captain バー**（`captain_bar`・最上段・高さ 46px）: `⚑` + `Captain` + agent 名 + `⎇ main` + `⌘0`、2 行目に最後の采配 1 行（✳）。クリックでブリッジ（§3.6）の Captain の会話へ。未任命なら「未任命 — 押して任命する」で、押すとブリッジに任命の面が出る（§5.7）。Task 行の並びに混ぜない（Task ではないので）。
+0. **Captain バー**（`captain_bar`・最上段・高さ 46px）: `⚑` + `Captain` + agent 名 + `⎇ main`、2 行目に最後の采配 1 行（✳）、右端に **Captain スレッドのトークン**（上・Task 行の右端と同じ書式）と `⌘0`（下）。クリックでブリッジ（§3.6）の Captain の会話へ。未任命なら「未任命 — 押して任命する」で、押すとブリッジに任命の面が出る（§5.7）。Task 行の並びに混ぜない（Task ではないので）。トークンは未任命・Captain スレッドがまだ無い間は出さない（§5.6・2026-09-28）。
 1. **要対応**（`attention_queue`）。並び: Blocked 経過時間順 → Failed → レビュー待ち（radar 済み）→ 完了・未確認。
    カード = 状態グリフ + 名前 + 経過 / 1 行の内容（permission 文・エラー・digest）/ **Captain の推薦（あれば・✳ 付き）**
    / インライン操作。操作は phase ごとに固定:
@@ -415,6 +415,13 @@ Captain が実行中ならターン終了で未読を確かめて続けて渡す
   で引き継がず `session/new`）。次の 1 通には前置き（役割・現況・直近の采配 5 件・§5.9）と台帳の未読が付くので、続きから
   采配できる。transcript には区切りを 1 行出す（知らせのカードではなく会話ではない 1 行・§3.6）。
 - Captain のトークンは Task 行の右端と statusbar Σ に含めて常時見せる（見えないコストを作らない）。
+  *2026-09-28 実装*: **Captain バーの右端**に Captain スレッドの文脈の使用量（Task 行の右端と同じ書式・0 は `—`・未任命 /
+  スレッドがまだ無ければ出さない）、**Fleet 中の statusbar に `Σ`**（= サイドバーに出ている Task 行（絞り込む前の全部）+
+  Captain バーの合計・mock の statusbar の位置・0 なら出さない・「エージェントの状況」と一緒に出し入れ）。Captain は統合先に
+  住むので Task 行には入らず、Σ には 1 回だけ入る（統合先の普通の会話は数えない）。ブリッジで Captain タブを開けば composer の
+  トークンメーターも Captain の分を出す（既存）。どれも**文脈の使用量で、使った量の累計ではない**（O11 で Σ 累計チップを
+  やめた理由と同じ。Σ のツールチップにそう書く）。累計は使用量の統計（台帳 `turn_usage`）で、Captain のターンも他の
+  スレッドと同じく 1 ターン 1 行で入る。
 - Captain の采配は毎回 `task_events` に `captain` として残す（監査可能・ニュースの丸チップ）。
 
 ### 5.7 任命
@@ -589,7 +596,7 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 `fleet.phase_working/blocked/review/integrated/failed` `fleet.radar_ok/ng/none`
 `fleet.next_review/allow/integrate/fix/cleanup` `fleet.new_task` `fleet.new_task_hint` `fleet.new_task_branch_auto`
 `fleet.new_task_setup_found/missing/create` `fleet.new_task_more` `fleet.new_task_existing_branch` `fleet.new_task_same_worktree`
-`fleet.new_task_start` `fleet.setup_failed`
+`fleet.new_task_start` `fleet.setup_failed` `fleet.tokens_total` `fleet.tokens_total_tip`（statusbar の Σ・§5.6）
 `captain.title` `captain.row_sub` `captain.appoint` `captain.phase` `captain.tab_log` `captain.tab_tasks`
 `captain.dest` `captain.pill_scope` `captain.role` `captain.facts` `captain.recommend` `captain.spawned_by` `captain.human_send`
 `captain.recent` `captain.wake_header` `captain.wake_omitted` `captain.line_created/human_send/approved/rejected` `captain.rotated` `captain.retired_name`
@@ -628,7 +635,7 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 | **F3 要対応をサイドバーへ・中央タブ廃止 ✅ 2026-09-16** | `render_stage_attention`（Captain バーの直下・選択リポジトリの分だけ）が `render_attention_card` を再利用。サイドバー全体を `FleetControl` key context にして ⏎ / ⌘⇧U（`ControlNext`）が効く。管制タブ本体（ヘッダ / Captain バー / 稼働カード / パイプライン）・中央タブ帯・`ToggleControl`・`NECODER_CONTROL`・`fleet_mascot`・`control.*` の死キー 26 個を削除。*実装時の訂正*: `FleetCenterView` enum は `Work` が `workbench.rs` に残るため **F7 まで据え置き**（描画経路からは外れている） | 全 test green・`cargo check --workspace --all-targets` の警告は workbench 由来 5 件のみ（F7 で消える） |
 | **F4 ＋ Task ダイアログ + 準備スクリプト + task.env ✅ 2026-09-16** | `new_task_dialog.rs`（⌘N / サイドバーの ＋Task）: 1 入力（EditorView・⌘⏎）→ `project::task_slug` → `create_named_task_on`（`<repo>-worktrees/<slug>`・衝突は `-2`）→ `run_task_setup_on`（`.necoder/worktree-setup.sh`・失敗は `failed` + 要対応）→ `ipc_spawn_into` で 1 行目を Task 名にしてプロンプト送信。`host::task_environment` が `.necoder/task.env` を ACP（`acp_client`）とターミナル（`terminal_view`）の環境に注入。ダイアログに branch / worktree パス / 準備スクリプトの有無（無ければ「作る」= §6.2 テンプレを書いてエディタで開く）。CLI の `fleet create` も同じ関数。*未実装*: エージェント/model ピル（sticky 既定が自動で効く）・「詳細 ▾」・設定 `worktree_dir` | `task_slug` / `task_worktree_dir` / `task_environment` の unit test。**necoder 自身での `CARGO_TARGET_DIR` 共有の体感（2 本目の `cargo check`）は本人の実機の手番** |
 | **F5 系譜の帯 ✅ 2026-09-16** | 畳んだ系譜ヘッダの下に `render_lineage_strip`（Task 色の `┬━ 名前` / 統合済み `╰━` / main `━`・クリックで舞台の選択へ）。⌄ で従来 4 表示に展開・`ToggleLineage`（⌘⇧G・非 mac は ctrl-alt-g = Git パネルとの衝突回避）。*実装時の訂正*: 曲線描画の 64px 帯ではなくテキストの 1 行（34px）から始めた。既定は畳み | 帯の名前クリックで舞台が切り替わる（offscreen 目視は本人の手番） |
-| **F6 Captain の玄関（一部 2026-09-16・*2026-09-20*: Captain カードはブリッジ（§3.6）に統合・任命 UI と設定の交代/解任を追加（§5.7））** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。*2026-09-24*: **Captain の席（§5.8）と分解案の承認（§5.5）**・台帳の未読と読んだ位置（`captain_cursors`・§5.3・`captain_pending` は削除）・会話の交代（§5.6）・前置きの直近の采配（§5.9）・`⚑` 帰属・知らせが表示中のタブを奪わない（`send_ledger_event_to`）・ターン終了の通知に `completed`（失敗したターンで読んだ位置を進めない）。*2026-09-28*: **台帳の知らせの灰色のカード**（§3.6・汎用の necoder の知らせ `Entry::AutoPrompt` / `send_auto_prompt_to`・DB の role `auto_prompt` と送る本文の印 `<necoder-event>` で再起動と再生を越えて残る・前置きは `<necoder-context>` で囲み再生で外す・交代の印は区切りの 1 行に・`send_ledger_event(_to)` はこれに置き換えた）。残: 承認の推薦（✳）を要対応カードへ・トークン表示 | storage / agent_panel / workspace / necoder の test（読んだ位置と分解案の往復・席の裁定・見張り・交代・MCP の Captain 版・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`・知らせが人の発話と別の種別で送られ保存・復元・再生を越えて同じ種別に戻る）。隔離 offscreen で知らせのカードを目視（2026-09-28・`captain-transcript`）。実機: /tmp の練習用 repo で Opus 5 が「分けて提案 → 承認待ちで止まる → 承認の知らせで起こし直さない」。隔離 offscreen で分解案カードと `⚑` 行を目視。**necoder 本体での実 e2e（目標 1 つ → 承認 → 2 Task）は本人の目視待ち** |
+| **F6 Captain の玄関（一部 2026-09-16・*2026-09-20*: Captain カードはブリッジ（§3.6）に統合・任命 UI と設定の交代/解任を追加（§5.7））** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。*2026-09-24*: **Captain の席（§5.8）と分解案の承認（§5.5）**・台帳の未読と読んだ位置（`captain_cursors`・§5.3・`captain_pending` は削除）・会話の交代（§5.6）・前置きの直近の采配（§5.9）・`⚑` 帰属・知らせが表示中のタブを奪わない（`send_ledger_event_to`）・ターン終了の通知に `completed`（失敗したターンで読んだ位置を進めない）。*2026-09-28*: **台帳の知らせの灰色のカード**（§3.6・汎用の necoder の知らせ `Entry::AutoPrompt` / `send_auto_prompt_to`・DB の role `auto_prompt` と送る本文の印 `<necoder-event>` で再起動と再生を越えて残る・前置きは `<necoder-context>` で囲み再生で外す・交代の印は区切りの 1 行に・`send_ledger_event(_to)` はこれに置き換えた）と **Captain のトークン**（Captain バーの右端・Fleet の statusbar の Σ に 1 回だけ・§5.6）。残: 承認の推薦（✳）を要対応カードへ | storage / agent_panel / workspace / necoder の test（読んだ位置と分解案の往復・席の裁定・見張り・交代・MCP の Captain 版・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`・知らせが人の発話と別の種別で送られ保存・復元・再生を越えて同じ種別に戻る・Captain のトークンが Captain バーと Σ に 1 回だけ入り Task 行に入らない）。隔離 offscreen で知らせのカード・Captain バーのトークン・Σ を目視（2026-09-28・`captain-transcript`）。実機: /tmp の練習用 repo で Opus 5 が「分けて提案 → 承認待ちで止まる → 承認の知らせで起こし直さない」。隔離 offscreen で分解案カードと `⚑` 行を目視。**necoder 本体での実 e2e（目標 1 つ → 承認 → 2 Task）は本人の目視待ち** |
 | **F7 掃除 ✅ 2026-09-20** | `workbench.rs` / `work_layout.rs` / `FleetCenterView` / `work.*` の死キー 37 個 / `NECODER_WORKBENCH_PROBE` を削除。窓の状態の復元は `restore_window_state`（`persisted_state` の対・`explorer_controller.rs`）へ改名して残し、保存形式から `work_layout` / `fleet_view` を外した（旧 payload の余分なキーは serde が無視する）。端末の名札は `chrome.next_terminal_id`（プロセス内単調増加・PTY は再起動を越えないので保存しない）。生きていた 3 キーは `settings.pref_tabs_position` / `tabs_position_top` / `tabs_position_left` へ。設定キー `work_tabs_position` の名前は未決のまま据え置き。**残: UI-SPEC §11 の置換・FLEET-CONTROL-PLAN P3 の注記** | `cargo check --workspace --all-targets` **と `--release`** で警告 0（`WorkAction` の未使用警告は debug 専用プローブからしか構築されず、release ビルドでだけ出ていた） |
 
 順序は F0 → F1 → F2 → F3 → F4 → F5 → F6 → F7。F1 と F5 は独立。**各フェーズの終わりに本文書と JOURNAL を更新**。

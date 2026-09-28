@@ -656,6 +656,28 @@ impl Workspace {
     pub(super) fn captain_log_count(&self) -> usize {
         self.notifications.news.iter().filter(|item| item.kind == NewsKind::Captain).count()
     }
+
+    /// Captain バーに出すトークン（Captain スレッドの文脈の使用量・Task 行の右端と同じ量・§5.6）。
+    /// 未任命・統合先を開いていない・Captain スレッドがまだ無い時は `None`（出さない）。Captain は統合先に
+    /// 住むので Task 行には入らず、ここで 1 回だけ数える。描画から呼ぶので、探すだけで作らない。
+    pub(super) fn captain_tokens(&self, cx: &App) -> Option<u32> {
+        settings::get(cx).captain_agent.as_ref()?;
+        let repository = self.fleet_repository_key()?;
+        let integration = self.captain_integration_index(&repository)?;
+        let panel = self
+            .project_sessions
+            .sessions
+            .get(integration)?
+            .fleet_agents
+            .first()?
+            .read(cx);
+        let thread = panel.seat_thread(CAPTAIN_SEAT).or_else(|| {
+            captain_thread_names()
+                .iter()
+                .find_map(|name| panel.thread_index_named(name))
+        })?;
+        Some(panel.thread_tokens(thread).0)
+    }
 }
 
 #[cfg(test)]
