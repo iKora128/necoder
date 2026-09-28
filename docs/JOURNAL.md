@@ -3780,6 +3780,9 @@
   - 知らせ（`send_auto_prompt_to`）は `last_prompt` に入らない。テストで Captain に届いた文を読むなら transcript の `◇` の行から。
   - 並行の 3 本は、FLEET-V2 の F6 行・ROADMAP の F6 行・UI-SPEC §11・locales・dev_probes のプローブ一覧で必ずぶつかった。
     どれも「両方を残す」で解けた（rerere に記録済み）。
+  - **準備スクリプトを本当に流すテストは Windows の CI で落ちる**（手元の Windows は POSIX shell 無し＝`LocalHost::has_posix_shell`
+    が false で、準備はいつも失敗する）。「直したら通る」を確かめる部分は `has_posix_shell()` の時だけ流す（`64324ca`）。
+    macOS の手元では通るので、check-windows で初めて分かった。
 - 検証: `cargo test -p workspace -p necoder -p agent_panel -p acp_client -p i18n -p project -p storage`（使い捨ての HOME・
   workspace 291 件ほか全部通過・HOME には python のキャッシュだけ）、`relay` の `npm test` 18 件、`cargo check --workspace
   --all-targets` 警告 0。隔離 offscreen で 1 列（変更を開いた Task・ブリッジ）・2〜3 列（並べて比べる・ピン 3 枚）・
