@@ -1,5 +1,8 @@
 use crate::workspace::*;
 
+/// git 更新 1 回で、追跡外ファイルの行数を数えるために読む量の上限（`+N −M` 用）。超えた分は 0 行として並べる。
+const UNTRACKED_COUNT_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Rail 上の project metadata と、遅延復元に必要なファイル一覧。
 pub(crate) struct ProjectSlot {
     pub(crate) worktree: Rc<Worktree>,
@@ -1637,14 +1640,24 @@ impl Workspace {
                     let mut task_files =
                         project::git_diff_files_on(host.as_ref(), &root, &base).unwrap_or_default();
                     // untracked は git の diff に出ない。エージェントが作ったばかりのファイルを落とさない。
+                    // 行数も変更レビューと同じ規則で数える（数えないと、見出しのトグルとサイドバーの `+N −M` が
+                    // レビューの見出しより少なく出ていた）。読むのは 1 回の更新で UNTRACKED_COUNT_BYTES まで。
+                    let mut count_budget = UNTRACKED_COUNT_BYTES;
                     for (path, kind) in &status {
                         if *kind == StatusKind::Untracked
                             && !task_files.iter().any(|file| &file.path == path)
                         {
+                            let size = host.metadata(path).map_or(u64::MAX, |metadata| metadata.len);
+                            let added = if size <= project::review::MAX_TEXT_BYTES as u64 && size <= count_budget {
+                                count_budget -= size;
+                                host.read_file(path).map_or(0, |content| project::review::untracked_line_count(&content.bytes))
+                            } else {
+                                0
+                            };
                             task_files.push(project::DiffFile {
                                 path: path.clone(),
                                 kind: *kind,
-                                added: 0,
+                                added,
                                 deleted: 0,
                             });
                         }

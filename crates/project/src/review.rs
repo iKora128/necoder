@@ -910,6 +910,16 @@ fn split_text_lines(text: &str) -> (Vec<&str>, bool) {
     (lines, missing_newline)
 }
 
+/// 追跡外ファイルの追加行数。[`untracked_file_diff`] と同じ規則（バイナリ・[`MAX_TEXT_BYTES`] 超は 0）で、
+/// 行を組み立てずに数える。Fleet の `+N −M`（見出しのトグル・サイドバー）を変更レビューの見出しと揃えるのに使う。
+pub fn untracked_line_count(bytes: &[u8]) -> usize {
+    if looks_binary(bytes) || bytes.len() > MAX_TEXT_BYTES {
+        return 0;
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    newlines + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))
+}
+
 /// 追跡外ファイルを「全行追加」の差分にする。バイナリ・大きすぎるものは印だけ。
 pub fn untracked_file_diff(path: &str, bytes: &[u8]) -> FileDiff {
     let mut file = FileDiff::new(path.to_string());
@@ -1596,6 +1606,16 @@ mod tests {
         assert!(untracked_file_diff("empty", b"").hunks.is_empty());
         let big = vec![b'a'; MAX_TEXT_BYTES + 1];
         assert!(untracked_file_diff("big.txt", &big).too_large);
+    }
+
+    #[test]
+    fn untracked_line_counts_match_the_review() {
+        // Fleet の `+N −M` はこの数を使う。レビューの見出し（`additions`）と食い違わないこと。
+        for text in [&b"a\nb\nc"[..], b"a\nb\n", b"\n", b"", b"one line", b"a\r\nb\r\n"] {
+            assert_eq!(untracked_line_count(text), untracked_file_diff("f", text).additions, "{:?}", String::from_utf8_lossy(text));
+        }
+        assert_eq!(untracked_line_count(b"\x00\x01\n"), 0, "バイナリは数えない");
+        assert_eq!(untracked_line_count(&vec![b'\n'; MAX_TEXT_BYTES + 1]), 0, "大きすぎるものは数えない");
     }
 
     #[test]
