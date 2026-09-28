@@ -2971,6 +2971,13 @@ mod tests {
             Some(ProposalRowStatus::Succeeded)
         );
 
+        // 2 行目の「直して通す」は準備スクリプトが走る必要がある。手元の Windows には POSIX shell が無く
+        // （`LocalHost::has_posix_shell`）準備はいつも失敗するので、ここまで（1 行目を飛ばして始める）で止める。
+        if !host::LocalHost::shared().has_posix_shell() {
+            std::fs::remove_dir_all(&scratch.base).ok();
+            return;
+        }
+
         // 2 行目: 送らずに終了 → 準備を直して再起動 → やり直す。
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("書ける");
         let (second, cx) = open_window(cx, &scratch, "after");
