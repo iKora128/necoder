@@ -5271,12 +5271,28 @@ mod tests {
         settle(cx);
         panel.read_with(cx, |panel, _| {
             let seat = panel.seat_thread(captain::CAPTAIN_SEAT).expect("Captain が席に座る");
-            let delivered = panel.statuses()[seat].last_prompt.clone().unwrap_or_default();
+            // 知らせは人の発話（▸）ではなく necoder の知らせ（◇ の行・§3.6）として積まれ、「頼んだこと」に
+            // ならない（このテストではターンが失敗で終わるので、失敗の行が後ろに付く）。
+            let lines = panel.transcript_lines(seat, usize::MAX);
+            assert!(
+                lines.iter().all(|(bullet, _)| bullet.as_ref() != "▸"),
+                "{lines:?}"
+            );
+            let delivered = lines
+                .iter()
+                .rev()
+                .find(|(bullet, _)| bullet.as_ref() == "◇")
+                .map(|(_, text)| text.clone())
+                .expect("知らせが transcript に積まれる");
             assert!(
                 delivered.contains(&format!("#{review} space-rope rope 設計: → review_ready — ropey に置き換えた")),
                 "{delivered}"
             );
             assert!(!delivered.contains("working"), "途中経過は載せない: {delivered}");
+            assert!(
+                panel.statuses()[seat].last_prompt.is_none(),
+                "知らせは頼んだことではない"
+            );
             assert_eq!(panel.active_thread(), other, "知らせは表示中のタブを奪わない");
         });
         // このテストの設定ではエージェントを起こせない＝ターンは失敗で終わる → 位置は進めない（次の wake で再送）。

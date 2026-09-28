@@ -859,9 +859,13 @@ mod tests {
             let seat = panel
                 .seat_thread(captain::CAPTAIN_SEAT)
                 .expect("Captain が起きる");
-            let delivered = panel.statuses()[seat]
-                .last_prompt
-                .clone()
+            // 起こす 1 通は人の発話ではなく necoder の知らせ（◇ の行・FLEET-V2 §3.6）として積まれる。
+            let delivered = panel
+                .transcript_lines(seat, usize::MAX)
+                .into_iter()
+                .rev()
+                .find(|(bullet, _)| bullet.as_ref() == "◇")
+                .map(|(_, text)| text)
                 .unwrap_or_default();
             assert!(delivered.contains("→ blocked"), "台帳の未読: {delivered}");
             assert!(

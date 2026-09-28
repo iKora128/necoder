@@ -200,7 +200,8 @@ impl AgentPanel {
     }
 
     /// 会話を交代する（FLEET-V2 §5.6）。送信路と会話 id を捨て、次の送信で `session/new` から始める。
-    /// transcript には区切りを 1 行残す。実行中・承認待ち・回答待ちなら何もしない（`false`）。
+    /// transcript には区切り（会話ではない 1 行・エージェントには送らない）を残す。実行中・承認待ち・
+    /// 回答待ちなら何もしない（`false`）。
     pub fn rotate_thread_session(
         &mut self,
         index: usize,
@@ -227,7 +228,7 @@ impl AgentPanel {
         thread.tokens_used = 0;
         thread
             .entries
-            .push(Entry::LedgerEvent(SharedString::from(divider)));
+            .push(Entry::Notice(SharedString::from(divider)));
         let thread_id = thread.id.clone();
         // DB の会話 id も忘れる（再起動で古い会話を `session/load` しない）。
         if let Some(storage) = self.storage.clone() {

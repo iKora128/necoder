@@ -486,7 +486,11 @@ pub(crate) fn entries_from_replay(items: Vec<ReplayItem>, omitted: usize) -> Vec
     let mut steps: HashSet<String> = HashSet::new();
     for item in items {
         entries.push(match item {
-            ReplayItem::User(text) => Entry::User(SharedString::from(text)),
+            // necoder の知らせは印で見分けてカードに戻し、前置きは外す（`auto_prompt.rs`）。
+            ReplayItem::User(text) => match auto_prompt::replayed_user_entry(text) {
+                Some(entry) => entry,
+                None => continue,
+            },
             ReplayItem::Agent(text) => Entry::Agent(SharedString::from(text)),
             ReplayItem::Tool(mut info) => {
                 if info

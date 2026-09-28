@@ -90,7 +90,9 @@ b { font-weight: 600; }
 .cap .c2 { min-width: 0; flex: 1; }
 .cap .l1 { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
 .cap .l1 .dim { font-size: 10px; }
-.cap .l1 .k { margin-left: auto; font-size: 9.5px; color: var(--fg2); }
+/* 右端 = Task 行と同じ並び（上 = Captain スレッドのトークン / 下 = キー）。未任命なら出さない（FLEET-V2 §5.6） */
+.cap .meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 10px; color: var(--fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cap .meta .k { font-size: 9.5px; }
 .cap .say { font-size: 10.5px; color: var(--fg1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cap .say::before { content: "✳ "; color: var(--terra); }
 .cap.focus { background: var(--bg2); }
@@ -406,9 +408,10 @@ body.l1 .task.pinned::after { display: none; }
       <div class="cap" onclick="focusTask('tc')" title="Captain に話す（⌘0）">
         <div class="face">⚑</div>
         <div class="c2">
-          <div class="l1"><b>Captain</b><span class="dim">Claude Code · ⎇ main</span><span class="k">⌘0</span></div>
+          <div class="l1"><b>Captain</b><span class="dim">Claude Code · ⎇ main</span></div>
           <div class="say">gpui起動 は radar ✓ — 確認だけで統合できます。rope設計 は plan 3/5</div>
         </div>
+        <div class="meta"><span>4.2k</span><span class="k">⌘0</span></div>
       </div>
       <div class="attn">
         <div class="sec-h">要対応 <span class="cnt">3</span><span class="r">⏎ で先頭へ</span></div>
@@ -813,7 +816,7 @@ test history::tests::undo_restores_snapshot ... ok
     <span>⎇ main</span><span>✕ 1 ▲ 0</span><span style="color:var(--ok)">● rust-analyzer</span>
     <span class="fill"></span>
     <span>⠿ 1 稼働 · ◐ 1 承認待ち · ✓ 1 完了</span>
-    <span class="dots"><i class="work" style="background:var(--th1)"></i><i style="background:var(--th2)"></i><i style="background:var(--th3)"></i> Σ 43.5k</span>
+    <span class="dots" title="Fleet のトークン: Task 行（23.4k + 8.1k + 12.0k）と Captain（4.2k）の合計"><i class="work" style="background:var(--th1)"></i><i style="background:var(--th2)"></i><i style="background:var(--th3)"></i> Σ 47.7k</span>
   </div>
 
   <!-- ＋ Task ダイアログ -->

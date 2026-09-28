@@ -24,6 +24,7 @@ use acp_client::{
     AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
     PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
+mod auto_prompt;
 mod chat;
 mod history;
 mod idle;
@@ -158,8 +159,9 @@ struct SelectorChoice {
 enum Entry {
     /// ユーザー発話（bg2 箱・左縁スレッド色）。
     User(SharedString),
-    /// 台帳から受け取ったイベント。人間の発話とは別に保存・描画する。
-    LedgerEvent(SharedString),
+    /// necoder の知らせ（人ではなく necoder が書いて送った発話・`auto_prompt.rs`）。エージェントには
+    /// user ターンとして届くが、人の発話とは別に保存し、灰色のカードで描く。
+    AutoPrompt(auto_prompt::AutoPrompt),
     /// 思考（常時展開・斜体）。
     Thinking(SharedString),
     /// ステップ（⏺ ツール名 + 引数 → ⎿ 結果）。Edit は before/after 差分、Bash 等は出力を持てる。
@@ -1876,11 +1878,10 @@ fn cap_output(text: &str) -> (String, usize) {
 
 fn entry_plain_text(entry: &Entry) -> String {
     match entry {
-        Entry::User(text)
-        | Entry::LedgerEvent(text)
-        | Entry::Thinking(text)
-        | Entry::Agent(text)
-        | Entry::Notice(text) => text.to_string(),
+        Entry::User(text) | Entry::Thinking(text) | Entry::Agent(text) | Entry::Notice(text) => {
+            text.to_string()
+        }
+        Entry::AutoPrompt(auto) => auto.text.to_string(),
         Entry::Step {
             tool, args, result, ..
         } => match result {
@@ -2998,7 +2999,7 @@ PYEOF"#;
         for index in thread.persisted_entries..thread.entries.len() {
             let (role, content) = match &thread.entries[index] {
                 Entry::User(text) => ("user", text.to_string()),
-                Entry::LedgerEvent(text) => ("ledger_event", text.to_string()),
+                Entry::AutoPrompt(auto) => (auto_prompt::AUTO_PROMPT_ROLE, auto.wire()),
                 Entry::Thinking(text) => ("thinking", text.to_string()),
                 Entry::Step { tool, .. } => ("step", tool.to_string()),
                 Entry::Agent(text) => ("agent", text.to_string()),
@@ -3692,7 +3693,7 @@ PYEOF"#;
             .map(|entry| {
                 let (bullet, text): (&str, SharedString) = match entry {
                     Entry::User(text) => ("▸", text.clone()),
-                    Entry::LedgerEvent(text) => ("◇", text.clone()),
+                    Entry::AutoPrompt(auto) => ("◇", auto.text.clone()),
                     Entry::Thinking(text) => ("✳", text.clone()),
                     Entry::Step { tool, result, .. } => {
                         ("⏺", result.clone().unwrap_or_else(|| tool.clone()))
@@ -6413,7 +6414,7 @@ PYEOF"#;
             }
         });
         if let Some(prompt) = next {
-            self.send_prompt_entry(thread_index, prompt, false, cx);
+            self.send_prompt_entry(thread_index, prompt, None, cx);
         }
     }
 
@@ -6588,8 +6589,6 @@ PYEOF"#;
         self.send_prompt_text("/compact".to_string(), cx);
     }
 
-    /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
-    /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     /// 名前でスレッドの位置を引く（作らない・アクティブ化しない）。
     pub fn thread_index_named(&self, name: &str) -> Option<usize> {
         self.threads
@@ -6597,24 +6596,19 @@ PYEOF"#;
             .position(|thread| thread.name.as_ref() == name)
     }
 
+    /// スレッドの前置き（Captain の役割・現況表など）。人の発話にも necoder の知らせにも毎回付けて送り
+    /// （slash コマンドには付けない）、transcript には出さない。送る本文では `<necoder-context>` で囲む
+    /// （再生された会話から外せるように・`auto_prompt.rs`）。
     pub fn set_prompt_context(&mut self, thread: usize, context: String) {
         if let Some(thread) = self.threads.get(thread) {
             self.prompt_context.insert(thread.id.to_string(), context);
         }
     }
 
-    pub fn send_ledger_event(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(self.active, prompt, true, cx);
-    }
-
-    /// 表示中のタブを切り替えずに、指定のスレッドへ台帳イベントを送る（Captain の wake）。
-    /// 人間が統合先で別のスレッドと話している最中に、知らせが表示を奪わない。
-    pub fn send_ledger_event_to(&mut self, thread_index: usize, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(thread_index, prompt, true, cx);
-    }
-
+    /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
+    /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     pub fn send_prompt_text(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(self.active, prompt, false, cx);
+        self.send_prompt_entry(self.active, prompt, None, cx);
     }
 
     /// 表示中のタブを切り替えずに、指定のスレッドへ**人間の発話として**送る（変更レビューの注記など）。
@@ -6639,23 +6633,26 @@ PYEOF"#;
             cx.notify();
             return true;
         }
-        self.send_prompt_entry(thread_index, prompt, false, cx);
+        self.send_prompt_entry(thread_index, prompt, None, cx);
         true
     }
 
+    /// `auto_source` = necoder の知らせの出所（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
     fn send_prompt_entry(
         &mut self,
         thread_index: usize,
         prompt: String,
-        ledger: bool,
+        auto_source: Option<SharedString>,
         cx: &mut Context<Self>,
     ) {
+        let auto = auto_source.map(|source| auto_prompt::AutoPrompt::now(source, prompt.clone()));
         // slash コマンド（`/clear` `/compact` 等）は**本文 1 ブロックだけ**で送る。エージェントに
         // よってコマンドとして読むブロックが違い（Claude は末尾・Codex は先頭）、添付や画像を
         // 1 つでも足すとどちらかで効かない（`acp_client::prompt_blocks` の説明）。スレッドの
         // context（Captain の役割・現況表）・`@path` の添付・画像は付けない。添付は外さずに残す＝
-        // 次の通常の送信に付く（毎ターン送る設計はそのまま）。
-        let is_slash_command = is_slash_command(&prompt);
+        // 次の通常の送信に付く（毎ターン送る設計はそのまま）。necoder の知らせは印で始まるので
+        // コマンドにはならない。
+        let is_slash_command = auto.is_none() && is_slash_command(&prompt);
         // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
         // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
         let (images, image_paths) = self
@@ -6684,7 +6681,7 @@ PYEOF"#;
             .filter(|_| !is_slash_command)
             .and_then(|thread| self.prompt_context.get(thread.id.as_str()))
         {
-            context_prefix.push_str(context);
+            context_prefix.push_str(&auto_prompt::wrap_prompt_context(context));
         }
         // `!` で人が走らせたコマンドの結果（#37）は、次の通常の送信に 1 回だけ添える（本文の直前）。
         // この会話の持ち主の文脈なので、composer 以外の入口（キュー・Captain の台帳など）から来た
@@ -6707,25 +6704,28 @@ PYEOF"#;
         if let Some(preamble) = &handoff {
             context_prefix.insert_str(0, &format!("{preamble}\n\n"));
         }
+        // necoder の知らせは印で囲んで送る（再生された会話でも人の発話と見分けられる・`auto_prompt.rs`）。
+        let body = auto
+            .as_ref()
+            .map(auto_prompt::AutoPrompt::wire)
+            .unwrap_or_else(|| prompt.clone());
         let full_prompt = if context_prefix.is_empty() {
-            prompt.clone()
+            body
         } else {
-            format!("{context_prefix}\n{prompt}")
+            format!("{context_prefix}\n{body}")
         };
         if let Some(thread) = self.threads.get_mut(thread_index) {
-            let shown = if images.is_empty() {
-                prompt.clone()
-            } else {
-                let names: Vec<String> = image_paths
-                    .iter()
-                    .map(|path| context_chip_label(path.as_ref()).to_string())
-                    .collect();
-                format!("{prompt}\n\n▦ {}", names.join(" · "))
-            };
-            thread.entries.push(if ledger {
-                Entry::LedgerEvent(shown.into())
-            } else {
-                Entry::User(shown.into())
+            let human = auto.is_none();
+            thread.entries.push(match auto {
+                Some(auto) => Entry::AutoPrompt(auto),
+                None if images.is_empty() => Entry::User(prompt.clone().into()),
+                None => {
+                    let names: Vec<String> = image_paths
+                        .iter()
+                        .map(|path| context_chip_label(path.as_ref()).to_string())
+                        .collect();
+                    Entry::User(format!("{prompt}\n\n▦ {}", names.join(" · ")).into())
+                }
             });
             // 画像は**その 1 通だけ**に添える（パスの添付と違って毎ターン送り直すと重い）。
             thread.context.retain(|path| !image_paths.contains(path));
@@ -6734,11 +6734,14 @@ PYEOF"#;
             thread.done = None; // 新しいターン開始＝直前の「完了・未確認」ラッチは消す
             thread.tier2 = None; // ✳ 要約は前ターンの文＝新ターンでは古い（P4）
             thread.turn_started_at = Some(std::time::Instant::now()); // 経過秒の起点
-            thread.last_input_at_ms = Some(now_unix_ms()); // 「最終いつ入力したか」（M14）
             thread.last_active_at_ms = now_unix_ms();
-            // 「頼んだこと」は**エージェントに渡す原文ではなく人間が書いた本文**を残す
-            // （`@path` の context 接頭辞を混ぜない＝サイドバーで読めるのは自分の言葉だけ）。
-            thread.last_prompt = Some(SharedString::from(prompt.clone()));
+            // 「最終いつ入力したか」（M14）と「頼んだこと」は人の発話だけで決める（necoder の知らせは
+            // 人が頼んだことではない）。頼んだことは**エージェントに渡す原文ではなく人間が書いた本文**を
+            // 残す（`@path` の context 接頭辞を混ぜない＝サイドバーで読めるのは自分の言葉だけ）。
+            if human {
+                thread.last_input_at_ms = Some(now_unix_ms());
+                thread.last_prompt = Some(SharedString::from(prompt.clone()));
+            }
             thread.session_used = true; // 先張りの「畳んでよい」対象から外れる
         }
         self.sync_running_registry(cx); // ⌘O ダッシュボードの「実行中」を即時反映（M12-12）
@@ -9454,6 +9457,7 @@ PYEOF"#;
         // 長い入力だけ「畳む/開く」を出す（他のエントリ種別はそれぞれ自前のヘッダで畳める）。
         let foldable_input = match entry {
             Entry::User(text) => user_entry_foldable(text),
+            Entry::AutoPrompt(auto) => user_entry_foldable(&auto.text),
             _ => false,
         };
         let input_expanded = self.is_input_expanded(index);
@@ -9563,17 +9567,8 @@ PYEOF"#;
         match entry {
             // `!` で人が走らせたコマンド（#37・`shell.rs`）。
             Entry::Shell(run) => self.render_shell_entry(index, run, cx),
-            Entry::LedgerEvent(text) => div()
-                .p(px(10.))
-                .rounded(px(6.))
-                .bg(theme.bg2)
-                .text_size(px(11.))
-                .text_color(theme.fg2)
-                .child(SharedString::from(format!(
-                    "◇ {}\n{text}",
-                    i18n::t!("captain.ledger_event")
-                )))
-                .into_any_element(),
+            // necoder の知らせ（`auto_prompt.rs`）: 人の発話と分けた灰色のカード。
+            Entry::AutoPrompt(auto) => self.render_auto_prompt_entry(index, auto, cx),
             // 会話の区切り（O15）: 細い罫線に挟んだ一言。色は中立（識別色を使わない＝UI-SPEC §1.3）。
             Entry::Notice(text) => div()
                 .flex()
@@ -9652,32 +9647,8 @@ PYEOF"#;
                     .text_color(theme.fg0)
                     .child(self.selectable_text(shown, cx));
                 if foldable && !expanded {
-                    let lines = text.lines().count();
-                    // 畳んでいる間だけ出す**文字チップ**（アイコンだけにしない＝押せると分かる）。
-                    column = column.child(
-                        div()
-                            .id(("user-fold", index))
-                            .mt(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(theme.fg2)
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(theme.fg0))
-                            .child(div().flex_none().text_size(px(8.)).child("▸"))
-                            .child(SharedString::from(
-                                i18n::t!("agent.input_expand", "n" => lines),
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_input(index, cx);
-                                }),
-                            ),
-                    );
+                    column =
+                        column.child(self.render_input_fold_chip(index, text.lines().count(), cx));
                 }
                 div()
                     .flex()
@@ -10510,6 +10481,40 @@ PYEOF"#;
             self.expanded_inputs.insert(key);
         }
         cx.notify();
+    }
+
+    /// 畳んだ長い入力の下に出す**文字チップ**（`▸ 全 N 行を表示`・アイコンだけにしない＝押せると分かる）。
+    /// 人の発話と necoder の知らせのカードで共用する。
+    fn render_input_fold_chip(
+        &self,
+        index: usize,
+        lines: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        div()
+            .id(("user-fold", index))
+            .mt(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(11.))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(theme.fg2)
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.fg0))
+            .child(div().flex_none().text_size(px(8.)).child("▸"))
+            .child(SharedString::from(
+                i18n::t!("agent.input_expand", "n" => lines),
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_input(index, cx);
+                }),
+            )
+            .into_any_element()
     }
 
     fn is_step_expanded(&self, index: usize) -> bool {
@@ -13322,7 +13327,7 @@ fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
 fn entry_from_turn((role, content): (String, String)) -> Entry {
     match role.as_str() {
         "user" => Entry::User(content.into()),
-        "ledger_event" => Entry::LedgerEvent(content.into()),
+        auto_prompt::AUTO_PROMPT_ROLE => auto_prompt::stored_auto_prompt(content),
         "thinking" => Entry::Thinking(content.into()),
         "notice" => Entry::Notice(content.into()),
         "step" => Entry::Step {
@@ -14589,7 +14594,10 @@ PYEOF"#;
                     other => panic!("prompt が送られていない: {other:?}"),
                 }
             };
-            assert_eq!(sent(panel, "目標", cx), "ROLE\n\n目標");
+            assert_eq!(
+                sent(panel, "目標", cx),
+                "<necoder-context>\nROLE\n</necoder-context>\n\n目標"
+            );
             assert_eq!(sent(panel, "/clear", cx), "/clear");
         });
         let _ = std::fs::remove_file(settings_path);
@@ -14912,14 +14920,17 @@ PYEOF"#;
             panel.threads[active].acp_session_id = Some("old-session".into());
             panel.threads[active].tokens_used = 90_000;
             panel.threads[active].running = true;
-            assert!(!panel.rotate_thread_session(active, "── 交代".into(), cx));
+            assert!(!panel.rotate_thread_session(active, "交代".into(), cx));
             assert!(panel.threads[active].acp_session_id.is_some());
             panel.threads[active].running = false;
-            assert!(panel.rotate_thread_session(active, "── 交代".into(), cx));
+            assert!(panel.rotate_thread_session(active, "交代".into(), cx));
             let thread = &panel.threads[active];
             assert!(thread.command_tx.is_none() && thread.acp_session_id.is_none());
             assert_eq!(thread.tokens_used, 0);
-            assert!(matches!(thread.entries.last(), Some(Entry::LedgerEvent(text)) if text.as_ref() == "── 交代"));
+            assert!(
+                matches!(thread.entries.last(), Some(Entry::Notice(text)) if text.as_ref() == "交代"),
+                "区切りは会話ではない 1 行（エージェントには送らない）"
+            );
         });
         let _ = std::fs::remove_file(settings_path);
     }
@@ -17362,7 +17373,10 @@ PYEOF"#;
             panel.threads[active].running = false;
             match command_rx.try_recv() {
                 Ok(SessionCommand::PromptWithImages { text, images }) => {
-                    assert_eq!(text, "@src/lib.rs\nROLE\n\n/Users/me/a.rs を見て");
+                    assert_eq!(
+                        text,
+                        "@src/lib.rs\n<necoder-context>\nROLE\n</necoder-context>\n\n/Users/me/a.rs を見て"
+                    );
                     assert_eq!(images.len(), 1);
                 }
                 other => panic!("普通の依頼は添付つき: {other:?}"),

@@ -1322,9 +1322,13 @@ mod tests {
             assert!(panel.send_user_prompt_to(active, "!touch pwned-note".to_string(), cx));
             assert_eq!(settle(panel), "!touch pwned-note");
 
-            // Captain の台帳（`send_ledger_event`）。
-            panel.send_ledger_event("!touch pwned-captain".to_string(), cx);
-            assert_eq!(settle(panel), "!touch pwned-captain");
+            // necoder の知らせ（Captain の台帳の未読・`send_auto_prompt_to`）。印で囲んだ文のまま届く。
+            panel.send_auto_prompt_to(active, "台帳", "!touch pwned-captain".to_string(), cx);
+            let sent = settle(panel);
+            assert!(
+                sent.starts_with("<necoder-event") && sent.contains("\n!touch pwned-captain\n"),
+                "{sent}"
+            );
 
             // 生成中に積んだ送信待ちは、ターン完了で文のまま流れる。
             panel.threads[active].running = true;

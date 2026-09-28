@@ -572,6 +572,14 @@ impl Workspace {
             .find(|item| item.kind == NewsKind::Captain)
             .map(|item| item.text.clone());
         let shortcut = Self::shortcut_label_for("workspace::FocusCaptain").unwrap_or_default();
+        // 右端のトークン = Captain スレッドの文脈の使用量（Task 行と同じ書式・未任命 / スレッドが無ければ出さない）。
+        let tokens = self.captain_tokens(cx).map(|tokens| {
+            if tokens == 0 {
+                SharedString::from("—")
+            } else {
+                SharedString::from(agent_panel::human_tokens(tokens))
+            }
+        });
         div()
             .id("fleet-captain-bar")
             .flex_none()
@@ -654,15 +662,26 @@ impl Workspace {
                         )
                     }),
             )
-            .when(!shortcut.is_empty(), |element| {
-                element.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(9.))
-                        .text_color(theme.fg2)
-                        .child(SharedString::from(shortcut)),
-                )
-            })
+            // 右端は Task 行と同じ並び（上 = トークン / 下 = キー）。
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(2.))
+                    .when_some(tokens, |element, tokens| {
+                        element.child(div().text_size(px(10.)).text_color(theme.fg2).child(tokens))
+                    })
+                    .when(!shortcut.is_empty(), |element| {
+                        element.child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(shortcut)),
+                        )
+                    }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -670,6 +689,16 @@ impl Workspace {
                 }),
             )
             .into_any_element()
+    }
+
+    /// statusbar の Σ（FLEET-V2 §5.6・mock `fleet-v2.html` の statusbar）: サイドバーに出ている数の合計 =
+    /// Task 行（絞り込む前の全部）+ Captain バー。Captain は統合先に住み Task 行に入らないので、足すのは
+    /// ここの 1 回だけ（統合先の普通の会話は数えない）。どれも文脈の使用量で、使った量の累計ではない。
+    pub(super) fn fleet_tokens_total(&self, cx: &App) -> u32 {
+        let (_, rows, _) = self.fleet_sidebar_rows(cx);
+        rows.iter()
+            .map(|row| row.tokens)
+            .fold(self.captain_tokens(cx).unwrap_or(0), u32::saturating_add)
     }
 
     /// サイドバーに出す素材を 1 パスで集める（render から切り出して検証できるように）。
@@ -2103,6 +2132,99 @@ mod tests {
             "語は別の欄に在ってよい"
         );
         assert!(!task_row_matches(&row, "oauth 決済"), "全部の語が要る");
+    }
+
+    /// Captain のトークン（FLEET-V2 §5.6）: Captain バーには Captain スレッドの分だけを出し（統合先の
+    /// 普通の会話を足さない）、Task 行には入れず、statusbar の Σ には 1 回だけ入る。未任命・Captain
+    /// スレッドがまだ無い間は出さない。
+    #[gpui::test]
+    fn the_captain_bar_counts_the_captain_tokens_once(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!(
+            "necoder_fleet_captain_tokens_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // main = 統合先 / task = その Task。
+        let roots: Vec<PathBuf> = ["main", "task"]
+            .iter()
+            .map(|name| base.join(name))
+            .collect();
+        for root in &roots {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(roots.clone(), Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            let key = "repo-main".to_string();
+            workspace.project_sessions.projects[0]
+                .task_space
+                .repository_id = key.clone();
+            let task = &mut workspace.project_sessions.projects[1];
+            task.task_space.kind = SpaceKind::Task;
+            task.task_space.repository_id = key;
+            task.task_space.title = SharedString::from("rope");
+            workspace.switch_project(0, window, cx);
+            assert_eq!(workspace.captain_tokens(cx), None, "未任命なら出さない");
+
+            settings::set_user_value(cx, "captain_agent", serde_json::json!("Claude Code"))
+                .expect("任命を書ける");
+            assert_eq!(
+                workspace.captain_tokens(cx),
+                None,
+                "Captain スレッドがまだ無い"
+            );
+
+            let (captain_panel, captain) = workspace
+                .ensure_captain_thread(0, cx)
+                .expect("Captain のスレッドを用意できる");
+            assert_eq!(
+                workspace.captain_tokens(cx),
+                Some(0),
+                "まだ話していない（バーは —）"
+            );
+
+            // 統合先の普通の会話 5k・Captain 3k・Task の会話 8k。
+            captain_panel.update(cx, |panel, cx| {
+                panel.debug_set_thread_tokens(0, 5_000, 200_000, cx);
+                panel.debug_set_thread_tokens(captain, 3_000, 200_000, cx);
+            });
+            workspace.project_sessions.sessions[1]
+                .agent_panel
+                .update(cx, |panel, cx| {
+                    panel.debug_set_thread_tokens(0, 8_000, 200_000, cx)
+                });
+            assert_ne!(captain, 0, "Captain は統合先の普通の会話とは別のスレッド");
+            assert_eq!(
+                workspace.captain_tokens(cx),
+                Some(3_000),
+                "Captain の分だけ（統合先の普通の会話を足さない）"
+            );
+            let (_, rows, _) = workspace.fleet_sidebar_rows(cx);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].tokens, 8_000, "Task 行に Captain は入らない");
+            assert_eq!(
+                workspace.fleet_tokens_total(cx),
+                11_000,
+                "statusbar の Σ = Task 行 + Captain（1 回だけ・統合先の普通の会話は数えない）"
+            );
+        });
+        if let Err(error) = std::fs::remove_dir_all(&base) {
+            eprintln!("一時ディレクトリを消せない: {error}");
+        }
     }
 
     /// レールを切り替えたら編隊ごと入れ替わる。統合先は Task 行に混ぜず別行にする。
