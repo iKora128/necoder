@@ -110,6 +110,8 @@ b { font-weight: 600; }
 .acard .ops span { font-size: 10.5px; padding: 2px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg2); color: var(--fg1); }
 .acard .ops span.pri { color: var(--fg0); border-color: var(--fg2); }
 .acard .ops .key { margin-left: auto; border: none; background: none; color: var(--fg2); padding-right: 0; }
+/* Captain の推薦（FLEET-V2 §5.5）: 承認待ちのカードだけ。✳ だけテラコッタ・見立ては太さで立てる（色相は使わない）・応答はしない */
+.acard .l2.rec .rv { color: var(--fg0); font-weight: 500; }
 /* 分解案カード（FLEET-V2 §5.5）: 承認 / 却下を見出しの直下に置く（要対応は高さに上限があり、下だと隠れる） */
 .acard.prop { border-color: color-mix(in srgb, var(--err) 40%, var(--border)); }
 .acard.prop .ops { margin-top: 5px; margin-bottom: 1px; }
@@ -410,6 +412,7 @@ body.l1 .task.pinned::after { display: none; }
         <div class="acard next" style="--tc:var(--th2)" onclick="focusTask('t2')">
           <div class="l1"><span class="stg block">◐</span><span class="nm">tab色分け</span><span class="when hot">待ち 45s</span></div>
           <div class="l2"><q>Write settings.rs を許可しますか</q></div>
+          <div class="l2 rec" title="Captain: 許可してよい — Task の worktree 内の settings.rs への書き込みだけ"><span style="color:var(--terra)">✳</span> <span class="rv">Captain: 許可してよい</span> — Task の worktree 内の settings.rs への書き込みだけ</div>
           <div class="ops"><span class="pri">許可</span><span>常に許可</span><span>拒否</span><span class="key">次 ⏎</span></div>
         </div>
         <div class="acard prop" style="--tc:var(--fg2)">

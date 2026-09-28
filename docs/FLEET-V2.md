@@ -119,6 +119,9 @@ Herdr / Orca の深掘り・采配役（Captain 型エージェント）の製�
    | 完了・未確認 | 確認（Done → Idle）/ 開く |
 
    先頭カードに「次 ⏎」。0 件なら見出しだけ（面積を取らない）。既存の `control_view.rs` のキュー描画と配線を移設する。
+   *2026-09-28*: Captain の推薦は**承認待ちのカードにだけ**出る（§5.5）。permission 文と待ち時間の下・ボタンの上に
+   `✳ Captain: 許可してよい — 理由` の 1 行（✳ だけテラコッタ・見立ては太さで立て、理由は省略して全文はツールチップ）。
+   表示だけで、許可・拒否のボタンの働きは変えない。
 2. **リポジトリ見出し** = `● 名前 ⎇ 統合先ブランチ · N Tasks · Captain 任命済み/未任命`。
 3. **Task 行**（`fleet_sidebar.rs`）。3 段固定・高さ 54px:
    - 1 段目: 状態グリフ（`activity_dot`・Task 色）+ **名前** + `⎇ branch`（mono・省略）+ `⚑`（Captain が起動した Task）
@@ -327,7 +330,7 @@ MCP だけを持たせた Captain は 3 回とも道具だけで Task を切り�
 | phase の報告（`fleet_update_task`） | **×** | ○ | phase は担当エージェントが報告する。Captain が「担当を起こせなかった」を blocked で表した実例がある（画面では承認待ちに見える） |
 | Task を終了（archived） | × | ○ | worktree は消さない |
 | **Integrate** | **×** | ○ | 人間 gate（不変） |
-| **承認待ちへの応答** | **× （推薦のみ）** | ○ | §5.5 |
+| **承認待ちへの応答** | **× （推薦のみ・`fleet_recommend`）** | ○ | §5.5。推薦は要対応カードに添えるだけで、許可・拒否は人間が押す |
 | worktree / ブランチの削除 | × | ○ | |
 | ファイルの編集・shell | **×** | ○ | necoder が席の決まりで断る（§5.8） |
 | 設定の変更・Captain 自身の交代 | × | ○ | |
@@ -340,7 +343,7 @@ Herdr socket 直叩き等の迂回路は Captain のツールセットに含め�
 |---|---|---|
 | 人間が Captain に書いた | 即時 | 発話 + 前置き（役割・現況・直近の采配・§5.9） |
 | Task が Done / review_ready / Failed | 即時 | 台帳の未読 |
-| Task が Blocked | 15 秒経過後 1 回 | 台帳の未読 |
+| Task が Blocked | 15 秒経過後 1 回 | 台帳の未読 + 今の承認待ちの要求（推薦の案内つき・§5.5） |
 | 人間が Task に介入した（§5.4） | 次の wake に同乗（単独では起こさない） | 台帳の未読（`human_send`） |
 | Task が integrated | 即時 | 台帳の未読 |
 | 分解案が承認 / 却下された（§5.5） | 即時 | 台帳の未読（`proposal_approved` / `proposal_rejected`） |
@@ -388,8 +391,30 @@ Captain が実行中ならターン終了で未読を確かめて続けて渡す
 - 提案は DB（`captain_proposals`）に置くので、再起動を跨いでカードが残る。titlebar の要対応バッジにも数える
   （Editor 画面にいても気づける）。
 
-**承認待ちへの推薦**: Blocked で起きた Captain は「許可してよい: cargo test の実行（worktree 内・読み取りのみ）」の形で
+**承認待ちへの推薦**（*2026-09-28 実装*）: Blocked で起きた Captain は「許可してよい: cargo test の実行（worktree 内・読み取りのみ）」の形で
 1 行の推薦を返せる。UI は要対応カードに ✳ 付きで添えるだけで、**応答はしない**。ポリシーによる自動承認は本文書の範囲外（後段の判断）。
+
+- **道具** = `fleet_recommend(task_id, permission_id, verdict, reason)`（Captain 版の MCP にだけ出す・§5.8）。verdict は
+  `allow`（許可してよい）/ `deny`（拒否を勧める）/ `ask_human`（判断はあなたに＝取り消せない・Task の範囲の外など、人間が中身を
+  見るべき）。reason は 1 行（改行なし・200 字まで）。引数は GUI に触れる前に確かめ、GUI が居なければ断る（推薦は今の承認待ちに
+  だけ意味があるので DB には置かない）。返り値は「カードに添えた・応答はしない・待たずにターンを終えてよい」。
+- **どの要求か**: 承認要求には 1 件ごとに id がある（`PermissionCard::id`・リモート管制の `permission_id` と同じ相関キー）。Captain は
+  起こされた 1 通の末尾の「承認待ち」（`- <Task-id> <名前>: 「<要求>」 permission_id=<id>`・まだ推薦していない要求だけ・台帳ではなく
+  GUI の今の状態から足す）か、`fleet_digest` の `threads[].permission`（id・文・付けた推薦）で知る。今の要求と id が違えば断り、
+  今の要求を添えて返す（読んだ後に解決・取り消し・別の要求に替わった＝古い要求への推薦を新しい要求に付けない）。
+- **持ち方**: GUI は「どの Task の、どの要求への推薦か」と一緒に画面の上にだけ持つ（承認待ち自体が再起動を越えないので、推薦も
+  越えない）。カードは今の要求の id で引くので、前の要求への推薦は出ない。解決・取り消し・別の要求に替わった推薦は、パネルの出来事
+  （次の承認待ち・ターンの終わり）と要対応カードのボタンの後に捨てる。同じ要求への 2 度目の推薦は差し替える。
+- **記録**: 台帳に `captain`（Task の id・payload に見立て・理由・要求の id と文・スレッド名）を積み、ニュースに Captain の丸チップの行
+  （`推薦 · <Task>: 許可してよい — 理由`・押すとその Task へ）。Captain へ渡す知らせからは kind で外れる（§5.3）。
+- **Captain の席だけ**: `necoder mcp`（Full 版・人が普通のスレッドや他のツールに登録して使う版）の一覧と `ne skills get --full` には出さず、名前で呼んでも断る
+  （担当が自分の承認要求に「Captain:」の見立てを付ける道を道具として渡さない）。GUI も Captain が未任命なら受けない。統合先（main）の
+  スレッドの承認待ちには推薦しない（Captain が見るのは Task）。CLI の対（`ne fleet recommend`）は作らない（分解案と同じく席の MCP から
+  だけ使う道具）。
+- **リモート管制には載せない**（今回）: スマホの承認カードは `remote_thread` の `permission`（agent_panel・Captain を知らない）から組み、
+  許可は「実行内容と変更内容を確認しました」を経てからしか押せない（tool poisoning 対策）。推薦を並べるなら、その確認との並べ方
+  （読まずに許可を誘わない）を決めて、Cloudflare に別に配っている PWA（`relay/public`）と一緒に出す。データの道は
+  `handle_remote_control` の `remote_thread` で `permission` に 1 項目足すだけ（ホストの bridge は中身を素通しする）なので後から足せる。
 
 ### 5.6 コストの規律
 
@@ -432,7 +457,8 @@ workspace が Captain 用の中身を詰めて渡す。
    （ACP で渡すと codex-acp が `mcp_servers` を丸ごと差し込み、止める指定が上書きで消える）。
    **Claude Code** は mcpServers で渡し、`strictMcpConfig` + `settingSources` 空（`~/.claude` の許可ルール・hooks を
    持ち込まない）+ claude.ai のコネクタを止める環境変数。組み込みの道具は絞らない（MCP を読み込む `ToolSearch` まで消えうる）。道具: `fleet_list_tasks` `fleet_digest` `fleet_events` `fleet_propose_tasks` `fleet_spawn_agent`
-   `fleet_send` `fleet_set_depends` `fleet_review_task` と、読むだけの `list_files` `read_file` `search` `git_status`。
+   `fleet_send` `fleet_set_depends` `fleet_review_task` `fleet_recommend`（承認待ちへの推薦・**この席だけ**の道具で Full 版には出さない・§5.5）と、
+   読むだけの `list_files` `read_file` `search` `git_status`。
    `write_file` `fleet_create_task` `fleet_update_task` `fleet_wait_task` `fleet_integrate_task` は一覧に出さず、呼ばれても断る。
    型つきの引数（`fleet_propose_tasks` の目的・完了条件は必須）が、そのまま委任文の型になる。
 2. **権限モードは「聞いてくる」モードに固定**（Claude Code = `default`・Codex = `read-only`・他は広告の既定）。
@@ -573,7 +599,8 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 `fleet.new_task_setup_found/missing/create` `fleet.new_task_more` `fleet.new_task_existing_branch` `fleet.new_task_same_worktree`
 `fleet.new_task_start` `fleet.setup_failed`
 `captain.title` `captain.row_sub` `captain.appoint` `captain.phase` `captain.tab_log` `captain.tab_tasks`
-`captain.dest` `captain.pill_scope` `captain.role` `captain.facts` `captain.recommend` `captain.spawned_by` `captain.human_send`
+`captain.dest` `captain.pill_scope` `captain.role` `captain.facts` `captain.spawned_by` `captain.human_send`
+`captain.recommend_allow/deny/ask_human/card/news/reply/wake_header/wake_line` `captain.recommend_err_field/verdict/line/long/no_captain/task/integration/stale/stale_current/stale_none`（*2026-09-28*: 予定の `captain.recommend` を分けた）
 `captain.recent` `captain.wake_header` `captain.wake_omitted` `captain.line_created/human_send/approved/rejected` `captain.rotated` `captain.retired_name`
 `captain.seat_denied` `captain.seat_violation` `captain.seat_violation_news` `captain.proposal_title/goal/done_when/scope/approve/reject`
 `captain.proposal_pending_reply` `captain.proposal_err_tasks/too_many/field/agent/no_integration/resolve` `captain.facts_proposal`
@@ -608,7 +635,7 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 | **F3 要対応をサイドバーへ・中央タブ廃止 ✅ 2026-09-16** | `render_stage_attention`（Captain バーの直下・選択リポジトリの分だけ）が `render_attention_card` を再利用。サイドバー全体を `FleetControl` key context にして ⏎ / ⌘⇧U（`ControlNext`）が効く。管制タブ本体（ヘッダ / Captain バー / 稼働カード / パイプライン）・中央タブ帯・`ToggleControl`・`NECODER_CONTROL`・`fleet_mascot`・`control.*` の死キー 26 個を削除。*実装時の訂正*: `FleetCenterView` enum は `Work` が `workbench.rs` に残るため **F7 まで据え置き**（描画経路からは外れている） | 全 test green・`cargo check --workspace --all-targets` の警告は workbench 由来 5 件のみ（F7 で消える） |
 | **F4 ＋ Task ダイアログ + 準備スクリプト + task.env ✅ 2026-09-16** | `new_task_dialog.rs`（⌘N / サイドバーの ＋Task）: 1 入力（EditorView・⌘⏎）→ `project::task_slug` → `create_named_task_on`（`<repo>-worktrees/<slug>`・衝突は `-2`）→ `run_task_setup_on`（`.necoder/worktree-setup.sh`・失敗は `failed` + 要対応）→ `ipc_spawn_into` で 1 行目を Task 名にしてプロンプト送信。`host::task_environment` が `.necoder/task.env` を ACP（`acp_client`）とターミナル（`terminal_view`）の環境に注入。ダイアログに branch / worktree パス / 準備スクリプトの有無（無ければ「作る」= §6.2 テンプレを書いてエディタで開く）。CLI の `fleet create` も同じ関数。*未実装*: エージェント/model ピル（sticky 既定が自動で効く）・「詳細 ▾」・設定 `worktree_dir` | `task_slug` / `task_worktree_dir` / `task_environment` の unit test。**necoder 自身での `CARGO_TARGET_DIR` 共有の体感（2 本目の `cargo check`）は本人の実機の手番** |
 | **F5 系譜の帯 ✅ 2026-09-16** | 畳んだ系譜ヘッダの下に `render_lineage_strip`（Task 色の `┬━ 名前` / 統合済み `╰━` / main `━`・クリックで舞台の選択へ）。⌄ で従来 4 表示に展開・`ToggleLineage`（⌘⇧G・非 mac は ctrl-alt-g = Git パネルとの衝突回避）。*実装時の訂正*: 曲線描画の 64px 帯ではなくテキストの 1 行（34px）から始めた。既定は畳み | 帯の名前クリックで舞台が切り替わる（offscreen 目視は本人の手番） |
-| **F6 Captain の玄関（一部 2026-09-16・*2026-09-20*: Captain カードはブリッジ（§3.6）に統合・任命 UI と設定の交代/解任を追加（§5.7））** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。*2026-09-24*: **Captain の席（§5.8）と分解案の承認（§5.5）**・台帳の未読と読んだ位置（`captain_cursors`・§5.3・`captain_pending` は削除）・会話の交代（§5.6）・前置きの直近の采配（§5.9）・`⚑` 帰属・知らせが表示中のタブを奪わない（`send_ledger_event_to`）・ターン終了の通知に `completed`（失敗したターンで読んだ位置を進めない）。残: 台帳イベントの灰色カード表示・承認の推薦（✳）を要対応カードへ・トークン表示 | storage / agent_panel / workspace / necoder の test（読んだ位置と分解案の往復・席の裁定・見張り・交代・MCP の Captain 版・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`）。実機: /tmp の練習用 repo で Opus 5 が「分けて提案 → 承認待ちで止まる → 承認の知らせで起こし直さない」。隔離 offscreen で分解案カードと `⚑` 行を目視。**necoder 本体での実 e2e（目標 1 つ → 承認 → 2 Task）は本人の目視待ち** |
+| **F6 Captain の玄関（一部 2026-09-16・*2026-09-20*: Captain カードはブリッジ（§3.6）に統合・任命 UI と設定の交代/解任を追加（§5.7））** | 済: Captain カード（⌘0 → `captain_space`・タブ = Captain スレッド / 采配ログ / Task 一覧）・`captain_pending` に台帳イベントを溜めて busy 明けにまとめて 1 通（`send_ledger_event`・`captain_facts` の現況表を同乗）・Task への直接発話を `human_send` として台帳 + ニュース + Captain へ・`integrated` でも wake。*2026-09-24*: **Captain の席（§5.8）と分解案の承認（§5.5）**・台帳の未読と読んだ位置（`captain_cursors`・§5.3・`captain_pending` は削除）・会話の交代（§5.6）・前置きの直近の采配（§5.9）・`⚑` 帰属・知らせが表示中のタブを奪わない（`send_ledger_event_to`）・ターン終了の通知に `completed`（失敗したターンで読んだ位置を進めない）。*2026-09-28*: **承認待ちへの推薦 ✳**（§5.5・Captain の席だけの `fleet_recommend`・要対応カードの 1 行・どの要求への推薦かを id で持つ・Blocked の知らせに今の要求と permission_id）。残: 台帳イベントの灰色カード表示・トークン表示 | storage / agent_panel / workspace / necoder の test（読んだ位置と分解案の往復・席の裁定・見張り・交代・MCP の Captain 版・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`・推薦の道具は Captain 版だけで引数を GUI の前に確かめる・推薦は今の要求にだけ付き解決と差し替えで消え古い id は断る・Blocked の 1 通に permission_id）。隔離 offscreen で推薦つきの承認待ちカード（allow / deny / ask_human）を目視。実機: /tmp の練習用 repo で Opus 5 が「分けて提案 → 承認待ちで止まる → 承認の知らせで起こし直さない」。隔離 offscreen で分解案カードと `⚑` 行を目視。**necoder 本体での実 e2e（目標 1 つ → 承認 → 2 Task）は本人の目視待ち** |
 | **F7 掃除 ✅ 2026-09-20** | `workbench.rs` / `work_layout.rs` / `FleetCenterView` / `work.*` の死キー 37 個 / `NECODER_WORKBENCH_PROBE` を削除。窓の状態の復元は `restore_window_state`（`persisted_state` の対・`explorer_controller.rs`）へ改名して残し、保存形式から `work_layout` / `fleet_view` を外した（旧 payload の余分なキーは serde が無視する）。端末の名札は `chrome.next_terminal_id`（プロセス内単調増加・PTY は再起動を越えないので保存しない）。生きていた 3 キーは `settings.pref_tabs_position` / `tabs_position_top` / `tabs_position_left` へ。設定キー `work_tabs_position` の名前は未決のまま据え置き。**残: UI-SPEC §11 の置換・FLEET-CONTROL-PLAN P3 の注記** | `cargo check --workspace --all-targets` **と `--release`** で警告 0（`WorkAction` の未使用警告は debug 専用プローブからしか構築されず、release ビルドでだけ出ていた） |
 
 順序は F0 → F1 → F2 → F3 → F4 → F5 → F6 → F7。F1 と F5 は独立。**各フェーズの終わりに本文書と JOURNAL を更新**。
@@ -654,6 +681,7 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
 | `captain` | ⌘0 と同じ（未任命なら任命の面・任命済みなら Captain の会話） |
 | `proposal:<n>` | Captain の分解案を n 行（既定 2・2 行目は印を外した状態）で要対応に仕込む（DB には書かない） |
 | `origin` | 1 本目の Task に `⚑` 帰属を付ける（分解案の承認で作られた Task の行の見た目） |
+| `recommend[:allow\|deny\|ask_human]` | 承認待ちの最初の Task（CONTROL_PROBE の「バグ #412」の `cargo publish`）に Captain の推薦を仕込む（§5.5・既定 deny・DB には書かない。ニュースにも行が出る） |
 | `editor` / `threads` | Fleet から Editor へ戻る（titlebar の `Editor` と同じ道）/ レールの AI スレッド一覧を押す（`graph;editor` で「戻った直後の左カラム」を撮れる） |
 | `columns:<n>` / `pin` | 舞台の列数 / 選択中の Task をピン |
 | `filter:<語>` / `select:<n>` | サイドバーの絞り込み欄に語を入れる / n 本目の Task を複数選択に足す（O21・`select:1;select:3` で帯が出る） |
@@ -672,4 +700,4 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
 7. 管制タブ・作業タブは廃止。要対応はサイドバー常設。管制の全画面版はリモート管制（P9）の正として残す。
 
 **残る判断**（実装中に本人に聞く）: 承認のポリシー自動化（§5.5 の先）/ Captain の推薦を要対応カードで
-ワンクリック適用にするか / `worktree_dir` の既定パス / solo のタブ向き設定の名前。
+ワンクリック適用にするか / 推薦をスマホ（リモート管制）の承認カードにも出すか / `worktree_dir` の既定パス / solo のタブ向き設定の名前。
