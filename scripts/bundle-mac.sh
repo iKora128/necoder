@@ -188,7 +188,7 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 
 echo "組み立て完了: $APP"
 if [ "$FLAVOR" = "dev" ]; then
-    echo "   状態の置き場: $DEV_HOME（常用の necoder とは別・消せば初期状態に戻る）"
+    echo "   状態の置き場: ${DEV_HOME}（常用の necoder とは別・消せば初期状態に戻る）"
 fi
 echo "→ open \"$APP\" で起動（Dock にマスコットが出る）"
 echo "   アイコンが古いままなら: killall Dock"
