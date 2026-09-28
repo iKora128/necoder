@@ -619,6 +619,23 @@ fleet:
   creating_cancel_tip: "取り消す（作り終えた分は消します）"
   creating_dismiss_tip: "閉じる"
   creating_discard_failed: "取り消した Task の worktree を消せませんでした（%{path}）: %{error}"
+  creating_interrupted: "中断: %{step}"
+  creating_step_waiting: "未着手"
+  creating_step_worktree: "worktree 作成"
+  creating_step_setup: "準備"
+  creating_step_register: "Task 登録"
+  creating_step_spawn: "担当の起動"
+  creating_step_send: "委任文の送信"
+  creating_resume: "再開"
+  creating_resume_tip: "止まった段から続けます（作ってあった worktree・Task はそのまま使います）"
+  creating_resume_send_tip: "委任文が担当に届いたかは分かりません。Task の会話に発話が無ければ、もう一度送ります"
+  creating_proposal_retry_tip: "失敗した段から続けます（作ってあった worktree・Task はそのまま使います）"
+  creating_proposal_discard_tip: "この行をやめる（記録を閉じます。作ってあった worktree・Task は残ります）"
+  creating_proposal_running_elsewhere: "この行は別の窓で作っています"
+  creating_proposal_done_elsewhere: "この行はもう済んでいます（別の窓で作り終えたか、やめました）"
+  creating_proposal_no_panel: "Task の会話を開けません"
+  creating_proposal_not_task: "この worktree は Task として開けません"
+  creating_proposal_taken: "この worktree は別の Task（%{title}）が使っています。この行には使いません: %{path}"
 worktree_delete:
   title: この worktree を削除しますか？
   title_branch: worktree とブランチを削除しますか？

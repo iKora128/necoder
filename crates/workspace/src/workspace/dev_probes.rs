@@ -541,8 +541,8 @@ impl Workspace {
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
     /// 画面の組み立て（`;` 区切り）: `graph` / `formation` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
     /// `side:<diff|terminal|files>`（その Task カードのサイドペイン。diff = 変更レビュー）/ `columns:<n>` / `pin` / `captain` /
-    /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `compare:<n>`（O23）/
-    /// `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）。
+    /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `interrupted`（R09 の中断した行）/
+    /// `compare:<n>`（O23）/ `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -746,6 +746,8 @@ impl Workspace {
             }
             // ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない）。
             "creating" => self.debug_seed_task_creations(cx),
+            // Captain の分解案の中断した行（前の起動で途中のまま終わった）を段ごとに仕込む（R09・DB には書かない）。
+            "interrupted" => self.debug_seed_interrupted_rows(cx),
             // 並べて比べる（O23）: 先頭から n 本（2〜3）の Task を舞台に並べ、各カードの「変更」を開く
             // （fan-out が作り終えた時と同じ `show_fanout_on_stage`）。
             "compare" => {

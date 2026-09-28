@@ -335,7 +335,7 @@
   - R01・R04・R05 は #30 の版で確認条件を満たすので、そのまま採用した。
 - **台帳の残りで、この統合で直した物**: R12 の 2 つ目（ターミナル検索の入力欄を EditorView にし、日本語の変換・貼り付け・選択・カーソル移動を通す）。
 - **CI**: Remote control の WebKit の不安定な 3 本を直した。カメラの 2 本は、main の作業ツリーで別の会話が原因を突き止めていた未コミットの差分（偽カメラを `MediaDevices.prototype` に載せる）を取り込んだ。PWA の送信数の競走は、#30 のコメントの案で直した。手元の `cargo test` がテストバイナリごと落ちていた件（O19 のテストで本物の rust-analyzer が立つ）も直した。
-- **実機での確認**: `./scripts/bundle-mac.sh release dev` で `necoder Dev.app`（状態は `~/.necoder-dev`・常用と並べて動く）を作り、チェックリスト `docs/ORCA-PARITY-CHECKLIST.md`（155 項目・2026-09-28）を回す。
+- **実機での確認**: `./scripts/bundle-mac.sh release dev` で `necoder Dev.app`（状態は `~/.necoder-dev`・常用と並べて動く）を作り、チェックリスト `docs/ORCA-PARITY-CHECKLIST.md`（158 項目・2026-09-28）を回す。
 - **残り**: O18（Git パネルの基本）・O19 の残り・O24/O25 の残り・O27 の残り・O29 の残り・O37 の残り・O38（スマホ）・§6 の判断待ち。~~main の作業ツリーの Captain の未コミット作業との合流（台帳 R09・R10）~~ → §7.3 で合流済み。残りは R09 の条件 1（承認の後に終了した時の再開）と、実機での確認。
 
 ### 7.3 Captain の作業との合流（2026-09-27・`parity/merge-captain-fleet`）

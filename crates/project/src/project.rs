@@ -4150,6 +4150,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// R09: Captain の分解案の行は名前と場所を先に決め（`plan_task_target_on`）、作る時は既にある物を使う。
+    /// 前の起動で作ってあった worktree・ブランチだけ・何も無い、のどれでも 2 本目を作らない。取り違えそうな時
+    /// （その場所に別のブランチの worktree・worktree でない物・そのブランチを別の場所で使っている）は断る。
+    #[test]
+    fn planned_task_worktrees_are_reused_instead_of_made_twice() {
+        let base = scratch("planned_task");
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let task_branches = || {
+            git_branches_on(&LocalHost, &root)
+                .into_iter()
+                .filter(|branch| branch.starts_with("task/"))
+                .collect::<Vec<_>>()
+        };
+
+        // 何も無い: 決めた名前と場所で作る。
+        let (target, branch) = plan_task_target_on(&LocalHost, &root, "Fix the parser").unwrap();
+        assert_eq!(branch, "task/fix-the-parser");
+        assert!(target.ends_with("fix-the-parser"));
+        assert!(!target.exists(), "決めるだけで作らない");
+        let made = ensure_planned_task_worktree_on(&LocalHost, &root, &target, &branch).unwrap();
+        assert!(made.created_branch && made.created_worktree);
+        assert!(target.join("a.txt").exists());
+
+        // 前の起動で作ってあった（記録を書く前に落ちた）: 作り直さずに使う。
+        let again = ensure_planned_task_worktree_on(&LocalHost, &root, &target, &branch).unwrap();
+        assert!(!again.created_branch && !again.created_worktree);
+        assert_eq!(task_branches(), vec![branch.clone()], "2 本目のブランチを切らない");
+        assert_eq!(git_worktrees_on(&LocalHost, &root).len(), 2, "統合先 + 1 本");
+
+        // ブランチだけあった（ブランチを切った所で落ちた）: そのブランチの worktree を作る。
+        let (readme_target, readme_branch) =
+            plan_task_target_on(&LocalHost, &root, "README").unwrap();
+        git(&["branch", &readme_branch]);
+        let made =
+            ensure_planned_task_worktree_on(&LocalHost, &root, &readme_target, &readme_branch)
+                .unwrap();
+        assert!(!made.created_branch && made.created_worktree);
+        assert!(readme_target.join("a.txt").exists());
+
+        // 取り違えそうな時は作らずに断る。
+        let (stray, stray_branch) = plan_task_target_on(&LocalHost, &root, "Stray").unwrap();
+        std::fs::create_dir_all(stray.join("notes")).unwrap();
+        assert!(
+            ensure_planned_task_worktree_on(&LocalHost, &root, &stray, &stray_branch).is_err(),
+            "worktree でない物がある"
+        );
+        assert!(
+            ensure_planned_task_worktree_on(&LocalHost, &root, &target, "task/other").is_err(),
+            "その場所に別のブランチの worktree"
+        );
+        let elsewhere = target.with_file_name("elsewhere");
+        assert!(
+            ensure_planned_task_worktree_on(&LocalHost, &root, &elsewhere, &branch).is_err(),
+            "そのブランチを別の場所で使っている"
+        );
+        assert!(!elsewhere.exists());
+        assert_eq!(
+            task_branches(),
+            vec![branch, readme_branch],
+            "断った時はブランチを切らない"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// O20 / A24: リポジトリの `task_sparse` があれば、新しい Task はそのフォルダ（と根のファイル）だけを
     /// 取り出す。統合先はそのまま。既にあるブランチの worktree も同じ。変な書き方は捨てる。
     #[test]
@@ -5225,6 +5304,95 @@ pub fn rename_task_branch_on(host: &dyn Host, dir: &Path, old: &str, stem: &str)
         git_fail_message(&renamed)
     );
     Ok(candidate)
+}
+
+/// Task のブランチ名（`task/<slug>`）と worktree の場所を、**作らずに**決める（[`create_named_task_on`] と同じ
+/// 決め方）。Captain の分解案の行はこれを記録してから作る（R09・再開で同じ名前を使い、2 本目を作らない）。
+/// 返すのは `(worktree の場所, ブランチ名)`。
+pub fn plan_task_target_on(host: &dyn Host, root: &Path, title: &str) -> Result<(PathBuf, String)> {
+    free_task_target(host, root, &task_slug(title))
+}
+
+/// 決めてあった名前と場所で用意した Task の worktree（[`ensure_planned_task_worktree_on`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedTaskWorktree {
+    /// worktree の場所（git の一覧にある物を使った時はその表記）。
+    pub path: PathBuf,
+    /// このブランチを今切った（取り消したら消してよい）。
+    pub created_branch: bool,
+    /// worktree を今作った（前の起動で作ってあった物を使った時は false）。
+    pub created_worktree: bool,
+}
+
+/// 決めてあった名前（`branch`）と場所（`target`）で Task の worktree を用意する（R09）。**既にあれば作らずに使う**:
+/// その場所にそのブランチの worktree があればそれ、ブランチだけあればその worktree を作る（＋ Task の「既にある
+/// ブランチ」と同じ）、どちらも無ければ起点（リポジトリの既定・無ければ統合先の HEAD）から新しく切る。
+/// 取り違えそうな時は作らずに断る: その場所に別のブランチの worktree・worktree でない物がある、そのブランチを
+/// 別の場所の worktree が使っている。準備（リンク・`.worktreeinclude`・準備スクリプト）はしない。
+pub fn ensure_planned_task_worktree_on(
+    host: &dyn Host,
+    root: &Path,
+    target: &Path,
+    branch: &str,
+) -> Result<PlannedTaskWorktree> {
+    // git の一覧は正規化した綴りで出ることがある（macOS の /var と /private/var）。手元なら正規化して比べる。
+    let canonical_target = if host.is_remote() {
+        None
+    } else {
+        paths::canonicalize(target).ok()
+    };
+    let same_place = |listed: &Path| {
+        listed == target
+            || canonical_target
+                .as_deref()
+                .is_some_and(|canonical| paths::canonicalize(listed).ok().as_deref() == Some(canonical))
+    };
+    let worktrees = git_worktrees_on(host, root);
+    if let Some(existing) = worktrees.iter().find(|worktree| same_place(&worktree.path)) {
+        anyhow::ensure!(
+            existing.branch.as_deref() == Some(branch),
+            "{} には別のブランチ（{}）の worktree があります",
+            target.display(),
+            existing.branch.as_deref().unwrap_or("detached")
+        );
+        return Ok(PlannedTaskWorktree {
+            path: existing.path.clone(),
+            created_branch: false,
+            created_worktree: false,
+        });
+    }
+    if let Some(elsewhere) = worktrees
+        .iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch))
+    {
+        anyhow::bail!(
+            "{branch} は別の場所の worktree（{}）で使われています",
+            elsewhere.path.display()
+        );
+    }
+    anyhow::ensure!(
+        host.metadata(target).is_err(),
+        "{} が既にあります（worktree ではありません）",
+        target.display()
+    );
+    if git_branches_on(host, root).iter().any(|known| known == branch) {
+        add_task_worktree_on(host, root, target, None, branch)?;
+        return Ok(PlannedTaskWorktree {
+            path: target.to_path_buf(),
+            created_branch: false,
+            created_worktree: true,
+        });
+    }
+    let valid = run_git(host, root, ["check-ref-format", "--branch", branch])
+        .is_ok_and(|output| output.success());
+    anyhow::ensure!(valid, "ブランチ名に使えない文字があります: {branch}");
+    let base = repository_task_base_on(host, root);
+    create_task_worktree_from_on(host, root, target, branch, base.as_deref().unwrap_or("HEAD"))?;
+    Ok(PlannedTaskWorktree {
+        path: target.to_path_buf(),
+        created_branch: true,
+        created_worktree: true,
+    })
 }
 
 /// 空いている `task/<slug>`（と worktree の置き場）を探す（[`create_named_task_on`] と同じ決め方）。

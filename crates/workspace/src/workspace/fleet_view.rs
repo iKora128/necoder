@@ -578,10 +578,6 @@ impl Workspace {
         self.project_sessions.projects[index].task_space.parent = parent;
         self.persist_new_task_space(index, cx);
         self.transition_task_space(index, TaskPhase::Planned, "task_created", None, cx);
-        // Captain の分解案から切った Task（`⚑` 帰属・台帳の `captain_task`・FLEET-V2 §5.5）。
-        if let Some(proposal) = &task.captain_proposal {
-            self.mark_captain_task(index, proposal, cx);
-        }
         if let Some(error) = failure {
             // 依頼は送らずに控える（「準備をやり直す」/「飛ばして始める」で送る・O20）。
             self.chrome
@@ -725,6 +721,8 @@ impl Workspace {
         if !prompt.trim().is_empty() {
             self.ipc_spawn_into(session_index, agent, Some(prompt), cx);
         }
+        // Captain の分解案の行なら、委任文を渡し終えた（R09）。
+        self.finish_held_proposal_row(&space_id, cx);
         cx.notify();
     }
 
@@ -2886,9 +2884,6 @@ pub(crate) struct FanoutTask {
     pub(crate) agent: Option<String>,
     /// Task 名に添える印（「Codex」「Claude Code #2」）。1 本だけなら付けない。
     pub(crate) title_suffix: Option<String>,
-    /// Captain の分解案を承認して切る 1 本なら、その案の id（FLEET-V2 §5.5）。作れたら `⚑` 帰属と台帳の
-    /// `captain_task` を付ける。＋ Task・fan-out は `None`。
-    pub(crate) captain_proposal: Option<String>,
 }
 
 /// 依頼・詳細のブランチ名・選んだエージェント・エージェントごとの本数から、切る Task の並びを決める
@@ -2907,7 +2902,6 @@ pub(crate) fn plan_fanout(
             branch: branch.map(str::to_string),
             agent: agents.first().cloned(),
             title_suffix: None,
-            captain_proposal: None,
         }];
     }
     let first_line = prompt.lines().next().unwrap_or("");
@@ -2928,7 +2922,6 @@ pub(crate) fn plan_fanout(
                 } else {
                     agent.clone()
                 }),
-                captain_proposal: None,
             });
         }
     }
@@ -2950,7 +2943,6 @@ mod tests {
                 branch: Some("feature/login".into()),
                 agent: None,
                 title_suffix: None,
-                captain_proposal: None,
             }]
         );
         let one = plan_fanout("fix login", None, &["Codex".to_string()], 1);

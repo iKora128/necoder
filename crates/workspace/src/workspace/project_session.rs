@@ -344,22 +344,7 @@ impl Workspace {
                 let mut missing = Vec::new();
                 for slot in &mut workspace.project_sessions.projects {
                     if let Some(record) = by_id.get(slot.task_space.id.as_str()) {
-                        // lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
-                        // ただし Fleet で取り込んだ linked worktree（`task/` でないブランチ）は台帳の
-                        // Task を正にする（O21・再起動で統合先扱いへ戻さない）。メインの作業ツリーは
-                        // Task にしない。
-                        if record.kind == SpaceKind::Task && slot.task_space.linked {
-                            slot.task_space.kind = SpaceKind::Task;
-                        }
-                        slot.task_space.repository_id = record.repository_id.clone();
-                        slot.task_space.title = SharedString::from(record.title.clone());
-                        slot.task_space.phase = record.phase;
-                        slot.task_space.base_oid = record.base_oid.clone();
-                        slot.task_space.head_oid = record.head_oid.clone();
-                        slot.task_space.result_summary =
-                            record.result_summary.clone().map(SharedString::from);
-                        slot.task_space.created_at_ms = record.created_at;
-                        slot.task_space.parent = record.parent.clone().map(SpaceId);
+                        slot.task_space.overlay_stored(record);
                     } else {
                         missing.push(slot.task_space.to_record(slot));
                     }
@@ -486,41 +471,19 @@ impl Workspace {
         digest: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.project_sessions.projects.get_mut(session_index) else {
+        let Some(mut record) = self.apply_task_transition(session_index, phase, digest, cx) else {
             return;
         };
-        if slot.task_space.is_integration() {
+        let Some(slot) = self.project_sessions.projects.get(session_index) else {
             return;
-        }
-        slot.task_space.phase = phase;
+        };
         let host = slot.worktree.host().clone();
         let root = slot.worktree.root().to_path_buf();
-        // HEAD の取得は `git rev-parse` ＝ remote では SSH の往復。local だけ同期で取り、
-        // remote は台帳へ書く直前に背景で取る（遷移そのもの・ニュース・総括は待たせない）。
-        if !host.is_remote() {
-            slot.task_space.head_oid = project::git_head_oid_on(host.as_ref(), &root);
+        if phase == TaskPhase::Archived {
+            // Captain の分解案の行（準備の失敗で依頼を控えていた・中断した）は、Task を片付けたら閉じる（R09）。
+            let space = slot.task_space.id.clone();
+            self.close_proposal_rows_for_task(&space, &root, cx);
         }
-        let mut record = slot.task_space.to_record(slot);
-        let news_color = slot.color;
-        let news_title = slot.task_space.title.clone();
-        let news_space = slot.task_space.id.clone();
-        // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
-        let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
-        self.push_news(
-            news_kind,
-            news_color,
-            news_title,
-            news_text,
-            Some(news_space),
-        );
-        // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
-        self.schedule_control_summary(cx);
-        // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。
-        cx.defer(super::dock_badge::refresh_dock_badge);
-        if phase == TaskPhase::Integrated {
-            self.wake_captain(session_index, cx);
-        }
-        cx.notify();
         let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
@@ -560,8 +523,54 @@ impl Workspace {
         .detach();
     }
 
+    /// 遷移を画面に反映する（phase・手元なら HEAD・ニュース・監督バー・Dock のバッジ・integrated の wake）。
+    /// 台帳へ書くのは呼び手（[`Self::transition_task_space`] か、Captain の分解案の行の登録のトランザクション・
+    /// R09）。返すのは台帳に書く snapshot。統合先・範囲外なら `None`。
+    pub(crate) fn apply_task_transition(
+        &mut self,
+        session_index: usize,
+        phase: TaskPhase,
+        digest: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<storage::TaskSpaceRecord> {
+        let slot = self.project_sessions.projects.get_mut(session_index)?;
+        if slot.task_space.is_integration() {
+            return None;
+        }
+        slot.task_space.phase = phase;
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        // HEAD の取得は `git rev-parse` ＝ remote では SSH の往復。local だけ同期で取り、
+        // remote は台帳へ書く直前に背景で取る（遷移そのもの・ニュース・総括は待たせない）。
+        if !host.is_remote() {
+            slot.task_space.head_oid = project::git_head_oid_on(host.as_ref(), &root);
+        }
+        let record = slot.task_space.to_record(slot);
+        let news_color = slot.color;
+        let news_title = slot.task_space.title.clone();
+        let news_space = slot.task_space.id.clone();
+        // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
+        let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
+        self.push_news(
+            news_kind,
+            news_color,
+            news_title,
+            news_text,
+            Some(news_space),
+        );
+        // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
+        self.schedule_control_summary(cx);
+        // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。
+        cx.defer(super::dock_badge::refresh_dock_badge);
+        if phase == TaskPhase::Integrated {
+            self.wake_captain(session_index, cx);
+        }
+        cx.notify();
+        Some(record)
+    }
+
     /// task_events に載せる遷移 payload（GUI 起点）。
-    fn transition_payload(
+    pub(crate) fn transition_payload(
         phase: TaskPhase,
         reason: &str,
         digest: Option<&str>,
@@ -887,9 +896,12 @@ impl Workspace {
                 adopt_as_task: std::collections::HashSet::new(),
                 pending_task_prompts: HashMap::new(),
                 pending_task_agents: HashMap::new(),
+                held_proposal_rows: HashMap::new(),
                 task_conflicts: HashMap::new(),
                 task_creations: Vec::new(),
                 next_task_creation_id: 0,
+                #[cfg(test)]
+                proposal_row_crash: None,
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
                 agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),
