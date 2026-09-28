@@ -826,7 +826,8 @@ impl PendingElicitation {
 }
 
 struct PendingPermission {
-    /// リモート応答の相関キー。添字を再利用した別の承認へ応答させない。
+    /// 承認要求 1 件の相関キー（要求ごとに新しい値）。リモート応答と Captain の推薦（workspace）を、
+    /// 添字を再利用した別の承認へ付けない。
     remote_id: String,
     title: SharedString,
     diffs: Vec<PermissionDiff>,
@@ -1091,6 +1092,8 @@ pub struct AgentStatus {
 
 /// 管制の要対応キュー（P3）が承認カードを組むための素材（`permission_card()` が返す）。
 pub struct PermissionCard {
+    /// この承認要求の id（要求ごとに新しい値）。Captain の推薦をこの要求にだけ結ぶ（FLEET-V2 §5.5）。
+    pub id: SharedString,
     pub title: SharedString,
     /// `(respond へ返す添字, 種別, 表示ラベル)`。
     pub options: Vec<(usize, PermissionKind, SharedString)>,
@@ -3421,6 +3424,7 @@ PYEOF"#;
         let thread = self.threads.get(thread_index)?;
         let pending = thread.pending_permission.as_ref()?;
         Some(PermissionCard {
+            id: SharedString::from(pending.remote_id.clone()),
             title: pending.title.clone(),
             options: pending
                 .options
@@ -5591,6 +5595,42 @@ PYEOF"#;
             },
             cx,
         );
+    }
+
+    /// 開発用: アクティブスレッドへ「許可 / 拒否」の承認要求を 1 つ届ける（workspace のテスト・Captain の
+    /// 推薦が今の要求にだけ付くことの確認）。実際の `PermissionRequest` と同じ `on_event` を通すので、
+    /// Blocked への遷移と `PanelEvent::PermissionWaiting` まで本物の経路で起きる。返すのは選ばれた添字の受け口。
+    pub fn debug_request_permission(
+        &mut self,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> mpsc::UnboundedReceiver<usize> {
+        let (respond, answers) = mpsc::unbounded();
+        self.on_event(
+            self.active,
+            AgentEvent::PermissionRequest {
+                title: title.to_string(),
+                kind: Some(acp_client::ToolCallKind::Execute),
+                paths: Vec::new(),
+                diffs: Vec::new(),
+                raw_input: None,
+                options: vec![
+                    PermissionChoice {
+                        label: "許可".into(),
+                        kind: PermissionKind::Allow,
+                    },
+                    PermissionChoice {
+                        label: "拒否".into(),
+                        kind: PermissionKind::Reject,
+                    },
+                ],
+                tool_call_id: String::new(),
+                mcp_tool: false,
+                respond,
+            },
+            cx,
+        );
+        answers
     }
 
     pub fn debug_set_activities(&mut self, cx: &mut Context<Self>) {

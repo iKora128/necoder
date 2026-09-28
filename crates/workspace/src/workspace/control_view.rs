@@ -2,7 +2,8 @@
 //!
 //! 管制タブ（ヘッダ / Captain バー / 稼働カード / 統合パイプライン）は F3（2026-09-16）で削除し、
 //! ここには **キューの導出**（`control_attention_queue`・台帳と memory から毎 render 再導出）、
-//! **カード描画**（`render_attention_card`・許可/拒否・Radar・Integrate・確認の**インライン操作**）、
+//! **カード描画**（`render_attention_card`・許可/拒否・Radar・Integrate・確認の**インライン操作**・
+//! 承認待ちには Captain の推薦 ✳ の 1 行を添えるだけ＝`captain_recommendations.rs`）、
 //! ⏎ / ⌘⇧U の先頭没入、Captain バーの ✳ 総括（Tier2・5s デバウンス）だけが残る。
 //! 全画面の管制はリモート管制（P9・`mock/fleet-dashboard.html`）の正として別に残す。
 //!
@@ -641,6 +642,8 @@ impl Workspace {
                                     None,
                                     cx,
                                 );
+                                // 解決した要求への Captain の推薦を片付ける（応答そのものは変えない・§5.5）。
+                                this.prune_captain_recommendations(cx);
                             }),
                         ),
                     );
@@ -651,6 +654,16 @@ impl Workspace {
                     elapsed_label(permission.waited_secs),
                     i18n::t!("control.files", "n" => permission.diff_files)
                 ));
+                // Captain の推薦（あれば・FLEET-V2 §3.2 / §5.5）: この要求の id で引く＝前の要求への推薦は出ない。
+                // 表示だけで、ボタンの働きは変えない。
+                let recommendation = self
+                    .captain_recommendation_for(
+                        &self.project_sessions.projects[session_index].task_space.id,
+                        &permission.id,
+                    )
+                    .map(|recommendation| {
+                        self.render_captain_recommendation(position, recommendation)
+                    });
                 card.child(
                     div()
                         .text_size(px(10.5))
@@ -666,6 +679,7 @@ impl Workspace {
                         .text_color(theme.err)
                         .child(meta),
                 )
+                .children(recommendation)
                 .child(buttons)
             }
             AttentionKind::Question(question) => card

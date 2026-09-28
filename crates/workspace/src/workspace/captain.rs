@@ -9,7 +9,8 @@
 //!   位置を進めるのはターンが終わってから（途中で落ちたら同じ出来事をもう一度渡す）。
 //! - 会話が膨らんだら同じタブのまま新しい会話へ交代する（§5.6）。前置き（役割・現況・直近の采配）が続きを渡す。
 //! - integrate は radar clean + **人間 gate**（Captain は提案まで・§5.2 の権限表）。Task を切るのも
-//!   分解案の承認の後（§5.5・`captain_proposals.rs`）。
+//!   分解案の承認の後（§5.5・`captain_proposals.rs`）。承認待ちには応答せず、1 行の推薦を添えるだけ
+//!   （§5.5 の末尾・`captain_recommendations.rs`）。
 //! - 采配の監査 = Captain ターンの完了を `captain` イベントとして task_events + ニュースへ
 //!   （丸チップ・NewsKind::Captain）。
 
@@ -195,7 +196,9 @@ impl Workspace {
     }
 
     /// Blocked の wake は 15s 閾値（worry と同じ）: 15 秒待ってまだ Blocked なら起こす。
-    /// 即時に人間が許可した場合は Captain を起こさない（注意の節約）。
+    /// 即時に人間が許可した場合は Captain を起こさない（注意の節約）。起こす 1 通には、台帳の未読に加えて
+    /// 今の承認待ちの要求（permission_id つき）と「fleet_recommend で 1 行の推薦を返してよい・応答はしない」を
+    /// 添える（§5.5・[`Self::send_captain_wake`]）。
     pub(crate) fn wake_captain_for_blocked(&mut self, session_index: usize, cx: &mut Context<Self>) {
         if settings::get(cx).captain_agent.is_none() {
             return;
@@ -414,7 +417,15 @@ impl Workspace {
         self.chrome
             .captain_inflight
             .insert(repository.to_string(), last_event_id);
-        let message = format!("{}\n{}", i18n::t!("captain.wake_header"), lines.join("\n"));
+        let mut message = format!("{}\n{}", i18n::t!("captain.wake_header"), lines.join("\n"));
+        // 今の承認待ち（§5.5）: 推薦の道具の案内と、要求ごとの id（台帳には残らない今の状態なのでここで足す）。
+        let waiting = self.captain_permission_lines(repository, cx);
+        if !waiting.is_empty() {
+            message.push_str("\n\n");
+            message.push_str(&i18n::t!("captain.recommend_wake_header"));
+            message.push('\n');
+            message.push_str(&waiting.join("\n"));
+        }
         panel.update(cx, |panel, cx| panel.send_ledger_event_to(index, message, cx));
         cx.notify();
     }

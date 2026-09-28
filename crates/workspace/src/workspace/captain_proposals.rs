@@ -27,11 +27,17 @@ pub const CAPTAIN_MCP_TOOLS: &[&str] = &[
     "fleet_send",
     "fleet_set_depends",
     "fleet_review_task",
+    "fleet_recommend",
     "list_files",
     "read_file",
     "search",
     "git_status",
 ];
+
+/// Captain の席**だけ**に出す道具（普通の `necoder mcp` = Full 版には出さず、呼ばれても断る）。
+/// `fleet_recommend` の推薦は要対応カードに「✳ Captain:」として出るので、担当が自分の承認要求に
+/// Captain の名で見立てを付ける道を道具として渡さない（FLEET-V2 §5.5）。
+pub const CAPTAIN_ONLY_MCP_TOOLS: &[&str] = &["fleet_recommend"];
 
 /// 1 つの案に載せられる行の上限。それ以上は分けすぎ（研究の結論: 分けすぎは逐次依存で遅くなる）。
 pub const MAX_PROPOSED_TASKS: usize = 6;

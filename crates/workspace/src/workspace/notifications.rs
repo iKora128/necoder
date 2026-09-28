@@ -57,6 +57,9 @@ impl Workspace {
         else {
             return;
         };
+        // 解決・取り消し・別の要求に替わった承認への Captain の推薦を捨てる（FLEET-V2 §5.5・次の承認待ちや
+        // ターンの終わりはここを通る。推薦が無ければ何もしない）。
+        self.prune_captain_recommendations(cx);
         match event {
             agent_panel::PanelEvent::HumanSend { thread, text } => {
                 if is_captain_thread_name(thread.as_ref()) {
