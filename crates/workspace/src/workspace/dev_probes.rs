@@ -744,6 +744,34 @@ impl Workspace {
                     self.toggle_fleet_selection(space, cx);
                 }
             }
+            // 外部の worktree（O21）の先頭を、サイドバーの「取り込む」と同じ入口（`adopt_worktree`）で取り込む。
+            // サイドバーの一覧は背景で読むので、ここでは git に直接聞く。
+            "adopt" => {
+                let Some(key) = self.fleet_repository_key() else {
+                    return;
+                };
+                let Some(index) = self.integration_slot_for(&key) else {
+                    return;
+                };
+                let canonical =
+                    |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                let slot = &self.project_sessions.projects[index];
+                let host = slot.worktree.host().clone();
+                let root = slot.worktree.root().to_path_buf();
+                let rail: Vec<PathBuf> = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .map(|slot| canonical(slot.worktree.root()))
+                    .collect();
+                let external = project::git_worktrees_on(host.as_ref(), &root)
+                    .into_iter()
+                    .skip(1)
+                    .find(|worktree| !rail.contains(&canonical(&worktree.path)));
+                if let Some(worktree) = external {
+                    self.adopt_worktree(worktree.path, worktree.branch, None, cx);
+                }
+            }
             // ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない）。
             "creating" => self.debug_seed_task_creations(cx),
             // Captain の分解案の中断した行（前の起動で途中のまま終わった）を段ごとに仕込む（R09・DB には書かない）。

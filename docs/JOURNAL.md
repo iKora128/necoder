@@ -3793,3 +3793,20 @@
   `+N −M` の一致・推薦（2 行）・台帳のカード・Captain バーのトークン・Σ・中断した行を撮って目視。
 - 次: 本人が Dev.app（`./scripts/bundle-mac.sh release dev`）で ORCA-PARITY-CHECKLIST（158 項目）を回す。Captain の実 e2e・
   推薦・再開は本物のエージェントが要る（課金）。Gemini / OpenCode を Captain にした時の MCP の承認の形は未確認のまま。
+
+## 2026-09-29 — 外部の worktree を取り込んでも舞台に何も出なかった
+
+- 本人の報告: 「左の worktree で取り込む押しても、何も表示されない」（Dev.app・Fleet サイドバーの「外部の worktree」）。
+- 原因: 取り込み（`adopt_worktree` → `open_folder_in_rail` → `add_worktree_to_rail`）は、レールに開いて Task にし、その slot へ
+  切り替える（サイドバーの Task 行も出る）。ところが舞台（`stage_cards`）は札（`fleet_cells` の `FleetPane::Task`）のある Task
+  しか並べず、札は Fleet に入った時に `seed_fleet_cells` がリポジトリの slot から 1 回だけ作る（2 回目以降は退避した一覧を
+  戻すだけ）。＋ Task と Captain の分解案の経路は札を自分で足していたが、取り込みの経路は足していなかったので、選ばれても
+  中央が空だった。
+- 直し: `seed_fleet_cells` の最後で、選んでいる slot の札を必ず置く（`ensure_task_cell` を captain_proposals から fleet_view へ
+  移して共用）。Fleet に入る時・切り替える時（`switch_project` は Fleet 中に `seed_fleet_cells` を呼ぶ）の両方で効くので、
+  ⌘O で開いた linked worktree や、退避していた一覧を戻した時の同じ穴も塞がる。
+- 検証: 取り込みのテスト（`external_worktrees_show_up_and_can_be_adopted`）に「Fleet の中で取り込むと、その Task を選び舞台に
+  出る」を足した（直しを外すと落ちることを確かめた）。隔離 offscreen で新しいプローブ `adopt`（取り込むと同じ入口）を使い、
+  直す前は中央が空・直した後は Task のカードが出ることを撮って目視。`cargo test -p workspace` 291 件通過・警告 0。
+- 学び/罠: **舞台に出すかどうかは札で決まる**。slot をレールに足す新しい経路を作ったら、札のことも考える（今回からは
+  `seed_fleet_cells` が選んでいる slot の分を補うが、ピンして並べる時は札の有無がそのまま効く）。

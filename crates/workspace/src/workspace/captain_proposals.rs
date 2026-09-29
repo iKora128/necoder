@@ -1010,18 +1010,6 @@ impl Workspace {
             .position(|slot| slot.worktree.root() == root)
     }
 
-    fn ensure_task_cell(&mut self, space: &SpaceId) {
-        let shown =
-            self.chrome.fleet_cells.iter().any(
-                |pane| matches!(pane, FleetPane::Task { space: existing } if existing == space),
-            );
-        if !shown {
-            self.chrome.fleet_cells.push(FleetPane::Task {
-                space: space.clone(),
-            });
-        }
-    }
-
     /// 新しく作った行の Task を画面に載せる（題名・`⚑`・作った時の遷移とニュース）。台帳には書かない
     /// （呼び手が行の記録と 1 トランザクションで書く）。返すのは slot・台帳に書く snapshot・Task の host。
     fn register_proposal_row_task(

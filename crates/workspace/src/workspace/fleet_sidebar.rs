@@ -1734,8 +1734,10 @@ mod tests {
         assert_eq!(listed[0].1.as_deref(), Some("feature/orca"));
         assert_eq!(listed[0].2, None, "まだレールに無い");
 
-        // 取り込む → レールに開いて Task。統合先はメインの作業ツリーのまま。
+        // 取り込む（Fleet の中から）→ レールに開いて Task。統合先はメインの作業ツリーのまま。
         workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.chrome.fleet_mode = true;
+            workspace.seed_fleet_cells(cx);
             let (path, branch, rail) = listed[0].clone();
             workspace.adopt_worktree(path, branch, rail, cx);
         });
@@ -1747,6 +1749,17 @@ mod tests {
                 .iter()
                 .position(|slot| canonical(slot.worktree.root()) == canonical(&external))
                 .expect("レールに開いた");
+            // 取り込んだ Task へ切り替わる（描画の時に消化する予約）と、舞台に出る。札が無いと中央が空のままだった
+            // （2026-09-29・「取り込むを押しても何も出ない」）。
+            if let Some(pending) = workspace.overlays.pending_project_switch.take() {
+                workspace.switch_project(pending, window, cx);
+            }
+            assert_eq!(workspace.project_sessions.active, adopted, "取り込んだ Task を選ぶ");
+            let space = workspace.project_sessions.projects[adopted].task_space.id.clone();
+            assert!(
+                workspace.stage_cards().iter().any(|(_, pane)| matches!(pane, FleetPane::Task { space: shown } if shown == &space)),
+                "取り込んだ Task が舞台に出る"
+            );
             assert_eq!(
                 workspace.project_sessions.projects[adopted].task_space.kind,
                 SpaceKind::Task,

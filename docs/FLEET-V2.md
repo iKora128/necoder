@@ -176,7 +176,11 @@ Herdr / Orca の深掘り・采配役（Captain 型エージェント）の製�
    Task になっていないもの = レールに無いもの（**Orca・Claude Code・手で `git worktree add` したもの**も git の一覧から拾う）と、
    レールにあるが統合先扱いのもの（メイン以外）。行 = `◌`（中立）+ フォルダ名 + `⎇ branch` + `取り込む`。
    **取り込む** = レールに開いて Task にする（ブランチ名に関係なく・ブランチもファイルもそのまま）。台帳に Task として残し、
-   再起動しても Task のまま（linked worktree に限り、台帳の Task を branch 接頭辞より優先する）。
+   再起動しても Task のまま（linked worktree に限り、台帳の Task を branch 接頭辞より優先する）。取り込んだ Task を選び、舞台に
+   その Task のカードを出す。*2026-09-29 の訂正*: 舞台は札（`fleet_cells` の `FleetPane::Task`）のある Task しか並べず、
+   札は Fleet に入った時にリポジトリの slot から 1 回だけ作るので、取り込んだ Task は選ばれても中央が空のままだった
+   （本人「取り込むを押しても何も表示されない」）。`seed_fleet_cells` の最後で**選んでいる slot の札は必ず置く**ようにした
+   （⌘O で開いた linked worktree・退避していた一覧の復元も同じ理由で直る）。
    一覧（`git worktree list`）を読むのは、Fleet を出した時・レールの worktree が増えた / 減った時・窓が前に出た時だけ
    （ポーリングしない・背景で 1 回）。
 4. **＋ Task** ボタン（⌘N）と凡例（形の説明・中立色）。
@@ -755,6 +759,7 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
 | `columns:<n>` / `pin` | 舞台の列数 / 選択中の Task をピン |
 | `filter:<語>` / `select:<n>` | サイドバーの絞り込み欄に語を入れる / n 本目の Task を複数選択に足す（O21・`select:1;select:3` で帯が出る） |
 | `creating` | ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない） |
+| `adopt` | 外部の worktree の先頭を、サイドバーの「取り込む」と同じ入口（`adopt_worktree`）で取り込む（O21・一覧は git に直接聞く。撮るなら先に `git -C $ISO/project worktree add -b feature/x $ISO/x` で外の worktree を作る） |
 | `interrupted` | Captain の分解案の中断した行を段ごとに仕込む（未着手 / Task 登録 / 委任文の送信 / 作れなかった・R09・DB には書かず worktree も作らない） |
 | `compare:<n>` | 先頭から n 本（2〜3）の Task を舞台に並べ、各カードの「変更」を開く（O23 の並べて比べる） |
 | `captain-transcript` | Captain の会話に見本（人の発話・台帳の知らせの灰色のカード 2 枚・fleet の道具・采配の本文）とトークン 4.2k を仕込む（`captain` の後に置く・任命済みの時だけ・エージェントには送らない・§3.6 / §5.6） |

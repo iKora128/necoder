@@ -183,6 +183,29 @@ impl Workspace {
     /// 同じリポジトリの 2 回目以降は何もしない — 中身はユーザーの操作（＋ / ×）が正になる。
     /// リポジトリを跨いだら現在の並びを畳み、行き先の並びを戻す（前に閉じたセルは閉じたまま）。
     pub(crate) fn seed_fleet_cells(&mut self, cx: &App) {
+        self.seed_repository_cells(cx);
+        // 選んでいる slot の札は必ず置く。舞台は札のある Task しか並べないので、後からレールに載った slot
+        // （外部の worktree の取り込み・⌘O で開いた linked worktree・退避していた一覧の復元）は、札が無いと
+        // 選んでも中央に何も出なかった（2026-09-29・取り込みを押しても何も出ない）。
+        if let Some(space) = self.active_slot().map(|slot| slot.task_space.id.clone()) {
+            self.ensure_task_cell(&space);
+        }
+    }
+
+    /// 舞台に出す Task の札（`FleetPane::Task`）が無ければ足す。
+    pub(crate) fn ensure_task_cell(&mut self, space: &SpaceId) {
+        let shown = self.chrome.fleet_cells.iter().any(
+            |pane| matches!(pane, FleetPane::Task { space: existing } if existing == space),
+        );
+        if !shown {
+            self.chrome.fleet_cells.push(FleetPane::Task {
+                space: space.clone(),
+            });
+        }
+    }
+
+    /// このリポジトリの札の一覧を用意する（リポジトリを跨いだら前の一覧を退避し、行き先の一覧を戻すか作る）。
+    fn seed_repository_cells(&mut self, cx: &App) {
         let Some(repository) = self.active_repository_key().map(str::to_string) else {
             return;
         };
