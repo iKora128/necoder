@@ -31,6 +31,7 @@ impl Workspace {
                     }).collect();
                 json!({"id": slot.task_space.id.as_str(), "name": slot.name.as_ref(),
                     "branch": slot.branch, "remote_host": slot.remote_host.as_ref().map(SharedString::as_ref),
+                    "color": format!("#{:06x}", theme_core::hex_from_color(slot.color)),
                     "threads": threads})
             }).collect();
             if let Err(error) = respond.send(reply(Ok(

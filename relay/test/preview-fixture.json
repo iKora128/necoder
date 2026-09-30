@@ -1,0 +1,305 @@
+{
+  "snapshot": {
+    "instance_id": "preview",
+    "projects": [
+      {
+        "id": "project-a",
+        "name": "necoder",
+        "branch": "main",
+        "color": "#7c8cf8",
+        "threads": [
+          {
+            "id": "thread-a",
+            "name": "ビルド失敗の調査",
+            "agent": "Claude Code",
+            "turn_id": "1:a",
+            "running": false,
+            "blocked": true,
+            "session_lost": false,
+            "tokens_used": 48210,
+            "digest": "テストが 1 本落ちています。直す前に、実行の許可をください。",
+            "permission_id": "perm-a",
+            "question_pending": false,
+            "color": "#61afef"
+          },
+          {
+            "id": "thread-b",
+            "name": "スマホ画面の改善",
+            "agent": "Claude Code",
+            "turn_id": "1:b",
+            "running": true,
+            "blocked": false,
+            "session_lost": false,
+            "tokens_used": 137611,
+            "digest": "一覧と会話の 2 画面に組み直しています。",
+            "question_pending": false,
+            "color": "#e5c07b"
+          },
+          {
+            "id": "thread-c",
+            "name": "色の使い方の相談",
+            "agent": "Codex",
+            "turn_id": "2:c",
+            "running": false,
+            "blocked": false,
+            "session_lost": false,
+            "tokens_used": 9120,
+            "digest": "結論: 色は **識別** だけに使い、状態は形と動きで出します。",
+            "question_pending": false,
+            "color": "#c678dd"
+          }
+        ]
+      },
+      {
+        "id": "project-b",
+        "name": "otoko-tts",
+        "branch": "",
+        "remote_host": "Macstudio",
+        "color": "#34d3b6",
+        "threads": [
+          {
+            "id": "thread-d",
+            "name": "文字起こしの進め方",
+            "agent": "Claude Code",
+            "turn_id": "5:d",
+            "running": false,
+            "blocked": true,
+            "session_lost": false,
+            "tokens_used": 220400,
+            "digest": "どちらの方針で進めますか？",
+            "question_pending": true,
+            "question_id": "q-d",
+            "color": "#61afef"
+          }
+        ]
+      },
+      {
+        "id": "project-c",
+        "name": "medlocal",
+        "branch": "main",
+        "threads": []
+      }
+    ]
+  },
+  "later": [
+    {
+      "thread": "thread-c",
+      "turn_id": "3:c"
+    }
+  ],
+  "details": {
+    "thread-a": {
+      "id": "thread-a",
+      "turn_id": "1:a",
+      "history_truncated": false,
+      "question": null,
+      "question_pending": false,
+      "entries": [
+        {
+          "id": 0,
+          "kind": "user",
+          "text": "cargo test が落ちてる。原因を調べて直して"
+        },
+        {
+          "id": 1,
+          "kind": "thinking",
+          "text": "まず失敗しているテストを特定する。\nログの末尾だけ見れば足りるはず。"
+        },
+        {
+          "id": 2,
+          "kind": "tool",
+          "text": "cargo test -p editor_core 2>&1 | tail -8\n\n```console\ntest buffer::tests::undo_restores_selection ... FAILED\n\nfailures:\n    buffer::tests::undo_restores_selection\n\ntest result: FAILED. 211 passed; 1 failed; 0 ignored\n```"
+        },
+        {
+          "id": 3,
+          "kind": "tool",
+          "text": "Read crates/editor_core/src/buffer.rs\n/Users/me/necoder/crates/editor_core/src/buffer.rs\n```\n120\tpub fn undo(&mut self) {\n121\t    let entry = self.history.pop();\n122\t    self.apply(entry);\n123\t}\n```"
+        },
+        {
+          "id": 4,
+          "kind": "agent",
+          "text": "原因が分かりました。\n\n## 何が起きているか\n\n- `undo()` が**選択範囲を戻していません**\n- 直前の編集で選択が動いたまま残ります\n\n| テスト | 結果 |\n|---|---|\n| undo_restores_selection | 失敗 |\n| ほか 211 本 | 成功 |\n\n直すには `buffer.rs` を次のように変えます。\n\n```rust\npub fn undo(&mut self) {\n    let entry = self.history.pop();\n    self.selection = entry.selection_before;\n    self.apply(entry);\n}\n```"
+        }
+      ],
+      "permission": {
+        "id": "perm-a",
+        "title": "Edit crates/editor_core/src/buffer.rs",
+        "complete": true,
+        "raw_input": null,
+        "diffs": [
+          {
+            "path": "crates/editor_core/src/buffer.rs",
+            "old_text": "    let entry = self.history.pop();\n    self.apply(entry);",
+            "new_text": "    let entry = self.history.pop();\n    self.selection = entry.selection_before;\n    self.apply(entry);"
+          }
+        ],
+        "options": [
+          {
+            "id": "perm-a:0",
+            "kind": "allow"
+          },
+          {
+            "id": "perm-a:1",
+            "kind": "reject"
+          }
+        ]
+      }
+    },
+    "thread-b": {
+      "id": "thread-b",
+      "turn_id": "1:b",
+      "history_truncated": true,
+      "permission": null,
+      "question": null,
+      "question_pending": false,
+      "entries": [
+        {
+          "id": 40,
+          "kind": "user",
+          "text": "スマホの画面が読めない。直して。\n条件:\n1. 最初の画面で何が動いているか分かる\n2. 会話が読める\n3. ツールの出力で流れない\n4. 承認はすぐ押せる\n5. 入力欄はいつも下\n6. 色はデスクトップと同じ\n7. 状態は形と動き\n8. 日本語で\n9. 英語でも崩れない\n10. iPhone で試せる\n11. テストを直す\n12. 実データで確認\n13. デプロイ前に見せる"
+        },
+        {
+          "id": 41,
+          "kind": "agent",
+          "text": "まず今の画面を実データで再現します。"
+        },
+        {
+          "id": 42,
+          "kind": "tool",
+          "text": "Read relay/public/app.mjs (1 - 120)\n/Users/me/necoder/relay/public/app.mjs\n```\n1\timport { initiate } from './crypto.mjs';\n2\timport { saveDevice } from './storage.mjs';\n```"
+        },
+        {
+          "id": 43,
+          "kind": "tool",
+          "text": "cd /Users/me/necoder && sed -n 1,80p relay/public/style.css\n\n```console\n:root { color-scheme: dark; }\n```"
+        },
+        {
+          "id": 44,
+          "kind": "tool",
+          "text": "grep -rn \"remote_snapshot\" crates relay/host | head\n\n```console\ncrates/workspace/src/workspace/remote_control.rs:25:        if method == \"remote_snapshot\" {\nrelay/host/bridge.mjs:202:      try { next = await this.ipc('remote_snapshot', {}); }\n```"
+        },
+        {
+          "id": 45,
+          "kind": "thinking",
+          "text": "最初の 1 画面がボタンで埋まっている。会話は下の方。\n2 画面に分けるのがよさそう。"
+        },
+        {
+          "id": 46,
+          "kind": "tool",
+          "text": "cd /Users/me/necoder/relay && node test/preview.mjs --out /tmp/before\n\n```console\n/tmp/before/1-home.png\n/tmp/before/2-thread.png\n```"
+        },
+        {
+          "id": 47,
+          "kind": "agent",
+          "text": "最初の 1 画面が設定のボタンで埋まっていました。**会話は約 50 画面下**です。一覧と会話の 2 画面に分けます。"
+        },
+        {
+          "id": 48,
+          "kind": "tool",
+          "text": "Search \"iOS PWA status bar color theme-color\"\n\n"
+        },
+        {
+          "id": 49,
+          "kind": "tool",
+          "text": "Fetch https://developer.apple.com/documentation/webkit\n\n```\nSupporting associated domains …\n```"
+        },
+        {
+          "id": 50,
+          "kind": "tool",
+          "text": "Edit relay/public/app.mjs\n/Users/me/necoder/relay/public/app.mjs\n"
+        },
+        {
+          "id": 51,
+          "kind": "tool",
+          "text": "Write relay/public/steps.mjs\n/Users/me/necoder/relay/public/steps.mjs\n"
+        },
+        {
+          "id": 52,
+          "kind": "tool",
+          "text": "cat >> docs/JOURNAL.md\n\n"
+        },
+        {
+          "id": 53,
+          "kind": "agent",
+          "text": "直しました。テストを流します。"
+        },
+        {
+          "id": 54,
+          "kind": "tool",
+          "text": "Read relay/test/browser/control.spec.mjs\n/Users/me/necoder/relay/test/browser/control.spec.mjs\n```\n1\timport { test } from '@playwright/test';\n```"
+        },
+        {
+          "id": 55,
+          "kind": "tool",
+          "text": "cd /Users/me/necoder/relay && npm run test:browser 2>&1 | tail -5\n\n```console\n  8 passed (12.8s)\n```"
+        }
+      ]
+    },
+    "thread-c": {
+      "id": "thread-c",
+      "turn_id": "2:c",
+      "history_truncated": false,
+      "permission": null,
+      "question": null,
+      "question_pending": false,
+      "entries": [
+        {
+          "id": 0,
+          "kind": "user",
+          "text": "状態を色で出すのはあり？"
+        },
+        {
+          "id": 1,
+          "kind": "agent",
+          "text": "結論: 色は **識別** だけに使い、状態は形と動きで出します。\n\n1. 実行中 = 点字スピナー\n2. 回答待ち = 半円の脈動\n3. 新着 = リング\n\n> 色を状態に使うと、スレッドの色と意味がぶつかります。"
+        },
+        {
+          "id": 2,
+          "kind": "auto_prompt",
+          "text": "Captain · 2026-10-01 09:12\nTask「ビルド失敗の調査」が承認待ちになりました。"
+        }
+      ]
+    },
+    "thread-d": {
+      "id": "thread-d",
+      "turn_id": "5:d",
+      "history_truncated": false,
+      "permission": null,
+      "question_pending": true,
+      "entries": [
+        {
+          "id": 0,
+          "kind": "user",
+          "text": "残りの 1741 本の文字起こし、どう進める？"
+        },
+        {
+          "id": 1,
+          "kind": "agent",
+          "text": "進め方は 2 通りあります。どちらにしますか？"
+        }
+      ],
+      "question": {
+        "id": "q-d",
+        "message": "どちらの方針で進めますか？",
+        "fields": [
+          {
+            "name": "plan",
+            "title": "方針",
+            "multi": false,
+            "choices": [
+              {
+                "value": "all",
+                "label": "A: 全量を一括で（速いが GPU を占有する）"
+              },
+              {
+                "value": "batch",
+                "label": "B: 100 本ずつ（遅いが他の作業と並行できる）"
+              }
+            ],
+            "custom": true
+          }
+        ]
+      }
+    }
+  }
+}

@@ -26,6 +26,21 @@ iPhone で固定 URL をホーム画面に追加し、PWA にペアリング URL
 配布版の更新後は `ne remote pair`、Windows では `necoder.exe remote pair` が使えます。
 Windows 用バイナリの生成と実機検証は、この Mac では行っていません。Windows CI にホスト起動・名前付きパイプ認証・配布同梱の検査を追加済みです。
 
+## 画面の作り（2026-10-01・v0.1.23）
+
+一覧（共有中の全スレッド。要対応が先頭）→ 会話（作業の欄は畳む・入力欄は下に固定）の 2 画面。
+設定（PC・再接続・通知・言語・接続の削除）は一覧の右上からシートで開く。仕様は [UI-SPEC §15](./UI-SPEC.md)。
+
+- PWA（`relay/public`）の変更は **Worker へのデプロイで初めてスマホに届く**（`.app` には入らない）。
+  `relay/` で `npm run build`（AGPL の `public/source.tar.gz` を作り直す）→ `npx wrangler deploy`。
+  service worker は network-first なので、デプロイ後にアプリを開き直せば新しい画面になる。
+- スレッド・プロジェクトの色は Mac の necoder が snapshot に載せる（0.1.23 から）。古い版の necoder に
+  繋がっている間、スマホは中立色で出る。
+- 見た目は `relay/` で `node test/preview.mjs --thread <名前の一部> --sheets` で撮れる（iPhone 13 サイズ・WebKit）。
+  実ユーザーの socket には触らない（:8791 の wrangler dev と偽 GUI）。実データで見たい時は
+  `remote_snapshot` / `remote_thread` の結果を **relay/ の外**に置いて `--data <dir>` で渡す
+  （build が `test/` ごと公開の source.tar.gz に固めるため）。
+
 ## QR が発行できないとき（2026-09-11）
 
 設定画面の失敗表示は**原因ごとに違う一文**を出す。総称の一文（「原因不明」）が出た時だけ、

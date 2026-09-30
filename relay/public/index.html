@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#17181b">
+  <meta name="theme-color" content="#16181e">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="necoder">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
@@ -12,10 +13,12 @@
   <link rel="stylesheet" href="/style.css">
   <title>necoder · Remote</title>
 </head>
-<body>
-  <header><a class="brand" href="/">necoder <span>Remote</span></a><select id="language" aria-label="Language"><option value="ja">日本語</option><option value="en">English</option></select></header>
-  <main>
-    <section id="welcome" class="welcome">
+<body data-status="offline">
+  <!-- 未ペアリング: ホーム画面への追加と QR の読み取り -->
+  <section id="welcome" hidden>
+    <header class="bar"><div class="bar-title"><span class="brand">necoder <small>Remote</small></span></div>
+      <select id="language" class="compact" aria-label="Language"><option value="ja">日本語</option><option value="en">English</option></select></header>
+    <div class="welcome">
       <p class="eyebrow" data-t="eyebrow"></p><h1 data-t="welcome"></h1><p data-t="intro"></p>
       <ol><li data-t="install"></li><li data-t="pairHelp"></li></ol>
       <button id="scan" class="primary" data-t="scan"></button>
@@ -24,28 +27,59 @@
         <form id="pair-form"><label for="pair-url" data-t="pairUrl"></label><input id="pair-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://control.necoder.com/#…"><button type="submit" data-t="connect"></button></form>
       </details>
       <p class="hint" data-t="privacy"></p>
-    </section>
-    <section id="control" hidden>
-      <div class="connection"><label for="hosts" class="sr-only" data-t="host"></label><select id="hosts"></select><span id="status" role="status"></span><button id="reconnect" data-t="reconnect"></button></div>
-      <p id="last-seen" class="hint"></p>
-      <nav class="tools"><button id="notifications" data-t="notifications"></button><button id="forget" data-t="forget"></button></nav>
-      <label for="projects" data-t="project"></label><select id="projects"></select>
-      <div class="thread-heading"><h2 data-t="threads"></h2><button id="new-thread" data-t="newThread"></button></div>
-      <div id="threads" class="threads"></div>
-      <section id="thread-view" hidden>
-        <div class="destination"><span id="destination"></span><span id="tokens"></span></div>
-        <div id="permission"></div><div id="question"></div>
-        <div class="thread-actions"><button id="diff" data-t="diff"></button><button id="interrupt" data-t="interrupt"></button></div>
-        <form id="composer"><label for="message" data-t="message"></label><textarea id="message" rows="3" maxlength="8000"></textarea><div class="composer-footer"><span id="receipt" role="status"></span><button id="send" type="submit" data-t="send"></button></div></form>
-        <div id="transcript" aria-live="off"></div>
-      </section>
-    </section>
-    <div id="notice" role="status" hidden></div>
-    <dialog id="scan-dialog"><div class="dialog-head"><h2 data-t="scan"></h2><button id="close-scan" data-t="close"></button></div>
-      <video id="scan-video" playsinline muted autoplay></video><p data-t="scanHint"></p></dialog>
-    <dialog id="diff-dialog"><div class="dialog-head"><h2 data-t="diff"></h2><button id="close-diff" data-t="close"></button></div><p data-t="diffHint"></p><pre id="diff-text"></pre></dialog>
-  </main>
-  <footer><span data-t="footer"></span><a href="/source.tar.gz" data-t="source"></a></footer>
+    </div>
+    <footer class="legal"><span data-t="footer"></span><a href="/source.tar.gz" data-t="source"></a></footer>
+  </section>
+
+  <!-- ホーム: 共有中の全プロジェクトのスレッド一覧（要対応・実行中を先頭に） -->
+  <section id="home" hidden>
+    <header class="bar">
+      <div class="bar-title"><span class="brand">necoder</span><span id="host-name" class="bar-sub"></span></div>
+      <span id="status" class="status" role="status"></span>
+      <button id="open-settings" class="icon-button" type="button" data-aria="settings"><svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg></button>
+    </header>
+    <main id="home-list" class="home-list"></main>
+  </section>
+
+  <!-- スレッド: 会話を読む・指示する・承認する -->
+  <section id="thread-view" hidden>
+    <header class="bar">
+      <button id="back" class="icon-button back" type="button" data-aria="back"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg><span id="back-badge" class="badge" hidden></span></button>
+      <div id="destination" class="bar-title"><span id="thread-name" class="thread-name"></span><span class="bar-sub"><span id="thread-project" class="project-chip"></span><span id="thread-meta"></span></span></div>
+      <button id="diff" class="chip" type="button" data-t="changes"></button>
+    </header>
+    <div id="connection-banner" class="banner" role="status" hidden></div>
+    <main id="transcript" class="transcript" aria-live="off"></main>
+    <div id="permission"></div><div id="question"></div>
+    <button id="to-latest" class="to-latest" type="button" data-aria="toLatest" hidden><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v12M6 10l6 6 6-6M5 20h14"/></svg></button>
+    <form id="composer" class="composer">
+      <label for="message" class="sr-only" data-t="message"></label>
+      <textarea id="message" rows="1" maxlength="8000" enterkeyhint="enter"></textarea>
+      <div class="composer-row"><span id="receipt" role="status"></span><button id="interrupt" class="chip" type="button" data-t="interrupt" hidden></button><button id="send" class="send" type="submit" data-t="send"></button></div>
+    </form>
+  </section>
+
+  <div id="notice" role="status" hidden></div>
+
+  <dialog id="settings-dialog" class="sheet">
+    <div class="sheet-head"><h2 data-t="settings"></h2><button id="close-settings" class="chip" type="button" data-t="close"></button></div>
+    <label for="hosts" data-t="host"></label><select id="hosts"></select>
+    <p class="settings-status"><span id="settings-status"></span><span id="last-seen"></span></p>
+    <div class="sheet-actions"><button id="reconnect" type="button" data-t="reconnect"></button><button id="notifications" type="button" data-t="notifications"></button></div>
+    <label for="language-settings" data-t="language"></label>
+    <select id="language-settings"><option value="ja">日本語</option><option value="en">English</option></select>
+    <button id="forget" class="danger" type="button" data-t="forget"></button>
+    <footer class="legal"><span data-t="footer"></span><a href="/source.tar.gz" data-t="source"></a></footer>
+  </dialog>
+  <dialog id="agent-dialog" class="sheet">
+    <div class="sheet-head"><h2 data-t="newThread"></h2><button id="close-agent" class="chip" type="button" data-t="close"></button></div>
+    <p id="agent-project" class="hint"></p>
+    <div id="agent-choices" class="agent-choices"></div>
+  </dialog>
+  <dialog id="scan-dialog"><div class="sheet-head"><h2 data-t="scan"></h2><button id="close-scan" class="chip" type="button" data-t="close"></button></div>
+    <video id="scan-video" playsinline muted autoplay></video><p class="hint" data-t="scanHint"></p></dialog>
+  <dialog id="diff-dialog" class="sheet tall"><div class="sheet-head"><h2 data-t="diff"></h2><button id="close-diff" class="chip" type="button" data-t="close"></button></div>
+    <p class="hint" data-t="diffHint"></p><pre id="diff-text"></pre></dialog>
   <script type="module" src="/app.mjs"></script>
 </body>
 </html>

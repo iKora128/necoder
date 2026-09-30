@@ -30,6 +30,13 @@ const messages = {
     pushReady: '通知を有効にしました。', pushOff: '通知を無効にしました。', pushDenied: '通知が許可されていません。ホーム画面に追加し、端末の通知設定を確認してください。',
     forgetConfirm: 'この端末の接続情報を削除しますか？PCから完全に失効させるには ne remote revoke を実行してください。',
     newAgent: '使用するAgent名（Claude Code / Codex）', noDiff: '追跡ファイルに変更はありません。', stale: '状態が変わりました。再接続して最新状態を確認してください。',
+    settings: '設定', back: 'スレッド一覧へ戻る', toLatest: '最新へ', changes: '変更', language: '表示言語',
+    attention: '要対応', runningNow: '実行中', done: '新着', untitled: '無題のスレッド',
+    steps: '{n} ステップ', lines: '{n} 行', showAll: '▸ 全 {n} 行を表示', showMore: '▸ 続きを表示', collapse: '▾ 折りたたむ',
+    composerRunning: '実行中…（完了か「中断」の後に送信）', composerBlocked: '上の承認・質問に先に答えてください',
+    emptyProject: 'スレッドはまだありません（PCで作成できます）', emptyThread: 'まだ会話がありません', guiOfflineHint: 'PCでnecoderを起動すると、ここにスレッドが並びます。',
+    newThreadIn: '{project} に新しいスレッドを作ります',
+    kind_read: '読む', kind_search: '検索', kind_edit: '編集', kind_write: '書き込み', kind_web: 'Web', kind_tool: 'ツール', kind_run: '実行', kind_think: '思考',
   },
   en: {
     wait_until_idle_or_interrupt: 'Wait for completion or interrupt before sending.',
@@ -50,6 +57,13 @@ const messages = {
     running: 'Working', blocked: 'Needs attention', idle: 'Idle', lost: 'Agent disconnected', user: 'You', agent: 'Agent', tool: 'Tool', thinking: 'Thinking', checkpoint: 'Checkpoint', notice: 'Notice', auto_prompt: 'From necoder', approve: 'Allow once', reject: 'Deny', reviewed: 'I reviewed the command and changes above', permission: 'Approval requested', incomplete: 'Details are unavailable or too large. Review on your PC to approve.', before: 'Before', after: 'After',
     question: 'Question from agent', questionLocal: 'Answer this question on your PC.', customSingle: 'Type your own answer (or a note on the option you pick)', customMulti: 'Type your own answer (added to your picks)', answerRequired: 'Pick or type an answer for each question.', answer: 'Answer', decline: 'Decline', sending: 'Confirming…', accepted: 'Accepted by PC', unknown: 'Could not confirm receipt. Check the conversation before resending.', history: 'Showing up to 60 recent items. Long text is shortened. Full history is available on your PC.',
     pairExpired: 'This QR code expired. Generate a new one on your PC.', pairInvalid: 'Enter a valid pairing URL for this site.', pairLost: 'Could not verify the connection. Generate a fresh QR code on your PC.', storageError: 'Could not save device keys. Exit private browsing and try again.', pushReady: 'Notifications enabled.', pushOff: 'Notifications disabled.', pushDenied: 'Notifications are not allowed. Add to Home Screen and check device notification settings.', forgetConfirm: 'Remove this connection from this device? To revoke access on the PC, run ne remote revoke.', newAgent: 'Agent name (Claude Code / Codex)', noDiff: 'No tracked changes.', stale: 'State changed. Reconnect to refresh.',
+    settings: 'Settings', back: 'Back to threads', toLatest: 'Jump to latest', changes: 'Changes', language: 'Language',
+    attention: 'Needs you', runningNow: 'Working', done: 'New reply', untitled: 'Untitled thread',
+    steps: '{n} steps', lines: '{n} lines', showAll: '▸ Show all {n} lines', showMore: '▸ Show more', collapse: '▾ Collapse',
+    composerRunning: 'Working… send when done, or interrupt', composerBlocked: 'Answer the approval or question above first',
+    emptyProject: 'No threads yet (create one on your PC)', emptyThread: 'No messages yet', guiOfflineHint: 'Start necoder on your PC to see your threads here.',
+    newThreadIn: 'Start a new thread in {project}',
+    kind_read: 'Read', kind_search: 'Search', kind_edit: 'Edit', kind_write: 'Write', kind_web: 'Web', kind_tool: 'Tool', kind_run: 'Run', kind_think: 'Thinking',
   },
 };
 export let language = navigator.language.startsWith('ja') ? 'ja' : 'en';
