@@ -7,7 +7,9 @@
 //! `<bash-input>` / `<bash-stdout>` として添える（CLI が会話へ差し込むのと同じ形＝Claude は
 //! 「ユーザーが手で打ったコマンドとその出力」と読む）。実行しただけではエージェントを起こさない。
 //!
-//! 対話はできない（stdin は即 EOF）。[`SHELL_TIMEOUT`] を過ぎたら、または停止を押したら打ち切る。
+//! 対話はできない（stdin は即 EOF）。時間では打ち切らない — 人が打ったコマンドで、ビルドやテストは
+//! 数分かかるのが普通だから。止めるのは停止ボタン（スレッドを閉じた時・パネルが消えた時も止める）。
+//! 実行中も出力の末尾を流して見せる（終わるまで無言にしない）。止める時はシェルが起動した子・孫まで止める。
 //! stderr はシェル側で stdout へ寄せる（`HostProcess` は stdout しか持たない。順序も端末と同じになる）。
 
 use super::*;
@@ -17,8 +19,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// 打ち切りまでの時間。Claude Code の Bash ツールの既定（2 分）に揃える。
-pub(crate) const SHELL_TIMEOUT: Duration = Duration::from_secs(120);
+/// 終わったか・出力が増えたかを見に行く最初の間隔（短いコマンドを待たせない）。
+const SHELL_FIRST_POLL: Duration = Duration::from_millis(25);
+/// 走り続けるコマンドの出力を transcript へ流す間隔（見に行く間隔はここまで伸ばす）。
+const SHELL_LIVE_INTERVAL: Duration = Duration::from_millis(400);
+/// 実行中に見せる出力の末尾の行数（全部は終わってから）。
+const SHELL_LIVE_TAIL_LINES: usize = 8;
 /// 終了を見に行く間隔。
 const SHELL_POLL: Duration = Duration::from_millis(30);
 /// 子が終わった後、出力の読み残しを待つ上限（バックグラウンドへ逃げた孫が stdout を握り続けても
@@ -35,7 +41,6 @@ pub(crate) enum ShellStatus {
     Running,
     /// 終了した。終了コードはシグナルで落ちた場合 `None`。
     Exited(Option<i32>),
-    TimedOut,
     Stopped,
     /// 起動できなかった（出力欄に理由を入れる）。
     Failed,
@@ -173,24 +178,21 @@ pub(crate) fn context_block(command: &str, output: &str, status: ShellStatus) ->
         ShellStatus::Running | ShellStatus::Exited(Some(0)) => String::new(),
         ShellStatus::Exited(Some(code)) => format!("(exit code {code})\n"),
         ShellStatus::Exited(None) => "(terminated by a signal)\n".to_string(),
-        ShellStatus::TimedOut => format!(
-            "(stopped after {} seconds without finishing)\n",
-            SHELL_TIMEOUT.as_secs()
-        ),
         ShellStatus::Stopped => "(stopped by the user before finishing)\n".to_string(),
         ShellStatus::Failed => "(could not be started)\n".to_string(),
     };
     format!("<bash-input>{command}</bash-input>\n<bash-stdout>{output}</bash-stdout><bash-stderr></bash-stderr>\n{note}")
 }
 
-/// 実行して終わるまで待つ（**blocking**・background executor で呼ぶ）。
-/// 戻り値は整形済みの出力全体と終わり方。
+/// 実行して終わるまで待つ（**blocking**・専用スレッドで呼ぶ。GPUI の background executor は
+/// 数本しかないので、何分も走るコマンドで塞がない）。出力は `collected` へ溜まり続ける
+/// （実行中の表示は呼び出し側がそこを覗く）。戻り値は整形済みの出力全体と終わり方。
 pub(crate) fn run_blocking(
     host: &dyn Host,
     cwd: &Path,
     command: &str,
     stop: &AtomicBool,
-    timeout: Duration,
+    collected: Arc<Mutex<Collected>>,
 ) -> (String, ShellStatus) {
     let spec = host.shell_script(&merged_script(command, host.has_posix_shell()), cwd);
     let mut process = match host.spawn_process(&spec) {
@@ -206,10 +208,8 @@ pub(crate) fn run_blocking(
         Ok(stdout) => stdout,
         Err(error) => return (format!("{error:#}"), ShellStatus::Failed),
     };
-    let collected = Arc::new(Mutex::new(Collected::default()));
     let reader = spawn_reader(stdout, collected.clone());
 
-    let started = Instant::now();
     let mut failure = None;
     let status = loop {
         match process.try_wait() {
@@ -223,12 +223,9 @@ pub(crate) fn run_blocking(
         if stop.load(Ordering::Acquire) {
             break ShellStatus::Stopped;
         }
-        if started.elapsed() >= timeout {
-            break ShellStatus::TimedOut;
-        }
         std::thread::sleep(SHELL_POLL);
     };
-    if matches!(status, ShellStatus::TimedOut | ShellStatus::Stopped) {
+    if status == ShellStatus::Stopped {
         let marker_pid = {
             let collected = collected
                 .lock()
@@ -237,7 +234,7 @@ pub(crate) fn run_blocking(
         };
         kill_tree(host, cwd, &process, marker_pid);
     }
-    // 打ち切りならここで本体も kill される（終わっていれば回収するだけ）。
+    // 止めたならここで本体も kill される（終わっていれば回収するだけ）。
     drop(process);
     let deadline = Instant::now() + SHELL_READER_GRACE;
     while !reader.is_finished() && Instant::now() < deadline {
@@ -248,27 +245,45 @@ pub(crate) fn run_blocking(
     }
     // 見切った場合、読み手は孫が stdout を閉じるまで裏で読み続けて自然に終わる（ここでは待たない）。
 
-    let (bytes, clipped) = {
-        let collected = collected
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (collected.bytes.clone(), collected.clipped)
-    };
-    let mut output = clean_output(&String::from_utf8_lossy(split_pid_marker(&bytes).1));
-    if clipped {
-        output.push_str(&format!("\n{}", i18n::t!("agent.shell_output_clipped")));
-    }
-    if let Some(failure) = failure {
-        output = failure;
-    }
+    let output = failure.unwrap_or_else(|| collected_text(&collected));
     (output, status)
 }
 
+/// 読み取り中の出力（実行スレッドと表示側が共有する）。
 #[derive(Default)]
-struct Collected {
+pub(crate) struct Collected {
     bytes: Vec<u8>,
     /// 上限を超えて読み捨てた。
     clipped: bool,
+}
+
+/// ここまでに届いた出力を、表示できる文字にして返す（PID の目印は外す）。
+fn collected_text(collected: &Mutex<Collected>) -> String {
+    let collected = collected
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut output = clean_output(&String::from_utf8_lossy(
+        split_pid_marker(&collected.bytes).1,
+    ));
+    if collected.clipped {
+        output.push_str(&format!("\n{}", i18n::t!("agent.shell_output_clipped")));
+    }
+    output
+}
+
+/// 届いたバイト数（増えた時だけ実行中の表示を更新するため）。
+fn collected_len(collected: &Mutex<Collected>) -> usize {
+    collected
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .bytes
+        .len()
+}
+
+/// 実行中の `!`（停止の宛先。どのスレッドのものかを持つ＝閉じたスレッドの分だけ止められる）。
+pub(crate) struct ShellRun {
+    thread_id: String,
+    stop: Arc<AtomicBool>,
 }
 
 fn spawn_reader(
@@ -306,7 +321,6 @@ pub(crate) fn encode_turn(
     let (status, code) = match status {
         ShellStatus::Running => ("running", None),
         ShellStatus::Exited(code) => ("exited", code),
-        ShellStatus::TimedOut => ("timed_out", None),
         ShellStatus::Stopped => ("stopped", None),
         ShellStatus::Failed => ("failed", None),
     };
@@ -337,7 +351,6 @@ pub(crate) fn decode_turn(content: &str) -> Entry {
         .and_then(|v| v.as_i64())
         .and_then(|code| i32::try_from(code).ok());
     let status = match text("status").as_deref() {
-        Some("timed_out") => ShellStatus::TimedOut,
         Some("stopped") => ShellStatus::Stopped,
         Some("failed") => ShellStatus::Failed,
         // `running` は書かない（persist が手前で止まる）。来たら途中で落ちた＝終わり方不明。
@@ -357,6 +370,13 @@ pub(crate) fn decode_turn(content: &str) -> Entry {
     }
 }
 
+/// 実行 id から transcript 上の `!` 行を引く。
+fn shell_entry_index(entries: &[Entry], run: u64) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| matches!(entry, Entry::Shell { run: Some(id), .. } if *id == run))
+}
+
 /// transcript の状態表示（成功は何も出さない）。
 fn status_label(status: ShellStatus) -> Option<String> {
     match status {
@@ -364,10 +384,6 @@ fn status_label(status: ShellStatus) -> Option<String> {
         ShellStatus::Exited(Some(0)) => None,
         ShellStatus::Exited(Some(code)) => Some(i18n::t!("agent.shell_exit", "code" => code)),
         ShellStatus::Exited(None) => Some(i18n::t!("agent.shell_signal")),
-        ShellStatus::TimedOut => Some(i18n::t!(
-            "agent.shell_timed_out",
-            "minutes" => SHELL_TIMEOUT.as_secs() / 60
-        )),
         ShellStatus::Stopped => Some(i18n::t!("agent.shell_stopped")),
         ShellStatus::Failed => Some(i18n::t!("agent.shell_failed")),
     }
@@ -466,7 +482,13 @@ impl AgentPanel {
         let run = self.next_shell_run;
         self.next_shell_run += 1;
         let stop = Arc::new(AtomicBool::new(false));
-        self.shell_stops.insert(run, stop.clone());
+        self.shell_stops.insert(
+            run,
+            ShellRun {
+                thread_id: thread_id.clone(),
+                stop: stop.clone(),
+            },
+        );
         if let Some(thread) = self.threads.get_mut(thread_index) {
             thread.entries.push(Entry::Shell {
                 run: Some(run),
@@ -478,21 +500,113 @@ impl AgentPanel {
             thread.last_active_at_ms = now_unix_ms();
         }
         cx.notify();
+        let collected = Arc::new(Mutex::new(Collected::default()));
+        let (done_tx, mut done_rx) = futures::channel::oneshot::channel();
+        let runner_collected = collected.clone();
+        std::thread::spawn(move || {
+            let result = run_blocking(host.as_ref(), &cwd, &command, &stop, runner_collected);
+            // 受け手（パネル）が先に消えていれば、結果の行き先は無い。
+            done_tx.send(result).ok();
+        });
+        // 終わりは「見に行く」（実行スレッドから GPUI のタスクを起こさない）。短いコマンドを待たせない
+        // よう間隔は短く始めて、走り続けるものほど [`SHELL_LIVE_INTERVAL`] まで伸ばす。
         cx.spawn(async move |panel, cx| {
-            let (output, status) =
-                cx.background_executor()
-                    .spawn(async move {
-                        run_blocking(host.as_ref(), &cwd, &command, &stop, SHELL_TIMEOUT)
-                    })
-                    .await;
-            // パネルが閉じていれば表示先が無い＝結果は捨てる。
-            panel
-                .update(cx, |panel, cx| {
-                    panel.finish_shell(&thread_id, run, output, status, cx)
-                })
-                .ok();
+            let mut shown_len = 0;
+            let mut interval = SHELL_FIRST_POLL;
+            loop {
+                cx.background_executor().timer(interval).await;
+                interval = (interval * 2).min(SHELL_LIVE_INTERVAL);
+                match done_rx.try_recv() {
+                    Ok(None) => {}
+                    finished => {
+                        let (output, status) = finished.ok().flatten().unwrap_or_else(|| {
+                            // 実行スレッドが結果を返さずに落ちた。
+                            (i18n::t!("agent.shell_failed"), ShellStatus::Failed)
+                        });
+                        // パネルが閉じていれば表示先が無い＝結果は捨てる。
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.finish_shell(&thread_id, run, output, status, cx)
+                            })
+                            .ok();
+                        return;
+                    }
+                }
+                let len = collected_len(&collected);
+                if len == shown_len {
+                    continue;
+                }
+                shown_len = len;
+                let text = collected_text(&collected);
+                let shown = panel.update(cx, |panel, cx| {
+                    panel.show_shell_progress(&thread_id, run, &text, cx)
+                });
+                if shown.is_err() {
+                    return; // パネルが消えた（実行は on_release の停止で止まる）
+                }
+            }
         })
         .detach();
+    }
+
+    /// 実行中の出力を `!` 行へ流す（末尾だけ見せる。全文は終わってから）。
+    fn show_shell_progress(
+        &mut self,
+        thread_id: &str,
+        run: u64,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.id.clone());
+        let Some(thread) = self.shell_thread_mut(thread_id) else {
+            return;
+        };
+        let Some(entry_index) = shell_entry_index(&thread.entries, run) else {
+            return;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = lines[lines.len().saturating_sub(SHELL_LIVE_TAIL_LINES)..].join("\n");
+        if let Entry::Shell {
+            output,
+            output_lines,
+            ..
+        } = &mut thread.entries[entry_index]
+        {
+            *output = (!tail.is_empty()).then(|| SharedString::from(tail));
+            *output_lines = lines.len();
+        }
+        if active.as_deref() == Some(thread_id) {
+            self.transcript_list
+                .remeasure_items(entry_index..entry_index + 1);
+            cx.notify();
+        }
+    }
+
+    /// `!` を走らせたスレッド（開いているもの・閉じて復元待ちのもの両方から探す）。
+    fn shell_thread_mut(&mut self, thread_id: &str) -> Option<&mut Thread> {
+        self.threads
+            .iter_mut()
+            .chain(self.closed_threads.iter_mut())
+            .find(|thread| thread.id == thread_id)
+    }
+
+    /// スレッドを閉じる時: そのスレッドで走っている `!` を止める（裏で走り続けさせない）。
+    pub(crate) fn stop_thread_shells(&self, thread_id: &str) {
+        for shell in self.shell_stops.values() {
+            if shell.thread_id == thread_id {
+                shell.stop.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    /// パネルが消える時: 走っている `!` を全部止める。
+    pub(crate) fn stop_all_shells(&self) {
+        for shell in self.shell_stops.values() {
+            shell.stop.store(true, Ordering::Release);
+        }
     }
 
     /// 実行が終わった `!` の結果を transcript へ書き、次の送信に添える分として積む。
@@ -505,16 +619,14 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.shell_stops.remove(&run);
-        let Some(thread_index) = self.thread_index_by_id(thread_id) else {
-            return; // 実行中にスレッドが閉じられた
-        };
+        // 開いているスレッドの位置（閉じたスレッドなら None＝表示も保存もしない）。
+        let open_index = self.thread_index_by_id(thread_id);
         let (shown, output_lines) = cap_output(&output);
-        let thread = &mut self.threads[thread_index];
-        let Some(entry_index) = thread
-            .entries
-            .iter()
-            .position(|entry| matches!(entry, Entry::Shell { run: Some(id), .. } if *id == run))
-        else {
+        // 閉じたスレッドの分も書き換える（⌘⇧T で戻した時に「実行中…」のまま残さない）。
+        let Some(thread) = self.shell_thread_mut(thread_id) else {
+            return;
+        };
+        let Some(entry_index) = shell_entry_index(&thread.entries, run) else {
             return;
         };
         let Entry::Shell { command, .. } = &thread.entries[entry_index] else {
@@ -533,6 +645,9 @@ impl AgentPanel {
             status,
         };
         let agent_running = thread.running;
+        let Some(thread_index) = open_index else {
+            return;
+        };
         if thread_index == self.active {
             // 出力が付いて背が伸びた＝測り直す（末尾以外は描画側が測り直さない）。
             self.transcript_list
@@ -546,8 +661,8 @@ impl AgentPanel {
     }
 
     fn stop_shell(&mut self, run: u64) {
-        if let Some(stop) = self.shell_stops.get(&run) {
-            stop.store(true, Ordering::Release);
+        if let Some(shell) = self.shell_stops.get(&run) {
+            shell.stop.store(true, Ordering::Release);
         }
     }
 
@@ -726,6 +841,21 @@ impl AgentPanel {
             .gap(px(4.))
             .child(header);
         match output {
+            // 実行中は流れてくる末尾をそのまま見せる（畳まない＝進み具合が見える）。
+            Some(output) if status == ShellStatus::Running => {
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(4.))
+                        .pt(px(3.))
+                        .font_family("Guguru Sans Code")
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(div().flex_none().child("⎿"))
+                        .child(div().flex_1().min_w_0().child(output.clone())),
+                );
+            }
             Some(output) => {
                 body = body.child(self.render_step_result(index, output, output_lines, None, cx));
             }
@@ -814,8 +944,8 @@ mod tests {
         );
         let failed = context_block("false", "", ShellStatus::Exited(Some(1)));
         assert!(failed.ends_with("(exit code 1)\n"));
-        let timed_out = context_block("sleep 999", "", ShellStatus::TimedOut);
-        assert!(timed_out.contains("stopped after 120 seconds"));
+        let stopped = context_block("sleep 999", "", ShellStatus::Stopped);
+        assert!(stopped.ends_with("(stopped by the user before finishing)\n"));
     }
 
     #[test]
@@ -859,50 +989,86 @@ mod tests {
             &cwd,
             "echo out; echo err 1>&2; exit 3",
             &stop,
-            Duration::from_secs(10),
+            Arc::default(),
         );
         assert_eq!(output.trim_end(), "out\nerr");
         assert_eq!(status, ShellStatus::Exited(Some(3)));
     }
 
+    /// 別スレッドから停止を立てる（停止ボタン相当）。
+    #[cfg(unix)]
+    fn stop_after(stop: &Arc<AtomicBool>, delay: Duration) {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            stop.store(true, Ordering::Release);
+        });
+    }
+
     #[cfg(unix)]
     #[test]
-    fn run_blocking_gives_eof_on_stdin_and_times_out() {
+    fn run_blocking_gives_eof_on_stdin_and_stops_on_request() {
         let host = LocalHost::shared();
-        let stop = AtomicBool::new(false);
+        let stop = Arc::new(AtomicBool::new(false));
         let cwd = std::env::temp_dir();
         // stdin は即 EOF＝入力待ちで固まらない。
-        let (_, status) = run_blocking(host.as_ref(), &cwd, "cat", &stop, Duration::from_secs(10));
+        let (_, status) = run_blocking(host.as_ref(), &cwd, "cat", &stop, Arc::default());
         assert_eq!(status, ShellStatus::Exited(Some(0)));
+        // 時間では打ち切らない。止めるのは停止だけ。
         let started = Instant::now();
-        let (_, status) = run_blocking(
-            host.as_ref(),
-            &cwd,
-            "exec sleep 30",
-            &stop,
-            Duration::from_millis(200),
-        );
-        assert_eq!(status, ShellStatus::TimedOut);
+        stop_after(&stop, Duration::from_millis(300));
+        let (_, status) = run_blocking(host.as_ref(), &cwd, "exec sleep 30", &stop, Arc::default());
+        assert_eq!(status, ShellStatus::Stopped);
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
-    /// 打ち切りでシェルの子（`npm run dev` のような長生きプロセス）まで止まる。
+    /// 実行中も出力が共有バッファへ溜まっていく（実行中の表示はここを覗く）。
     #[cfg(unix)]
     #[test]
-    fn timing_out_kills_child_processes_too() {
+    fn output_is_visible_while_running() {
         let host = LocalHost::shared();
-        let stop = AtomicBool::new(false);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cwd = std::env::temp_dir();
+        let collected: Arc<Mutex<Collected>> = Arc::default();
+        let runner_collected = collected.clone();
+        let runner_stop = stop.clone();
+        let runner = std::thread::spawn(move || {
+            run_blocking(
+                LocalHost::shared().as_ref(),
+                &std::env::temp_dir(),
+                "echo first; sleep 30",
+                &runner_stop,
+                runner_collected,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while collected_text(&collected).trim() != "first" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            collected_text(&collected).trim(),
+            "first",
+            "終わる前に見えている"
+        );
+        stop.store(true, Ordering::Release);
+        let (output, status) = runner.join().expect("実行スレッドが終わる");
+        assert_eq!(status, ShellStatus::Stopped);
+        assert_eq!(output.trim(), "first");
+        drop((host, cwd));
+    }
+
+    /// 停止でシェルの子（`npm run dev` のような長生きプロセス）まで止まる。
+    #[cfg(unix)]
+    #[test]
+    fn stopping_kills_child_processes_too() {
+        let host = LocalHost::shared();
+        let stop = Arc::new(AtomicBool::new(false));
         let cwd = std::env::temp_dir();
         let pid_file = cwd.join(format!("necoder-shell-child-{}", std::process::id()));
         let command = format!("sleep 37 & echo $! > '{}'; wait", pid_file.display());
-        let (_, status) = run_blocking(
-            host.as_ref(),
-            &cwd,
-            &command,
-            &stop,
-            Duration::from_millis(500),
-        );
-        assert_eq!(status, ShellStatus::TimedOut);
+        stop_after(&stop, Duration::from_millis(500));
+        let (_, status) = run_blocking(host.as_ref(), &cwd, &command, &stop, Arc::default());
+        assert_eq!(status, ShellStatus::Stopped);
         let child = std::fs::read_to_string(&pid_file).expect("子の PID が書かれている");
         std::fs::remove_file(&pid_file).expect("後始末");
         let alive = std::process::Command::new("kill")

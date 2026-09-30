@@ -1724,7 +1724,7 @@ pub struct AgentPanel {
     /// composer の本文が `!` で始まっている（シェルモード・#37）。composer の通知ごとに見直す。
     composer_shell: bool,
     /// 実行中の `!` コマンドの停止フラグ（実行 id → フラグ）。終わったら外す。
-    shell_stops: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
+    shell_stops: HashMap<u64, shell::ShellRun>,
     /// 次に振る `!` 実行の id（パネル内で一意であればよい）。
     next_shell_run: u64,
     /// Enter 送信の現在値（送信ヒント表示 + トグルの状態。composer にも反映する）。
@@ -1871,6 +1871,8 @@ impl AgentPanel {
             ComposerEvent::ContentHeightChanged => cx.notify(),
         })
         .detach();
+        // パネルが消える時は走っている `!` を止める（裏で子プロセスを走らせ続けない）。
+        cx.on_release(|panel, _cx| panel.stop_all_shells()).detach();
         // 先頭 `!`（シェルモード・#37）の見た目は composer の本文で決まる。打つたびに見直す。
         cx.observe(&composer, |panel, _composer, cx| {
             panel.sync_composer_shell(cx)
@@ -3932,6 +3934,7 @@ PYEOF"#;
         }
         self.save_active_draft(cx);
         let mut closed = self.threads.remove(index);
+        self.stop_thread_shells(&closed.id); // 閉じたスレッドの `!` は止める
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
         closed.running = false;
         closed.turn_started_at = None;
@@ -11789,7 +11792,18 @@ PYEOF"#;
             command_rx.try_recv().is_err(),
             "エージェントへは何も送らない"
         );
-        cx.run_until_parked();
+        // 実行は専用スレッドなので、終わるまで実時間で待つ（テストの時計も進めて live 更新を回す）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(500));
+            cx.run_until_parked();
+            let running = panel.read_with(cx, |panel, _cx| !panel.shell_stops.is_empty());
+            if !running || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         panel.update(cx, |panel, cx| {
             let active = panel.active;
             match panel.threads[active].entries.last() {

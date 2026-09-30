@@ -123,7 +123,6 @@ agent:
   shell_stop: Stop
   shell_exit: exit code %{code}
   shell_signal: killed by a signal
-  shell_timed_out: "stopped after %{minutes} min"
   shell_stopped: Stopped
   shell_failed: Couldn't run
   shell_no_output: (no output)

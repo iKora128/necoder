@@ -124,7 +124,6 @@ agent:
   shell_stop: 停止
   shell_exit: 終了コード %{code}
   shell_signal: シグナルで終了
-  shell_timed_out: "%{minutes} 分で打ち切り"
   shell_stopped: 停止しました
   shell_failed: 実行できません
   shell_no_output: （出力なし）
