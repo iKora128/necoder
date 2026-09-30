@@ -23,7 +23,7 @@
 | ↳ **Chat プリセット**（セッションの作り方。プロンプト・ツール・設定の継承・MCP・フォルダの束。正は `CHAT.md` §5） | `acp_client::preset::SessionPreset`（中身を詰めるのは `chat_core::preset::session_preset`） | — | — |
 | ↳ **チャットのフォルダ**（会話ごとの永続の作業場所 = cwd。成果物はその中の `artifacts/`。隔離ではない） | `chat_dir`（`<書類>/necoder/<YYYY-MM-DD 先頭の文>/`・`paths::documents_dir()`） | フォルダ | Folder |
 | **artifact**（エージェントがチャットのフォルダの `artifacts/` に書いた、見せるための単体ファイル。表示は既存プレビュー） | `artifact` | artifact | Artifact |
-| ↳ **添付**（composer へドロップしたファイル・フォルダ。読み取りは自動許可・書き込みは初回確認） | `Thread.context`（既存の @メンション） | 添付 | Attachment |
+| ↳ **添付**（composer へドロップしたファイル・フォルダ。読み取りは自動許可・書き込みは初回確認） | `Thread.context`（下の「添付」と同じ物。本文の @メンションとは別） | 添付 | Attachment |
 | ↳ **引用**（エディタで選んだ行を `path:10-14` と抜粋のコードブロックにして composer の末尾へ足す。送信はしない・その下に注記を書く。⌥⌘K・O29 / D04。変更レビューの**注記**とは別＝保存しない） | `QuoteSelectionInThread` / `quote_lines` / `AgentPanel::append_quote_to_composer` | 引用 | Quote |
 | ↳ **プレビューチップ**（ツールカードからプレビュー表示で開く） | `preview_chip` | プレビュー | Preview |
 | **Fleet サイドバー**（状態一覧） | `fleet_sidebar`（← `herd`） | Fleet サイドバー | Fleet sidebar |
@@ -134,6 +134,8 @@
 | ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化。ほかの窓が残る時はその窓だけを最小化。プロセスは止めないが、終了・クラッシュを越えては続かない） | `QuitChoice::KeepRunning` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |
 | **AI 全画面**（solo で中央エディタを Agent に差し替える。左/下ドックは各自の ON/OFF） | `agent_full_screen` / `ToggleAgentFullScreen` | AI を全画面 | AI full screen |
 | **「最新へ」ボタン**（transcript を遡り中だけ右下に出る・最下部へ戻す） | `render_jump_to_latest` | 最新へ | Jump to latest |
+| **添付**（＋ context / D&D で composer に付けるファイル。× で外すまで**毎回**送信の先頭に `@パス` で付く。Chat では書ける範囲の裁定にも使う） | `Thread.context`（チップ） | 添付 | Attachment |
+| **@メンション**（composer で `@` を打って選ぶ。本文に `@パス` が入る＝**その 1 通だけ**） | `MentionCompletion` / `mention_query_at` / `mention_token`（`@"…"` の綴りは添付と共有） | @メンション | @mention |
 | **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V。開発サーバを見るのは別のタブ＝下の Web タブ） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |
 | ↳ **Web タブ**（localhost の開発サーバを見るタブ。読み込めるのはループバックの http(s) だけ・汎用ブラウザではない。鍵は URL。入口はパレット「プレビュー: localhost を開く…」と transcript / Markdown のリンク） | `TabContent::Web` / `WebPreviewView` / `webview_view::localhost` / `Workspace::open_url` | Web タブ | Web tab |
 | ↳ **Design モード**（Web タブのページの要素を選び、切り抜きと説明を composer へ「要素のチップ」として添える。送信はしない。⌘⇧D） | `ToggleDesignMode` / `webview_view::design` / `ElementCapture` / `WebPreviewEvent::ElementPicked` | Design モード / 要素のチップ | Design Mode / element chip |

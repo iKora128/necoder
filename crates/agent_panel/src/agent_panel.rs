@@ -1899,6 +1899,126 @@ fn fuzzy_matches(haystack: &str, query: &str) -> bool {
     query.chars().all(|needle| chars.any(|c| c == needle))
 }
 
+/// ＋context と @メンションの候補（先頭 `limit` 件）。クエリの文字が順に現れるパスのうち、
+/// 語をそのまま含む物を先に、同じ扱いの中では短いパス（浅い・名前に近い）を先に並べる。
+fn file_candidates(files: &[SharedString], query: &str, limit: usize) -> Vec<SharedString> {
+    let query = query.to_lowercase();
+    let mut matches: Vec<(bool, usize, &SharedString)> = files
+        .iter()
+        .filter_map(|path| {
+            let lower = path.to_lowercase();
+            fuzzy_matches(&lower, &query).then(|| (!lower.contains(&query), path.len(), path))
+        })
+        .collect();
+    matches.sort_by_key(|(scattered, length, _)| (*scattered, *length));
+    matches
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, path)| path.clone())
+        .collect()
+}
+
+/// composer の `@` メンション補完（`/` 補完と同じ作り・2026-09-30）。
+#[derive(Default)]
+struct MentionCompletion {
+    /// 打ちかけの `@語`（`@` の byte 位置, 語）。変わった時だけ候補を引き直す（点滅の notify では
+    /// 2000 件を舐め直さない）。
+    word: Option<(usize, String)>,
+    /// 候補（`context_files` と同じ一覧を [`file_candidates`] で絞った物）。
+    candidates: Vec<SharedString>,
+    selected: usize,
+    /// Esc で閉じた `@` の位置。その `@` の語を打っている間は開き直さない。
+    dismissed_at: Option<usize>,
+}
+
+impl MentionCompletion {
+    /// 候補窓を出しているか（キーを先取りするか）。
+    fn open(&self) -> bool {
+        self.word
+            .as_ref()
+            .is_some_and(|(start, _)| self.dismissed_at != Some(*start))
+            && !self.candidates.is_empty()
+    }
+}
+
+/// `@` 補完に出す候補の最大件数。
+const MENTION_POPUP_ROWS: usize = 8;
+
+/// キャレットの直前が打ちかけの `@語` なら `(@ の byte 位置, 語)`。
+///
+/// - 語は空白を含まず、キャレットの直後は行末か空白（書き終えた語の途中へ戻っただけでは開かない）
+/// - `@` の直前は行頭・空白・ASCII 以外（日本語の直後でも開く。確定時に空白を挟む）。
+///   `a@b` のようなメールアドレスでは開かない
+/// - 日本語入力のままの `＠ｆｌｅ` も読む（語は半角に寄せて返す）
+fn mention_query_at(before: &str, after: &str) -> Option<(usize, String)> {
+    if after.chars().next().is_some_and(|c| !c.is_whitespace()) {
+        return None;
+    }
+    let (start, sign) = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| matches!(c, '@' | '＠') || c.is_whitespace())?;
+    if sign.is_whitespace() {
+        return None;
+    }
+    let opens = before[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|c| c.is_whitespace() || !c.is_ascii());
+    let word = before[start + sign.len_utf8()..]
+        .chars()
+        .map(half_width)
+        .collect();
+    opens.then_some((start, word))
+}
+
+/// 全角英数記号（U+FF01〜U+FF5E）を半角へ。日本語入力のまま打った `＠ｆｌｅ` をファイル名と突き合わせる。
+fn half_width(c: char) -> char {
+    match c {
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        _ => c,
+    }
+}
+
+/// 添付・@メンションを Claude Code が**ファイルとして読む**綴り。Claude Code が拾うのは `@"…"` か、
+/// 空白までの `@…`（末尾は英数字で終わる所まで縮む）。空白を含むパスや英数字で終わらないパス
+/// （`メモ`・`(3)`）は囲まないと手前で切れ、添付されない（2026-09-30 に同梱の claude で実測）。
+/// `"` を含むパスは囲めないのでそのまま（エージェントが本文のパスを見て自分で読む）。
+fn mention_token(path: &str) -> String {
+    let cut_short = path.chars().any(char::is_whitespace)
+        || !path
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    if cut_short && !path.contains('"') {
+        format!("@\"{path}\"")
+    } else {
+        format!("@{path}")
+    }
+}
+
+/// 候補を確定したときに `@語` と置き換える文字列。Claude Code は `@` の直前が行頭・空白・`。、？！`
+/// のときだけ参照として読むので、日本語の直後なら空白を 1 つ挟む。末尾にも空白を足して語を閉じる
+/// （閉じないとキャレットが語の末尾に残り、候補がまた開く）。
+fn mention_insertion(before: Option<char>, path: &str) -> String {
+    let gap = before.is_some_and(|c| !c.is_whitespace() && !matches!(c, '。' | '、' | '？' | '！'));
+    format!("{}{} ", if gap { " " } else { "" }, mention_token(path))
+}
+
+/// 候補の 1 行: ファイル名と、その置き場所（プロジェクト相対のフォルダ）。
+fn split_file_label(path: &str) -> (SharedString, SharedString) {
+    match path.rsplit_once('/') {
+        Some((directory, name)) => (
+            SharedString::from(name.to_string()),
+            SharedString::from(directory.to_string()),
+        ),
+        None => (
+            SharedString::from(path.to_string()),
+            SharedString::default(),
+        ),
+    }
+}
+
 /// 既定のスレッド名（"スレッド1" / "Thread 1"）。表示言語に追従する。
 fn default_thread_name(index: usize) -> String {
     i18n::t!("agent.default_thread_name", "n" => index + 1)
@@ -1988,9 +2108,10 @@ struct SlashCompletion {
     dismissed: bool,
 }
 
-/// `/` 補完が開いている間に先取りするキー（composer の Editor アクションから写す）。
+/// 補完（`/` コマンド・`@` メンション）が開いている間に先取りするキー（composer の Editor
+/// アクションから写す）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlashKey {
+enum CompletionKey {
     Up,
     Down,
     /// Enter / Tab: 選んでいる候補を入れる。
@@ -2313,6 +2434,8 @@ pub struct AgentPanel {
     auto_naming: std::collections::HashSet<String>,
     /// composer の `/` 補完（O2）。composer の変化を observe して局面を読み直す。
     slash: SlashCompletion,
+    /// composer の `@` メンション補完。`/` 補完と同じく composer の変化で読み直す。
+    mention: MentionCompletion,
     /// composer の本文が `!` のコマンド（シェルモード・#37）。立っている間 composer の下にヒントを出す。
     /// `/` 補完と同じく composer の変化で読み直す。
     shell_input: bool,
@@ -2430,6 +2553,12 @@ impl AgentPanel {
         // 点滅の notify でも呼ばれるが、局面が変わらなければ何もしない（再描画を増やさない）。
         cx.observe(&composer, |panel, _composer, cx| {
             panel.refresh_slash_state(cx)
+        })
+        .detach();
+        // `@` を打ったらファイル候補を出す（`/` 補完と同じく、打鍵・IME・削除・クリックでのキャレット
+        // 移動のどれでも composer は notify するので、ここで開閉を決める）。
+        cx.observe(&composer, |panel, _composer, cx| {
+            panel.refresh_mention_state(cx)
         })
         .detach();
         // 画像の貼り付け（スクリーンショット）→ 添付にして、次の 1 通に image ブロックで添える。
@@ -2792,6 +2921,7 @@ PYEOF"#;
             preview_exists: RefCell::new(HashMap::new()),
             auto_naming: std::collections::HashSet::new(),
             slash: SlashCompletion::default(),
+            mention: MentionCompletion::default(),
             shell_input: false,
             _stop_shell_on_quit: stop_shell_on_quit,
         }
@@ -3269,6 +3399,9 @@ PYEOF"#;
         self.context_files = files;
         // 索引が届くまで解決できなかったトークンを引き直す（裸のファイル名はこの索引で効く）。
         self.forget_link_resolutions();
+        // 一覧が届く前に打っていた `@語` の候補も引き直す。
+        self.mention.word = None;
+        self.refresh_mention_state(cx);
         cx.notify();
     }
 
@@ -6552,7 +6685,7 @@ PYEOF"#;
     /// `/` 補完が開いている間の ↑↓ / Enter・Tab / Esc。composer の Editor アクション（MoveUp /
     /// MoveDown / Newline / TabIndent / Cancel）を capture で先取りする。開いていない時・IME 変換中は
     /// 何もしない＝アクションはそのまま composer へ流れる（変換確定の Enter を奪わない）。
-    fn on_slash_key(&mut self, key: SlashKey, cx: &mut Context<Self>) {
+    fn on_slash_key(&mut self, key: CompletionKey, cx: &mut Context<Self>) {
         if self.composer.read(cx).has_marked_text() {
             return;
         }
@@ -6563,12 +6696,91 @@ PYEOF"#;
         cx.stop_propagation();
         let selected = self.slash.selected.min(items.len() - 1);
         match key {
-            SlashKey::Up => self.slash.selected = (selected + items.len() - 1) % items.len(),
-            SlashKey::Down => self.slash.selected = (selected + 1) % items.len(),
-            SlashKey::Accept => self.accept_slash_command(items[selected], cx),
-            SlashKey::Dismiss => self.slash.dismissed = true,
+            CompletionKey::Up => self.slash.selected = (selected + items.len() - 1) % items.len(),
+            CompletionKey::Down => self.slash.selected = (selected + 1) % items.len(),
+            CompletionKey::Accept => self.accept_slash_command(items[selected], cx),
+            CompletionKey::Dismiss => self.slash.dismissed = true,
         }
         cx.notify();
+    }
+
+    /// 補完が開いている間の ↑↓ / Enter・Tab / Esc。`@` を先に見る（`/review @src` の最中は
+    /// `/` 補完は閉じている＝両方が同時に開くことは無い）。
+    fn on_completion_key(&mut self, key: CompletionKey, cx: &mut Context<Self>) {
+        if !self.on_mention_key(key, cx) {
+            self.on_slash_key(key, cx);
+        }
+    }
+
+    /// composer の本文とキャレットから `@` 補完の局面を読み直す（composer の notify ごと）。
+    fn refresh_mention_state(&mut self, cx: &mut Context<Self>) {
+        let word = {
+            let composer = self.composer.read(cx);
+            let before = composer.text_before_caret(usize::MAX);
+            // 点滅の notify でも呼ばれるので、`@` が無ければ本文全体は写さない。
+            if before.contains(['@', '＠']) {
+                let text = composer.plain_text();
+                mention_query_at(&before, text.get(before.len()..).unwrap_or_default())
+            } else {
+                None
+            }
+        };
+        if word == self.mention.word {
+            return;
+        }
+        // Esc で閉じた `@` から離れたら（消した・別の語へ移った）、次の `@` ではまた開く。
+        if word.as_ref().map(|(start, _)| *start) != self.mention.dismissed_at {
+            self.mention.dismissed_at = None;
+        }
+        self.mention.candidates = word
+            .as_ref()
+            .map(|(_, query)| file_candidates(&self.context_files, query, MENTION_POPUP_ROWS))
+            .unwrap_or_default();
+        self.mention.word = word;
+        self.mention.selected = 0;
+        cx.notify();
+    }
+
+    /// `@` 補完が開いている間のキー。開いていない時・IME 変換中は false（`/` 補完と composer へ流す）。
+    fn on_mention_key(&mut self, key: CompletionKey, cx: &mut Context<Self>) -> bool {
+        if !self.mention.open() || self.composer.read(cx).has_marked_text() {
+            return false;
+        }
+        cx.stop_propagation();
+        let count = self.mention.candidates.len();
+        let selected = self.mention.selected.min(count - 1);
+        match key {
+            CompletionKey::Up => self.mention.selected = (selected + count - 1) % count,
+            CompletionKey::Down => self.mention.selected = (selected + 1) % count,
+            CompletionKey::Accept => self.accept_mention(selected, cx),
+            CompletionKey::Dismiss => {
+                self.mention.dismissed_at = self.mention.word.as_ref().map(|(start, _)| *start)
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// 候補 `index` で `@語` を置き換える（本文に `@パス ` が入る＝その 1 通だけに付く参照。
+    /// ＋context のチップは外すまで毎回付く）。
+    fn accept_mention(&mut self, index: usize, cx: &mut Context<Self>) {
+        let (Some((start, _)), Some(path)) = (
+            self.mention.word.clone(),
+            self.mention.candidates.get(index).cloned(),
+        ) else {
+            return;
+        };
+        let before = self.composer.read(cx).text_before_caret(usize::MAX);
+        let Some(prefix) = before.get(..start) else {
+            return;
+        };
+        let insertion = mention_insertion(prefix.chars().next_back(), &path);
+        let caret = before.len();
+        // 1 回の編集で置き換える＝⌘Z で打っていた `@語` に戻せる。
+        self.composer.update(cx, |composer, cx| {
+            composer.replace_ranges(&[start..caret], &insertion, cx)
+        });
+        self.mention.selected = 0;
     }
 
     /// 候補を composer へ入れる（`/name ` に置き換え・キャレットは末尾＝引数を続けて打てる）。
@@ -6703,7 +6915,7 @@ PYEOF"#;
                     .context
                     .iter()
                     .filter(|path| !image_paths.contains(path))
-                    .map(|path| format!("@{path}\n"))
+                    .map(|path| format!("{}\n", mention_token(path)))
                     .collect()
             })
             .unwrap_or_default();
@@ -10650,15 +10862,8 @@ PYEOF"#;
             .get(self.active)
             .map(|thread| thread.context.clone())
             .unwrap_or_default();
-        // fuzzy 絞り込み（全ファイル対象・M12-7）: クエリの各文字が順に現れるものを前方一致優先で。
-        let query = self.context_query.to_lowercase();
-        let mut matches: Vec<SharedString> = self
-            .context_files
-            .iter()
-            .filter(|path| fuzzy_matches(&path.to_lowercase(), &query))
-            .cloned()
-            .collect();
-        matches.sort_by_key(|path| (!path.to_lowercase().contains(&query), path.len()));
+        // fuzzy 絞り込み（全ファイル対象・M12-7）: `@` メンションと同じ並び。
+        let matches = file_candidates(&self.context_files, &self.context_query, 15);
         let display: SharedString = if self.context_query.is_empty() {
             SharedString::from(i18n::t!("agent.context_filter"))
         } else {
@@ -10718,36 +10923,30 @@ PYEOF"#;
                 .track_focus(focus)
                 .on_key_down(cx.listener(Self::on_context_key_down));
         }
-        menu.children(
-            matches
-                .into_iter()
-                .take(15)
-                .enumerate()
-                .map(|(file_index, path)| {
-                    let already = attached.contains(&path);
-                    div()
-                        .id(("context-file", file_index))
-                        .flex()
-                        .items_center()
-                        .px(px(9.))
-                        .py(px(4.))
-                        .rounded(px(5.))
-                        .text_size(px(11.5))
-                        .text_color(if already { theme.fg2 } else { theme.fg1 })
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.bg3))
-                        .child(path.clone())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                // ドロップダウンの track_focus（閉じる面）へフォーカスを渡さない。
-                                cx.stop_propagation();
-                                this.add_context(path.clone(), cx);
-                                this.focus_composer(window, cx);
-                            }),
-                        )
-                }),
-        )
+        menu.children(matches.into_iter().enumerate().map(|(file_index, path)| {
+            let already = attached.contains(&path);
+            div()
+                .id(("context-file", file_index))
+                .flex()
+                .items_center()
+                .px(px(9.))
+                .py(px(4.))
+                .rounded(px(5.))
+                .text_size(px(11.5))
+                .text_color(if already { theme.fg2 } else { theme.fg1 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3))
+                .child(path.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        // ドロップダウンの track_focus（閉じる面）へフォーカスを渡さない。
+                        cx.stop_propagation();
+                        this.add_context(path.clone(), cx);
+                        this.focus_composer(window, cx);
+                    }),
+                )
+        }))
     }
 
     /// ＋context 絞り込みのキー入力（Esc 閉じ / backspace / 印字。Enter は先頭候補を添付）。
@@ -10764,12 +10963,11 @@ PYEOF"#;
                 self.close_context_menu(window, cx);
             }
             "enter" => {
-                let query = self.context_query.to_lowercase();
-                let first = self
-                    .context_files
-                    .iter()
-                    .find(|path| fuzzy_matches(&path.to_lowercase(), &query))
-                    .cloned();
+                // 一覧の先頭（表示と同じ並び）を添付する。以前は並べる前の順で探していて、
+                // 見えている先頭と違うファイルが付いた。
+                let first = file_candidates(&self.context_files, &self.context_query, 1)
+                    .into_iter()
+                    .next();
                 if let Some(path) = first {
                     self.add_context(path, cx);
                     self.focus_composer(window, cx);
@@ -11865,6 +12063,110 @@ PYEOF"#;
         )
     }
 
+    /// composer の `@` 補完（2026-09-30）。`/` 補完と同じ面・同じ置き場所（composer の真上）で、
+    /// **色は中立**（選択中の行は bg3）。行 = ファイル名 + 置き場所のフォルダ（fg2）。候補は ＋context と
+    /// 同じ一覧・同じ並び。フォーカスは入力欄のまま（打ち続けられる・IME もそのまま）。
+    fn render_mention_popup(
+        &self,
+        composer_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !composer_focused || !self.mention.open() {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let selected = self
+            .mention
+            .selected
+            .min(self.mention.candidates.len().saturating_sub(1));
+        let rows = self
+            .mention
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let (name, directory) = split_file_label(path);
+                let is_selected = index == selected;
+                div()
+                    .id(("mention-file", index))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(9.))
+                    .py(px(4.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .when(is_selected, |row| row.bg(theme.bg3))
+                    .hover(|style| style.bg(theme.bg3))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.))
+                            .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(theme.fg2)
+                            .child(directory),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.accept_mention(index, cx);
+                            cx.notify();
+                        }),
+                    )
+            })
+            .collect::<Vec<_>>();
+        Some(
+            div()
+                .absolute()
+                .left(px(12.))
+                .right(px(12.))
+                // `/` 補完と同じく composer の上端に付ける（composer は自動で伸びるので px で決めない）。
+                .bottom(relative(1.))
+                .pb(px(4.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .bg(theme.bg2)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(px(8.))
+                        .p(px(4.))
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
+                        // 下の transcript へクリック・ホイールを通さない。
+                        .occlude()
+                        .children(rows)
+                        .child(
+                            div()
+                                .mt(px(2.))
+                                .px(px(9.))
+                                .pt(px(4.))
+                                .pb(px(2.))
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .text_size(px(10.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(i18n::t!("agent.mention_footer"))),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_composer(&self, composer_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
@@ -11923,6 +12225,7 @@ PYEOF"#;
                 this.add_context(dragged.path.clone(), cx);
             }))
             .children(self.render_slash_popup(composer_focused, cx))
+            .children(self.render_mention_popup(composer_focused, cx))
             .child(
                 div()
                     .flex()
@@ -12057,7 +12360,12 @@ PYEOF"#;
                                     .text_size(px(10.5))
                                     .text_color(theme.fg1)
                                     .child(label)
-                                    .tooltip(Tooltip::text(path.to_string(), theme_for_tip))
+                                    // 送信後もチップが残る＝次の送信にも付く、をここで言う（2026-09-30
+                                    // 「毎回送ってる？ 実は送れてない？」と本人が迷った）。
+                                    .tooltip(Tooltip::text(
+                                        i18n::t!("agent.attach_chip_tip", "path" => path),
+                                        theme_for_tip,
+                                    ))
                                     .child(
                                         div()
                                             .id(("context-chip-x", index))
@@ -12103,23 +12411,23 @@ PYEOF"#;
                             // composer の Editor アクションより先に capture で受け、閉じている時・
                             // IME 変換中は何もせず composer へ流す。
                             .capture_action(cx.listener(|this, _: &editor_view::MoveUp, _, cx| {
-                                this.on_slash_key(SlashKey::Up, cx)
+                                this.on_completion_key(CompletionKey::Up, cx)
                             }))
                             .capture_action(cx.listener(
                                 |this, _: &editor_view::MoveDown, _, cx| {
-                                    this.on_slash_key(SlashKey::Down, cx)
+                                    this.on_completion_key(CompletionKey::Down, cx)
                                 },
                             ))
                             .capture_action(cx.listener(|this, _: &editor_view::Newline, _, cx| {
-                                this.on_slash_key(SlashKey::Accept, cx)
+                                this.on_completion_key(CompletionKey::Accept, cx)
                             }))
                             .capture_action(cx.listener(
                                 |this, _: &editor_view::TabIndent, _, cx| {
-                                    this.on_slash_key(SlashKey::Accept, cx)
+                                    this.on_completion_key(CompletionKey::Accept, cx)
                                 },
                             ))
                             .capture_action(cx.listener(|this, _: &editor_view::Cancel, _, cx| {
-                                this.on_slash_key(SlashKey::Dismiss, cx)
+                                this.on_completion_key(CompletionKey::Dismiss, cx)
                             }))
                             .child(self.composer.clone()),
                     )
@@ -13691,6 +13999,89 @@ impl AgentPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude Code が `@` 参照を**ファイルとして読む**綴り（2026-09-30 に同梱の claude を API へ繋がずに
+    /// 走らせて実測: `@a b/メモ 1.txt` は何も添付されず、`@"a b/メモ 1.txt"` は中身が添付された）。
+    #[test]
+    fn mention_tokens_quote_what_claude_code_would_cut_short() {
+        assert_eq!(mention_token("src/main.rs"), "@src/main.rs");
+        assert_eq!(mention_token("docs/FLEET-V2.md"), "@docs/FLEET-V2.md");
+        // 空白で切れる（実際に届いていなかった形: `@docs/病院AI機能` までしか読まれない）。
+        assert_eq!(
+            mention_token("docs/病院AI機能 場面整理 (3).pdf"),
+            "@\"docs/病院AI機能 場面整理 (3).pdf\""
+        );
+        // 英数字で終わらないパスは末尾の `\b` で手前へ縮む（`docs/メモ` → `docs`）。
+        assert_eq!(mention_token("docs/メモ"), "@\"docs/メモ\"");
+        assert_eq!(mention_token("crates/"), "@\"crates/\"");
+        // `"` を含むと囲めない。そのまま渡す（エージェントが本文のパスを見て自分で読む）。
+        assert_eq!(mention_token("a \"b\".txt"), "@a \"b\".txt");
+    }
+
+    /// `@` の後ろを打っている間だけ候補を出す。メールアドレス・書き終えた参照・語の途中では出さない。
+    #[test]
+    fn mention_word_is_read_only_while_typing_after_an_at_sign() {
+        let at_end = |text: &str| mention_query_at(text, "");
+        assert_eq!(at_end("@"), Some((0, String::new())));
+        assert_eq!(
+            at_end("見て @fle"),
+            Some(("見て ".len(), "fle".to_string()))
+        );
+        // 日本語の直後でも開く（確定時に空白を挟む）。
+        assert_eq!(at_end("この@src"), Some(("この".len(), "src".to_string())));
+        // 日本語入力のままの全角も読む。
+        assert_eq!(at_end("＠ｆｌｅ"), Some((0, "fle".to_string())));
+        // メールアドレス・空白を含む語・確定済み（末尾に空白）は開かない。
+        assert_eq!(at_end("mail me at foo@example.com"), None);
+        assert_eq!(at_end("@src main"), None);
+        assert_eq!(at_end("@src/main.rs "), None);
+        // 書き終えた語の途中へキャレットを戻しただけでは開かない。
+        assert_eq!(mention_query_at("@src", "/main.rs"), None);
+        // 語の直後が空白なら、途中の行でも開く。
+        assert_eq!(
+            mention_query_at("@doc", " 続き"),
+            Some((0, "doc".to_string()))
+        );
+    }
+
+    /// 確定は `@語` を `@パス ` に置き換える。日本語の直後なら空白を挟む（Claude Code は `@` の直前が
+    /// 行頭・空白・`。、？！` の時だけ参照として読む）。
+    #[test]
+    fn accepted_mention_is_separated_so_claude_code_reads_it() {
+        assert_eq!(mention_insertion(None, "src/main.rs"), "@src/main.rs ");
+        assert_eq!(mention_insertion(Some(' '), "src/main.rs"), "@src/main.rs ");
+        assert_eq!(
+            mention_insertion(Some('。'), "src/main.rs"),
+            "@src/main.rs "
+        );
+        assert_eq!(
+            mention_insertion(Some('の'), "src/main.rs"),
+            " @src/main.rs "
+        );
+        assert_eq!(mention_insertion(Some('の'), "a b.txt"), " @\"a b.txt\" ");
+    }
+
+    /// 候補の並び: 語をそのまま含むパスが先・同じ扱いなら短いパスが先。＋context と `@` は同じ並びで、
+    /// ＋context の Enter はこの先頭を添付する（以前は並べる前の順で探していて、見えている先頭と違った）。
+    #[test]
+    fn file_candidates_put_contiguous_and_short_paths_first() {
+        let files: Vec<SharedString> = vec![
+            "crates/workspace/src/workspace/fleet_view.rs".into(),
+            "docs/FLEET-V2.md".into(),
+            "crates/foo/lib_extra.rs".into(),
+        ];
+        assert_eq!(
+            file_candidates(&files, "fle", 8),
+            vec![
+                SharedString::from("docs/FLEET-V2.md"),
+                SharedString::from("crates/workspace/src/workspace/fleet_view.rs"),
+                // 散在一致（f…l…e）は後ろ。
+                SharedString::from("crates/foo/lib_extra.rs"),
+            ]
+        );
+        assert_eq!(file_candidates(&files, "fle", 1).len(), 1);
+        assert!(file_candidates(&files, "zzz", 8).is_empty());
+    }
 
     #[test]
     fn a_chip_shows_a_short_readable_name() {
@@ -17542,6 +17933,146 @@ PYEOF"#;
             SlashInput::Inactive
         );
         assert!(names(cx).is_empty());
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// composer で `@` を打つとプロジェクトのファイル候補が開き、↑↓ で選んで Enter / Tab で本文へ
+    /// `@パス ` が入る。候補が開いている間の Enter は送信ではなく確定、Esc は中断ではなく候補を閉じる
+    /// だけ。既定 keymap（`Editor` 文脈の enter / tab / down / escape）を通して確かめる。
+    #[gpui::test]
+    fn mention_popup_keys_choose_and_insert_a_file(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "mention-keys");
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let set_text = |cx: &mut gpui::VisualTestContext, text: &str| {
+            let text = text.to_string();
+            panel.update_in(cx, |panel, _window, cx| {
+                panel
+                    .composer
+                    .update(cx, |composer, cx| composer.set_plain_text(&text, cx));
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let composer_text = |cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, cx| panel.composer.read(cx).plain_text())
+        };
+        let candidates = |cx: &mut gpui::VisualTestContext| -> Vec<String> {
+            panel.read_with(cx, |panel, _cx| {
+                if !panel.mention.open() {
+                    return Vec::new();
+                }
+                panel
+                    .mention
+                    .candidates
+                    .iter()
+                    .map(|path| path.to_string())
+                    .collect()
+            })
+        };
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_context_files(
+                vec![
+                    "crates/workspace/src/workspace/fleet_view.rs".into(),
+                    "docs/FLEET-V2.md".into(),
+                    "docs/病院AI機能 場面整理 (3).pdf".into(),
+                ],
+                cx,
+            );
+            panel.focus_composer(window, cx);
+        });
+
+        set_text(cx, "見て @fle");
+        assert_eq!(
+            candidates(cx),
+            vec![
+                "docs/FLEET-V2.md",
+                "crates/workspace/src/workspace/fleet_view.rs"
+            ],
+            "`@` の後ろの語で候補が開く（語をそのまま含む・短いパスが先）"
+        );
+        cx.simulate_keystrokes("down enter");
+        assert_eq!(
+            composer_text(cx),
+            "見て @crates/workspace/src/workspace/fleet_view.rs ",
+            "Enter は送信ではなく候補を入れる"
+        );
+        assert!(candidates(cx).is_empty(), "入れたら閉じる");
+        assert!(
+            panel.read_with(cx, |panel, _cx| panel.threads[panel.active]
+                .entries
+                .is_empty()),
+            "候補が開いている間の Enter は送信にならない"
+        );
+
+        // 日本語の直後は空白を挟み、空白を含むパスは `@"…"` で入る（Tab でも入る）。
+        set_text(cx, "この@病院");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            composer_text(cx),
+            "この @\"docs/病院AI機能 場面整理 (3).pdf\" "
+        );
+
+        // Esc は候補を閉じるだけ（走行中のターンを止めない）。同じ `@` の続きでは開き直さない。
+        set_text(cx, "@doc");
+        panel.update(cx, |panel, _cx| {
+            let active = panel.active;
+            panel.threads[active].running = true;
+        });
+        assert!(!candidates(cx).is_empty());
+        cx.simulate_keystrokes("escape");
+        assert!(candidates(cx).is_empty(), "Esc で閉じる");
+        assert!(
+            panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "候補を閉じる Esc でターンを止めない"
+        );
+        cx.simulate_keystrokes("s");
+        assert!(
+            candidates(cx).is_empty(),
+            "閉じた `@` の続きでは開き直さない"
+        );
+        assert_eq!(composer_text(cx), "@docs");
+
+        // メールアドレスでは開かない。
+        set_text(cx, "mail foo@fle");
+        assert!(candidates(cx).is_empty());
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 添付（＋context のチップ）は × で外すまで**毎回**先頭に `@パス` で付く。空白を含むパスは
+    /// `@"…"` で囲む — 囲まないと Claude Code は空白の手前で切り、中身が添付されない（2026-09-30 に
+    /// 同梱の claude を API へ繋がずに走らせて実測）。
+    #[gpui::test]
+    fn attachments_ride_every_turn_and_spaced_paths_are_quoted(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "attachment-prefix");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(std::env::temp_dir());
+            panel.threads[active].context = vec![
+                "docs/FLEET-V2.md".into(),
+                "docs/病院AI機能 場面整理 (3).pdf".into(),
+            ];
+            let mut sent = |panel: &mut AgentPanel, prompt: &str, cx: &mut Context<AgentPanel>| {
+                panel.send_prompt_text(prompt.to_string(), cx);
+                panel.threads[active].running = false;
+                match command_rx.try_recv() {
+                    Ok(SessionCommand::Prompt(text)) => text,
+                    other => panic!("prompt が送られていない: {other:?}"),
+                }
+            };
+            let expected = |prompt: &str| {
+                format!("@docs/FLEET-V2.md\n@\"docs/病院AI機能 場面整理 (3).pdf\"\n\n{prompt}")
+            };
+            assert_eq!(sent(panel, "見て", cx), expected("見て"));
+            assert_eq!(sent(panel, "続き", cx), expected("続き"), "2 通目にも付く");
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 

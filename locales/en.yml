@@ -145,7 +145,8 @@ agent:
   checkpoint_row: checkpoint — %{label} (click to restore this point)
   context_filter: Filter by file name…
   permission_needed: ● Approval needed
-  attach_tip: Attach file as context
+  attach_tip: Attach a file (sent with every message until removed · type @ for just one message)
+  attach_chip_tip: "%{path}\nSent with every message (× to remove)"
   compact: /compact
   compact_tip: Summarize and compact the context (/compact)
   compact_queued_tip: "Running — /compact will be sent after this turn (queued)"
@@ -173,6 +174,7 @@ agent:
   running_hint: esc to interrupt
   running_thinking: Thinking
   slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
+  mention_footer: "↑↓ to choose · Enter / Tab to insert (for this message only) · esc to close"
   shell_badge: "! Shell"
   shell_run_enter: Run ⏎
   shell_run_cmd: Run ⌘⏎
@@ -356,7 +358,7 @@ cmd:
   shortcut_sheet: "Help: Keyboard shortcuts"
   usage_limits: "Usage: Show rate limits"
   usage_stats: "Usage: Open statistics"
-  copy_path_line: "Edit: Copy path:line"
+  copy_path_line: "Edit: Copy path:line (the selected item's path in the explorer)"
   quote_selection: "Editor: Quote selection in thread"
   close_all_tabs: "Tabs: Close all (keep unsaved)"
   toggle_pin_tab: "Tabs: Pin / unpin"
@@ -1014,6 +1016,7 @@ explorer:
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash
   ctx_copy_path: Copy path
+  copied_path: "Copied path: %{path}"
   ctx_download: Download…
   ctx_upload_into: Upload into this folder…
   ctx_upload_beside: Upload to the same folder…

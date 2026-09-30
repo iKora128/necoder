@@ -5,6 +5,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-10-01
+
+> **This is a test release, like v0.1.21.** It contains everything in v0.1.21, and some of that has not been checked on a real machine yet (`docs/ORCA-PARITY-CHECKLIST.md`). It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.
+
+This release adds `@` mentions to the agent composer, fixes attachments whose path contains a space, and makes the explorer behave more like Finder: a double-click opens a file in its default app, and ⌥⌘C copies the selected item's path.
+
+### Added
+
+- **`@` mentions in the agent composer**: Type `@` and part of a file name, and the project's files are listed right above the composer. Enter or Tab puts `@path` into your message, for that message only. The list uses the same matching and order as ＋ context. It also works right after Japanese text (a space is inserted so the agent reads it) and with `＠` typed in Japanese input mode. Esc closes the list without stopping the turn. An email address like `a@b` does not open it.
+- **Explorer: double-click opens the default app**: Double-click a file in the explorer to open it in its default app, like in Finder. A single click still opens a preview tab. For files on an SSH host, a double-click keeps the tab open as before.
+- **Explorer: ⌥⌘C copies the selected item's path**: With the explorer focused, or right after you click a file in it, ⌥⌘C copies the full path of the selected item and shows a toast. While you work in the editor, ⌥⌘C still copies `path:line`.
+
+### Changed
+
+- A double-click in the explorer no longer keeps a preview tab open. Keep a preview tab by editing it, double-clicking its tab, reopening it with ⌘P, or pinning it.
+- The tooltip of a ＋ context chip now says that the file is sent with every message until you remove it.
+
+### Fixed
+
+- **Attachments with a space in the path**: Claude Code did not read files attached with ＋ context when their path contained a space (or did not end in a letter or digit), because it cut the `@path` reference at the space. necoder now sends such paths as `@"path"`.
+- **＋ context**: Enter attached the first match in file-list order instead of the first row shown. It now attaches the row you see at the top.
+
+### 日本語
+
+> **v0.1.21 と同じくテストリリースです。** v0.1.21 の変更をすべて含み、その中にはまだ実機で確かめていない所があります（`docs/ORCA-PARITY-CHECKLIST.md`）。自動更新では配信しません。試してくださる方は、この Release ページから手動で入れてください。不具合を見つけたら Issue で教えてもらえると助かります。
+
+エージェントの入力欄に `@` メンションを入れ、空白を含むパスの添付が届いていなかった不具合を直した版です。エクスプローラは Finder に近づけました。ダブルクリックで既定のアプリが開き、⌥⌘C で選んでいる項目のパスをコピーできます。
+
+#### 追加
+
+- **エージェントの入力欄の `@` メンション**：`@` に続けてファイル名の一部を打つと、入力欄のすぐ上にプロジェクトのファイルが並びます。Enter か Tab で本文に `@パス` が入り、その 1 通だけに付きます。候補の絞り方と並びは ＋ context と同じです。日本語のすぐ後ろでも使えます（エージェントが読めるよう空白を挟みます）。日本語入力のまま打った `＠` でも出ます。Esc は候補だけを閉じ、実行中のターンは止めません。`a@b` のようなメールアドレスでは出ません。
+- **エクスプローラ：ダブルクリックで既定のアプリ**：エクスプローラでファイルをダブルクリックすると、Finder と同じく既定のアプリで開きます。1 回クリックは今までどおりプレビュータブで開きます。SSH 先のファイルは、ダブルクリックで今までどおり普通のタブになります。
+- **エクスプローラ：⌥⌘C で選んでいる項目のパス**：エクスプローラを押した状態と、エクスプローラでファイルを押した直後は、⌥⌘C で選んでいる項目のフルパスをコピーし、トーストで知らせます。エディタで作業している時の ⌥⌘C は、今までどおり `パス:行` をコピーします。
+
+#### 変更
+
+- エクスプローラのダブルクリックでは、プレビュータブを普通のタブにしなくなりました。普通のタブにするには、編集する・タブをダブルクリックする・⌘P で開き直す・ピン留めする、のどれかを使います。
+- ＋ context のチップのツールチップで、外すまで送るたびに毎回付くことを伝えるようにしました。
+
+#### 修正
+
+- **空白を含むパスの添付**：＋ context で付けたファイルのパスに空白が入っている（または英数字で終わらない）と、Claude Code がファイルを読んでいませんでした。Claude Code が `@パス` を空白の手前で切るためです。こうしたパスは `@"パス"` と囲んで送るようにしました。
+- **＋ context**：Enter で付くのが、表示の先頭ではなく一覧の並びで最初に当たったファイルでした。表示の先頭を付けるようにしました。
+
 ## [0.1.21] - 2026-09-30
 
 > **This is a test release.** It is a large release with more than 300 changes since v0.1.20, and some of them have not been checked on a real machine yet (`docs/ORCA-PARITY-CHECKLIST.md`). It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.

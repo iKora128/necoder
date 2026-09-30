@@ -1554,6 +1554,10 @@ struct ChromeState {
     /// ここにある間だけ ⌘Z がファイル操作の取り消しになる（keymap の `Explorer` コンテキスト・H30）。
     /// エディタにフォーカスがある時の ⌘Z は従来どおりエディタの undo。
     explorer_focus: FocusHandle,
+    /// エクスプローラで押して開いたばかりのファイル。フォーカスはエディタへ移るので、この間の ⌥⌘C は
+    /// `path:行` ではなく Finder と同じくそのファイルのパスをコピーする。ほかの所を押す・エディタに
+    /// 打つと外れる（2026-09-30）。
+    explorer_clicked_file: Option<PathBuf>,
     should_move_window: bool,
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
@@ -2418,6 +2422,8 @@ impl Render for Workspace {
             // この後の `select_tab` がプレビューへ渡し直す）。
             .capture_any_mouse_down(cx.listener(|this, _event, _window, cx| {
                 this.release_native_key_focus(cx);
+                // 押したのがエクスプローラのファイルなら、その click（離した時）が付け直す。
+                this.chrome.explorer_clicked_file = None;
             }))
             .on_action(cx.listener(|this, _: &NewTask, window, cx| {
                 // ⌘N は面ごとに意味が決まる: Chat = 新しいチャット / Fleet = ＋ Task。

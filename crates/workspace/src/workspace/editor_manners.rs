@@ -143,12 +143,29 @@ fn terminal_command(folder: &Path) -> Option<(String, Vec<String>)> {
 
 impl Workspace {
     /// ⌘⌥C: 開いているファイルの `path:行`（選んでいれば `path:10-14`）をコピー。
+    /// エクスプローラにフォーカスがある時と、エクスプローラでファイルを押した直後（フォーカスは
+    /// エディタへ移っている）は、Finder と同じく選んでいる項目のパスをコピーする（2026-09-30 本人要望）。
+    /// キーを `Explorer` 文脈に別に割り当てない: gpui は文脈の無い割り当て（この ⌥⌘C）を優先するので、
+    /// 文脈付きの同じキーは隠れて効かない。
     pub(crate) fn copy_path_with_line(
         &mut self,
         _: &CopyPathWithLine,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let explorer_path = if self.chrome.explorer_focus.is_focused(window) {
+            self.active_slot()
+                .and_then(|slot| slot.explorer.selected.clone())
+        } else {
+            self.chrome
+                .explorer_clicked_file
+                .clone()
+                .filter(|path| self.active_tab_path().as_ref() == Some(path))
+        };
+        if let Some(path) = explorer_path {
+            self.copy_path(&path, cx);
+            return;
+        }
         let Some(editor) = self.active_editor() else {
             return;
         };

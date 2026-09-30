@@ -146,7 +146,8 @@ agent:
   checkpoint_row: checkpoint — %{label}（クリックでこの時点へ戻す）
   context_filter: ファイル名で絞り込み…
   permission_needed: ● 承認が必要
-  attach_tip: ファイルを文脈に添付
+  attach_tip: ファイルを添付（外すまで毎回送る · その 1 通だけなら本文で @）
+  attach_chip_tip: "%{path}\n送るたびに毎回付けます（× で外す）"
   compact: /compact
   compact_tip: 文脈を要約して圧縮する（/compact）
   compact_queued_tip: "実行中 — ターンが終わったら /compact を送る（送信待ちに積む）"
@@ -174,6 +175,7 @@ agent:
   running_hint: esc で中断
   running_thinking: 考えています
   slash_footer: "%{count} 件 · ↑↓ で選ぶ · Enter / Tab で入れる · esc で閉じる"
+  mention_footer: "↑↓ で選ぶ · Enter / Tab で入れる（この 1 通だけに付く） · esc で閉じる"
   shell_badge: "! シェル"
   shell_run_enter: 実行 ⏎
   shell_run_cmd: 実行 ⌘⏎
@@ -357,7 +359,7 @@ cmd:
   shortcut_sheet: "ヘルプ: キーボードショートカット"
   usage_limits: "使用量: レート制限を表示"
   usage_stats: "使用量: 統計を開く"
-  copy_path_line: "編集: パス:行をコピー"
+  copy_path_line: "編集: パス:行をコピー（エクスプローラでは選んでいる項目のパス）"
   quote_selection: "エディタ: 選んだ行をスレッドで引用"
   close_all_tabs: "タブ: 全部閉じる（未保存は残す）"
   toggle_pin_tab: "タブ: ピン留め / 外す"
@@ -1015,6 +1017,7 @@ explorer:
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる
   ctx_copy_path: パスをコピー
+  copied_path: "パスをコピーしました: %{path}"
   ctx_download: ダウンロード…
   ctx_upload_into: このフォルダへアップロード…
   ctx_upload_beside: 同じフォルダへアップロード…

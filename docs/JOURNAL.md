@@ -3824,3 +3824,17 @@
   - 二重実装の合流は「どちらかの commit が触ったファイルを丸ごと相手側へ戻す → 欲しい差分だけ載せ直す」が安全（衝突の塊ごとに混ぜると、両方の型・フィールド・i18n キーが半端に残る）
 - 次: v0.1.21 をテストリリース（プレリリース）で出す。実機（metal 環境）で `!`・SSH 先の停止を確認
 
+
+## 2026-10-01 — v0.1.22（テストリリース）: composer の `@` メンション・添付の空白パス・エクスプローラのダブルクリックと ⌥⌘C
+- 発端（本人・ドッグフーディング）: 「Context で入れた物は送れてる？ 送信後もチップが残るが毎回送ってる？」「やっぱり @ でメンションしたい」「左の Finder で ⌥⌘C でパスをコピー（既に出来ている？そんな感じはしないが）」「クリックは普通の表示・ダブルクリックは既定のアプリで」。
+- 届き方を実データで確認: 本人の Claude Code の会話ログ（`~/.claude/projects/*.jsonl`）で、necoder が先頭に付けた `@docs/FLEET-V2.md` は `attachment.type = file` で中身ごと添付されていた。チップは外すまで毎ターン付き、中身が変わっていないターンは `already_read_file`（file_unchanged）で済む。**空白を含むパスは届いていなかった**（添付 0 件・モデルが自分で Read）。claude-agent-acp 0.81.2 に同梱の claude を `ANTHROPIC_BASE_URL=http://127.0.0.1:9` と一時の `CLAUDE_CONFIG_DIR` で API に繋がずに走らせ、`@"a b/メモ 1.txt"` は添付・`@a b/メモ 1.txt` は 0 件を確定（正規表現は `(^|[\s。、？！])@"([^"]+)"` と `…@([^\s]+)\b`）。Codex は `@path` を文字のまま受け取り、モデルが exec で読む。
+- やったこと:
+  - `agent_panel`: 添付の先頭行を `mention_token`（空白入り・英数字で終わらないパスは `@"…"`）へ。`@` 補完（`MentionCompletion` / `mention_query_at` / `mention_insertion` / `file_candidates`）を `/` 補完（O2）と同じ作りで足した: 面と置き場所は `render_slash_popup` と同じ・キーは同じ capture_action で先取り（`SlashKey` → `CompletionKey` に改名し、`on_completion_key` が `@` → `/` の順に回す）。EditorView は変えていない（キャレット位置は `text_before_caret(usize::MAX)`）。＋context の Enter が並べる前の順で先頭を拾っていたのを `file_candidates` の先頭へ。チップのツールチップ。
+  - `workspace`: エクスプローラのファイルの click を `click_explorer_file` / `explorer_file_click` に集約（1 回 = プレビュー・2 回 = 既定のアプリ・SSH 先の 2 回と 3 回目以降 = 普通のタブ）。⌥⌘C（`copy_path_with_line`）は、エクスプローラにフォーカスがある時と、エクスプローラでファイルを押した直後（`chrome.explorer_clicked_file`・どこかを押す / エディタに打つと外れる）は、選んでいる項目のパスをコピーする。`copy_path` にトースト。ツリーのフォルダを押したら選択にする。
+  - docs: UI-SPEC（§4 プレビュータブ・§6 `@` と添付・キー表）、MANUAL（エクスプローラ・ファイルを渡す）、GLOSSARY、ROADMAP（M10・M12）、CHANGELOG `[0.1.22]`。
+- 検証: 新テスト 8 本（`mention_popup_keys_choose_and_insert_a_file` = 既定 keymap を通して `@fle` → ↓ → ⏎ で本文に入り送信されない・Tab で `@"…pdf"`・Esc はターンを止めない・メールでは開かない / `attachments_ride_every_turn_and_spaced_paths_are_quoted` / `copy_path_key_copies_what_you_last_clicked` = ①フォルダ → フルパス ②ファイルを押した直後 → フルパス ③エディタに打った後 → `a.txt:1` / `a_double_click_opens_the_default_app_only_for_local_files` / 判定の unit 4 本）。`cargo test --workspace`（使い捨て HOME）・`cargo deny check`。隔離 offscreen（`NECODER_HOME` / `NECODER_GUI_SOCK` / `NECODER_DOCUMENTS_DIR` を一時ディレクトリ・`agent_prewarm:false`）+ `NECODER_SLASH_PROBE="見て @fle"` で候補窓を撮って目視。
+- 学び/罠:
+  - **gpui は文脈の無い割り当てを文脈付きより優先する**（`binding_enabled` が predicate 無しを最深扱い）。全体の `cmd-alt-c: CopyPathWithLine` がある所に `Explorer` 文脈の `cmd-alt-c` を足しても隠れて効かない（`window.bindings_for_action` が 0 件になる）。同じキーの使い分けはハンドラの中でフォーカスを見て振り分ける。
+  - 最初の実装は #12 時点の古い main（origin/main から 353 コミット遅れ・未コミット差分 78 ファイル）の上で書いていた。origin/main には `/` 補完・プレビュータブ・⌥⌘C の `path:行` が既に入っていたので、`../necoder-release`（origin/main から切った worktree）で作り直した。着手前に `git status -sb` の behind を見る。
+  - ダブルクリックのテストは本物の `open` を起動しないよう、判定（`explorer_file_click`）だけを見る。
+- 次: 本人の実機（Dev.app / 手動インストール）で `@`（IME・日本語の直後）・⌥⌘C・ダブルクリックの体感確認。フォルダの `@` メンションは後続。
