@@ -73,6 +73,15 @@ impl AgentPanel {
                             result.as_ref().map_or("", |v| v.as_ref())
                         )),
                     ),
+                    Entry::Shell {
+                        command, output, ..
+                    } => (
+                        "tool",
+                        text(&format!(
+                            "! {command}\n\n{}",
+                            output.as_ref().map_or("", |v| v.as_ref())
+                        )),
+                    ),
                     Entry::Checkpoint { label, .. } => ("checkpoint", text(label)),
                 };
                 json!({ "id": index, "kind": kind, "text": content })

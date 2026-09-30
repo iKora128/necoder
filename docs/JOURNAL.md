@@ -3237,3 +3237,16 @@
 - やったこと: `captain.prompt` を `captain.role` / `captain.facts` / `captain.event` に分割。役割 + 現況表（`captain_context`）を Captain スレッドの prompt context に入れ、⌘0 で開いた時・wake の時・人間が Captain に書いた後に差し替える。wake 本文はイベント行 + 溜めたイベントだけ。道具一覧に `fleet create . <title>` を追加。回帰 test `role_prompt_lists_task_creation_in_every_locale`
 - 学び/罠: `PanelEvent::HumanSend` は送信**後**に届く（emit は遅延）ので、その発話の中身は差し替えられない。今のターンは既存の context、HumanSend で次のターン用に現況を更新する形。prompt context はメモリのみ（再起動後は ⌘0 か次の wake まで無い）。規律はプロンプトだけでツール制限は無い（案2 = Captain スレッドの編集系 permission を拒否、は未着手）。prompt context を前置すると slash コマンド（`/clear` `/compact`）の先頭が `/` でなくなり認識されない → `/` 始まりの発話には context を付けない（test `prompt_context_is_not_prepended_to_slash_commands`）
 - 次: 実機で「目標 1 つ → Captain が Task を切る」を確認（F6 の実 e2e）
+
+## 2026-09-30 — 外部 issue #39（＋context のフォーカス）と #37（`!` 実行）
+- やったこと:
+  - **#39**: `toggle_context_menu` が FocusHandle を作るだけで `window.focus` していなかった。開いたら絞り込み欄へ、閉じたら（トグル・Esc・Enter・候補クリック）composer へ返す `close_context_menu` に集約。キャレットはフォーカス時だけ描く。テスト `context_menu_takes_keys_and_returns_focus`
+  - **#37**: `crates/agent_panel/src/shell.rs` を新設。composer 先頭 `!` をシェルで実行（`Host::spawn_process` + 新設 `HostProcess::try_wait`・2 分で kill・停止ボタン）。出力は `Entry::Shell`（storage の role `shell`・JSON）で transcript に出し、次の人間の送信に `<bash-input>`/`<bash-stdout>` で添える（slash / 台帳イベントには添えない）。composer は `!` の間 syn-mac の見た目（UI-SPEC §1.3 に行追加・composer 節に仕様）。Step の `⎿ 結果` 描画を `render_step_result` に切り出して共用。開発用 `NECODER_SHELL_PROBE`
+- 学び/罠:
+  - **`window.focus` だけではクリックで開くものにフォーカスが移らない**: Workspace root が `track_focus` を持ち、GPUI はクリックを内→外へ流して「最初に当たった track_focus」へ focus する。子の mouse_down で focus しても root が奪い返すので `cx.stop_propagation()` が要る。閉じる面の中の候補クリックも同じ（閉じた面の handle に focus が移ると全キーが死ぬ）
+  - GPUI はキーバインド（アクション）を `on_key_down` より先に処理する。Enter/Esc/Backspace は `Editor` コンテキストにしか束縛が無いので、手書きの入力面に focus があれば届く
+  - `HostProcess` は stderr を捨てる（local も SSH も `Stdio::null`）。シェル側で `exec 2>&1`（cmd.exe は `(…) 2>&1`）して寄せる
+  - `persist_thread` は追記専用の watermark。実行中の `!` を書くと途中の状態で固まるので、Running の手前で止める（1 行ずつ watermark を進める形に変更＝途中失敗で重複行を出さない副次効果もある）
+  - `HostProcess` の drop（kill）は `sh` 本体しか殺さず、`npm run dev` の子が生き残る。スクリプト先頭で `$$` を目印付きで出させ、打ち切り時に同じホストで `pgrep -P` を辿って子から KILL する（リモートでも同じ・Windows ローカルは `taskkill /T`）。`kill_tree` は親を先に STOP して新しい子を産ませない
+- 次: 実機（metal 環境）で `!` の体感確認・Remote SSH 先での `!` 実行確認
+

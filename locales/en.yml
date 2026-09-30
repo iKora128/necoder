@@ -114,6 +114,21 @@ agent:
   send_enter: Send ⏎
   send_cmd: Send ⌘⏎
   stop: Stop esc
+  shell_badge: "! Shell"
+  shell_hint: Runs in the shell, not sent to the agent · output goes with your next message
+  shell_run_enter: Run ⏎
+  shell_run_cmd: Run ⌘⏎
+  shell_place_chat: chat folder
+  shell_running: Running…
+  shell_stop: Stop
+  shell_exit: exit code %{code}
+  shell_signal: killed by a signal
+  shell_timed_out: "stopped after %{minutes} min"
+  shell_stopped: Stopped
+  shell_failed: Couldn't run
+  shell_no_output: (no output)
+  shell_output_clipped: "… (output too large; the rest was dropped)"
+  shell_context_tip: Your next message passes this output to the agent (× to drop)
   running_hint: esc to interrupt
   running_thinking: Thinking
   more_lines: "… (+%{n} lines)"

@@ -115,6 +115,21 @@ agent:
   send_enter: 送信 ⏎
   send_cmd: 送信 ⌘⏎
   stop: 停止 esc
+  shell_badge: "! シェル"
+  shell_hint: エージェントには送らずシェルで実行 · 出力は次の送信に添えます
+  shell_run_enter: 実行 ⏎
+  shell_run_cmd: 実行 ⌘⏎
+  shell_place_chat: チャットのフォルダ
+  shell_running: 実行中…
+  shell_stop: 停止
+  shell_exit: 終了コード %{code}
+  shell_signal: シグナルで終了
+  shell_timed_out: "%{minutes} 分で打ち切り"
+  shell_stopped: 停止しました
+  shell_failed: 実行できません
+  shell_no_output: （出力なし）
+  shell_output_clipped: … （出力が大きすぎるため、ここから先は省きました）
+  shell_context_tip: 次の送信でこの出力をエージェントに渡します（× で外す）
   running_hint: esc で中断
   running_thinking: 考えています
   more_lines: … （他 %{n} 行）

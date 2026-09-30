@@ -28,6 +28,7 @@ mod chat;
 mod idle;
 mod remote;
 mod search;
+mod shell;
 pub mod sound;
 
 pub use chat::ChatRow;
@@ -164,6 +165,17 @@ enum Entry {
         result_lines: usize,
         /// ファイル編集の before/after（Edit 系。空なら差分表示なし）。
         diffs: Vec<PermissionDiff>,
+    },
+    /// composer の `!` で実行したシェルコマンド（エージェントを介さない・#37）。
+    Shell {
+        /// 停止ボタンの宛先（実行中だけ Some。終わったもの・復元したものは None）。
+        run: Option<u64>,
+        command: SharedString,
+        /// 丸めた出力（`cap_output`。実行中は None）。
+        output: Option<SharedString>,
+        /// 丸める前の行数（Step の `result_lines` と同じ意味）。
+        output_lines: usize,
+        status: shell::ShellStatus,
     },
     /// エージェントの本文（結論など）。
     Agent(SharedString),
@@ -901,6 +913,9 @@ struct Thread {
     agent: SharedString,
     /// 添付コンテキスト（プロジェクト相対パス）。送信時に `@path` として prompt 先頭へ付ける。
     context: Vec<SharedString>,
+    /// composer の `!` で実行したコマンドの出力のうち、まだエージェントへ渡していないもの。
+    /// 次に送る 1 通の先頭へ添えて空にする（CLI の bash モードと同じ・#37）。
+    shell_context: Vec<shell::ShellContext>,
     /// 未送信の composer 本文。タブは独立した作業面なので、切替時にスレッドごとに退避する。
     draft: String,
     entries: Vec<Entry>,
@@ -1007,6 +1022,7 @@ impl Thread {
             effort: SharedString::default(),
             agent: "Claude Code".into(),
             context: Vec::new(),
+            shell_context: Vec::new(),
             draft: String::new(),
             entries: Vec::new(),
             tokens_used: 0,
@@ -1533,6 +1549,12 @@ fn entry_plain_text(entry: &Entry) -> String {
             Some(result) => format!("{tool} {args}\n{result}"),
             None => format!("{tool} {args}"),
         },
+        Entry::Shell {
+            command, output, ..
+        } => match output {
+            Some(output) => format!("! {command}\n{output}"),
+            None => format!("! {command}"),
+        },
         Entry::Checkpoint { label, .. } => format!("checkpoint — {label}"),
     }
 }
@@ -1699,6 +1721,12 @@ pub struct AgentPanel {
     /// ＋context の fuzzy 絞り込みクエリ（M12-7・Picker 化）。
     context_query: String,
     context_focus: Option<FocusHandle>,
+    /// composer の本文が `!` で始まっている（シェルモード・#37）。composer の通知ごとに見直す。
+    composer_shell: bool,
+    /// 実行中の `!` コマンドの停止フラグ（実行 id → フラグ）。終わったら外す。
+    shell_stops: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
+    /// 次に振る `!` 実行の id（パネル内で一意であればよい）。
+    next_shell_run: u64,
     /// Enter 送信の現在値（送信ヒント表示 + トグルの状態。composer にも反映する）。
     submit_on_enter: bool,
     /// トークン表示のカウントアップ補間タスクが稼働中か（多重起動防止。追いついたら false に戻す＝idle 0%）。
@@ -1843,6 +1871,11 @@ impl AgentPanel {
             ComposerEvent::ContentHeightChanged => cx.notify(),
         })
         .detach();
+        // 先頭 `!`（シェルモード・#37）の見た目は composer の本文で決まる。打つたびに見直す。
+        cx.observe(&composer, |panel, _composer, cx| {
+            panel.sync_composer_shell(cx)
+        })
+        .detach();
         // 画像の貼り付け（スクリーンショット）→ 添付にして、次の 1 通に image ブロックで添える。
         cx.subscribe(
             &composer,
@@ -1898,6 +1931,31 @@ impl AgentPanel {
                         .ok();
                 })
                 .detach();
+            }
+        }
+        // 開発用: NECODER_SHELL_PROBE="!コマンド" で `!` を 1 回実行し（`git log --oneline -3`）、
+        // composer に値を入れてシェルモードを出す（#37 の描画検証）。ACP と同じく最初のパネルだけ。
+        #[cfg(debug_assertions)]
+        {
+            static SHELL_PROBE_CLAIMED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if let Ok(probe) = std::env::var("NECODER_SHELL_PROBE") {
+                if !SHELL_PROBE_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    cx.spawn(async move |panel, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1200))
+                            .await;
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.run_shell("git log --oneline -3".to_string(), cx);
+                                panel
+                                    .composer
+                                    .update(cx, |composer, cx| composer.set_plain_text(&probe, cx));
+                            })
+                            .ok();
+                    })
+                    .detach();
+                }
             }
         }
         // 開発用: NECODER_TRANSCRIPT_SEL_PROBE=1 で transcript 選択を注入（M13 の描画+コピー検証）。
@@ -2081,6 +2139,9 @@ PYEOF"#;
             context_menu_open: false,
             context_query: String::new(),
             context_focus: None,
+            composer_shell: false,
+            shell_stops: HashMap::new(),
+            next_shell_run: 0,
             submit_on_enter,
             token_ticker: false,
             celebrating: false,
@@ -2243,31 +2304,7 @@ PYEOF"#;
                     thread.tokens_max = tokens_limit as u32;
                 }
                 let turns = storage.load_recent_turns(&id, 200).unwrap_or_default();
-                thread.entries = turns
-                    .into_iter()
-                    .map(|(role, content)| match role.as_str() {
-                        "user" => Entry::User(content.into()),
-                        "ledger_event" => Entry::LedgerEvent(content.into()),
-                        "thinking" => Entry::Thinking(content.into()),
-                        "step" => Entry::Step {
-                            id: None,
-                            tool: content.into(),
-                            args: SharedString::default(),
-                            result: None,
-                            result_lines: 0,
-                            diffs: Vec::new(),
-                        },
-                        "checkpoint" => {
-                            let (id, label) =
-                                content.split_once('\t').unwrap_or(("0", "checkpoint"));
-                            Entry::Checkpoint {
-                                id: id.parse().unwrap_or(0),
-                                label: label.to_string().into(),
-                            }
-                        }
-                        _ => Entry::Agent(content.into()),
-                    })
-                    .collect();
+                thread.entries = turns.into_iter().map(entry_from_turn).collect();
                 thread.persisted_entries = thread.entries.len();
                 threads.push(thread);
             }
@@ -2328,13 +2365,29 @@ PYEOF"#;
                 Entry::Step { tool, .. } => ("step", tool.to_string()),
                 Entry::Agent(text) => ("agent", text.to_string()),
                 Entry::Checkpoint { id, label } => ("checkpoint", format!("{id}\t{label}")),
+                // 実行中の `!` はまだ書かない（行は追記しかできない＝途中の状態で固まる）。
+                // ここで止めて、終わった時の `finish_shell` か次のターン終了で続きから書く。
+                Entry::Shell {
+                    status: shell::ShellStatus::Running,
+                    ..
+                } => break,
+                Entry::Shell {
+                    command,
+                    output,
+                    output_lines,
+                    status,
+                    ..
+                } => (
+                    "shell",
+                    shell::encode_turn(command, output.as_deref(), *output_lines, *status),
+                ),
             };
             if let Err(error) = storage.insert_turn(&thread.id, role, &content) {
                 eprintln!("turn の永続化に失敗: {error:#}");
                 return; // persisted_entries を進めない = 次回リトライ
             }
+            thread.persisted_entries += 1;
         }
-        thread.persisted_entries = thread.entries.len();
         // 色 index は巡回パレットの逆引き（見つからなければ 0）。
         let color = thread.color;
         let color_index = (0..12).find(|i| thread_color(*i) == color).unwrap_or(0) as i64;
@@ -2775,6 +2828,7 @@ PYEOF"#;
                         ("⏺", result.clone().unwrap_or_else(|| tool.clone()))
                     }
                     Entry::Agent(text) => ("⏺", text.clone()),
+                    Entry::Shell { command, .. } => ("!", command.clone()),
                     Entry::Checkpoint { label, .. } => ("⟲", label.clone()),
                 };
                 (SharedString::from(bullet), text)
@@ -4754,11 +4808,28 @@ PYEOF"#;
         cx.notify();
     }
 
-    fn toggle_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu_open = !self.context_menu_open;
+    /// ＋context の候補を開閉する。開いたら絞り込み欄へフォーカスを移し（キーを受けるのは
+    /// ドロップダウン側の `on_key_down`）、閉じたら composer へ返す（#39）。
+    fn toggle_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.context_menu_open {
+            self.close_context_menu(window, cx);
+            return;
+        }
+        self.context_menu_open = true;
         self.context_query.clear();
-        self.context_focus = self.context_menu_open.then(|| cx.focus_handle());
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.context_focus = Some(focus);
         self.open_menu = None; // セレクタメニューと排他
+        cx.notify();
+    }
+
+    /// ＋context の候補を閉じて composer へフォーカスを返す（トグル・Esc・候補の選択の共通の出口）。
+    /// 閉じたドロップダウンにフォーカスを残すと、宛先がツリーから消えて全キーが効かなくなる。
+    fn close_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu_open = false;
+        self.context_focus = None;
+        self.focus_composer(window, cx);
         cx.notify();
     }
 
@@ -4770,6 +4841,7 @@ PYEOF"#;
             }
         }
         self.context_menu_open = false;
+        self.context_focus = None;
         self.persist_chat_state(self.active);
         cx.notify();
     }
@@ -4994,6 +5066,19 @@ PYEOF"#;
         if prompt.is_empty() {
             return;
         }
+        // 先頭 `!` = シェルで実行する（エージェントへは送らない・#37）。生成中でも列に積まず即実行。
+        if let Some(command) = shell::shell_input(&prompt) {
+            if command.is_empty() {
+                return; // `!` だけ＝何もしない（本文も消さない）
+            }
+            let command = command.to_string();
+            self.composer.update(cx, |composer, cx| composer.clear(cx));
+            if let Some(thread) = self.threads.get_mut(self.active) {
+                thread.draft.clear();
+            }
+            self.run_shell(command, cx);
+            return;
+        }
         if let Some(thread) = self.threads.get(self.active) {
             cx.emit(PanelEvent::HumanSend {
                 thread: thread.name.clone(),
@@ -5097,7 +5182,9 @@ PYEOF"#;
     /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     /// 名前でスレッドの位置を引く（作らない・アクティブ化しない）。
     pub fn thread_index_named(&self, name: &str) -> Option<usize> {
-        self.threads.iter().position(|thread| thread.name.as_ref() == name)
+        self.threads
+            .iter()
+            .position(|thread| thread.name.as_ref() == name)
     }
 
     pub fn set_prompt_context(&mut self, thread: usize, context: String) {
@@ -5139,6 +5226,11 @@ PYEOF"#;
         // slash コマンド（`/clear` `/compact` 等）は先頭が `/` でないとエージェントが認識しない。
         // スレッドの context（Captain の役割・現況表）は付けずにそのまま送る。
         let is_slash_command = prompt.starts_with('/');
+        // `!` で実行したコマンドの出力は、人間が次に送る 1 通へ添える（CLI の bash モードと同じ）。
+        // slash コマンドは先頭が `/` でないと効かず、台帳イベントは人間の発話ではないので添えない。
+        if !is_slash_command && !ledger {
+            context_prefix.push_str(&self.take_shell_context(thread_index));
+        }
         if let Some(context) = self
             .threads
             .get(thread_index)
@@ -7943,73 +8035,13 @@ PYEOF"#;
                 // 既定で折り畳み、要約行クリックで展開する（コード読み込みの結果で transcript が
                 // 流れないように・Thinking と同じ流儀）。
                 if let Some(result) = result {
-                    // 要約に出すのは**丸める前**の行数。載せている本文から数え直すと、
-                    // 2000 行の出力が「201 行」に見えて、畳みが実際より小さく嘘をつく。
-                    let shown_lines = result.lines().count().max(1);
-                    let line_count = (*result_lines).max(shown_lines);
-                    let collapsible = shown_lines > STEP_COLLAPSE_MIN_LINES
-                        || result.len() > STEP_COLLAPSE_MIN_BYTES;
-                    let expanded = self.is_step_expanded(index);
-                    // result 全体を 1 region に保ち、複数行コピー時の改行を原文どおりにする。
-                    let mut row = div()
-                        .flex()
-                        .items_start()
-                        .gap(px(4.))
-                        .pt(px(3.))
-                        .font_family("Guguru Sans Code")
-                        .text_size(px(11.))
-                        .text_color(theme.fg2)
-                        .child(div().flex_none().child("⎿"));
-                    if collapsible {
-                        let header = div()
-                            .id(("step-result", index))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .cursor_pointer()
-                            .child(div().flex_none().text_size(px(8.)).child(if expanded {
-                                "▾"
-                            } else {
-                                "▸"
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(step_result_summary(result.as_ref(), line_count)),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_step(index, cx);
-                                }),
-                            );
-                        let mut column = div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .gap(px(3.))
-                            .child(header);
-                        if expanded {
-                            column = column.child(div().min_w_0().child(self.push_selectable(
-                                result.clone(),
-                                self.syntax_highlights(result_language, result.as_ref()),
-                                cx,
-                            )));
-                        }
-                        row = row.child(column);
-                    } else {
-                        row = row.child(div().flex_1().min_w_0().child(self.push_selectable(
-                            result.clone(),
-                            self.syntax_highlights(result_language, result.as_ref()),
-                            cx,
-                        )));
-                    }
-                    body = body.child(row);
+                    body = body.child(self.render_step_result(
+                        index,
+                        result,
+                        *result_lines,
+                        result_language,
+                        cx,
+                    ));
                 }
                 div()
                     .flex()
@@ -8019,6 +8051,7 @@ PYEOF"#;
                     .child(body)
                     .into_any_element()
             }
+            Entry::Shell { .. } => self.render_shell_entry(index, entry, cx),
             // 生成中も完了後も同じ選択可能 Markdown パス（Zed の Markdown.selection 相当の一本化・
             // 2026-08-26）。生成中は reveal 分の接頭辞だけ描き、タイプライタの演出を出す。
             Entry::Agent(text) => {
@@ -8038,6 +8071,86 @@ PYEOF"#;
                     .into_any_element()
             }
         }
+    }
+
+    /// ステップ / `!` 実行の `⎿ 結果` 行。長い結果は既定で畳み、要約行クリックで展開する
+    /// （`expanded_steps` をエントリ index で引く）。`result_lines` は丸める前の行数。
+    fn render_step_result(
+        &self,
+        index: usize,
+        result: &SharedString,
+        result_lines: usize,
+        result_language: Option<lang::LanguageId>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let theme = &self.theme;
+        // 要約に出すのは**丸める前**の行数。載せている本文から数え直すと、
+        // 2000 行の出力が「201 行」に見えて、畳みが実際より小さく嘘をつく。
+        let shown_lines = result.lines().count().max(1);
+        let line_count = result_lines.max(shown_lines);
+        let collapsible =
+            shown_lines > STEP_COLLAPSE_MIN_LINES || result.len() > STEP_COLLAPSE_MIN_BYTES;
+        let expanded = self.is_step_expanded(index);
+        // result 全体を 1 region に保ち、複数行コピー時の改行を原文どおりにする。
+        let mut row = div()
+            .flex()
+            .items_start()
+            .gap(px(4.))
+            .pt(px(3.))
+            .font_family("Guguru Sans Code")
+            .text_size(px(11.))
+            .text_color(theme.fg2)
+            .child(div().flex_none().child("⎿"));
+        if collapsible {
+            let header = div()
+                .id(("step-result", index))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .cursor_pointer()
+                .child(div().flex_none().text_size(px(8.)).child(if expanded {
+                    "▾"
+                } else {
+                    "▸"
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(step_result_summary(result.as_ref(), line_count)),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_step(index, cx);
+                    }),
+                );
+            let mut column = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .gap(px(3.))
+                .child(header);
+            if expanded {
+                column = column.child(div().min_w_0().child(self.push_selectable(
+                    result.clone(),
+                    self.syntax_highlights(result_language, result.as_ref()),
+                    cx,
+                )));
+            }
+            row = row.child(column);
+        } else {
+            row = row.child(div().flex_1().min_w_0().child(self.push_selectable(
+                result.clone(),
+                self.syntax_highlights(result_language, result.as_ref()),
+                cx,
+            )));
+        }
+        row
     }
 
     /// markdown の 1 ブロック（本文 + インライン装飾）を、リンク検出つきで積む。
@@ -8514,7 +8627,7 @@ PYEOF"#;
     }
 
     /// Add context のドロップダウン（プロジェクトのファイル候補。クリックで添付）。
-    fn render_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_context_menu(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = self.active_color();
         let attached: Vec<SharedString> = self
@@ -8541,6 +8654,11 @@ PYEOF"#;
         } else {
             theme.fg0
         };
+        // キャレットは実際に打てる時（フォーカスがある時）だけ描く（打てないのに打てそうに見せない）。
+        let focused = self
+            .context_focus
+            .as_ref()
+            .is_some_and(|focus| focus.is_focused(window));
         let mut menu = div()
             .absolute()
             .left(px(11.))
@@ -8576,7 +8694,9 @@ PYEOF"#;
                             .whitespace_nowrap()
                             .child(display),
                     )
-                    .child(div().flex_none().w(px(1.5)).h(px(13.)).bg(accent)),
+                    .when(focused, |row| {
+                        row.child(div().flex_none().w(px(1.5)).h(px(13.)).bg(accent))
+                    }),
             );
         if let Some(focus) = &self.context_focus {
             menu = menu
@@ -8604,8 +8724,11 @@ PYEOF"#;
                         .child(path.clone())
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| {
-                                this.add_context(path.clone(), cx)
+                            cx.listener(move |this, _, window, cx| {
+                                // ドロップダウンの track_focus（閉じる面）へフォーカスを渡さない。
+                                cx.stop_propagation();
+                                this.add_context(path.clone(), cx);
+                                this.focus_composer(window, cx);
                             }),
                         )
                 }),
@@ -8616,16 +8739,14 @@ PYEOF"#;
     fn on_context_key_down(
         &mut self,
         event: &gpui::KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event.keystroke.key.as_str() {
             "escape" => {
-                self.context_menu_open = false;
-                self.context_focus = None;
                 // 親（パネル root）の Esc へ渡さない＝候補を閉じたついでに中断しない。
                 cx.stop_propagation();
-                cx.notify();
+                self.close_context_menu(window, cx);
             }
             "enter" => {
                 let query = self.context_query.to_lowercase();
@@ -8636,6 +8757,7 @@ PYEOF"#;
                     .cloned();
                 if let Some(path) = first {
                     self.add_context(path, cx);
+                    self.focus_composer(window, cx);
                 }
             }
             "backspace" => {
@@ -9308,6 +9430,10 @@ PYEOF"#;
             .map(|started| started.elapsed().as_secs());
         let running_tokens = active_thread.map(|thread| thread.tokens_used).unwrap_or(0);
         let running_digest = active_thread.and_then(|thread| thread.live_digest());
+        // 先頭 `!` の間は「シェルへ行く」見た目（枠・宛先・下段・実行ボタンを syn-mac に・#37）。
+        let shell_mode = self.composer_shell;
+        let shell_color = theme.syntax.macro_;
+        let shell_chips = self.render_shell_context_chips(cx);
 
         div()
             .id("composer-drop")
@@ -9339,7 +9465,11 @@ PYEOF"#;
                     .rounded(px(9.))
                     .bg(theme.bg0)
                     .border_1()
-                    .border_color(color.alpha(0.5))
+                    .border_color(if shell_mode {
+                        shell_color
+                    } else {
+                        color.alpha(0.5)
+                    })
                     .px(px(11.))
                     .py(px(8.))
                     // 上縁リサイズハンドル: 掴んで上下ドラッグで入力欄の高さを変える（固定 68px の解消）。
@@ -9382,7 +9512,24 @@ PYEOF"#;
                             .child(activity_dot("dest-dot", 8.0, color, activity))
                             .child(thread_name)
                             .child(div().flex_1())
-                            .child(div().text_color(theme.fg2).child(destination)),
+                            .when(!shell_mode, |row| {
+                                row.child(div().text_color(theme.fg2).child(destination))
+                            })
+                            // シェルモード: どこで走るかを出す（リモートへの誤爆防止）。
+                            .when(shell_mode, |row| {
+                                row.child(self.render_shell_badge()).child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .font_family("Guguru Sans Code")
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(format!(
+                                            "$ {}",
+                                            self.shell_place()
+                                        ))),
+                                )
+                            }),
                     )
                     // Add context: ＋ ボタン + 添付チップ（× で外す）
                     .child(
@@ -9415,8 +9562,11 @@ PYEOF"#;
                                     ))
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        cx.listener(|this, _, _window, cx| {
-                                            this.toggle_context_menu(cx)
+                                        cx.listener(|this, _, window, cx| {
+                                            // 祖先（Workspace root）の track_focus にフォーカスを
+                                            // 奪い返させない（開いた直後の絞り込み欄が死ぬ・#39）。
+                                            cx.stop_propagation();
+                                            this.toggle_context_menu(window, cx)
                                         }),
                                     ),
                             )
@@ -9451,7 +9601,9 @@ PYEOF"#;
                                                 }),
                                             ),
                                     )
-                            })),
+                            }))
+                            // 次の送信に添える `!` の出力（× で外す）。
+                            .children(shell_chips),
                     )
                     // composer 本体（平坦 EditorView。Enter=改行 / ⌘Enter=送信 / IME 確定 Enter は送信にしない）
                     // 高さは内容に合わせて自動で伸びる（auto-grow）: 基準高 composer_height
@@ -9479,36 +9631,49 @@ PYEOF"#;
                             .child(self.composer.clone()),
                     )
                     // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(6.))
-                            .pt(px(6.))
-                            .when(!self.chat_mode, |row| {
-                                row.child(self.render_selector_pill(Selector::Agent, cx))
-                                    .child(self.render_selector_pill(Selector::Mode, cx))
-                            })
-                            // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
-                            // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
-                            .when(self.chat_mode, |row| {
-                                row.child(
-                                    div()
-                                        .id("chat-write-scope")
-                                        .px(px(6.))
-                                        .text_size(px(10.5))
-                                        .text_color(theme.fg2)
-                                        .child(SharedString::from(i18n::t!("chat.write_scope")))
-                                        .tooltip(ui::Tooltip::text(
-                                            SharedString::from(i18n::t!("chat.write_scope_tip")),
-                                            theme.clone(),
-                                        )),
-                                )
-                            })
-                            .child(self.render_selector_pill(Selector::Model, cx))
-                            .child(self.render_selector_pill(Selector::Effort, cx)),
-                    )
+                    .when(shell_mode, |parent| {
+                        parent.child(
+                            div()
+                                .pt(px(6.))
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(i18n::t!("agent.shell_hint"))),
+                        )
+                    })
+                    .when(!shell_mode, |parent| {
+                        parent.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(6.))
+                                .pt(px(6.))
+                                .when(!self.chat_mode, |row| {
+                                    row.child(self.render_selector_pill(Selector::Agent, cx))
+                                        .child(self.render_selector_pill(Selector::Mode, cx))
+                                })
+                                // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
+                                // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
+                                .when(self.chat_mode, |row| {
+                                    row.child(
+                                        div()
+                                            .id("chat-write-scope")
+                                            .px(px(6.))
+                                            .text_size(px(10.5))
+                                            .text_color(theme.fg2)
+                                            .child(SharedString::from(i18n::t!("chat.write_scope")))
+                                            .tooltip(ui::Tooltip::text(
+                                                SharedString::from(i18n::t!(
+                                                    "chat.write_scope_tip"
+                                                )),
+                                                theme.clone(),
+                                            )),
+                                    )
+                                })
+                                .child(self.render_selector_pill(Selector::Model, cx))
+                                .child(self.render_selector_pill(Selector::Effort, cx)),
+                        )
+                    })
                     // 送信行: [Enter 挙動トグル] … [送信ボタン（現ヒント付き）]
                     .child(
                         div()
@@ -9547,7 +9712,29 @@ PYEOF"#;
                                     ),
                             )
                             .child(div().flex_1())
-                            .child(if running {
+                            .child(if shell_mode {
+                                // シェルモードはエージェントの生成中でも実行できる（列に積まず即実行）。
+                                div()
+                                    .id("shell-run-button")
+                                    .px(px(12.))
+                                    .py(px(3.))
+                                    .rounded(px(6.))
+                                    .bg(shell_color)
+                                    .cursor_pointer()
+                                    .hover(|style| style.opacity(0.85))
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.bg0)
+                                    .child(SharedString::from(if self.submit_on_enter {
+                                        i18n::t!("agent.shell_run_enter")
+                                    } else {
+                                        i18n::t!("agent.shell_run_cmd")
+                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| this.submit(cx)),
+                                    )
+                            } else if running {
                                 // 実行中は送信ボタンを**停止**に差し替える（Esc と同じ動作）。
                                 // 中立の警告色ではなく縁取りにして、識別色の意味を汚さない（§1.3）。
                                 div()
@@ -9729,7 +9916,7 @@ impl Render for AgentPanel {
             .child(self.render_composer(cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
             .when(self.context_menu_open, |element| {
-                element.child(self.render_context_menu(cx))
+                element.child(self.render_context_menu(window, cx))
             })
             // 狭いタブ行とは独立した入力面を最後に重ね、IME・ボタン・Esc を常に見える状態にする。
             .children(self.render_rename_dialog(cx))
@@ -10640,6 +10827,7 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
                 label: label.to_string().into(),
             }
         }
+        "shell" => shell::decode_turn(&content),
         _ => Entry::Agent(content.into()),
     }
 }
@@ -10714,6 +10902,7 @@ fn seed_threads() -> Vec<Thread> {
         effort: "high".into(),
         agent: "Claude Code".into(),
         context: Vec::new(),
+        shell_context: Vec::new(),
         draft: String::new(),
         tokens_used: 23_400,
         tokens_max: 200_000,
@@ -11564,6 +11753,109 @@ PYEOF"#;
             };
             assert_eq!(sent(panel, "目標", cx), "ROLE\n\n目標");
             assert_eq!(sent(panel, "/clear", cx), "/clear");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 先頭 `!` はエージェントへ送らずシェルで実行し（生成中でも列に積まない）、出力は次に人間が
+    /// 送る 1 通へ `<bash-input>` で添える。slash コマンドには添えない（#37）。
+    #[cfg(unix)]
+    #[gpui::test]
+    fn bang_prompt_runs_in_shell_and_goes_with_next_prompt(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "bang_shell");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.threads[active].running = true; // 生成中でも `!` は待たない
+            panel.dest_cwd = Some(std::env::temp_dir());
+            panel.composer.update(cx, |composer, cx| {
+                composer.set_plain_text("!echo necoder-shell; echo oops 1>&2", cx)
+            });
+            panel.submit(cx);
+            let thread = &panel.threads[active];
+            assert!(thread.queued_prompts.is_empty(), "送信待ちの列に積まない");
+            assert!(matches!(
+                thread.entries.last(),
+                Some(Entry::Shell {
+                    status: shell::ShellStatus::Running,
+                    ..
+                })
+            ));
+            assert!(panel.composer.read(cx).plain_text().is_empty());
+        });
+        assert!(
+            command_rx.try_recv().is_err(),
+            "エージェントへは何も送らない"
+        );
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            match panel.threads[active].entries.last() {
+                Some(Entry::Shell { output, status, .. }) => {
+                    assert_eq!(*status, shell::ShellStatus::Exited(Some(0)));
+                    assert_eq!(output.as_deref(), Some("necoder-shell\noops"));
+                }
+                other => panic!(
+                    "`!` の行が無い: {}",
+                    other.map(entry_plain_text).unwrap_or_default()
+                ),
+            }
+            assert_eq!(panel.threads[active].shell_context.len(), 1);
+            panel.threads[active].running = false;
+            panel.send_prompt_text("/clear".to_string(), cx);
+            assert_eq!(
+                panel.threads[active].shell_context.len(),
+                1,
+                "slash コマンドには添えない"
+            );
+            panel.threads[active].running = false;
+            panel.send_prompt_text("この結果を見て".to_string(), cx);
+            assert!(panel.threads[active].shell_context.is_empty());
+        });
+        let mut prompts = Vec::new();
+        while let Ok(SessionCommand::Prompt(text)) = command_rx.try_recv() {
+            prompts.push(text);
+        }
+        assert_eq!(prompts.first().map(String::as_str), Some("/clear"));
+        let with_output = prompts.get(1).expect("2 通目が送られている");
+        assert!(with_output.starts_with(
+            "<bash-input>echo necoder-shell; echo oops 1>&2</bash-input>\n<bash-stdout>necoder-shell\noops</bash-stdout>"
+        ));
+        assert!(with_output.ends_with("\nこの結果を見て"));
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// ＋context を開くと絞り込み欄がキーを受け、Esc で閉じて composer へフォーカスが戻る（#39）。
+    #[gpui::test]
+    fn context_menu_takes_keys_and_returns_focus(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "context_focus");
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let mut panel = AgentPanel::new(Theme::dark(), cx);
+            panel.context_files = vec!["src/main.rs".into(), "README.md".into()];
+            panel
+        });
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| panel.toggle_context_menu(window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let panel = panel.read(cx);
+            let focus = panel.context_focus.as_ref().expect("開いている");
+            assert!(focus.is_focused(window), "絞り込み欄にフォーカスがある");
+        });
+        cx.simulate_keystrokes("r e a");
+        panel.read_with(cx, |panel, _cx| assert_eq!(panel.context_query, "rea"));
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            let panel = panel.read(cx);
+            assert!(!panel.context_menu_open);
+            assert!(panel.context_focus.is_none());
+            assert!(
+                panel.composer.read(cx).focus_handle(cx).is_focused(window),
+                "composer へ戻る"
+            );
         });
         let _ = std::fs::remove_file(settings_path);
     }

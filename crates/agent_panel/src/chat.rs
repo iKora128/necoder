@@ -599,6 +599,7 @@ fn chat_markdown(name: &str, entries: &[Entry]) -> String {
                 ));
             }
             Entry::Step { tool, .. } => markdown.push_str(&format!("\n> ⏺ {tool}\n")),
+            Entry::Shell { command, .. } => markdown.push_str(&format!("\n> ! {command}\n")),
             Entry::Thinking(_) | Entry::Checkpoint { .. } => {}
         }
     }

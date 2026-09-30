@@ -203,6 +203,17 @@ impl HostProcess {
     pub fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// 手元の子プロセスの PID（remote では手元の `ssh` のもの＝リモート側の PID ではない）。
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// 終了していれば終了状態を返す（`None` = まだ走っている）。待たない。
+    /// remote では手元の `ssh` の終了状態＝リモート側コマンドの終了コード（接続失敗は 255）。
+    pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait().context("process の終了状態を読めない")
+    }
 }
 
 impl Drop for HostProcess {

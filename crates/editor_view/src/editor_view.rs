@@ -1190,6 +1190,19 @@ impl EditorView {
         cx.notify();
     }
 
+    /// 現在のアクセント色（親が「今の色と違う時だけ塗り直す」判定に使う）。
+    pub fn accent(&self) -> gpui::Hsla {
+        self.accent
+    }
+
+    /// 先頭の空白でない 1 文字（composer の `!` 判定用）。全文を複製せず先頭の行から見る —
+    /// 親はキャレット点滅の通知でも読むので、長文を貼った composer で毎回全文を作らない。
+    pub fn first_visible_char(&self) -> Option<char> {
+        let snapshot = self.buffer.snapshot();
+        (0..snapshot.line_count())
+            .find_map(|row| snapshot.line_text(row).trim_start().chars().next())
+    }
+
     fn line_height(&self) -> Pixels {
         px(self.line_height_value())
     }
