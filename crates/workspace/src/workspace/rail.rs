@@ -681,4 +681,101 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).ok();
     }
+
+    /// ⌘O で選んでいる行の行き先は、レールの枠が光る（本人要望・2026-10-01）: 開いている間だけ・
+    /// 絞り込みと ↑↓ に付いてくる・背景で worktree の行が届いても選んでいた物から動かない・
+    /// worktree の行はその下に並ぶプロジェクトの枠・Task の行は同じリポジトリの統合先の枠。
+    #[gpui::test]
+    fn the_rail_lights_the_project_chosen_in_the_switcher(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_rail_switcher_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let projects: Vec<PathBuf> = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|name| root.join(name))
+            .collect();
+        for project in &projects {
+            std::fs::create_dir_all(project).expect("作業フォルダを作れる");
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(projects.clone(), Theme::dark(), None, cx)
+        });
+        let lit = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| workspace.switcher_rail_slots(cx))
+        };
+        let set_query = |query: &str, cx: &mut gpui::VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                let picker = workspace.overlays.picker.clone().expect("⌘O が開いている");
+                picker.update(cx, |picker, cx| picker.set_query(query, cx));
+            })
+        };
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        assert!(lit(cx).is_empty(), "⌘O を開くまでは光らない");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_project_switcher(&ProjectSwitcher, window, cx)
+        });
+        cx.run_until_parked(); // 背景の worktree 集め（git ではないので 0 行）まで流す
+        assert_eq!(lit(cx), vec![0], "開いた時は先頭の候補");
+        cx.simulate_keystrokes("down");
+        assert_eq!(lit(cx), vec![1], "↓ に付いてくる");
+
+        // 背景で worktree の行が alpha の下に差し込まれても、選んでいた beta から動かない。
+        let feature = root.join("alpha-feature");
+        workspace.update(cx, |workspace, cx| {
+            let collected = vec![(
+                0,
+                vec![(
+                    project::GitWorktree {
+                        path: feature.clone(),
+                        branch: Some("feature".to_string()),
+                    },
+                    project::WorktreeStatus::default(),
+                )],
+            )];
+            let (items, rows) = workspace.build_switcher_items(&collected, cx);
+            workspace.picker_worktree_rows = rows;
+            let picker = workspace.overlays.picker.clone().expect("⌘O が開いている");
+            picker.update(cx, |picker, cx| picker.set_items(items, cx));
+        });
+        assert_eq!(lit(cx), vec![1], "行が差し込まれても選んでいた物のまま");
+
+        set_query("gam", cx);
+        assert_eq!(lit(cx), vec![2], "絞り込みの先頭に付いてくる");
+        set_query("feature", cx);
+        assert_eq!(
+            lit(cx),
+            vec![0],
+            "開いていない worktree の行は、その下に並ぶプロジェクトの枠"
+        );
+
+        // gamma を alpha のリポジトリの Task にする（レールに Task の枠は無い）。
+        workspace.update(cx, |workspace, _cx| {
+            let repository = "repository-alpha".to_string();
+            workspace.project_sessions.projects[0]
+                .task_space
+                .repository_id = repository.clone();
+            let gamma = &mut workspace.project_sessions.projects[2].task_space;
+            gamma.kind = SpaceKind::Task;
+            gamma.repository_id = repository;
+        });
+        set_query("gam", cx);
+        assert_eq!(lit(cx), vec![0], "Task の行は、同じリポジトリの統合先の枠");
+
+        cx.simulate_keystrokes("escape");
+        assert!(lit(cx).is_empty(), "閉じたら消える");
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

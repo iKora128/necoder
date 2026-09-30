@@ -271,13 +271,30 @@ impl Picker {
     }
 
     /// 項目を差し替える（背景で集めた行を後から流し込む・M12-12 ⌘O ダッシュボード）。
-    /// 現在のクエリで再フィルタし、選択位置は範囲内へクランプする。
+    /// 現在のクエリで再フィルタし、選んでいた行と同じ id の行を選び直す（間に行が差し込まれても
+    /// 選んでいた物から動かない）。その id が消えていれば、選択位置を範囲内へクランプする。
     pub fn set_items(&mut self, items: Vec<PickerItem>, cx: &mut Context<Self>) {
         let selected = self.selected;
+        let selected_id = self.selected_id();
         self.items = items;
         self.refilter();
-        self.selected = selected.min(self.filtered.len().saturating_sub(1));
+        self.selected = selected_id
+            .and_then(|id| {
+                self.filtered
+                    .iter()
+                    .position(|&index| self.items[index].id == id)
+            })
+            .unwrap_or_else(|| selected.min(self.filtered.len().saturating_sub(1)));
         cx.notify();
+    }
+
+    /// いま選んでいる行の id（一致が無ければ None）。ホストが選択に合わせて別の場所を描く用
+    /// （⌘O で選んでいるプロジェクトをレールで光らせる）。
+    pub fn selected_id(&self) -> Option<usize> {
+        self.filtered
+            .get(self.selected)
+            .and_then(|&index| self.items.get(index))
+            .map(|item| item.id)
     }
 
     /// クエリを直接セットして再フィルタ（開発プローブ / プログラム操作用）。

@@ -1377,10 +1377,19 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。
+    /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。`query` があれば開いてから
+    /// 絞り込む（選んだ行の行き先がレールで光るのを撮る）。
     #[cfg(debug_assertions)]
-    pub fn debug_open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn debug_open_switcher(
+        &mut self,
+        query: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_project_switcher(&ProjectSwitcher, window, cx);
+        if let (Some(query), Some(picker)) = (query, self.overlays.picker.clone()) {
+            picker.update(cx, |picker, cx| picker.set_query(query, cx));
+        }
     }
 
     /// 開発用: ⌘P ファイルファインダを開く（`NECODER_FINDER_PROBE`・空プロジェクトの

@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Added
+
+- **⌘O lights up the rail**: While the project switcher (⌘O) is open, the project you have selected lights up in the rail on the left. Its frame brightens, and a bar in its color appears at the rail's left edge. You can see where a project sits in the rail while you find it by name. A worktree row lights the project it is listed under, and a Task lights its repository's project.
+
+### Fixed
+
+- **⌘O selection stays put**: If you moved the selection in ⌘O before the branch and worktree rows finished loading, the selection could jump to another row when they arrived. It now stays on the row you chose.
+
+### 日本語
+
+#### 追加
+
+- **⌘O で選んでいるプロジェクトがレールで光る**: プロジェクト切替（⌘O）を開いている間、選んでいるプロジェクトが左のレールで光ります。枠が点き、レールの左端にその色の縦棒が出ます。名前で探しながら、そのプロジェクトがレールのどこにあるかが分かります。worktree の行はその行が並ぶプロジェクト、Task は同じリポジトリのプロジェクトが光ります。
+
+#### 修正
+
+- **⌘O の選択が勝手に動かない**: ブランチ / worktree の行が読み込み終わる前に ⌘O で選択を動かすと、行が届いた時に別の行へ移ることがありました。選んだ行のまま残ります。
+
 ## [0.1.23] - 2026-10-01
 
 > **This is a test release, like v0.1.21 and v0.1.22.** It contains everything in v0.1.22, and some of that has not been checked on a real machine yet (`docs/ORCA-PARITY-CHECKLIST.md`). It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.

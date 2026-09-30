@@ -932,9 +932,14 @@ fn main() {
                         }
                     }
                 }
-                // 開発用: NECODER_SWITCHER_PROBE=<ms> で ⌘O スイッチャーを開く（M12-12 の描画検証。
-                // ACP_PROBE と併用すると実行中ドットも写る）。
-                if let Ok(delay) = std::env::var("NECODER_SWITCHER_PROBE") {
+                // 開発用: NECODER_SWITCHER_PROBE=<ms>[;<絞り込み>] で ⌘O スイッチャーを開く（M12-12 の
+                // 描画検証。ACP_PROBE と併用すると実行中ドットも写る）。`;` の後ろは開いてから打つ文字
+                // （選んだ行の行き先がレールで光るのを撮る・2026-10-01）。
+                if let Ok(probe) = std::env::var("NECODER_SWITCHER_PROBE") {
+                    let (delay, query) = match probe.split_once(';') {
+                        Some((delay, query)) => (delay.to_string(), Some(query.to_string())),
+                        None => (probe, None),
+                    };
                     if let Ok(delay_ms) = delay.parse::<u64>() {
                         if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                             cx.spawn(async move |_workspace, cx| {
@@ -942,7 +947,7 @@ fn main() {
                                     .timer(std::time::Duration::from_millis(delay_ms))
                                     .await;
                                 let _ = handle.update(cx, |workspace, window, cx| {
-                                    workspace.debug_open_switcher(window, cx);
+                                    workspace.debug_open_switcher(query.as_deref(), window, cx);
                                 });
                             })
                             .detach();

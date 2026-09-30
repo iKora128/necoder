@@ -126,6 +126,8 @@ impl Workspace {
             .unwrap_or_default();
         let rail_focus = self.chrome.rail_focus.clone();
         let focused_surface = theme.bg2;
+        // ⌘O で選んでいる行の行き先（開いている間だけ・overlays の `switcher_rail_slots`）。
+        let switcher_lit = self.switcher_rail_slots(cx);
         div()
             .id("rail")
             // レールを本物のキーの宛先にする。これが無いとレールは dispatch 経路に載らず、
@@ -191,6 +193,9 @@ impl Workspace {
                             || (active_slot_is_task
                                 && active_repository.as_deref()
                                     == Some(slot.task_space.repository_id.as_str())));
+                    // ⌘O で選んでいる行の行き先: 枠を hover と同じ濃さで点け、レールの左端に縦棒を出す
+                    // （名前で選んだ物がレールのどこに居るかを目で結ぶ・本人要望 2026-10-01）。
+                    let is_switcher_target = switcher_lit.contains(&index);
                     let monogram = slot
                         .icon
                         .as_ref()
@@ -215,9 +220,13 @@ impl Workspace {
                         .items_center()
                         .justify_center()
                         .text_color(theme.fg0)
-                        .bg(color.alpha(0.14))
+                        .bg(color.alpha(if is_switcher_target { 0.24 } else { 0.14 }))
                         .border_2()
-                        .border_color(if is_active { color } else { color.alpha(0.35) })
+                        .border_color(if is_active || is_switcher_target {
+                            color
+                        } else {
+                            color.alpha(0.35)
+                        })
                         .cursor_pointer()
                         // 非アクティブは hover で色が濃くなる＝クリックできる合図（Zed の気持ちよさ）
                         .hover(|style| style.bg(color.alpha(0.24)).border_color(color))
@@ -233,6 +242,9 @@ impl Workspace {
                                 )
                                 .into_any_element(),
                             None => monogram.into_any_element(),
+                        })
+                        .when(is_switcher_target, |element| {
+                            element.child(rail_switcher_bar(index, color))
                         })
                         .when(slot.remote_host.is_some(), |element| {
                             // リモート slot の見分け（#2）: 右下に server バッジ（SSH 接続先の目印）。
@@ -604,4 +616,36 @@ impl Workspace {
             )
             .child(div().h(px(6.)))
     }
+}
+
+/// レールのプロジェクト枠の一辺（`render_rail` の `size(px(30.))`）と枠線（`border_2`）。
+const RAIL_SLOT_SIZE: f32 = 30.0;
+const RAIL_SLOT_BORDER: f32 = 2.0;
+
+/// ⌘O で選んでいる行の行き先の枠に添える、レールの左端の縦棒（プロジェクト色・選択の左バー §1.3）。
+/// 枠の子として絶対配置する。原点は枠線の内側なので、レールの左端までの距離（中央寄せの余白 +
+/// 枠線）だけ左へ出す。レールは右に 1px の境界線を持つので、中身の幅は `RAIL_WIDTH − 1`。
+/// 出るたびに短い棒から伸びて点く（160ms・1 回きり＝idle 予算を守る）。
+fn rail_switcher_bar(index: usize, color: Hsla) -> impl IntoElement {
+    const WIDTH: f32 = 3.0;
+    const HEIGHT: f32 = 18.0;
+    let inner = RAIL_SLOT_SIZE - 2.0 * RAIL_SLOT_BORDER;
+    let left = -((RAIL_WIDTH - 1.0 - RAIL_SLOT_SIZE) / 2.0 + RAIL_SLOT_BORDER);
+    div()
+        .absolute()
+        .left(px(left))
+        .w(px(WIDTH))
+        .rounded_r(px(WIDTH / 2.0))
+        .bg(color)
+        .with_animation(
+            ("rail-switcher-bar", index),
+            Animation::new(std::time::Duration::from_millis(160))
+                .with_easing(gpui::ease_out_quint()),
+            move |bar, delta| {
+                let height = HEIGHT * (0.4 + 0.6 * delta);
+                bar.top(px((inner - height) / 2.0))
+                    .h(px(height))
+                    .opacity(delta)
+            },
+        )
 }
