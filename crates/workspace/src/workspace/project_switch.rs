@@ -26,7 +26,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let text = match event {
-            EditorInputEvent::Typed(text) => text,
+            EditorInputEvent::Typed(text) => {
+                // エディタに打った＝エクスプローラから離れた（⌥⌘C は `path:行` に戻る）。
+                self.chrome.explorer_clicked_file = None;
+                text
+            }
             EditorInputEvent::HunkClicked { hunk, position } => {
                 if self.active_editor().as_ref() == Some(editor) {
                     self.on_hunk_clicked(hunk.clone(), *position, cx);

@@ -404,14 +404,18 @@ impl Workspace {
                 // クリック合成を破棄するので、on_click ならドラッグ時に誤発火しない。
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     if is_dir {
+                        // フォルダも押したら選択にする（⌥⌘C でコピーされるのは選択＝最後に押した項目）。
+                        this.select_explorer_entry(path.clone());
                         this.toggle_dir(path.clone(), cx);
                     } else {
-                        // 1 回クリック = プレビュータブ・ダブルクリック = 普通のタブ（O26）。
-                        if event.click_count() >= 2 {
-                            this.open_file(path.clone(), window, cx);
-                        } else {
-                            this.open_file_preview(path.clone(), window, cx);
-                        }
+                        // 1 回クリック = プレビュータブ・ダブルクリック = 既定のアプリ（O26・2026-09-30）。
+                        this.click_explorer_file(
+                            path.clone(),
+                            event.click_count(),
+                            is_local,
+                            window,
+                            cx,
+                        );
                         // フォーカスはエディタへ（エクスプローラ枠の click で取り返さない）。
                         cx.stop_propagation();
                     }
@@ -517,11 +521,14 @@ impl Workspace {
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if is_dir {
                             this.enter_dir(path.clone(), cx);
-                        } else if event.click_count() >= 2 {
-                            this.open_file(path.clone(), window, cx);
-                            cx.stop_propagation(); // フォーカスはエディタへ
                         } else {
-                            this.open_file_preview(path.clone(), window, cx);
+                            this.click_explorer_file(
+                                path.clone(),
+                                event.click_count(),
+                                is_local,
+                                window,
+                                cx,
+                            );
                             cx.stop_propagation(); // フォーカスはエディタへ
                         }
                     }))
@@ -667,11 +674,14 @@ impl Workspace {
                                         move |this, event: &ClickEvent, window, cx| {
                                             if is_dir {
                                                 this.enter_dir(path.clone(), cx);
-                                            } else if event.click_count() >= 2 {
-                                                this.open_file(path.clone(), window, cx);
-                                                cx.stop_propagation(); // フォーカスはエディタへ
                                             } else {
-                                                this.open_file_preview(path.clone(), window, cx);
+                                                this.click_explorer_file(
+                                                    path.clone(),
+                                                    event.click_count(),
+                                                    is_local,
+                                                    window,
+                                                    cx,
+                                                );
                                                 cx.stop_propagation(); // フォーカスはエディタへ
                                             }
                                         },

@@ -1333,11 +1333,47 @@ impl Workspace {
         }
     }
 
-    /// パスをクリップボードへコピー。
+    /// パスをクリップボードへコピー。何も起きないように見えるので、コピーした物をトーストで返す。
     pub(crate) fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+        let text = path.display().to_string();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         self.hide_context_menu(cx);
-        cx.notify();
+        let color = self.accent();
+        self.push_toast(
+            i18n::t!("explorer.copied_path", "path" => text).into(),
+            color,
+            cx,
+        );
+    }
+
+    /// アクティブ project のエクスプローラで `path` を選択にする（ツリーのフォルダを押した時）。
+    pub(crate) fn select_explorer_entry(&mut self, path: PathBuf) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.selected = Some(path);
+        }
+    }
+
+    /// エクスプローラでファイルを押した（ツリー / カラム / アイコン共通）。1 回目はプレビュータブ、
+    /// ダブルクリックは OS の既定のアプリ（Finder と同じ手癖・2026-09-30 本人要望。1 回目で necoder
+    /// にも開いている）。既定のアプリはこの Mac の上にしか無いので、SSH 先のファイルのダブルクリックは
+    /// 従来どおり普通のタブにする。
+    pub(crate) fn click_explorer_file(
+        &mut self,
+        path: PathBuf,
+        click_count: usize,
+        is_local: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match explorer_file_click(click_count, is_local) {
+            ExplorerFileClick::Preview => {
+                self.chrome.explorer_clicked_file = Some(path.clone());
+                self.open_file_preview(path, window, cx);
+            }
+            ExplorerFileClick::DefaultApp => self.open_with_default_app(&path, cx),
+            ExplorerFileClick::Keep => self.open_file(path, window, cx),
+        }
     }
 
     /// Finder で表示（親フォルダを開いて選択・ローカルのみ）。
@@ -1364,7 +1400,7 @@ impl Workspace {
         }
     }
 
-    /// ファイルを開く（⌘P・ツリーのダブルクリック・検索ジャンプ・F12 等の対話経路）。
+    /// ファイルを開く（⌘P・SSH 先のファイルのダブルクリック・検索ジャンプ・F12 等の対話経路）。
     /// **読み込みは背景スレッド**（remote は 30s ブロックしうる — ARCHITECTURE §9）。
     /// プレビュータブで開いていたら普通のタブにする（開き直した＝そのファイルを使う意思）。
     pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -1407,7 +1443,7 @@ impl Workspace {
         if preview {
             self.pending_preview_tab = Some(path.clone());
         } else if self.pending_preview_tab.as_ref() == Some(&path) {
-            // プレビューで読み込み中に普通に開き直された（ダブルクリック）＝普通のタブで開く。
+            // プレビューで読み込み中に普通に開き直された（⌘P・SSH 先のダブルクリック）＝普通のタブで開く。
             self.pending_preview_tab = None;
         }
         let Some(host) = self.active_host() else {
@@ -1844,5 +1880,123 @@ fn undo_error_message(error: &UndoError) -> String {
             i18n::t!("explorer.undo_missing", "name" => file_label(path))
         }
         UndoError::Io(error) => i18n::t!("explorer.undo_failed", "error" => format!("{error:#}")),
+    }
+}
+
+/// エクスプローラのファイルを押した時の開き方（[`Workspace::click_explorer_file`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExplorerFileClick {
+    /// プレビュータブ（O26）。
+    Preview,
+    /// OS の既定のアプリ（Finder と同じ手癖）。
+    DefaultApp,
+    /// 普通のタブ（プレビューを外す）。
+    Keep,
+}
+
+/// 押した回数から開き方を決める。1 回目 = プレビュー・ダブルクリック = 既定のアプリ（この Mac の
+/// ファイルだけ）。SSH 先のファイルのダブルクリックと 3 回目以降は普通のタブ（連打でアプリを重ねない）。
+fn explorer_file_click(click_count: usize, is_local: bool) -> ExplorerFileClick {
+    match click_count {
+        0 | 1 => ExplorerFileClick::Preview,
+        2 if is_local => ExplorerFileClick::DefaultApp,
+        _ => ExplorerFileClick::Keep,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_double_click_opens_the_default_app_only_for_local_files() {
+        assert_eq!(explorer_file_click(1, true), ExplorerFileClick::Preview);
+        assert_eq!(explorer_file_click(2, true), ExplorerFileClick::DefaultApp);
+        assert_eq!(
+            explorer_file_click(2, false),
+            ExplorerFileClick::Keep,
+            "SSH 先のファイルは普通のタブ"
+        );
+        assert_eq!(
+            explorer_file_click(3, true),
+            ExplorerFileClick::Keep,
+            "連打でアプリを重ねない"
+        );
+    }
+
+    /// ⌥⌘C: エクスプローラにフォーカスがある時・ファイルを押した直後は、選んでいる項目のパスを
+    /// コピーする（Finder と同じ）。エディタに打った後は従来どおり `path:行`。
+    #[gpui::test]
+    fn copy_path_key_copies_what_you_last_clicked(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_copy_path_key_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("notes")).expect("一時プロジェクト");
+        std::fs::write(project.join("a.txt"), "hello\n").expect("a.txt");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        draw(cx);
+        // Worktree は root を正規化する（/var → /private/var）ので、開いている物から組む。
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        let clipboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_window, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        };
+
+        // ① フォルダを押した後（フォーカスはエクスプローラ）。
+        let folder = canonical_root.join("notes");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.select_explorer_entry(folder.clone());
+            workspace.focus_explorer(window, cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("cmd-alt-c");
+        assert_eq!(clipboard(cx), Some(folder.display().to_string()));
+
+        // ② ファイルを押した直後（開いたエディタへフォーカスが移っている）も、そのファイルのパス。
+        let file = canonical_root.join("a.txt");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.click_explorer_file(file.clone(), 1, true, window, cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("cmd-alt-c");
+        assert_eq!(clipboard(cx), Some(file.display().to_string()));
+
+        // ③ エディタに打った後は、従来どおり `path:行`。
+        cx.simulate_input("x");
+        draw(cx);
+        cx.simulate_keystrokes("cmd-alt-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("a.txt:1"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
