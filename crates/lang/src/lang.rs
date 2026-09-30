@@ -5,6 +5,7 @@
 //! 描画側（editor_view）が theme_core の syn-* にマップする（= この crate は theme を知らない）。
 
 use anyhow::{Context as _, Result};
+use std::borrow::Cow;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
 use std::path::Path;
@@ -54,6 +55,18 @@ pub enum LanguageId {
     Bash,
     C,
     Cpp,
+    Java,
+    Ruby,
+    Php,
+    Sql,
+    Dockerfile,
+    Lua,
+    Elixir,
+    Zig,
+    Make,
+    CMake,
+    Protobuf,
+    GraphQl,
 }
 
 impl LanguageId {
@@ -73,6 +86,18 @@ impl LanguageId {
             Self::Bash => "Shell",
             Self::C => "C",
             Self::Cpp => "C++",
+            Self::Java => "Java",
+            Self::Ruby => "Ruby",
+            Self::Php => "PHP",
+            Self::Sql => "SQL",
+            Self::Dockerfile => "Dockerfile",
+            Self::Lua => "Lua",
+            Self::Elixir => "Elixir",
+            Self::Zig => "Zig",
+            Self::Make => "Makefile",
+            Self::CMake => "CMake",
+            Self::Protobuf => "Protocol Buffers",
+            Self::GraphQl => "GraphQL",
         }
     }
 
@@ -94,6 +119,18 @@ impl LanguageId {
             Self::Bash => "bash",
             Self::C => "c",
             Self::Cpp => "cpp",
+            Self::Java => "java",
+            Self::Ruby => "ruby",
+            Self::Php => "php",
+            Self::Sql => "sql",
+            Self::Dockerfile => "dockerfile",
+            Self::Lua => "lua",
+            Self::Elixir => "elixir",
+            Self::Zig => "zig",
+            Self::Make => "make",
+            Self::CMake => "cmake",
+            Self::Protobuf => "proto",
+            Self::GraphQl => "graphql",
         }
     }
 
@@ -115,6 +152,18 @@ impl LanguageId {
             "sh" | "bash" | "zsh" => Self::Bash,
             "c" | "h" => Self::C,
             "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Self::Cpp,
+            "java" => Self::Java,
+            "rb" | "rake" | "gemspec" | "ru" => Self::Ruby,
+            "php" | "phtml" => Self::Php,
+            "sql" => Self::Sql,
+            "dockerfile" | "containerfile" => Self::Dockerfile,
+            "lua" => Self::Lua,
+            "ex" | "exs" => Self::Elixir,
+            "zig" | "zon" => Self::Zig,
+            "mk" | "mak" => Self::Make,
+            "cmake" => Self::CMake,
+            "proto" => Self::Protobuf,
+            "graphql" | "graphqls" | "gql" => Self::GraphQl,
             _ => return None,
         })
     }
@@ -143,22 +192,45 @@ impl LanguageId {
             "bash" | "sh" | "shell" | "zsh" | "console" => Self::Bash,
             "c" => Self::C,
             "cpp" | "c++" | "cc" | "cxx" => Self::Cpp,
+            "java" => Self::Java,
+            "ruby" | "rb" => Self::Ruby,
+            "php" => Self::Php,
+            "sql" | "postgresql" | "postgres" | "mysql" | "sqlite" => Self::Sql,
+            "dockerfile" | "docker" | "containerfile" => Self::Dockerfile,
+            "lua" => Self::Lua,
+            "elixir" | "ex" | "exs" => Self::Elixir,
+            "zig" => Self::Zig,
+            "make" | "makefile" | "mk" => Self::Make,
+            "cmake" => Self::CMake,
+            "proto" | "protobuf" => Self::Protobuf,
+            "graphql" | "gql" => Self::GraphQl,
             _ => return Self::from_extension(&name),
         })
     }
 
     pub fn from_path(path: &Path) -> Option<Self> {
-        let file_name = path.file_name()?.to_str()?;
-        match file_name.to_ascii_lowercase().as_str() {
+        let file_name = path.file_name()?.to_str()?.to_ascii_lowercase();
+        match file_name.as_str() {
             "cargo.lock" => return Some(Self::Toml),
             ".bashrc" | ".bash_profile" | ".zshrc" | ".zprofile" | ".profile" => {
                 return Some(Self::Bash)
             }
+            // 拡張子を持たない（または拡張子が用途を表す）定番のファイル名。
+            "dockerfile" | "containerfile" => return Some(Self::Dockerfile),
+            "makefile" | "gnumakefile" => return Some(Self::Make),
+            "cmakelists.txt" => return Some(Self::CMake),
+            "gemfile" | "rakefile" | "podfile" | "fastfile" | "brewfile" | "vagrantfile"
+            | "guardfile" => return Some(Self::Ruby),
             _ => {}
         }
         path.extension()
             .and_then(|extension| extension.to_str())
             .and_then(Self::from_extension)
+            .or_else(|| {
+                // 拡張子で決まらない `Dockerfile.dev` のような変種（`Dockerfile.md` は Markdown のまま）。
+                (file_name.starts_with("dockerfile.") || file_name.starts_with("containerfile."))
+                    .then_some(Self::Dockerfile)
+            })
     }
 }
 
@@ -207,6 +279,21 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "text.reference",
     "text.emphasis",
     "text.strong",
+    // nvim-treesitter 流のクエリ（Zig・Lua・SQL・CMake など）が使う名前。末尾に足すのは、
+    // 既存の名前どうしの同点（部分一致の長さが同じ）の勝ち順を変えないため。
+    "number",
+    "float",
+    "boolean",
+    "character",
+    "conditional",
+    "repeat",
+    "exception",
+    "include",
+    "storageclass",
+    "method",
+    // `keyword.function` を "function" に、`type.qualifier` を "type" に吸わせない（2 語で一致させる）。
+    "keyword.function",
+    "type.qualifier",
 ];
 
 fn kind_for_name(name: &str) -> Option<HighlightKind> {
@@ -216,23 +303,53 @@ fn kind_for_name(name: &str) -> Option<HighlightKind> {
         "text.uri" | "text.reference" => Some(HighlightKind::Link),
         "text.emphasis" => Some(HighlightKind::Emphasis),
         "text.strong" => Some(HighlightKind::Strong),
+        // nvim 旧来の名前で、中身は `abstract` / `final` / SQL の修飾語などのキーワード。
+        "type.qualifier" => Some(HighlightKind::Keyword),
         _ => None,
     } {
         return Some(kind);
     }
     let base = name.split('.').next().unwrap_or(name);
     Some(match base {
-        "keyword" => HighlightKind::Keyword,
+        "keyword" | "conditional" | "repeat" | "exception" | "include" | "storageclass" => {
+            HighlightKind::Keyword
+        }
         "function" if name.contains("macro") => HighlightKind::Macro,
-        "function" => HighlightKind::Function,
+        "function" | "method" => HighlightKind::Function,
         "type" | "constructor" => HighlightKind::Type,
-        "string" | "escape" => HighlightKind::String,
-        "constant" => HighlightKind::Number,
+        // 文字リテラルは Rust（`char_literal` → `@string`）と同じ文字列色に揃える。
+        "string" | "escape" | "character" => HighlightKind::String,
+        "constant" | "number" | "float" | "boolean" => HighlightKind::Number,
         "comment" => HighlightKind::Comment,
         "attribute" => HighlightKind::Macro,
         "operator" | "punctuation" => HighlightKind::Punctuation,
         _ => return None, // variable / property / label 等は既定色
     })
+}
+
+/// necoder が評価しない条件付きのパターン・キャプチャを無効にする（両エンジン共通）。
+///
+/// - `@spell` / `@nospell` はスペルチェック用の印で色ではない。tree-sitter-highlight は同じノードの
+///   最後のキャプチャを採るため、`(comment) @comment @spell` のままだとコメントが無色になる。
+/// - `#lua-match?` など tree-sitter が評価しない述語（general predicate）は条件が素通りになり、
+///   `((identifier) @type (#lua-match? …))` が全識別子を型色にしてしまう。条件を守れないので外す。
+/// - `(#is-not? local)` などの locals 解析が前提のパターンは、locals クエリを渡さない場合に外す。
+///   Ruby の `((identifier) @function.method (#is-not? local))` が全識別子を関数色にするため。
+fn restrict_to_evaluated_patterns(query: &mut tree_sitter::Query, analyzes_locals: bool) {
+    for capture in ["spell", "nospell"] {
+        query.disable_capture(capture);
+    }
+    for pattern in 0..query.pattern_count() {
+        let unevaluated = !query.general_predicates(pattern).is_empty();
+        let needs_locals = !analyzes_locals
+            && query
+                .property_predicates(pattern)
+                .iter()
+                .any(|(property, _)| property.key.as_ref() == "local");
+        if unevaluated || needs_locals {
+            query.disable_pattern(pattern);
+        }
+    }
 }
 
 /// 1 言語分のハイライタ。クエリのコンパイルは 1 回（`new`）。
@@ -257,19 +374,28 @@ impl Highlighter {
             locals_query,
         )
         .with_context(|| format!("{name} ハイライトクエリのコンパイルに失敗"))?;
+        restrict_to_evaluated_patterns(&mut config.query, !locals_query.is_empty());
         config.configure(HIGHLIGHT_NAMES);
         Ok(Highlighter { config })
     }
 
+    /// [`grammar`] 表の言語のハイライタ。
+    fn for_grammar(language: LanguageId) -> Result<Highlighter> {
+        let grammar = grammar(language).with_context(|| {
+            format!("{} は単一 grammar の言語ではない", language.canonical_id())
+        })?;
+        Self::with_query(
+            grammar.language,
+            language.canonical_id(),
+            &grammar.highlights,
+            grammar.injections,
+            grammar.locals,
+        )
+    }
+
     /// Rust 用ハイライタ。
     pub fn rust() -> Result<Highlighter> {
-        Self::with_query(
-            tree_sitter_rust::LANGUAGE.into(),
-            "rust",
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        )
+        Self::for_grammar(LanguageId::Rust)
     }
 
     /// 拡張子から対応ハイライタを選ぶ（M11 多言語）。クエリのコンパイル失敗は None（無ハイライトで開く）。
@@ -280,111 +406,10 @@ impl Highlighter {
     /// 共通言語 ID からハイライタを作る。Markdown は block/inline の 2 grammar が必要なため、
     /// 通常エディタの [`IncrementalHighlighter`] が担当する。
     pub fn for_language(language: LanguageId) -> Option<Highlighter> {
-        let result = match language {
-            LanguageId::Rust => Highlighter::rust(),
-            LanguageId::JavaScript => Self::with_query(
-                tree_sitter_javascript::LANGUAGE.into(),
-                "javascript",
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-                tree_sitter_javascript::INJECTIONS_QUERY,
-                tree_sitter_javascript::LOCALS_QUERY,
-            ),
-            // TS/TSX は JS のクエリ + TS 差分クエリを連結（tree-sitter-typescript の流儀）。
-            LanguageId::TypeScript => Self::with_query(
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                "typescript",
-                &format!(
-                    "{}\n{}",
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY
-                ),
-                "",
-                tree_sitter_javascript::LOCALS_QUERY,
-            ),
-            LanguageId::Tsx => Self::with_query(
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-                "tsx",
-                &format!(
-                    "{}\n{}",
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY
-                ),
-                "",
-                tree_sitter_javascript::LOCALS_QUERY,
-            ),
-            LanguageId::Python => Self::with_query(
-                tree_sitter_python::LANGUAGE.into(),
-                "python",
-                tree_sitter_python::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Go => Self::with_query(
-                tree_sitter_go::LANGUAGE.into(),
-                "go",
-                tree_sitter_go::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Json => Self::with_query(
-                tree_sitter_json::LANGUAGE.into(),
-                "json",
-                tree_sitter_json::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Yaml => Self::with_query(
-                tree_sitter_yaml::LANGUAGE.into(),
-                "yaml",
-                tree_sitter_yaml::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Toml => Self::with_query(
-                tree_sitter_toml_ng::LANGUAGE.into(),
-                "toml",
-                tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Html => Self::with_query(
-                tree_sitter_html::LANGUAGE.into(),
-                "html",
-                tree_sitter_html::HIGHLIGHTS_QUERY,
-                tree_sitter_html::INJECTIONS_QUERY,
-                "",
-            ),
-            LanguageId::Css => Self::with_query(
-                tree_sitter_css::LANGUAGE.into(),
-                "css",
-                tree_sitter_css::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Bash => Self::with_query(
-                tree_sitter_bash::LANGUAGE.into(),
-                "bash",
-                tree_sitter_bash::HIGHLIGHT_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::C => Self::with_query(
-                tree_sitter_c::LANGUAGE.into(),
-                "c",
-                tree_sitter_c::HIGHLIGHT_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Cpp => Self::with_query(
-                tree_sitter_cpp::LANGUAGE.into(),
-                "cpp",
-                tree_sitter_cpp::HIGHLIGHT_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Markdown => return None,
-        };
-        match result {
+        if language == LanguageId::Markdown {
+            return None;
+        }
+        match Self::for_grammar(language) {
             Ok(highlighter) => Some(highlighter),
             Err(error) => {
                 eprintln!(
@@ -500,6 +525,18 @@ mod tests {
             LanguageId::Bash,
             LanguageId::C,
             LanguageId::Cpp,
+            LanguageId::Java,
+            LanguageId::Ruby,
+            LanguageId::Php,
+            LanguageId::Sql,
+            LanguageId::Dockerfile,
+            LanguageId::Lua,
+            LanguageId::Elixir,
+            LanguageId::Zig,
+            LanguageId::Make,
+            LanguageId::CMake,
+            LanguageId::Protobuf,
+            LanguageId::GraphQl,
         ];
         // 全角文字（コメント・文字列・記号）が識別子/記号に隣接する断片。クラッシュログの
         // ` TextRun（=` / `のまま）` を含め、境界が全角の内側へ落ちやすい形を各言語へ通す。
@@ -581,78 +618,221 @@ mod tests {
             Some(LanguageId::Bash)
         );
     }
+
+    #[test]
+    fn language_registry_detects_added_languages() {
+        let paths = [
+            ("src/Main.java", LanguageId::Java),
+            ("app/models/user.rb", LanguageId::Ruby),
+            ("lib/tasks/db.rake", LanguageId::Ruby),
+            ("Gemfile", LanguageId::Ruby),
+            ("ios/Podfile", LanguageId::Ruby),
+            ("public/index.php", LanguageId::Php),
+            ("db/schema.sql", LanguageId::Sql),
+            ("Dockerfile", LanguageId::Dockerfile),
+            ("docker/Dockerfile.dev", LanguageId::Dockerfile),
+            ("Containerfile", LanguageId::Dockerfile),
+            ("build/app.dockerfile", LanguageId::Dockerfile),
+            ("nvim/init.lua", LanguageId::Lua),
+            ("mix.exs", LanguageId::Elixir),
+            ("lib/app.ex", LanguageId::Elixir),
+            ("build.zig", LanguageId::Zig),
+            ("build.zig.zon", LanguageId::Zig),
+            ("Makefile", LanguageId::Make),
+            ("GNUmakefile", LanguageId::Make),
+            ("rules.mk", LanguageId::Make),
+            ("CMakeLists.txt", LanguageId::CMake),
+            ("cmake/deps.cmake", LanguageId::CMake),
+            ("api/user.proto", LanguageId::Protobuf),
+            ("schema.graphql", LanguageId::GraphQl),
+            ("queries/user.gql", LanguageId::GraphQl),
+        ];
+        for (path, expected) in paths {
+            assert_eq!(language_for_path(Path::new(path)), Some(expected), "{path}");
+        }
+        // CMakeLists.txt 以外の .txt は巻き込まない。既知の拡張子はファイル名の規則より優先。
+        assert_eq!(language_for_path(Path::new("requirements.txt")), None);
+        assert_eq!(
+            language_for_path(Path::new("docs/Dockerfile.md")),
+            Some(LanguageId::Markdown)
+        );
+
+        // Markdown / ACP のコードフェンス名。
+        let fences = [
+            ("java", LanguageId::Java),
+            ("ruby", LanguageId::Ruby),
+            ("rb", LanguageId::Ruby),
+            ("php", LanguageId::Php),
+            ("sql", LanguageId::Sql),
+            ("postgresql", LanguageId::Sql),
+            ("dockerfile", LanguageId::Dockerfile),
+            ("docker", LanguageId::Dockerfile),
+            ("lua", LanguageId::Lua),
+            ("elixir", LanguageId::Elixir),
+            ("zig", LanguageId::Zig),
+            ("makefile", LanguageId::Make),
+            ("cmake", LanguageId::CMake),
+            ("protobuf", LanguageId::Protobuf),
+            ("graphql", LanguageId::GraphQl),
+        ];
+        for (name, expected) in fences {
+            assert_eq!(LanguageId::from_name(name), Some(expected), "{name}");
+        }
+        // statusbar の言語ラベル。
+        assert_eq!(LanguageId::Make.label(), "Makefile");
+        assert_eq!(LanguageId::Protobuf.label(), "Protocol Buffers");
+    }
 }
 
-/// 単一 grammar の言語 → (言語, highlights クエリ)。Markdown は専用の block/inline 統合へ送る。
-fn language_and_query(language_id: LanguageId) -> Option<(tree_sitter::Language, String)> {
-    let pair: (tree_sitter::Language, String) = match language_id {
-        LanguageId::Rust => (
+/// 単一 grammar の言語の grammar とクエリ。どのクエリも grammar crate に同梱のもの。
+struct Grammar {
+    language: tree_sitter::Language,
+    highlights: Cow<'static, str>,
+    /// tree-sitter-highlight 経路（[`Highlighter`]）だけが使う。増分経路は highlights のみ。
+    injections: &'static str,
+    locals: &'static str,
+}
+
+impl Grammar {
+    fn highlights_only(language: tree_sitter::Language, highlights: &'static str) -> Self {
+        Self {
+            language,
+            highlights: Cow::Borrowed(highlights),
+            injections: "",
+            locals: "",
+        }
+    }
+}
+
+/// 言語 → grammar とクエリ（両エンジン共通の表）。Markdown は block/inline の 2 grammar のため
+/// 持たず、専用の [`MarkdownIncrementalHighlighter`] が担当する。
+fn grammar(language_id: LanguageId) -> Option<Grammar> {
+    Some(match language_id {
+        LanguageId::Rust => Grammar::highlights_only(
             tree_sitter_rust::LANGUAGE.into(),
-            tree_sitter_rust::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::JavaScript => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            tree_sitter_javascript::HIGHLIGHT_QUERY.to_string(),
-        ),
-        LanguageId::TypeScript => (
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            format!(
+        LanguageId::JavaScript => Grammar {
+            language: tree_sitter_javascript::LANGUAGE.into(),
+            highlights: Cow::Borrowed(tree_sitter_javascript::HIGHLIGHT_QUERY),
+            injections: tree_sitter_javascript::INJECTIONS_QUERY,
+            locals: tree_sitter_javascript::LOCALS_QUERY,
+        },
+        // TS/TSX は JS のクエリ + TS 差分クエリを連結（tree-sitter-typescript の流儀）。
+        LanguageId::TypeScript => Grammar {
+            language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            highlights: Cow::Owned(format!(
                 "{}\n{}",
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_typescript::HIGHLIGHTS_QUERY
-            ),
-        ),
-        LanguageId::Tsx => (
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            format!(
+            )),
+            injections: "",
+            locals: tree_sitter_javascript::LOCALS_QUERY,
+        },
+        LanguageId::Tsx => Grammar {
+            language: tree_sitter_typescript::LANGUAGE_TSX.into(),
+            highlights: Cow::Owned(format!(
                 "{}\n{}",
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_typescript::HIGHLIGHTS_QUERY
-            ),
-        ),
-        LanguageId::Python => (
+            )),
+            injections: "",
+            locals: tree_sitter_javascript::LOCALS_QUERY,
+        },
+        LanguageId::Python => Grammar::highlights_only(
             tree_sitter_python::LANGUAGE.into(),
-            tree_sitter_python::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_python::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Go => (
+        LanguageId::Go => Grammar::highlights_only(
             tree_sitter_go::LANGUAGE.into(),
-            tree_sitter_go::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_go::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Json => (
+        LanguageId::Json => Grammar::highlights_only(
             tree_sitter_json::LANGUAGE.into(),
-            tree_sitter_json::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_json::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Yaml => (
+        LanguageId::Yaml => Grammar::highlights_only(
             tree_sitter_yaml::LANGUAGE.into(),
-            tree_sitter_yaml::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_yaml::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Toml => (
+        LanguageId::Toml => Grammar::highlights_only(
             tree_sitter_toml_ng::LANGUAGE.into(),
-            tree_sitter_toml_ng::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Html => (
-            tree_sitter_html::LANGUAGE.into(),
-            tree_sitter_html::HIGHLIGHTS_QUERY.to_string(),
-        ),
-        LanguageId::Css => (
+        LanguageId::Html => Grammar {
+            language: tree_sitter_html::LANGUAGE.into(),
+            highlights: Cow::Borrowed(tree_sitter_html::HIGHLIGHTS_QUERY),
+            injections: tree_sitter_html::INJECTIONS_QUERY,
+            locals: "",
+        },
+        LanguageId::Css => Grammar::highlights_only(
             tree_sitter_css::LANGUAGE.into(),
-            tree_sitter_css::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_css::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Bash => (
+        LanguageId::Bash => Grammar::highlights_only(
             tree_sitter_bash::LANGUAGE.into(),
-            tree_sitter_bash::HIGHLIGHT_QUERY.to_string(),
+            tree_sitter_bash::HIGHLIGHT_QUERY,
         ),
-        LanguageId::C => (
+        LanguageId::C => Grammar::highlights_only(
             tree_sitter_c::LANGUAGE.into(),
-            tree_sitter_c::HIGHLIGHT_QUERY.to_string(),
+            tree_sitter_c::HIGHLIGHT_QUERY,
         ),
-        LanguageId::Cpp => (
+        LanguageId::Cpp => Grammar::highlights_only(
             tree_sitter_cpp::LANGUAGE.into(),
-            tree_sitter_cpp::HIGHLIGHT_QUERY.to_string(),
+            tree_sitter_cpp::HIGHLIGHT_QUERY,
+        ),
+        // O30 で足した言語は highlights だけ渡す（locals を渡すと tree-sitter-highlight 経路だけ
+        // 色が変わり、エディタ（増分経路）と食い違うため）。
+        LanguageId::Java => Grammar::highlights_only(
+            tree_sitter_java::LANGUAGE.into(),
+            tree_sitter_java::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Ruby => Grammar::highlights_only(
+            tree_sitter_ruby::LANGUAGE.into(),
+            tree_sitter_ruby::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Php => Grammar::highlights_only(
+            tree_sitter_php::LANGUAGE_PHP.into(),
+            tree_sitter_php::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Sql => Grammar::highlights_only(
+            tree_sitter_sequel::LANGUAGE.into(),
+            tree_sitter_sequel::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Dockerfile => Grammar::highlights_only(
+            tree_sitter_containerfile::LANGUAGE.into(),
+            tree_sitter_containerfile::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Lua => Grammar::highlights_only(
+            tree_sitter_lua::LANGUAGE.into(),
+            tree_sitter_lua::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Elixir => Grammar::highlights_only(
+            tree_sitter_elixir::LANGUAGE.into(),
+            tree_sitter_elixir::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Zig => Grammar::highlights_only(
+            tree_sitter_zig::LANGUAGE.into(),
+            tree_sitter_zig::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Make => Grammar::highlights_only(
+            tree_sitter_make::LANGUAGE.into(),
+            tree_sitter_make::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::CMake => Grammar::highlights_only(
+            tree_sitter_cmake::LANGUAGE.into(),
+            tree_sitter_cmake::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::Protobuf => Grammar::highlights_only(
+            arborium_proto::language().into(),
+            arborium_proto::HIGHLIGHTS_QUERY,
+        ),
+        LanguageId::GraphQl => Grammar::highlights_only(
+            arborium_graphql::language().into(),
+            arborium_graphql::HIGHLIGHTS_QUERY,
         ),
         LanguageId::Markdown => return None,
-    };
-    Some(pair)
+    })
 }
 
 struct StandardIncrementalHighlighter {
@@ -664,10 +844,10 @@ struct StandardIncrementalHighlighter {
 
 impl StandardIncrementalHighlighter {
     fn new(language_id: LanguageId) -> Option<Self> {
-        let (language, query_source) = language_and_query(language_id)?;
+        let grammar = grammar(language_id)?;
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&language).ok()?;
-        let query = match tree_sitter::Query::new(&language, &query_source) {
+        parser.set_language(&grammar.language).ok()?;
+        let mut query = match tree_sitter::Query::new(&grammar.language, &grammar.highlights) {
             Ok(query) => query,
             Err(error) => {
                 eprintln!(
@@ -677,6 +857,8 @@ impl StandardIncrementalHighlighter {
                 return None;
             }
         };
+        // 増分経路は locals 解析をしない。
+        restrict_to_evaluated_patterns(&mut query, false);
         let capture_kinds = query
             .capture_names()
             .iter()
@@ -1399,6 +1581,21 @@ mod multilang_tests {
                 "cpp",
                 "class Thing { public: int value() const { return 1; } };",
             ),
+            ("java", "class A { int f() { return 1; } }"),
+            ("rb", "def f(a)\n  a + 1\nend\n"),
+            ("php", "<?php\nfunction f($a) { return $a + 1; }\n"),
+            ("sql", "SELECT a FROM t WHERE b = 'c';"),
+            ("dockerfile", "FROM alpine\nRUN echo hi\n"),
+            ("lua", "local function f(a) return a + 1 end"),
+            ("ex", "defmodule A do\n  def f(a), do: a + 1\nend\n"),
+            ("zig", "pub fn f(a: u32) u32 { return a + 1; }"),
+            ("mk", "all: main.o\n\tcc -o app main.o\n"),
+            ("cmake", "project(app LANGUAGES C)\n"),
+            (
+                "proto",
+                "syntax = \"proto3\";\nmessage A { string b = 1; }\n",
+            ),
+            ("graphql", "query A { b(c: 1) { d } }"),
         ];
         for (extension, sample) in samples {
             let highlighter = Highlighter::for_extension(extension)
@@ -1425,6 +1622,249 @@ mod multilang_tests {
             .iter()
             .any(|span| { span.kind == HighlightKind::String && span.range.contains(&string_at) }));
         assert!(!spans.is_empty());
+    }
+
+    /// `needle` の先頭 byte を覆う span の種別（両エンジン）。無色なら None。
+    fn kinds_at(
+        language: LanguageId,
+        source: &str,
+        needle: &str,
+    ) -> (Option<HighlightKind>, Option<HighlightKind>) {
+        let at = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("{language:?}: {needle:?} がサンプルに無い"));
+        let kind_at = |spans: &[HighlightSpan]| {
+            spans
+                .iter()
+                .find(|span| span.range.start <= at && at < span.range.end)
+                .map(|span| span.kind)
+        };
+        let highlighter = Highlighter::for_language(language)
+            .unwrap_or_else(|| panic!("{language:?} のハイライタが作れない"));
+        let mut incremental = IncrementalHighlighter::for_language(language)
+            .unwrap_or_else(|| panic!("{language:?} の増分ハイライタが作れない"));
+        incremental.reparse_full(source);
+        (
+            kind_at(&highlighter.highlight(source)),
+            kind_at(&incremental.spans(source, 0..source.len())),
+        )
+    }
+
+    /// `(needle, 期待の種別)`。None は無色。
+    type Expectation<'a> = (&'a str, Option<HighlightKind>);
+
+    /// 期待の種別を、チャット等の tree-sitter-highlight 経路とエディタの増分経路の両方で確かめる。
+    fn assert_kinds(language: LanguageId, source: &str, expected: &[Expectation]) {
+        for (needle, kind) in expected {
+            let (highlighted, incremental) = kinds_at(language, source, needle);
+            assert_eq!(highlighted, *kind, "{language:?} {needle:?}（Highlighter）");
+            assert_eq!(incremental, *kind, "{language:?} {needle:?}（増分）");
+        }
+    }
+
+    #[test]
+    fn added_languages_highlight_keywords_strings_comments_and_numbers() {
+        use HighlightKind::{Comment, Function, Keyword, Number, String, Type};
+        let cases: &[(LanguageId, &str, &[Expectation])] = &[
+            (
+                LanguageId::Java,
+                "// greet the user\npublic class Greeter {\n    private static final int COUNT = 42;\n    public String greet(String name) {\n        return \"Hello, \" + name;\n    }\n}\n",
+                &[
+                    ("// greet", Some(Comment)),
+                    ("public class", Some(Keyword)),
+                    ("Greeter {", Some(Type)),
+                    ("42", Some(Number)),
+                    ("String greet", Some(Type)),
+                    ("greet(", Some(Function)),
+                    ("return", Some(Keyword)),
+                    ("\"Hello, \"", Some(String)),
+                ],
+            ),
+            (
+                LanguageId::Ruby,
+                "# greet the user\nclass Greeter\n  def greet(name)\n    count = 42\n    puts \"Hello, #{name}\"\n  end\nend\n",
+                &[
+                    ("# greet", Some(Comment)),
+                    ("class", Some(Keyword)),
+                    ("Greeter\n", Some(Type)),
+                    ("def", Some(Keyword)),
+                    ("greet(", Some(Function)),
+                    ("42", Some(Number)),
+                    ("puts", Some(Function)),
+                    ("\"Hello", Some(String)),
+                    ("end", Some(Keyword)),
+                ],
+            ),
+            (
+                LanguageId::Php,
+                "<?php\n// greet the user\nfunction greet(string $name): string {\n    $count = 42;\n    return \"Hello, \" . $name;\n}\n",
+                &[
+                    ("// greet", Some(Comment)),
+                    ("function", Some(Keyword)),
+                    ("greet(", Some(Function)),
+                    ("string $name", Some(Type)),
+                    ("42", Some(Number)),
+                    ("return", Some(Keyword)),
+                    ("\"Hello, \"", Some(String)),
+                ],
+            ),
+            (
+                LanguageId::Sql,
+                "-- active users\nSELECT id, name FROM users WHERE age > 42 AND name = 'neco';\n",
+                &[
+                    ("-- active", Some(Comment)),
+                    ("SELECT", Some(Keyword)),
+                    ("FROM", Some(Keyword)),
+                    ("WHERE", Some(Keyword)),
+                    ("AND", Some(Keyword)),
+                    ("'neco'", Some(String)),
+                ],
+            ),
+            (
+                LanguageId::Dockerfile,
+                "# build stage\nFROM rust:1.95 AS build\nRUN cargo build --release\nENV PORT=8080\nCMD [\"./necoder\"]\n",
+                &[
+                    ("# build", Some(Comment)),
+                    ("FROM", Some(Keyword)),
+                    ("AS build", Some(Keyword)),
+                    ("RUN", Some(Keyword)),
+                    ("ENV", Some(Keyword)),
+                    ("CMD", Some(Keyword)),
+                    ("\"./necoder\"", Some(String)),
+                ],
+            ),
+            (
+                LanguageId::Lua,
+                "-- greet the user\nlocal function greet(name)\n  local count = 42\n  return \"Hello, \" .. name\nend\n",
+                &[
+                    ("-- greet", Some(Comment)),
+                    ("local function", Some(Keyword)),
+                    ("function greet", Some(Keyword)),
+                    ("greet(", Some(Function)),
+                    ("42", Some(Number)),
+                    ("return", Some(Keyword)),
+                    ("\"Hello, \"", Some(String)),
+                    ("end\n", Some(Keyword)),
+                ],
+            ),
+            (
+                LanguageId::Elixir,
+                "# greet the user\ndefmodule Greeter do\n  def greet(name) do\n    count = 42\n    \"Hello, #{name}\"\n  end\nend\n",
+                &[
+                    ("# greet", Some(Comment)),
+                    ("defmodule", Some(Keyword)),
+                    ("def greet", Some(Keyword)),
+                    ("greet(", Some(Function)),
+                    ("42", Some(Number)),
+                    ("\"Hello", Some(String)),
+                    ("end\n", Some(Keyword)),
+                ],
+            ),
+            (
+                LanguageId::Zig,
+                "// greet the user\nconst std = @import(\"std\");\npub fn main() void {\n    const count: u32 = 42;\n    const initial = 'n';\n    std.debug.print(\"Hello {d}\\n\", .{count});\n}\n",
+                &[
+                    ("// greet", Some(Comment)),
+                    ("'n'", Some(String)),
+                    ("const std", Some(Keyword)),
+                    ("pub", Some(Keyword)),
+                    ("fn", Some(Keyword)),
+                    ("main", Some(Function)),
+                    ("u32", Some(Type)),
+                    ("42", Some(Number)),
+                    ("\"std\"", Some(String)),
+                    ("print", Some(Function)),
+                ],
+            ),
+            (
+                LanguageId::Make,
+                "# build everything\ninclude common.mk\nCC := gcc\nifeq ($(OS),Darwin)\n  FLAGS += -O2\nendif\nall: main.o\n\t$(CC) -o app main.o\n",
+                &[
+                    ("# build", Some(Comment)),
+                    ("include", Some(Keyword)),
+                    ("ifeq", Some(Keyword)),
+                    ("endif", Some(Keyword)),
+                ],
+            ),
+            (
+                LanguageId::CMake,
+                "# project setup\ncmake_minimum_required(VERSION 3.20)\nset(NAME \"neco\")\nif(APPLE)\n  message(STATUS \"mac\")\nendif()\nfunction(add_neco target)\n  return()\nendfunction()\n",
+                &[
+                    ("# project", Some(Comment)),
+                    ("cmake_minimum_required", Some(Function)),
+                    ("\"neco\"", Some(String)),
+                    ("if(", Some(Keyword)),
+                    ("endif", Some(Keyword)),
+                    ("function(", Some(Keyword)),
+                    ("add_neco", Some(Function)),
+                    ("return", Some(Keyword)),
+                ],
+            ),
+            (
+                LanguageId::Protobuf,
+                "// user record\nsyntax = \"proto3\";\nmessage User {\n  string name = 1;\n  int32 age = 2;\n}\n",
+                &[
+                    ("// user", Some(Comment)),
+                    ("syntax", Some(Keyword)),
+                    ("\"proto3\"", Some(String)),
+                    ("message", Some(Keyword)),
+                    ("User {", Some(Type)),
+                    ("string", Some(Type)),
+                    ("1;", Some(Number)),
+                ],
+            ),
+            (
+                LanguageId::GraphQl,
+                "# fetch a user\nquery GetUser {\n  user(id: \"42\", first: 10, active: true) { name }\n}\n",
+                &[
+                    ("# fetch", Some(Comment)),
+                    ("query", Some(Keyword)),
+                    ("\"42\"", Some(String)),
+                    ("10", Some(Number)),
+                    ("true", Some(Number)),
+                ],
+            ),
+        ];
+        for (language, source, expected) in cases {
+            assert_kinds(*language, source, expected);
+        }
+    }
+
+    #[test]
+    fn numbers_and_booleans_use_the_number_kind() {
+        // `@number` / `@boolean` を syn-num に載せる（以前は既存言語でも無色だった）。
+        let cases = [
+            (LanguageId::JavaScript, "const answer = 42;\n", "42"),
+            (LanguageId::Python, "ratio = 3.14\n", "3.14"),
+            (LanguageId::Json, "{\"count\": 7}\n", "7"),
+            (LanguageId::Yaml, "enabled: true\n", "true"),
+            (LanguageId::Toml, "enabled = false\n", "false"),
+        ];
+        for (language, source, needle) in cases {
+            assert_kinds(language, source, &[(needle, Some(HighlightKind::Number))]);
+        }
+    }
+
+    #[test]
+    fn unevaluated_predicates_and_locals_do_not_paint_every_identifier() {
+        // Zig の `((identifier) @type (#lua-match? …))` は条件を評価できないので外す
+        // （外さないと小文字の変数まで型色になる）。
+        let zig =
+            "const std = @import(\"std\");\npub fn main() void {\n    const count: u32 = 42;\n}\n";
+        assert_kinds(LanguageId::Zig, zig, &[("count:", None), ("std =", None)]);
+        // Ruby の `((identifier) @function.method (#is-not? local))` は locals 解析が前提。
+        let ruby = "def greet(name)\n  count = 42\n  count + name.size\nend\n";
+        assert_kinds(
+            LanguageId::Ruby,
+            ruby,
+            &[("count =", None), ("count +", None)],
+        );
+        // `(comment) @comment @spell` の @spell がコメントの色を消さない。
+        assert_kinds(
+            LanguageId::Sql,
+            "-- note\nSELECT 1;\n",
+            &[("-- note", Some(HighlightKind::Comment))],
+        );
     }
 }
 

@@ -19,6 +19,45 @@ use std::process::Command;
 /// リリース確認先（GitHub Releases API）。
 const RELEASES_URL: &str = "https://api.github.com/repos/iKora128/necoder/releases/latest";
 
+/// リリースの人間向けページ（`v` 付きのタグ）。更新後の「変更点」の行き先。
+pub fn release_page_url(version: &str) -> String {
+    format!(
+        "https://github.com/iKora128/necoder/releases/tag/v{}",
+        version.trim_start_matches('v')
+    )
+}
+
+/// 更新の後の最初の起動か（O45・H17）。状態フォルダの `last_version` と比べ、新しくなっていれば
+/// 前の版を返す（今の版を書く）。初めての起動・同じ版・下がった版は `None`（書くだけ）。
+/// 1 つのプロセスで返すのは最初の 1 回だけ（窓がいくつ開いても知らせは 1 回）。
+pub fn take_update_notice(current: &str) -> Option<String> {
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    let path = paths::state_dir()?.join("last_version");
+    note_version(&path, current)
+}
+
+/// [`take_update_notice`] の中身（置き場を渡せる・テスト用）。
+fn note_version(path: &std::path::Path, current: &str) -> Option<String> {
+    let previous = std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    if previous.as_deref() != Some(current) {
+        if let Some(parent) = path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("版の記録の置き場を作れない: {error:#}");
+            }
+        }
+        if let Err(error) = std::fs::write(path, current) {
+            eprintln!("版を記録できない: {error:#}");
+        }
+    }
+    previous.filter(|previous| version_newer(current, previous))
+}
+
 /// 見つかった新しいリリース。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
@@ -50,6 +89,11 @@ pub enum UpdateAction {
 /// - Windows: Release ページを開くだけ（アプリ内適用は WINDOWS-PORT §W6 の残項目）。
 /// - それ以外（Linux 等）: **配布物が無い**ので確認自体をしない。
 fn platform_update_route() -> Option<UpdateRoute> {
+    // Dev.app は実行中の .app をリリース版で置き換えると LSEnvironment ごと消え、次の起動から常用の
+    // データを共有してしまう。自動の確認も About のボタンも、経路が無い OS と同じく出さない。
+    if paths::is_dev_bundle() {
+        return None;
+    }
     if cfg!(target_os = "macos") {
         Some(UpdateRoute::InAppDmg)
     } else if cfg!(target_os = "windows") {
@@ -378,6 +422,25 @@ fn running_app_bundle() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O45・H17: 更新の後の最初の起動だけ前の版を返す（初回・同じ版・下がった版は何も言わない）。
+    #[test]
+    fn only_the_first_launch_after_an_upgrade_is_noted() {
+        let dir = std::env::temp_dir().join(format!("necoder_last_version_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("last_version");
+        assert_eq!(note_version(&path, "0.1.20"), None, "初めての起動");
+        assert_eq!(note_version(&path, "0.1.20"), None, "同じ版");
+        assert_eq!(note_version(&path, "0.1.21"), Some("0.1.20".to_string()));
+        assert_eq!(note_version(&path, "0.1.21"), None, "知らせは 1 回");
+        assert_eq!(note_version(&path, "0.1.19"), None, "下がった版");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "0.1.19");
+        assert_eq!(
+            release_page_url("0.1.21"),
+            "https://github.com/iKora128/necoder/releases/tag/v0.1.21"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 進捗バーの分母: リダイレクト追従の `curl -sIL` は応答ヘッダが複数並ぶ（302 → 200）。
     /// 最後の応答の Content-Length を取り、大文字小文字は区別しない。

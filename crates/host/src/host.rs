@@ -15,7 +15,7 @@ use std::io::{BufRead as _, BufReader};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
@@ -186,6 +186,7 @@ pub struct HostProcess {
     child: Child,
     stdin: Option<Box<dyn Write + Send>>,
     stdout: Option<Box<dyn Read + Send>>,
+    stderr: StderrTail,
     _transport: Option<Arc<SshTransport>>,
 }
 
@@ -204,16 +205,159 @@ impl HostProcess {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// 手元の子プロセスの PID（remote では手元の `ssh` のもの＝リモート側の PID ではない）。
-    pub fn id(&self) -> u32 {
-        self.child.id()
+    /// 終わっていればその終わり方（まだ動いていれば `None`）。remote では手元の `ssh` の終わり方
+    /// ＝リモートのコマンドの終了コード（ssh 自身の失敗は 255）。
+    pub fn try_exit_status(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
     }
 
-    /// 終了していれば終了状態を返す（`None` = まだ走っている）。待たない。
-    /// remote では手元の `ssh` の終了状態＝リモート側コマンドの終了コード（接続失敗は 255）。
-    pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait().context("process の終了状態を読めない")
+    /// stderr の末尾（[`StderrTail`]）。remote では ssh 自身の知らせも混ざる。
+    pub fn stderr_tail(&self) -> StderrTail {
+        self.stderr.clone()
     }
+}
+
+/// 長寿命の子（ACP エージェント・言語サーバ）の stderr の末尾。起動してすぐ落ちた子の理由を見せる
+/// ために持つ。**上限つきでメモリにだけ置き、ファイルにもログにも書かない**（秘密が混ざり得るので、
+/// 見せるかどうか・どう伏せるかは呼び手が決める）。子は止まらないよう、読む側は最後まで読み続けて
+/// 古い行から捨てる。色などの制御文字は落とす。
+#[derive(Clone, Default)]
+pub struct StderrTail {
+    shared: Arc<(Mutex<StderrTailState>, std::sync::Condvar)>,
+}
+
+#[derive(Default)]
+struct StderrTailState {
+    lines: std::collections::VecDeque<String>,
+    /// 子が stderr を閉じた（終わった）。
+    closed: bool,
+}
+
+impl StderrTail {
+    /// 持っておく行数（古い行から捨てる）。
+    pub const MAX_LINES: usize = 40;
+    /// 1 行に持つバイト数（超えた分は捨てて `…` を付ける）。改行の無い長い出力でメモリを食わない。
+    pub const MAX_LINE_BYTES: usize = 1000;
+
+    /// 今持っている行（古い順）。
+    pub fn lines(&self) -> Vec<String> {
+        let (state, _) = &*self.shared;
+        state
+            .lock()
+            .map(|state| state.lines.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// 子が stderr を閉じるまで最長 `timeout` 待つ（閉じたら `true`）。すぐ落ちた子の最後の行を、
+    /// 読む側が追いつく前に取りこぼさないため。
+    pub fn wait_closed(&self, timeout: Duration) -> bool {
+        let (state, closed) = &*self.shared;
+        let Ok(guard) = state.lock() else {
+            return false;
+        };
+        closed
+            .wait_timeout_while(guard, timeout, |state| !state.closed)
+            .map(|(state, _)| state.closed)
+            .unwrap_or(false)
+    }
+
+    fn push(&self, line: String) {
+        let (state, _) = &*self.shared;
+        if let Ok(mut state) = state.lock() {
+            if state.lines.len() == Self::MAX_LINES {
+                state.lines.pop_front();
+            }
+            state.lines.push_back(line);
+        }
+    }
+
+    fn close(&self) {
+        let (state, closed) = &*self.shared;
+        if let Ok(mut state) = state.lock() {
+            state.closed = true;
+        }
+        closed.notify_all();
+    }
+
+    /// `pipe` を別スレッドで最後まで読み、末尾を持つ。
+    fn capture(mut pipe: impl Read + Send + 'static) -> StderrTail {
+        let tail = StderrTail::default();
+        let writer = tail.clone();
+        let spawned = thread::Builder::new()
+            .name("stderr-tail".to_string())
+            .spawn(move || {
+                // 8 KB ずつ読む（行の区切りは自分で見る＝改行の無い長い出力でも 1 行ぶんしか持たない）。
+                let mut chunk = [0u8; 8192];
+                let mut line: Vec<u8> = Vec::new();
+                let mut truncated = false;
+                loop {
+                    let read = match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    for &byte in &chunk[..read] {
+                        if byte == b'\n' {
+                            writer.push(stderr_line(&line, truncated));
+                            line.clear();
+                            truncated = false;
+                        } else if line.len() < Self::MAX_LINE_BYTES {
+                            line.push(byte);
+                        } else {
+                            truncated = true;
+                        }
+                    }
+                }
+                if !line.is_empty() {
+                    writer.push(stderr_line(&line, truncated));
+                }
+                writer.close();
+            });
+        if let Err(error) = spawned {
+            eprintln!("stderr を読むスレッドを立てられない: {error}");
+            tail.close();
+        }
+        tail
+    }
+}
+
+/// stderr の 1 行を見せられる文字にする（UTF-8 に直し、色などの制御文字・エスケープ列を落とす）。
+fn stderr_line(bytes: &[u8], truncated: bool) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut line = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            // ESC [ … 終端（CSI・色）/ ESC ] … BEL か ESC \（OSC・題名）/ ESC と次の 1 文字。
+            '\u{1b}' => match characters.next() {
+                Some('[') => {
+                    for next in characters.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = characters.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' {
+                            characters.next_if_eq(&'\\');
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\t' => line.push(' '),
+            character if character.is_control() => {}
+            character => line.push(character),
+        }
+    }
+    if truncated {
+        line.push('…');
+    }
+    line
 }
 
 impl Drop for HostProcess {
@@ -286,6 +430,166 @@ impl CommandOutput {
     }
 }
 
+/// 上限つきで取り込んだ出力 1 本（[`Host::run_user_command`]）。頭と尻を残して間を捨てる
+/// （`cat` の頭も `cargo build` の尻も落とさない・transcript のツール結果と同じ考え方）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapturedOutput {
+    /// 先頭から（上限の半分まで）。間を捨てていなければ全部ここにある。
+    pub head: Vec<u8>,
+    /// 末尾（上限の残り半分まで）。間を捨てていなければ空。
+    pub tail: Vec<u8>,
+    /// `head` と `tail` の間で捨てたバイト数（0 = 全部持っている）。
+    pub omitted: u64,
+}
+
+impl CapturedOutput {
+    /// 手元に全部ある出力（remote の結果）を同じ上限で丸める。
+    fn from_bytes(bytes: &[u8], limit: usize) -> Self {
+        let mut buffer = CaptureBuffer::new(limit);
+        buffer.push(bytes);
+        buffer.take()
+    }
+}
+
+/// [`Host::run_user_command`] の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserCommandOutput {
+    /// 終了コード。シグナルで終わった・止めた・走らせなかった時は `None`。
+    pub status_code: Option<i32>,
+    pub stdout: CapturedOutput,
+    pub stderr: CapturedOutput,
+    /// 取り消しで止めた（出力は止めるまでの分）。始める前に取り消されていれば何も走らせていない。
+    pub cancelled: bool,
+}
+
+impl UserCommandOutput {
+    /// 始める前に取り消された（起動もしていない）。
+    fn not_started() -> Self {
+        Self {
+            status_code: None,
+            stdout: CapturedOutput::default(),
+            stderr: CapturedOutput::default(),
+            cancelled: true,
+        }
+    }
+}
+
+/// 走っている間の出力の末尾（エージェントパネルの `!` の行に流して見せる・#37）。
+///
+/// 取り込み（[`CapturedOutput`]・終わってから返す）とは別に、**表示のためだけに**最後の
+/// [`LIVE_OUTPUT_BYTES`] を持つ。stdout と stderr は届いた順に 1 本へ並べる（端末と同じ）。
+/// 読み手のスレッドと UI で共有するので、clone は同じ中身を指す。
+#[derive(Clone, Default)]
+pub struct LiveOutput(Arc<Mutex<LiveTail>>);
+
+#[derive(Default)]
+struct LiveTail {
+    bytes: std::collections::VecDeque<u8>,
+    received: u64,
+}
+
+/// [`LiveOutput`] が持つ末尾の大きさ（画面に出すのは数行なので十分）。
+const LIVE_OUTPUT_BYTES: usize = 16 * 1024;
+
+impl LiveOutput {
+    fn push(&self, chunk: &[u8]) {
+        let mut tail = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tail.received += chunk.len() as u64;
+        tail.bytes.extend(chunk);
+        let excess = tail.bytes.len().saturating_sub(LIVE_OUTPUT_BYTES);
+        tail.bytes.drain(..excess);
+    }
+
+    /// これまでに届いたバイト数（増えた時だけ描き直すため）。
+    pub fn received(&self) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .received
+    }
+
+    /// 届いた出力の末尾（最大 [`LIVE_OUTPUT_BYTES`]・先頭は文字の途中から始まりうる）。
+    pub fn tail(&self) -> Vec<u8> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bytes
+            .iter()
+            .copied()
+            .collect()
+    }
+}
+
+/// 頭と尻だけを持つ取り込み口（[`CapturedOutput`] を作る）。読み手のスレッドと取り出す側で共有する。
+struct CaptureBuffer {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    head_limit: usize,
+    tail_limit: usize,
+    omitted: u64,
+    /// 取り出した後（[`Self::take`]）。まだ読み手が生きていても（`&` の孫がパイプを握っている）以後は捨てる。
+    taken: bool,
+}
+
+impl CaptureBuffer {
+    fn new(limit: usize) -> Self {
+        let head_limit = limit / 2;
+        Self {
+            head: Vec::new(),
+            tail: std::collections::VecDeque::new(),
+            head_limit,
+            tail_limit: limit - head_limit,
+            omitted: 0,
+            taken: false,
+        }
+    }
+
+    fn push(&mut self, mut bytes: &[u8]) {
+        if self.taken {
+            return;
+        }
+        let room = self.head_limit.saturating_sub(self.head.len());
+        if room > 0 {
+            let taken = room.min(bytes.len());
+            self.head.extend_from_slice(&bytes[..taken]);
+            bytes = &bytes[taken..];
+        }
+        if bytes.is_empty() {
+            return;
+        }
+        if bytes.len() >= self.tail_limit {
+            // 1 回で尻の上限を超える: 今までの尻は全部押し出される。
+            self.omitted += (self.tail.len() + bytes.len() - self.tail_limit) as u64;
+            self.tail.clear();
+            self.tail.extend(&bytes[bytes.len() - self.tail_limit..]);
+            return;
+        }
+        let overflow = (self.tail.len() + bytes.len()).saturating_sub(self.tail_limit);
+        self.tail.drain(..overflow);
+        self.omitted += overflow as u64;
+        self.tail.extend(bytes);
+    }
+
+    fn take(&mut self) -> CapturedOutput {
+        self.taken = true;
+        let mut head = std::mem::take(&mut self.head);
+        let mut tail: Vec<u8> = std::mem::take(&mut self.tail).into();
+        let omitted = std::mem::take(&mut self.omitted);
+        if omitted == 0 {
+            // 間を捨てていない＝頭と尻は地続き。1 本にして返す。
+            head.append(&mut tail);
+        }
+        CapturedOutput {
+            head,
+            tail,
+            omitted,
+        }
+    }
+}
+
 /// Project/workspace が使う OS 境界。blocking API なので UI thread では呼ばず background executor へ載せる。
 pub trait Host: Send + Sync {
     fn id(&self) -> &str;
@@ -320,6 +624,59 @@ pub trait Host: Send + Sync {
     /// 既定は [`Self::run_command`] と同じ（local に再送の概念は無い）。
     fn run_command_retry_safe(&self, spec: &CommandSpec) -> Result<CommandOutput> {
         self.run_command(spec)
+    }
+    /// `cancel` が立ったら結果を要らないものとして `Ok(None)` を返す command（変更レビューの
+    /// `git diff` のように、画面を閉じた・基準を変えたら用が無くなるもの）。**途中で止めても何も
+    /// 壊れない読み取り専用の command だけに使う**（git なら `--no-optional-locks` を付ける）。
+    /// local は子の出力を待つ間に `cancel` を見て、立ったら子を止める（残りを計算させない）。
+    /// 既定（remote）は daemon との 1 往復の途中で止める口が無いので、最後まで走らせてから見る。
+    fn run_command_cancellable(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+    ) -> Result<Option<CommandOutput>> {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let output = self.run_command(spec)?;
+        Ok((!cancel.load(Ordering::Acquire)).then_some(output))
+    }
+    /// 人が打ったシェルコマンドを流す（エージェントパネルの `!`・#37）。
+    /// [`Self::run_command_cancellable`] と違い、**副作用のある command に使う**前提で、止めるのは
+    /// 人の操作（esc / ■）だけ。stdin は空（対話しない）。
+    ///
+    /// - 出力は stream ごとに頭と尻を合わせて `output_limit` バイトまで持ち、間は読み捨てる
+    ///   （子は止めない）。巨大な `cat` や止まらない出力でメモリを食わない
+    /// - `cancel` が立ったら止め、そこまでの出力を `cancelled` 付きで返す
+    ///
+    /// - 走っている間の出力は `live` へ流す（表示用の末尾。取り込みの上限とは別）
+    ///
+    /// 既定は `run_command` の 1 往復で、途中で止める口も途中の出力も無い（取り消されても最後まで
+    /// 走らせて結果を返す・[`Self::can_stop_user_command`] が `false`＝呼ぶ側は待たずに畳む）。
+    /// 手元（[`LocalHost`]）と SSH 先（[`RemoteHost`]）はどちらも止められる実装を持つ。
+    fn run_user_command(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+        output_limit: usize,
+        live: &LiveOutput,
+    ) -> Result<UserCommandOutput> {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(UserCommandOutput::not_started());
+        }
+        let output = self.run_command(spec)?;
+        live.push(&output.stdout);
+        live.push(&output.stderr);
+        Ok(UserCommandOutput {
+            status_code: output.status_code,
+            stdout: CapturedOutput::from_bytes(&output.stdout, output_limit),
+            stderr: CapturedOutput::from_bytes(&output.stderr, output_limit),
+            cancelled: false,
+        })
+    }
+    /// [`Self::run_user_command`] を走っている途中で止められるか（手元だけ `true`）。
+    fn can_stop_user_command(&self) -> bool {
+        false
     }
     /// このホストで 1 行スクリプトを流す [`CommandSpec`] を組む。
     ///
@@ -360,6 +717,21 @@ pub trait Host: Send + Sync {
     /// 到達不能が続くと 60 秒までバックオフするので、「復帰したのに次の試行まで待つ」を
     /// ユーザー操作で短絡するための入口。
     fn reconnect(&self) {}
+    /// 接続先の TCP ポート `remote_port` を手元の 127.0.0.1 へ転送する（O5・SSH の ControlMaster の
+    /// `-O forward -L`）。手元の番号は、同じ番号が空いていればそれ、塞がっていれば空いている番号。
+    /// 返すのは手元の番号（すでに転送していればその番号）。再接続したら張り直す。
+    /// 手元のプロジェクトは転送するものが無いので `Err`。**UI スレッドから呼ばない**（ネットワーク）。
+    fn forward_port(&self, _remote_port: u16) -> Result<u16> {
+        bail!("手元のプロジェクトのポートは転送しない")
+    }
+    /// [`Host::forward_port`] の転送をやめる（`-O cancel`）。**UI スレッドから呼ばない**。
+    fn cancel_forward(&self, remote_port: u16) -> Result<()> {
+        bail!("{remote_port} は転送していない")
+    }
+    /// いま張っている転送（接続先の番号, 手元の番号）。ネットワークに触らない。
+    fn forwarded_ports(&self) -> Vec<(u16, u16)> {
+        Vec::new()
+    }
 }
 
 /// remote host の接続状態（statusbar の SSH チップが表示する。M9・2026-09-08）。
@@ -495,6 +867,28 @@ impl Host for LocalHost {
 
     fn run_command(&self, spec: &CommandSpec) -> Result<CommandOutput> {
         run_command_local(spec)
+    }
+
+    fn run_command_cancellable(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+    ) -> Result<Option<CommandOutput>> {
+        run_command_cancellable_local(spec, cancel)
+    }
+
+    fn run_user_command(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+        output_limit: usize,
+        live: &LiveOutput,
+    ) -> Result<UserCommandOutput> {
+        run_user_command_local(spec, cancel, output_limit, live)
+    }
+
+    fn can_stop_user_command(&self) -> bool {
+        true
     }
 
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess> {
@@ -829,6 +1223,549 @@ fn run_command_local(spec: &CommandSpec) -> Result<CommandOutput> {
     })
 }
 
+/// 取り消しの印を見る間隔（[`run_command_cancellable_local`]）。出力が届けばすぐ起きるので、
+/// 普段の command はこの分だけ遅れることはない（黙って計算している間の見回りの間隔）。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// [`Host::run_command_cancellable`] の local 実装。stdout と stderr は別々のスレッドで読み切り
+/// （片方のパイプが埋まると子が止まる）、待つ間に `cancel` が立ったら子を止めて回収し `None` を返す。
+/// 読み手のスレッドは待たない（子が止まってパイプが閉じれば自然に終わる）。
+fn run_command_cancellable_local(
+    spec: &CommandSpec,
+    cancel: &AtomicBool,
+) -> Result<Option<CommandOutput>> {
+    if cancel.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let mut child = Command::new(&spec.program)
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .envs(&spec.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("process を起動できない: {}", spec.program))?;
+    let pipes = child
+        .stdout
+        .take()
+        .zip(child.stderr.take())
+        .context("process の stdout / stderr が無い");
+    let (sender, receiver) = mpsc::channel();
+    let started = pipes.and_then(|(stdout, stderr)| {
+        read_pipe_in_background(stdout, 0, sender.clone())?;
+        read_pipe_in_background(stderr, 1, sender)
+    });
+    if let Err(error) = started {
+        stop_child(&mut child);
+        return Err(error);
+    }
+    // [stdout, stderr]。両方が読み終わる（= 子が書き終えた）まで待つ。
+    let mut outputs: [Option<Vec<u8>>; 2] = [None, None];
+    while outputs.iter().any(Option::is_none) {
+        match receiver.recv_timeout(CANCEL_POLL_INTERVAL) {
+            Ok((slot, Ok(bytes))) => outputs[slot] = Some(bytes),
+            Ok((_, Err(error))) => {
+                stop_child(&mut child);
+                return Err(error).context("process の出力を読めない");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::Acquire) {
+                    stop_child(&mut child);
+                    return Ok(None);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stop_child(&mut child);
+                bail!("process の出力を読むスレッドが落ちた");
+            }
+        }
+    }
+    let status = child.wait().context("process の終了を待てない")?;
+    let [Some(stdout), Some(stderr)] = outputs else {
+        bail!("process の出力が揃わない");
+    };
+    Ok(Some(CommandOutput {
+        status_code: status.code(),
+        stdout,
+        stderr,
+    }))
+}
+
+/// パイプを最後まで読み、`slot`（0 = stdout / 1 = stderr）と一緒に `sender` へ渡すスレッドを立てる。
+fn read_pipe_in_background(
+    mut pipe: impl Read + Send + 'static,
+    slot: usize,
+    sender: mpsc::Sender<(usize, std::io::Result<Vec<u8>>)>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("necoder-command-output".to_string())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let read = pipe.read_to_end(&mut bytes).map(|_| bytes);
+            // 受け手が先に抜けていたら（取り消した）読んだ分は要らない。
+            let _unwanted = sender.send((slot, read));
+        })
+        .context("process の出力を読むスレッドを起動できない")?;
+    Ok(())
+}
+
+/// 取り消した子を止めて回収する（ゾンビを残さない）。すでに終わっていれば kill は失敗するが、それで良い。
+fn stop_child(child: &mut Child) {
+    let _already_exited = child.kill();
+    if let Err(error) = child.wait() {
+        eprintln!("止めた process を回収できない: {error}");
+    }
+}
+
+/// 人が打ったコマンドを止める時、まず行儀よく終わらせる（SIGTERM）猶予。git などは受け取ると
+/// lock を片付けてから終わる。過ぎても子が生きていればグループごと SIGKILL。
+const USER_COMMAND_STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// 子が終わった後、出力のパイプが閉じるのを待つ上限。`&` で背景に回した孫がパイプを握ったままだと
+/// いつまでも閉じないので、ここで打ち切って結果を返す（孫は止めない＝端末で `&` を付けた時と同じ）。
+const USER_COMMAND_PIPE_GRACE: Duration = Duration::from_millis(300);
+
+/// [`Host::run_user_command`] の local 実装。
+///
+/// 子は**自分のプロセスグループ**で起こす（unix）。止める時にグループごとシグナルを送れば、
+/// パイプの後段や `cargo` が起こした `rustc` まで止まる（子だけ止めると孫が残り、出力のパイプも
+/// 閉じない）。stdout と stderr は別々のスレッドで上限つきで読み（片方が埋まると子が止まる）、
+/// 待つ間は [`CANCEL_POLL_INTERVAL`] ごとに子の終わりと取り消しの印を見る。
+fn run_user_command_local(
+    spec: &CommandSpec,
+    cancel: &AtomicBool,
+    output_limit: usize,
+    live: &LiveOutput,
+) -> Result<UserCommandOutput> {
+    if cancel.load(Ordering::Acquire) {
+        return Ok(UserCommandOutput::not_started());
+    }
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .envs(&spec.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+        // SAFETY: fork と exec の間の子で走る。中で呼ぶのは async-signal-safe な関数だけ
+        // （sigemptyset・sigprocmask・signal）で、メモリも確保しない。
+        unsafe {
+            command.pre_exec(reset_child_signals);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("process を起動できない: {}", spec.program))?;
+    let buffers = [
+        Arc::new(Mutex::new(CaptureBuffer::new(output_limit))),
+        Arc::new(Mutex::new(CaptureBuffer::new(output_limit))),
+    ];
+    let (sender, receiver) = mpsc::channel::<()>();
+    let pipes = child
+        .stdout
+        .take()
+        .zip(child.stderr.take())
+        .context("process の stdout / stderr が無い");
+    let started = pipes.and_then(|(stdout, stderr)| {
+        capture_pipe_in_background(stdout, buffers[0].clone(), live.clone(), sender.clone())?;
+        capture_pipe_in_background(stderr, buffers[1].clone(), live.clone(), sender)
+    });
+    if let Err(error) = started {
+        stop_user_command(&mut child);
+        return Err(error);
+    }
+    let mut open_pipes = 2usize;
+    let mut status: Option<std::process::ExitStatus> = None;
+    let mut exited_at: Option<std::time::Instant> = None;
+    let mut stop_started_at: Option<std::time::Instant> = None;
+    let mut killed = false;
+    loop {
+        match receiver.recv_timeout(CANCEL_POLL_INTERVAL) {
+            Ok(()) => open_pipes = open_pipes.saturating_sub(1),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => open_pipes = 0,
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit)) => {
+                    status = Some(exit);
+                    exited_at = Some(std::time::Instant::now());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stop_user_command(&mut child);
+                    return Err(error).context("process の終了を確かめられない");
+                }
+            }
+        }
+        // シグナルは子をまだ回収していない間だけ送る（回収した後はグループの id が再利用されうる）。
+        if status.is_none() && cancel.load(Ordering::Acquire) {
+            match stop_started_at {
+                None => {
+                    signal_process_group(&mut child, StopSignal::Terminate);
+                    stop_started_at = Some(std::time::Instant::now());
+                }
+                Some(started) if !killed && started.elapsed() >= USER_COMMAND_STOP_GRACE => {
+                    signal_process_group(&mut child, StopSignal::Kill);
+                    killed = true;
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(exited_at) = exited_at {
+            if open_pipes == 0 || exited_at.elapsed() >= USER_COMMAND_PIPE_GRACE {
+                break;
+            }
+        }
+    }
+    let take = |buffer: &Arc<Mutex<CaptureBuffer>>| {
+        buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    };
+    Ok(UserCommandOutput {
+        status_code: status.and_then(|status| status.code()),
+        stdout: take(&buffers[0]),
+        stderr: take(&buffers[1]),
+        cancelled: stop_started_at.is_some(),
+    })
+}
+
+/// [`run_user_command_over_process`] が出力の 1 行目に載せる「このシェルの PID」の目印（表示からは外す）。
+const USER_COMMAND_PID_MARKER: &str = "\u{1e}NECODER_USER_COMMAND_PID=";
+
+/// 目印の行はこれより長くならない（届かなければ目印ではない＝そのまま出力として扱う）。
+const USER_COMMAND_PID_LINE_MAX: usize = 64;
+
+/// 人のコマンドを **`spawn_process` の子として**走らせる（SSH 先の [`Host::run_user_command`]）。
+///
+/// daemon との 1 往復（`run_command`）だと途中で止める口が無く、出力も終わるまで届かない。
+/// `ssh` の子として直に走らせれば、出力は届いたそばから `live` へ流せる。止める時は、先頭で出させた
+/// シェルの PID から**同じホストで**子・孫まで TERM を送り（`pgrep -P` を辿る）、
+/// [`USER_COMMAND_STOP_GRACE`] を過ぎても残っていれば KILL する（手元のプロセスグループと同じ手順）。
+/// `ssh` の子の stderr は捨てられるので、シェル側で stdout へ寄せる（stderr は空で返す）。
+fn run_user_command_over_process(
+    host: &dyn Host,
+    spec: &CommandSpec,
+    cancel: &AtomicBool,
+    output_limit: usize,
+    live: &LiveOutput,
+) -> Result<UserCommandOutput> {
+    if cancel.load(Ordering::Acquire) {
+        return Ok(UserCommandOutput::not_started());
+    }
+    let mut words = vec![quote_posix(&spec.program)];
+    words.extend(spec.args.iter().map(|arg| quote_posix(arg)));
+    // PID を出してから本来のコマンドへ exec で置き換わる（PID は変わらない＝そこから辿れる）。
+    let script = format!(
+        "printf '{USER_COMMAND_PID_MARKER}%s\\n' \"$$\"\nexec 2>&1\nexec {}",
+        words.join(" ")
+    );
+    let mut wrapped = posix_shell_script(&script, &spec.cwd);
+    wrapped.env = spec.env.clone();
+    let mut process = host.spawn_process(&wrapped)?;
+    drop(process.take_stdin()?); // stdin は空（対話しない）
+    let stdout = process.take_stdout()?;
+    let buffer = Arc::new(Mutex::new(CaptureBuffer::new(output_limit)));
+    let pid = Arc::new(Mutex::new(None::<u32>));
+    let (sender, receiver) = mpsc::channel::<()>();
+    capture_marked_pipe_in_background(stdout, buffer.clone(), live.clone(), pid.clone(), sender)?;
+
+    let mut pipe_open = true;
+    let mut status: Option<std::process::ExitStatus> = None;
+    let mut exited_at: Option<std::time::Instant> = None;
+    let mut stop_started_at: Option<std::time::Instant> = None;
+    let mut killed = false;
+    loop {
+        match receiver.recv_timeout(CANCEL_POLL_INTERVAL) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => pipe_open = false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if status.is_none() {
+            if let Some(exit) = process.try_exit_status() {
+                status = Some(exit);
+                exited_at = Some(std::time::Instant::now());
+            }
+        }
+        if status.is_none() && cancel.load(Ordering::Acquire) {
+            let marked = *pid
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match (stop_started_at, marked) {
+                // PID がまだ届いていない（起動の直後）＝届くのを待ってから送る。
+                (None, None) => {}
+                (None, Some(pid)) => {
+                    signal_remote_tree(host, &spec.cwd, pid, "TERM");
+                    stop_started_at = Some(std::time::Instant::now());
+                }
+                (Some(started), Some(pid))
+                    if !killed && started.elapsed() >= USER_COMMAND_STOP_GRACE =>
+                {
+                    signal_remote_tree(host, &spec.cwd, pid, "KILL");
+                    killed = true;
+                }
+                // KILL しても `ssh` が戻らない（接続が詰まった）＝手元の `ssh` を畳んで見切る。
+                (Some(started), _) if started.elapsed() >= USER_COMMAND_STOP_GRACE * 2 => break,
+                _ => {}
+            }
+        }
+        if let Some(exited_at) = exited_at {
+            if !pipe_open || exited_at.elapsed() >= USER_COMMAND_PIPE_GRACE {
+                break;
+            }
+        }
+    }
+    drop(process); // 終わっていれば回収するだけ・見切った時は手元の `ssh` を止める
+    let captured = buffer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    Ok(UserCommandOutput {
+        status_code: status.and_then(|status| status.code()),
+        stdout: captured,
+        stderr: CapturedOutput::default(),
+        cancelled: stop_started_at.is_some(),
+    })
+}
+
+/// `pid` とその子・孫へシグナルを送るスクリプト（POSIX）。親を先に STOP して新しい子を産ませず、
+/// 子から順に送ってから CONT で起こす（STOP 中は TERM を受け取っても片付けに進めない）。
+/// `pgrep` が無い環境では `pid` 本体にだけ届く。
+fn signal_tree_script(pid: u32, signal: &str) -> String {
+    format!(
+        "signal_tree() {{ kill -STOP \"$1\" 2>/dev/null; for child in $(pgrep -P \"$1\" 2>/dev/null); do signal_tree \"$child\"; done; kill -{signal} \"$1\" 2>/dev/null; kill -CONT \"$1\" 2>/dev/null; }}\nsignal_tree {pid}"
+    )
+}
+
+fn signal_remote_tree(host: &dyn Host, cwd: &Path, pid: u32, signal: &str) {
+    let spec = posix_shell_script(&signal_tree_script(pid, signal), cwd);
+    if let Err(error) = host.run_command(&spec) {
+        eprintln!("コマンドを止められない（{signal}）: {error:#}");
+    }
+}
+
+/// [`capture_pipe_in_background`] の、先頭に PID の目印行が来るパイプ版。目印は `pid` へ控えて
+/// 出力からは外す（目印でなければそのまま出力として扱う）。
+fn capture_marked_pipe_in_background(
+    mut pipe: impl Read + Send + 'static,
+    buffer: Arc<Mutex<CaptureBuffer>>,
+    live: LiveOutput,
+    pid: Arc<Mutex<Option<u32>>>,
+    done: mpsc::Sender<()>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("necoder-command-output".to_string())
+        .spawn(move || {
+            let mut chunk = [0u8; 16 * 1024];
+            // 目印の行を読み切るまでは手元に溜める（`None` = もう目印を探さない）。
+            let mut head: Option<Vec<u8>> = Some(Vec::new());
+            let push = |bytes: &[u8]| {
+                buffer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(bytes);
+                live.push(bytes);
+            };
+            loop {
+                let read = match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        eprintln!("コマンドの出力を読めない: {error}");
+                        break;
+                    }
+                };
+                let Some(pending) = head.as_mut() else {
+                    push(&chunk[..read]);
+                    continue;
+                };
+                pending.extend_from_slice(&chunk[..read]);
+                match split_pid_marker(pending) {
+                    MarkerScan::Found(found, rest) => {
+                        *pid.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(found);
+                        push(&rest);
+                        head = None;
+                    }
+                    MarkerScan::NotMarker => {
+                        push(pending);
+                        head = None;
+                    }
+                    MarkerScan::Incomplete => {}
+                }
+            }
+            if let Some(pending) = head {
+                push(&pending); // 目印の行が完結しないまま終わった＝ただの出力
+            }
+            // 受け手が先に抜けていたら（打ち切って結果を返した）知らせは要らない。
+            let _unwanted = done.send(());
+        })
+        .context("process の出力を読むスレッドを起動できない")?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MarkerScan {
+    /// 目印の行を読んだ（PID・その後ろの出力）。
+    Found(u32, Vec<u8>),
+    /// 先頭は目印ではない。
+    NotMarker,
+    /// まだ判断できない（1 行目を読み切っていない）。
+    Incomplete,
+}
+
+fn split_pid_marker(bytes: &[u8]) -> MarkerScan {
+    let marker = USER_COMMAND_PID_MARKER.as_bytes();
+    let prefix = bytes.len().min(marker.len());
+    if bytes[..prefix] != marker[..prefix] {
+        return MarkerScan::NotMarker;
+    }
+    let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') else {
+        return if bytes.len() > USER_COMMAND_PID_LINE_MAX {
+            MarkerScan::NotMarker
+        } else {
+            MarkerScan::Incomplete
+        };
+    };
+    if newline < marker.len() {
+        return MarkerScan::NotMarker;
+    }
+    match std::str::from_utf8(&bytes[marker.len()..newline])
+        .ok()
+        .and_then(|pid| pid.trim().parse().ok())
+    {
+        Some(pid) => MarkerScan::Found(pid, bytes[newline + 1..].to_vec()),
+        None => MarkerScan::NotMarker,
+    }
+}
+
+/// パイプを上限つきで最後まで読むスレッドを立てる（読み終えたら `done` へ知らせる）。
+/// 上限を超えた分は [`CaptureBuffer`] が頭と尻を残して捨てる＝子は止めない。
+fn capture_pipe_in_background(
+    mut pipe: impl Read + Send + 'static,
+    buffer: Arc<Mutex<CaptureBuffer>>,
+    live: LiveOutput,
+    done: mpsc::Sender<()>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("necoder-command-output".to_string())
+        .spawn(move || {
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        buffer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(&chunk[..read]);
+                        live.push(&chunk[..read]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        eprintln!("コマンドの出力を読めない: {error}");
+                        break;
+                    }
+                }
+            }
+            // 受け手が先に抜けていたら（打ち切って結果を返した）知らせは要らない。
+            let _unwanted = done.send(());
+        })
+        .context("process の出力を読むスレッドを起動できない")?;
+    Ok(())
+}
+
+/// 子のシグナルの状態を既定へ戻す（`pre_exec`・fork の後 exec の前に子の中で走る）。
+///
+/// 背景の executor のスレッド（macOS は GCD）は非同期のシグナルを**ブロック**していて、Rust の
+/// `Command` はそのマスクを子へそのまま継ぐ（std の仕様・SIGPIPE の扱いしか直さない）。そのままだと
+/// 子は SIGTERM も SIGINT も受け取れず、止める操作が猶予の後の SIGKILL まで効かない（git が lock を
+/// 片付けられない・終了時の SIGTERM が届かず子が残る）。人のコマンドは端末と同じ既定の状態で
+/// 走らせたいので、マスクを空にし、無視の設定も既定へ戻す（端末の PTY の子と同じ顔ぶれ）。
+#[cfg(unix)]
+fn reset_child_signals() -> std::io::Result<()> {
+    // SAFETY: どれも async-signal-safe な libc の関数を、宣言どおりの引数で呼ぶだけ。
+    // `mask` は sigemptyset が初期化してから読む。
+    unsafe {
+        let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        if libc::sigemptyset(mask.as_mut_ptr()) != 0
+            || libc::sigprocmask(libc::SIG_SETMASK, mask.as_ptr(), std::ptr::null_mut()) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        for signal in [
+            libc::SIGCHLD,
+            libc::SIGHUP,
+            libc::SIGINT,
+            libc::SIGQUIT,
+            libc::SIGTERM,
+            libc::SIGALRM,
+        ] {
+            if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum StopSignal {
+    /// SIGTERM（行儀よく終わらせる）。
+    Terminate,
+    /// SIGKILL。
+    Kill,
+}
+
+/// 子のプロセスグループ全体へシグナルを送る。**子をまだ回収していない間だけ呼ぶ**こと
+/// （回収前ならグループの id は他のプロセスへ再利用されていない）。
+#[cfg(unix)]
+fn signal_process_group(child: &mut Child, signal: StopSignal) {
+    let signal = match signal {
+        StopSignal::Terminate => libc::SIGTERM,
+        StopSignal::Kill => libc::SIGKILL,
+    };
+    let Ok(group) = libc::pid_t::try_from(child.id()) else {
+        // pid が pid_t に収まらないことは無いが、収まらなければ子だけでも止める。
+        let _already_exited = child.kill();
+        return;
+    };
+    // SAFETY: killpg はシグナルを送るだけでメモリに触れない。相手は `process_group(0)` で起こした
+    // 子のグループ（id = 子の pid）で、呼ぶのは子を回収する前だけ。
+    let result = unsafe { libc::killpg(group, signal) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        // ESRCH = グループがもう空（全員終わっている）。それで良い。
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            eprintln!("コマンドのプロセスグループを止められない: {error}");
+        }
+    }
+}
+
+/// Windows はグループで止める口を持たない（孫は残る）。子だけ止める。
+#[cfg(not(unix))]
+fn signal_process_group(child: &mut Child, _signal: StopSignal) {
+    if let Err(error) = child.kill() {
+        eprintln!("コマンドを止められない: {error}");
+    }
+}
+
+/// 起動の途中で失敗した子をグループごと止めて回収する（ゾンビも孫も残さない）。
+fn stop_user_command(child: &mut Child) {
+    signal_process_group(child, StopSignal::Kill);
+    if let Err(error) = child.wait() {
+        eprintln!("止めた process を回収できない: {error}");
+    }
+}
+
 fn spawn_process_local(
     spec: &CommandSpec,
     transport: Option<Arc<SshTransport>>,
@@ -839,15 +1776,18 @@ fn spawn_process_local(
         .envs(&spec.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // 末尾だけを持つ（すぐ落ちた子の理由を見せる・[`StderrTail`]）。読む側は最後まで読み続ける。
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("process を起動できない: {}", spec.program))?;
     let stdin = child.stdin.take().context("process stdin が無い")?;
     let stdout = child.stdout.take().context("process stdout が無い")?;
+    let stderr = child.stderr.take().context("process stderr が無い")?;
     Ok(HostProcess {
         child,
         stdin: Some(Box::new(stdin)),
         stdout: Some(Box::new(stdout)),
+        stderr: StderrTail::capture(stderr),
         _transport: transport,
     })
 }
@@ -2126,23 +3066,182 @@ pub struct SshConfigHost {
     pub user: Option<String>,
 }
 
+/// SSH config の置き場。通常は `~/.ssh/config`、テストでは transport と同じ `NECODER_SSH_CONFIG`。
+pub fn ssh_config_path() -> Option<PathBuf> {
+    match std::env::var_os("NECODER_SSH_CONFIG") {
+        Some(path) => Some(PathBuf::from(path)),
+        // Windows の OpenSSH も `%USERPROFILE%\.ssh\config` を見る（paths が USERPROFILE を解決する）。
+        None => paths::home_dir().map(|home| home.join(".ssh/config")),
+    }
+}
+
 /// SSH config を読んで接続可能なホスト一覧を返す（読めなければ空）。
-/// 通常は `~/.ssh/config`、テストでは transport と同じ `NECODER_SSH_CONFIG` を使う。
 pub fn ssh_config_hosts() -> Vec<SshConfigHost> {
-    let path = match std::env::var_os("NECODER_SSH_CONFIG") {
-        Some(path) => PathBuf::from(path),
-        None => {
-            // Windows の OpenSSH も `%USERPROFILE%.sshnfig` を見る（paths が USERPROFILE を解決する）。
-            let Some(home) = paths::home_dir() else {
-                return Vec::new();
-            };
-            home.join(".ssh/config")
-        }
+    let Some(path) = ssh_config_path() else {
+        return Vec::new();
     };
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_ssh_config(&text),
         Err(_) => Vec::new(),
     }
+}
+
+/// 接続先の登録（O37・G01）で SSH config に足す 1 つ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewSshHost {
+    /// `Host` の名前（`ssh <名前>` で使う）。
+    pub alias: String,
+    /// `HostName`（ホスト名か IP）。
+    pub hostname: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    /// `IdentityFile`（`~/` 可）。
+    pub identity_file: Option<String>,
+    /// `ProxyJump`（経由するホスト・`名前` か `user@host:port`・`,` で続けて複数）。
+    pub proxy_jump: Option<String>,
+}
+
+/// 1 語の値として config に書けるか（空白・引用符・`#`・先頭の `-` を含まない）。
+fn plain_ssh_word(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '"' | '\'' | '#'))
+}
+
+/// ProxyJump の値か（`[user@]host[:port]` か `ssh://[user@]host[:port]` を `,` でつないだもの）。
+/// どの経由先も、ユーザー名とホスト名が空でなく `-` で始まらず（ssh のオプションに化けない）、使うのは
+/// ホスト名・ユーザー名・ポート・IPv6 の角括弧の文字だけ（`;` や `$` などは通さない）。先頭の経由先だけ
+/// 見ていた時は `bastion,-oProxyCommand=…` を通していた（レビューで見つけた）。
+fn proxy_jump_value(value: &str) -> bool {
+    value.split(',').all(|hop| {
+        let hop = hop.strip_prefix("ssh://").unwrap_or(hop);
+        !hop.is_empty()
+            && hop
+                .split('@')
+                .all(|part| !part.is_empty() && !part.starts_with('-'))
+            && hop.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '.' | '-' | '_' | '@' | ':' | '[' | ']' | '%')
+            })
+    })
+}
+
+impl NewSshHost {
+    /// 書く前に確かめる（書けない値は理由つきで断る・config を壊さない）。
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            plain_ssh_word(&self.alias)
+                && !self
+                    .alias
+                    .chars()
+                    .any(|character| matches!(character, '*' | '?' | '!' | ',')),
+            "名前には空白や記号（* ? ! , # 引用符）を使えません: {}",
+            self.alias
+        );
+        anyhow::ensure!(
+            plain_ssh_word(&self.hostname),
+            "ホスト名に使えない文字があります: {}",
+            self.hostname
+        );
+        if let Some(user) = &self.user {
+            anyhow::ensure!(
+                plain_ssh_word(user),
+                "ユーザー名に使えない文字があります: {user}"
+            );
+        }
+        anyhow::ensure!(self.port != Some(0), "ポートは 1〜65535");
+        if let Some(identity) = &self.identity_file {
+            anyhow::ensure!(
+                !identity.is_empty()
+                    && !identity.contains(['"', '\n', '\r'])
+                    && !identity.starts_with('-'),
+                "鍵のファイルに使えない文字があります: {identity}"
+            );
+        }
+        if let Some(proxy_jump) = &self.proxy_jump {
+            anyhow::ensure!(
+                proxy_jump_value(proxy_jump),
+                "経由するホストに使えない文字があります: {proxy_jump}"
+            );
+        }
+        Ok(())
+    }
+
+    /// 足す塊（前に空行・necoder が足した印のコメント・末尾に改行）。空白を含む鍵のパスは引用符で囲む。
+    pub fn config_block(&self) -> String {
+        let mut block = format!(
+            "\n# necoder で登録\nHost {}\n  HostName {}\n",
+            self.alias, self.hostname
+        );
+        if let Some(user) = &self.user {
+            block.push_str(&format!("  User {user}\n"));
+        }
+        if let Some(port) = self.port {
+            block.push_str(&format!("  Port {port}\n"));
+        }
+        if let Some(proxy_jump) = &self.proxy_jump {
+            block.push_str(&format!("  ProxyJump {proxy_jump}\n"));
+        }
+        if let Some(identity) = &self.identity_file {
+            if identity.contains(char::is_whitespace) {
+                block.push_str(&format!("  IdentityFile \"{identity}\"\n"));
+            } else {
+                block.push_str(&format!("  IdentityFile {identity}\n"));
+            }
+        }
+        block
+    }
+}
+
+/// SSH config の末尾に `host` を足す（O37・G01）。**既存の行は触らない**（追記だけ）。同じ名前の
+/// `Host` があれば断る。config が無ければ作る（unix は `~/.ssh` を 0700・config を 0600）。
+pub fn append_ssh_config_host(path: &Path, host: &NewSshHost) -> Result<()> {
+    host.validate()?;
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("{} を読めない", path.display()));
+        }
+    };
+    anyhow::ensure!(
+        !parse_ssh_config(&existing)
+            .iter()
+            .any(|known| known.alias == host.alias),
+        "同じ名前の接続先があります: {}",
+        host.alias
+    );
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("{} を作れない", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("{} を開けない", path.display()))?;
+    let mut text = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&host.config_block());
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("{} に書けない", path.display()))?;
+    Ok(())
 }
 
 /// ssh_config テキストを Host 単位で列挙する（IO 無し = テスト可能）。
@@ -2251,6 +3350,157 @@ const MASTER_OPTIONS: [&str; 5] = [
     "ServerAliveCountMax=3",
     "ExitOnForwardFailure=yes",
 ];
+
+/// OpenSSH が接続に失敗した理由の種類（接続のトーストで案内を出し分ける・文言は GUI 側で i18n）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshFailure {
+    /// 指紋を確かめていないホスト（初めて・確認を断った）。
+    HostKeyUnknown,
+    /// 覚えている指紋と違う（作り直した・なりすましの恐れ）。
+    HostKeyChanged,
+    /// 鍵・パスワードが通らない。
+    Authentication,
+    /// 鍵を試しすぎて切られた（agent に鍵が多い）。
+    TooManyKeys,
+    /// ホスト名が引けない。
+    UnknownHost,
+    /// 接続を断られた（sshd が居ない・ポート違い）。
+    Refused,
+    /// 応答が無い（ネットワーク・VPN・ファイアウォール）。
+    TimedOut,
+    /// `~/.ssh` や鍵の権限が広すぎて OpenSSH が読まない。
+    BadPermissions,
+    /// 鍵交換・暗号の方式が合わない（古い sshd）。
+    Negotiation,
+}
+
+impl SshFailure {
+    /// OpenSSH のログから種類を当てる（知らない書き方なら `None`＝ログをそのまま見せる）。
+    /// 順番が意味を持つ: 指紋の変化は「Host key verification failed」も伴い、権限の広い鍵は
+    /// 続けて「Permission denied」も出すので、より具体的な方を先に見る。
+    pub fn classify(log: &str) -> Option<Self> {
+        let has = |needle: &str| log.contains(needle);
+        if has("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+            Some(Self::HostKeyChanged)
+        } else if has("Bad owner or permissions") || has("UNPROTECTED PRIVATE KEY FILE") {
+            Some(Self::BadPermissions)
+        } else if has("Host key verification failed") || has("host key is known for") {
+            Some(Self::HostKeyUnknown)
+        } else if has("Too many authentication failures") {
+            Some(Self::TooManyKeys)
+        } else if has("Permission denied") {
+            Some(Self::Authentication)
+        } else if has("Could not resolve hostname") {
+            Some(Self::UnknownHost)
+        } else if has("Connection refused") {
+            Some(Self::Refused)
+        } else if has("timed out") {
+            Some(Self::TimedOut)
+        } else if has("Unable to negotiate") {
+            Some(Self::Negotiation)
+        } else {
+            None
+        }
+    }
+}
+
+/// ControlMaster が立たなかった。OpenSSH が理由を書いていればそれと、分かれば種類を持つ
+/// （GUI は `anyhow::Error::downcast_ref` で取り出して案内を出す）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshConnectError {
+    pub failure: Option<SshFailure>,
+    /// OpenSSH が書いた理由（空行と前後の空白を落とした行）。
+    pub reason: String,
+    status: String,
+}
+
+impl SshConnectError {
+    /// ssh の終わり方（`exit status: 255`）と、OpenSSH がログへ書いた文から作る。
+    pub fn new(status: impl Into<String>, log: &str) -> Self {
+        let reason = log
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            failure: SshFailure::classify(&reason),
+            reason,
+            status: status.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SshConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "OpenSSH ControlMaster の接続に失敗: {}",
+            self.status
+        )?;
+        if !self.reason.is_empty() {
+            write!(formatter, ": {}", self.reason)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SshConnectError {}
+
+/// master を起こした ssh の終わり方とログから結果を作る。ログは従来どおり stderr にも流す
+/// （「known hosts に足した」などの警告も含めて、以前は stderr にそのまま出ていた）。
+fn master_result(success: bool, status: &str, log: &str) -> Result<()> {
+    if !log.trim().is_empty() {
+        eprint!("{log}");
+    }
+    if success {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(SshConnectError::new(status, log)))
+}
+
+/// 接続を確かめる（O37・G01）。ControlMaster も server の配備もせず、`ssh <destination> true` を
+/// 1 回だけ走らせる（鍵のパスフレーズやホスト鍵の確認は askpass で訊く・10 秒で打ち切る）。
+/// 成功なら掛かった時間、失敗なら理由つきの [`SshConnectError`]（種類は [`SshFailure`]）。
+/// blocking なので背景で呼ぶ。
+pub fn test_ssh_connection(project: &SshProject) -> Result<Duration> {
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+    let log = std::env::temp_dir().join(format!(
+        "necoder-ssh-test-{}-{}.log",
+        std::process::id(),
+        NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+    ));
+    let started = std::time::Instant::now();
+    let mut command = ssh_command();
+    command
+        .args(["-o", "ConnectTimeout=10"])
+        .arg("-E")
+        .arg(&log);
+    if let Some(port) = project.port {
+        command.args(["-p", &port.to_string()]);
+    }
+    let status = command
+        .arg(project.destination())
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("ssh を起動できない")?;
+    let elapsed = started.elapsed();
+    let written = std::fs::read(&log).unwrap_or_default();
+    if let Err(error) = std::fs::remove_file(&log) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("Remote SSH: 接続テストのログを消せない: {error}");
+        }
+    }
+    master_result(
+        status.success(),
+        &status.to_string(),
+        &String::from_utf8_lossy(&written),
+    )?;
+    Ok(elapsed)
+}
 
 /// Remote terminal の `ne` から接続元 GUI へ戻る、open 専用のローカル gateway。
 ///
@@ -2392,6 +3642,8 @@ struct SshTransport {
     control_path: PathBuf,
     #[cfg(unix)]
     remote_cli_forward: Option<RemoteCliForward>,
+    /// 張っているポートの転送（接続先の番号, 手元の番号・O5）。master を張り直したら張り直す。
+    port_forwards: Mutex<Vec<(u16, u16)>>,
 }
 
 impl SshTransport {
@@ -2446,6 +3698,7 @@ impl SshTransport {
             control_path,
             #[cfg(unix)]
             remote_cli_forward,
+            port_forwards: Mutex::new(Vec::new()),
         }))
     }
 
@@ -2457,6 +3710,16 @@ impl SshTransport {
     }
 
     fn start_master(&self) -> Result<()> {
+        // OpenSSH の理由（指紋・鍵・名前・拒否…）は `-E` でこのログへ書かせる。stderr に任せると
+        // 終わり方（exit 255）しか分からず、トーストで案内を出し分けられない。stderr をパイプで
+        // 読む形は、`-f` で背景に回った master がパイプを握り続けて読み終わらないので使わない。
+        // 前の試行の分が混ざらないよう先に消す（`-E` は追記）。control_dir ごと Drop で消える。
+        let log = self.control_dir.join("master.log");
+        if let Err(error) = std::fs::remove_file(&log) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Remote SSH: 前の接続ログを消せない: {error}");
+            }
+        }
         let mut master = ssh_command();
         master
             .args(["-M", "-N", "-f"])
@@ -2469,12 +3732,19 @@ impl SshTransport {
             master.args(["-p", &port.to_string()]);
         }
         let status = master
+            .arg("-E")
+            .arg(&log)
             .arg(self.project.destination())
             .status()
             .context("OpenSSH ControlMaster を起動できない")?;
-        if !status.success() {
-            bail!("OpenSSH ControlMaster の接続に失敗: {status}");
-        }
+        // 何も書かれていなければファイルはできない（= 理由なし）。背景に回った master が後で書く分
+        // （切断の理由など）も同じファイルに残る。
+        let written = std::fs::read(&log).unwrap_or_default();
+        master_result(
+            status.success(),
+            &status.to_string(),
+            &String::from_utf8_lossy(&written),
+        )?;
         // `ne` gateway の reverse forward は master が立ってから足す。master 起動の `-R` に
         // 同居させると、前回の master が異常終了して remote に残った socket で bind が落ち、
         // `ExitOnForwardFailure=yes` が master ごと exit 255 にして**再接続が永久に失敗**する
@@ -2482,7 +3752,96 @@ impl SshTransport {
         // ときだけ standalone session が `-R` 無しの master になって回復していた）。
         #[cfg(unix)]
         self.install_cli_forward();
+        self.reinstall_port_forwards();
         Ok(())
+    }
+
+    /// ポートの転送を 1 つ頼む / やめる（`operation` = `forward` / `cancel`）。手元は 127.0.0.1 だけで待つ
+    /// （同じ LAN の他の機械からは届かない）。
+    fn port_forward_request(&self, operation: &str, local: u16, remote: u16) -> Result<()> {
+        let mut request = ssh_command();
+        request
+            .args(["-S", &self.control_path.to_string_lossy(), "-O", operation])
+            .arg("-L")
+            .arg(format!("127.0.0.1:{local}:127.0.0.1:{remote}"));
+        if let Some(port) = self.project.port {
+            request.args(["-p", &port.to_string()]);
+        }
+        let output = request
+            .arg(self.project.destination())
+            .stdin(Stdio::null())
+            .output()
+            .context("OpenSSH にポートの転送を頼めない")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "ポートの転送に失敗（{operation} {local} → {remote}）: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
+    }
+
+    /// `remote` を手元へ転送する（[`Host::forward_port`]）。
+    fn forward_port(&self, remote: u16) -> Result<u16> {
+        assert_off_main_thread("forward_port");
+        let known = self
+            .port_forwards
+            .lock()
+            .map_err(|_| anyhow!("転送の一覧が壊れている"))?
+            .iter()
+            .find(|(forwarded, _)| *forwarded == remote)
+            .map(|(_, local)| *local);
+        if let Some(local) = known {
+            return Ok(local);
+        }
+        self.ensure_master()?;
+        let local = free_local_port(remote)?;
+        self.port_forward_request("forward", local, remote)?;
+        self.port_forwards
+            .lock()
+            .map_err(|_| anyhow!("転送の一覧が壊れている"))?
+            .push((remote, local));
+        Ok(local)
+    }
+
+    /// `remote` の転送をやめる（[`Host::cancel_forward`]）。
+    fn cancel_forward(&self, remote: u16) -> Result<()> {
+        assert_off_main_thread("cancel_forward");
+        let local = {
+            let mut forwards = self
+                .port_forwards
+                .lock()
+                .map_err(|_| anyhow!("転送の一覧が壊れている"))?;
+            let position = forwards
+                .iter()
+                .position(|(forwarded, _)| *forwarded == remote)
+                .ok_or_else(|| anyhow!("{remote} は転送していない"))?;
+            forwards.remove(position).1
+        };
+        self.port_forward_request("cancel", local, remote)
+    }
+
+    fn forwarded_ports(&self) -> Vec<(u16, u16)> {
+        self.port_forwards
+            .lock()
+            .map(|forwards| forwards.clone())
+            .unwrap_or_default()
+    }
+
+    /// master を張り直した後、前の転送を同じ番号で張り直す（sleep 復帰の再接続でも localhost が生きる）。
+    /// 張れなかった物は一覧から外す（手元の番号が他に取られた等）。
+    fn reinstall_port_forwards(&self) {
+        let Ok(mut forwards) = self.port_forwards.lock() else {
+            return;
+        };
+        forwards.retain(|(remote, local)| {
+            match self.port_forward_request("forward", *local, *remote) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("Remote SSH: ポートの転送を張り直せない: {error:#}");
+                    false
+                }
+            }
+        });
     }
 
     /// remote の `ne` が GUI へ戻るための reverse forward を、生きている master へ後付けする。
@@ -2784,6 +4143,16 @@ fn find_local_remote_server() -> Option<PathBuf> {
 ///
 /// GUI から起こす ssh には TTY が無いので、パスワード / passphrase / host key 確認は
 /// `SSH_ASKPASS` 経由で GUI に訊く（[`install_askpass`]）。
+/// 手元で待てるポート（`preferred` が空いていればそれ・塞がっていれば OS が選んだ空き番号）。
+fn free_local_port(preferred: u16) -> Result<u16> {
+    if std::net::TcpListener::bind(("127.0.0.1", preferred)).is_ok() {
+        return Ok(preferred);
+    }
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).context("手元に空いているポートが無い")?;
+    Ok(listener.local_addr()?.port())
+}
+
 fn ssh_command() -> Command {
     let mut command = Command::new("ssh");
     if let Some(config) = std::env::var_os("NECODER_SSH_CONFIG") {
@@ -3980,6 +5349,27 @@ impl Host for RemoteHost {
         self.client.reconnect_in_background();
     }
 
+    fn forward_port(&self, remote_port: u16) -> Result<u16> {
+        match &self.transport {
+            Some(transport) => transport.forward_port(remote_port),
+            None => bail!("SSH で繋いでいないのでポートを転送できない"),
+        }
+    }
+
+    fn cancel_forward(&self, remote_port: u16) -> Result<()> {
+        match &self.transport {
+            Some(transport) => transport.cancel_forward(remote_port),
+            None => bail!("{remote_port} は転送していない"),
+        }
+    }
+
+    fn forwarded_ports(&self) -> Vec<(u16, u16)> {
+        self.transport
+            .as_ref()
+            .map(|transport| transport.forwarded_ports())
+            .unwrap_or_default()
+    }
+
     fn project_uri(&self, path: &Path) -> Option<String> {
         self.ssh_project
             .as_ref()
@@ -4140,6 +5530,21 @@ impl Host for RemoteHost {
         self.run_command_with(spec, true)
     }
 
+    /// daemon の 1 往復ではなく `ssh` の子として走らせる＝途中で止められ、出力も流れる。
+    fn run_user_command(
+        &self,
+        spec: &CommandSpec,
+        cancel: &AtomicBool,
+        output_limit: usize,
+        live: &LiveOutput,
+    ) -> Result<UserCommandOutput> {
+        run_user_command_over_process(self, spec, cancel, output_limit, live)
+    }
+
+    fn can_stop_user_command(&self) -> bool {
+        true
+    }
+
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess> {
         let transport = self
             .transport
@@ -4175,7 +5580,8 @@ impl Host for RemoteHost {
             .standalone_command(false, &remote_command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // リモートの子の stderr と ssh 自身の知らせの末尾（[`StderrTail`]）。
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("remote process を起動できない: {}", spec.program))?;
         let stdin = child.stdin.take().context("remote process stdin が無い")?;
@@ -4183,10 +5589,15 @@ impl Host for RemoteHost {
             .stdout
             .take()
             .context("remote process stdout が無い")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("remote process stderr が無い")?;
         Ok(HostProcess {
             child,
             stdin: Some(Box::new(stdin)),
             stdout: Some(Box::new(stdout)),
+            stderr: StderrTail::capture(stderr),
             _transport: Some(transport),
         })
     }
@@ -4378,6 +5789,417 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
 
+    /// 長寿命の子の stderr の末尾: すぐ落ちた子の最後の行と終わり方が取れる（読む側が追いつくまで
+    /// 待てる）。stdout は ACP 用にそのまま残る。
+    #[cfg(unix)]
+    #[test]
+    fn a_process_keeps_the_tail_of_its_stderr() {
+        let spec = CommandSpec::new("sh", std::env::temp_dir()).args([
+            "-c",
+            "echo 'first line' >&2; printf '\\033[31mDEEPSEEK_API_KEY is not set\\033[0m\\n' >&2; exit 3",
+        ]);
+        let mut process = LocalHost.spawn_process(&spec).expect("起動できる");
+        let tail = process.stderr_tail();
+        assert!(
+            tail.wait_closed(Duration::from_secs(5)),
+            "子が閉じるまで待てる"
+        );
+        assert_eq!(
+            tail.lines(),
+            vec![
+                "first line".to_string(),
+                "DEEPSEEK_API_KEY is not set".to_string()
+            ],
+            "色のエスケープ列は落とす"
+        );
+        let mut status = None;
+        for _ in 0..100 {
+            status = process.try_exit_status();
+            if status.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(status.and_then(|status| status.code()), Some(3));
+    }
+
+    /// 末尾は上限つき: 行数は最後の [`StderrTail::MAX_LINES`] 行・1 行は [`StderrTail::MAX_LINE_BYTES`]
+    /// まで（改行の無い長い出力でもメモリを食わない）。制御文字は落とし、タブは空白にする。
+    #[test]
+    fn the_stderr_tail_is_bounded() {
+        let mut text = String::new();
+        for number in 0..(StderrTail::MAX_LINES + 10) {
+            text.push_str(&format!("line {number}\n"));
+        }
+        text.push_str(&"x".repeat(StderrTail::MAX_LINE_BYTES * 3));
+        let tail = StderrTail::capture(std::io::Cursor::new(text.into_bytes()));
+        assert!(tail.wait_closed(Duration::from_secs(5)));
+        let lines = tail.lines();
+        assert_eq!(lines.len(), StderrTail::MAX_LINES);
+        assert_eq!(lines[0], "line 11", "古い行から捨てる");
+        let last = lines.last().expect("最後の行");
+        assert_eq!(last.chars().count(), StderrTail::MAX_LINE_BYTES + 1);
+        assert!(last.ends_with('…'), "切った印");
+        assert_eq!(stderr_line(b"a\tb\x07c\r", false), "a bc");
+        assert_eq!(
+            stderr_line(b"\x1b]0;title\x07done", false),
+            "done",
+            "題名の OSC も落とす"
+        );
+    }
+
+    /// 取り消せる command（local）: 取り消さなければ出力と終わり方を返す。待っている間に取り消すと
+    /// 子を止めてすぐ戻る（最後まで走らせない）。始める前に取り消されていれば起動もしない。
+    #[cfg(unix)]
+    #[test]
+    fn cancellable_command_stops_the_child_when_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let short = CommandSpec::new("sh", std::env::temp_dir())
+            .args(["-c", "printf abc; echo oops >&2; exit 3"]);
+        let output = LocalHost
+            .run_command_cancellable(&short, &cancel)
+            .expect("起動できる")
+            .expect("取り消していない");
+        assert_eq!(output.stdout, b"abc");
+        assert_eq!(output.stderr, b"oops\n");
+        assert_eq!(output.status_code, Some(3));
+
+        // 30 秒眠る子を 100ms 後に取り消す（`exec` = 止める相手が sleep そのもの）。
+        let flag = cancel.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let sleeper = CommandSpec::new("sh", std::env::temp_dir()).args(["-c", "exec sleep 30"]);
+        let output = LocalHost
+            .run_command_cancellable(&sleeper, &cancel)
+            .expect("起動できる");
+        assert!(output.is_none(), "取り消した結果は返さない");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "子を止めてすぐ戻る: {:?}",
+            started.elapsed()
+        );
+        canceller.join().expect("取り消し役のスレッド");
+
+        // 取り消し済みなら起動しない（印のファイルが作られない）。
+        let marker =
+            std::env::temp_dir().join(format!("necoder_cancelled_command_{}", std::process::id()));
+        let touch = CommandSpec::new("touch", std::env::temp_dir())
+            .args([marker.to_string_lossy().to_string()]);
+        let output = LocalHost
+            .run_command_cancellable(&touch, &cancel)
+            .expect("起動しないで戻る");
+        assert!(output.is_none());
+        assert!(!marker.exists(), "取り消した後の command は走らせない");
+    }
+
+    #[test]
+    fn pid_marker_line_is_found_or_left_as_output() {
+        let marked = format!("{USER_COMMAND_PID_MARKER}4242\nhello");
+        assert_eq!(
+            split_pid_marker(marked.as_bytes()),
+            MarkerScan::Found(4242, b"hello".to_vec())
+        );
+        assert_eq!(
+            split_pid_marker(&USER_COMMAND_PID_MARKER.as_bytes()[..5]),
+            MarkerScan::Incomplete
+        );
+        assert_eq!(split_pid_marker(b"plain output\n"), MarkerScan::NotMarker);
+    }
+
+    /// SSH 先の実装（`spawn_process` の子として走らせる）を、手元の Host で通す。
+    #[cfg(unix)]
+    #[test]
+    fn user_command_over_process_streams_merges_stderr_and_reports_exit() {
+        let cancel = AtomicBool::new(false);
+        let live = LiveOutput::default();
+        let spec = CommandSpec::new("sh", std::env::temp_dir())
+            .args(["-c", "printf abc; echo oops >&2; exit 3"]);
+        let output = run_user_command_over_process(&LocalHost, &spec, &cancel, 1_000, &live)
+            .expect("起動できる");
+        assert_eq!(
+            output.stdout.head, b"abcoops\n",
+            "目印は外れ、stderr は stdout へ寄る"
+        );
+        assert!(output.stderr.head.is_empty());
+        assert_eq!(output.status_code, Some(3));
+        assert!(!output.cancelled);
+        assert_eq!(live.tail(), b"abcoops\n");
+    }
+
+    /// 止めると、シェルが起こした子まで止まる（`npm run dev` のような長生きプロセスを残さない）。
+    /// 走っている間の出力は `live` に届いている。
+    #[cfg(unix)]
+    #[test]
+    fn user_command_over_process_stops_the_whole_tree() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let live = LiveOutput::default();
+        let pid_file =
+            std::env::temp_dir().join(format!("necoder-user-command-child-{}", std::process::id()));
+        let script = format!(
+            "echo started; sleep 37 & echo $! > '{}'; wait",
+            pid_file.display()
+        );
+        let spec = CommandSpec::new("sh", std::env::temp_dir()).args(["-c", script.as_str()]);
+        let stopper = {
+            let cancel = cancel.clone();
+            let live = live.clone();
+            thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while live.tail() != b"started\n" && std::time::Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancel.store(true, Ordering::Release);
+            })
+        };
+        let output = run_user_command_over_process(&LocalHost, &spec, &cancel, 1_000, &live)
+            .expect("起動できる");
+        stopper.join().expect("止める側のスレッド");
+        assert!(output.cancelled);
+        assert_eq!(output.stdout.head, b"started\n");
+        let child = std::fs::read_to_string(&pid_file).expect("子の PID が書かれている");
+        std::fs::remove_file(&pid_file).expect("後始末");
+        let alive = Command::new("kill")
+            .args(["-0", child.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill -0 を実行できる")
+            .success();
+        assert!(!alive, "子プロセス {} が生き残っている", child.trim());
+    }
+
+    #[test]
+    fn live_output_keeps_only_the_tail() {
+        let live = LiveOutput::default();
+        live.push(&vec![b'a'; LIVE_OUTPUT_BYTES]);
+        live.push(b"end");
+        assert_eq!(live.received(), LIVE_OUTPUT_BYTES as u64 + 3);
+        let tail = live.tail();
+        assert_eq!(tail.len(), LIVE_OUTPUT_BYTES);
+        assert!(tail.ends_with(b"end"));
+    }
+
+    /// 人が打ったコマンド（エージェントパネルの `!`・#37）: 出力と終了コードをそのまま返す。
+    /// 上限を超えた出力は頭と尻を残して間を捨てる（子は止めない＝最後まで読み切る）。
+    #[cfg(unix)]
+    #[test]
+    fn user_command_returns_output_and_keeps_head_and_tail() {
+        let cancel = AtomicBool::new(false);
+        let short = CommandSpec::new("sh", std::env::temp_dir())
+            .args(["-c", "printf abc; echo oops >&2; exit 3"]);
+        let output = LocalHost
+            .run_user_command(&short, &cancel, 1_000, &LiveOutput::default())
+            .expect("起動できる");
+        assert_eq!(output.stdout.head, b"abc");
+        assert_eq!(output.stdout.omitted, 0);
+        assert_eq!(output.stderr.head, b"oops\n");
+        assert_eq!(output.status_code, Some(3));
+        assert!(!output.cancelled);
+        assert!(LocalHost.can_stop_user_command());
+
+        let long = CommandSpec::new("sh", std::env::temp_dir()).args(["-c", "seq 1 100000"]);
+        let output = LocalHost
+            .run_user_command(&long, &cancel, 1_000, &LiveOutput::default())
+            .expect("起動できる");
+        assert_eq!(output.status_code, Some(0));
+        assert_eq!(output.stdout.head.len(), 500);
+        assert_eq!(output.stdout.tail.len(), 500);
+        assert!(output.stdout.head.starts_with(b"1\n2\n3\n"));
+        assert!(output.stdout.tail.ends_with(b"99999\n100000\n"));
+        let total: u64 = (1..=100_000u64)
+            .map(|n| n.to_string().len() as u64 + 1)
+            .sum();
+        assert_eq!(output.stdout.omitted, total - 1_000, "捨てた量を数える");
+
+        // remote（既定の実装）も同じ上限で丸める。
+        let captured = CapturedOutput::from_bytes(b"0123456789", 4);
+        assert_eq!(
+            (captured.head, captured.tail, captured.omitted),
+            (b"01".to_vec(), b"89".to_vec(), 6)
+        );
+        let captured = CapturedOutput::from_bytes(b"0123", 4);
+        assert_eq!(
+            (captured.head, captured.tail, captured.omitted),
+            (b"0123".to_vec(), Vec::new(), 0)
+        );
+    }
+
+    /// 止めるとプロセスグループごと止まる: `&` で起こした孫（`sleep`）も残らない。止めるまでの
+    /// 出力は返す。始める前に取り消されていれば走らせない。
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_user_command_takes_down_its_process_group() {
+        let scratch =
+            std::env::temp_dir().join(format!("necoder_user_command_{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("一時ディレクトリを作れる");
+        let pid_file = scratch.join("sleeper.pid");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let watched = pid_file.clone();
+        let canceller = thread::spawn(move || {
+            // 孫が pid を書き出してから止める（書く前に止めると確かめる相手が居ない）。
+            for _ in 0..500 {
+                if std::fs::read_to_string(&watched).is_ok_and(|pid| pid.ends_with('\n')) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            flag.store(true, Ordering::Release);
+        });
+        let spec = CommandSpec::new("sh", &scratch).args([
+            "-c",
+            "echo started; sleep 30 & echo $! > sleeper.pid; wait; echo never",
+        ]);
+        let started = std::time::Instant::now();
+        let output = LocalHost
+            .run_user_command(&spec, &cancel, 1_000, &LiveOutput::default())
+            .expect("起動できる");
+        canceller.join().expect("取り消し役のスレッド");
+        assert!(output.cancelled);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "止めたらすぐ戻る: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(output.stdout.head, b"started\n", "止めるまでの出力は返す");
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .expect("孫の pid")
+            .trim()
+            .parse()
+            .expect("pid は数");
+        // 孫はグループへのシグナルで止まる（親に回収されるまで一瞬ゾンビで残るので少し待つ）。
+        let alive = |pid: libc::pid_t| {
+            // SAFETY: シグナル 0 は送らずに存在だけを確かめる。
+            unsafe { libc::kill(pid, 0) == 0 }
+        };
+        let mut gone = false;
+        for _ in 0..200 {
+            if !alive(pid) {
+                gone = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !gone {
+            // 後始末（失敗の時も孫を残さない）。
+            // SAFETY: 自分が起こした孫の pid。
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(gone, "孫の sleep（pid {pid}）がグループごと止まる");
+
+        // SIGTERM を無視するコマンドも、猶予の後の SIGKILL で止まる（無視は孫の sleep にも継がれる）。
+        let stubborn = CommandSpec::new("sh", &scratch)
+            .args(["-c", "trap '' TERM; echo started; sleep 30; echo never"]);
+        let cancel_stubborn = Arc::new(AtomicBool::new(false));
+        let flag = cancel_stubborn.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            flag.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let output = LocalHost
+            .run_user_command(&stubborn, &cancel_stubborn, 1_000, &LiveOutput::default())
+            .expect("起動できる");
+        canceller.join().expect("取り消し役のスレッド");
+        assert!(output.cancelled);
+        assert!(
+            started.elapsed() >= USER_COMMAND_STOP_GRACE
+                && started.elapsed() < USER_COMMAND_STOP_GRACE + Duration::from_secs(5),
+            "SIGTERM を無視されたら猶予の後に SIGKILL: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(output.stdout.head, b"started\n");
+
+        // 取り消し済みなら起動しない（印のファイルが作られない）。
+        let marker = scratch.join("never-started");
+        let touch =
+            CommandSpec::new("touch", &scratch).args([marker.to_string_lossy().to_string()]);
+        let output = LocalHost
+            .run_user_command(&touch, &cancel, 1_000, &LiveOutput::default())
+            .expect("起動しないで戻る");
+        assert!(output.cancelled && output.status_code.is_none());
+        assert!(!marker.exists(), "取り消した後の command は走らせない");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// 背景の executor のスレッド（macOS の GCD）はシグナルをブロックしていて、Rust の `Command` は
+    /// そのマスクを子へ継ぐ。それでも子は既定の状態で走る＝SIGTERM で猶予（SIGKILL）を待たずに止まる。
+    /// 実害: 継いだままだと SIGTERM が届かず、止めるたびに 2 秒待ち、終了時の SIGTERM では残っていた。
+    #[cfg(unix)]
+    #[test]
+    fn a_user_command_does_not_inherit_the_callers_blocked_signals() {
+        let runner = thread::spawn(|| {
+            // GCD のワーカーと同じく、呼ぶスレッドで SIGTERM などをブロックする。
+            // SAFETY: このスレッドのシグナルマスクを変えるだけ。`blocked` は sigemptyset が初期化する。
+            unsafe {
+                let mut blocked = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+                libc::sigemptyset(blocked.as_mut_ptr());
+                for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+                    libc::sigaddset(blocked.as_mut_ptr(), signal);
+                }
+                libc::pthread_sigmask(libc::SIG_BLOCK, blocked.as_ptr(), std::ptr::null_mut());
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = cancel.clone();
+            let canceller = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(200));
+                flag.store(true, Ordering::Release);
+            });
+            let spec = CommandSpec::new("sh", std::env::temp_dir())
+                .args(["-c", "echo started; sleep 30; echo never"]);
+            let started = std::time::Instant::now();
+            let output = LocalHost.run_user_command(&spec, &cancel, 1_000, &LiveOutput::default());
+            let elapsed = started.elapsed();
+            canceller.join().expect("取り消し役のスレッド");
+            (output, elapsed)
+        });
+        let (output, elapsed) = runner.join().expect("呼ぶスレッド");
+        let output = output.expect("起動できる");
+        assert!(output.cancelled);
+        assert_eq!(output.stdout.head, b"started\n");
+        assert!(
+            elapsed < Duration::from_millis(1_500),
+            "SIGTERM で止まる（SIGKILL の猶予を待たない）: {elapsed:?}"
+        );
+    }
+
+    /// `&` で背景に回した孫がパイプを握っていても、子が終われば待ちすぎずに返す（孫は止めない＝
+    /// 端末で `&` を付けた時と同じ）。
+    #[cfg(unix)]
+    #[test]
+    fn a_user_command_returns_even_if_a_background_job_holds_the_pipe() {
+        let scratch =
+            std::env::temp_dir().join(format!("necoder_user_command_bg_{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("一時ディレクトリを作れる");
+        let cancel = AtomicBool::new(false);
+        let spec = CommandSpec::new("sh", &scratch)
+            .args(["-c", "sleep 30 & echo $! > sleeper.pid; echo done"]);
+        let started = std::time::Instant::now();
+        let output = LocalHost
+            .run_user_command(&spec, &cancel, 1_000, &LiveOutput::default())
+            .expect("起動できる");
+        let pid: Option<libc::pid_t> = std::fs::read_to_string(scratch.join("sleeper.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok());
+        if let Some(pid) = pid {
+            // 後始末: 背景に回った孫は自分で止める。
+            // SAFETY: 自分が起こした孫の pid。
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "孫を待たずに返す: {:?}",
+            started.elapsed()
+        );
+        assert!(!output.cancelled);
+        assert_eq!(output.status_code, Some(0));
+        assert_eq!(output.stdout.head, b"done\n");
+        assert!(pid.is_some(), "孫の pid が書かれている");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     #[test]
     fn host_watch_distinguishes_timeout_from_disconnection() {
         let (sender, receiver) = mpsc::channel();
@@ -4531,6 +6353,112 @@ mod tests {
         let _removed = std::fs::remove_dir_all(root);
     }
 
+    /// O37（G01）: 接続先の登録は config の末尾に足すだけ。同じ名前・書けない値は断り、元の行は触らない。
+    #[test]
+    fn registering_a_host_appends_a_block() {
+        let dir = std::env::temp_dir().join(format!("necoder-ssh-register-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(".ssh/config");
+        let host = NewSshHost {
+            alias: "devbox".into(),
+            hostname: "192.168.1.20".into(),
+            user: Some("me".into()),
+            port: Some(2222),
+            identity_file: Some("~/.ssh/My Keys/id_ed25519".into()),
+            proxy_jump: Some("admin@bastion.example.com:2200,inner".into()),
+        };
+        append_ssh_config_host(&path, &host).expect("無ければ作って書く");
+        let written = std::fs::read_to_string(&path).expect("読める");
+        assert!(written.contains("Host devbox\n  HostName 192.168.1.20\n  User me\n  Port 2222\n  ProxyJump admin@bastion.example.com:2200,inner\n"));
+        assert!(
+            written.contains("IdentityFile \"~/.ssh/My Keys/id_ed25519\""),
+            "{written}"
+        );
+        let hosts = parse_ssh_config(&written);
+        assert_eq!(hosts[0].alias, "devbox");
+        assert_eq!(hosts[0].user.as_deref(), Some("me"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "config は本人だけ");
+        }
+
+        assert!(
+            append_ssh_config_host(&path, &host).is_err(),
+            "同じ名前は断る"
+        );
+        std::fs::write(&path, "Host old\n  HostName old.example.com").unwrap();
+        let other = NewSshHost {
+            alias: "other".into(),
+            hostname: "other.example.com".into(),
+            ..NewSshHost::default()
+        };
+        append_ssh_config_host(&path, &other).expect("足せる");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.starts_with("Host old\n  HostName old.example.com\n\n# necoder"),
+            "元の行は触らず、改行を補って足す: {written}"
+        );
+        for bad in [
+            NewSshHost {
+                alias: "two words".into(),
+                hostname: "h".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "web*".into(),
+                hostname: "h".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "-oProxyCommand=x".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "h".into(),
+                port: Some(0),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "h".into(),
+                proxy_jump: Some("gw -oProxyCommand=x".into()),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "h".into(),
+                proxy_jump: Some("bastion,-oProxyCommand=x".into()),
+                ..NewSshHost::default()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        // 経由先は全部を確かめる（2 つ目以降の `-` や `;` も断る）。
+        for bad in [
+            "bastion,-oProxyCommand=x",
+            "bastion;touch x",
+            "bastion,",
+            "admin@-x",
+            "ssh://-oProxyCommand=x",
+            "gw$(id)",
+        ] {
+            assert!(!proxy_jump_value(bad), "{bad}");
+        }
+        for good in [
+            "admin@bastion.example.com:2200,inner",
+            "ssh://me@[2001:db8::1]:2222",
+            "jump_host-1",
+            "none",
+        ] {
+            assert!(proxy_jump_value(good), "{good}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn parses_ssh_config_hosts() {
         let text = "\
@@ -4678,6 +6606,100 @@ Host gpu
         );
         assert!(SshProject::parse("ssh://alice:secret@example.com/code").is_err());
         assert!(SshProject::parse("ssh://example.com/code?proxy=bad").is_err());
+    }
+
+    #[test]
+    fn openssh_failures_are_told_apart() {
+        let changed = "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+            @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
+            Host key verification failed.";
+        assert_eq!(
+            SshFailure::classify(changed),
+            Some(SshFailure::HostKeyChanged)
+        );
+        for (log, expected) in [
+            ("Host key verification failed.", SshFailure::HostKeyUnknown),
+            (
+                "No ED25519 host key is known for devbox and you have requested strict checking.",
+                SshFailure::HostKeyUnknown,
+            ),
+            (
+                "user@devbox: Permission denied (publickey,password).",
+                SshFailure::Authentication,
+            ),
+            (
+                "Received disconnect from 10.0.0.2 port 22:2: Too many authentication failures\n\
+                 Permission denied (publickey).",
+                SshFailure::TooManyKeys,
+            ),
+            (
+                "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\n\
+                 Permission denied (publickey).",
+                SshFailure::BadPermissions,
+            ),
+            (
+                "Bad owner or permissions on /Users/me/.ssh/config",
+                SshFailure::BadPermissions,
+            ),
+            (
+                "ssh: Could not resolve hostname devbx: nodename nor servname provided, or not known",
+                SshFailure::UnknownHost,
+            ),
+            (
+                "ssh: connect to host devbox port 2222: Connection refused",
+                SshFailure::Refused,
+            ),
+            (
+                "ssh: connect to host 10.0.0.9 port 22: Operation timed out",
+                SshFailure::TimedOut,
+            ),
+            (
+                "Unable to negotiate with 10.0.0.2 port 22: no matching host key type found. Their offer: ssh-rsa",
+                SshFailure::Negotiation,
+            ),
+        ] {
+            assert_eq!(SshFailure::classify(log), Some(expected), "{log}");
+        }
+        assert_eq!(
+            SshFailure::classify("kex_exchange_identification: read: Connection reset"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_master_carries_what_openssh_wrote() {
+        assert!(master_result(
+            true,
+            "exit status: 0",
+            "Warning: Permanently added 'devbox'.\n"
+        )
+        .is_ok());
+        let error = master_result(
+            false,
+            "exit status: 255",
+            "\r\nuser@devbox: Permission denied (publickey).\r\n\n",
+        )
+        .expect_err("失敗は理由つき")
+        .context("SSH ControlMaster の確立に失敗");
+        let connect = error
+            .downcast_ref::<SshConnectError>()
+            .expect("文脈を足しても取り出せる");
+        assert_eq!(connect.failure, Some(SshFailure::Authentication));
+        assert_eq!(
+            connect.reason,
+            "user@devbox: Permission denied (publickey)."
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "SSH ControlMaster の確立に失敗: OpenSSH ControlMaster の接続に失敗: exit status: 255: \
+             user@devbox: Permission denied (publickey)."
+        );
+        let silent = master_result(false, "exit status: 255", "").expect_err("理由が無くても失敗");
+        assert_eq!(
+            silent.to_string(),
+            "OpenSSH ControlMaster の接続に失敗: exit status: 255",
+            "書かれていなければ今までと同じ文"
+        );
     }
 
     #[test]

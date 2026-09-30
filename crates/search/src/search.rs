@@ -254,6 +254,39 @@ mod tests {
         assert_eq!(&SAMPLE[ranges[0].clone()], "() {\n    //");
     }
 
+    /// フォルダ内を検索（D18）: root にフォルダを渡すと、その中のファイルだけが出る。
+    #[test]
+    fn project_search_can_be_scoped_to_a_folder() {
+        let root =
+            std::env::temp_dir().join(format!("necoder_search_scope_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        std::fs::create_dir_all(root.join("sub/deeper")).expect("フォルダを作る");
+        std::fs::write(root.join("top.txt"), "TODO top\n").expect("top.txt");
+        std::fs::write(root.join("sub/a.txt"), "TODO a\n").expect("sub/a.txt");
+        std::fs::write(root.join("sub/deeper/b.txt"), "TODO b\n").expect("sub/deeper/b.txt");
+
+        let query = SearchQuery::new("TODO", false, true).expect("クエリ");
+        let host = host::LocalHost::shared();
+        let whole = query
+            .try_search_project_on(host.as_ref(), &root, 100, 100)
+            .expect("全体を検索");
+        assert_eq!(whole.len(), 3);
+        let scoped = query
+            .try_search_project_on(host.as_ref(), &root.join("sub"), 100, 100)
+            .expect("フォルダ内を検索");
+        let mut paths: Vec<PathBuf> = scoped.into_iter().map(|file| file.path).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![root.join("sub/a.txt"), root.join("sub/deeper/b.txt")],
+            "フォルダの外（top.txt）は出ない"
+        );
+
+        std::fs::remove_dir_all(&root).expect("後片付け");
+    }
+
     #[test]
     fn search_files_across_temp_files() {
         let dir = std::env::temp_dir().join(format!("necoder_search_{}", std::process::id()));

@@ -2,7 +2,8 @@
 //!
 //! 管制タブ（ヘッダ / Captain バー / 稼働カード / 統合パイプライン）は F3（2026-09-16）で削除し、
 //! ここには **キューの導出**（`control_attention_queue`・台帳と memory から毎 render 再導出）、
-//! **カード描画**（`render_attention_card`・許可/拒否・Radar・Integrate・確認の**インライン操作**）、
+//! **カード描画**（`render_attention_card`・許可/拒否・Radar・Integrate・確認の**インライン操作**・
+//! 承認待ちには Captain の推薦 ✳ の 1 行を添えるだけ＝`captain_recommendations.rs`）、
 //! ⏎ / ⌘⇧U の先頭没入、Captain バーの ✳ 総括（Tier2・5s デバウンス）だけが残る。
 //! 全画面の管制はリモート管制（P9・`mock/fleet-dashboard.html`）の正として別に残す。
 //!
@@ -12,19 +13,22 @@
 use crate::workspace::*;
 
 /// 要対応キューの 1 項目。優先順は Blocked（経過時間降順）→ Failed → Review 系 → Done 未確認。
-struct AttentionItem {
+pub(super) struct AttentionItem {
     session_index: usize,
     panel: Entity<AgentPanel>,
     thread_index: usize,
     color: Hsla,
     title: SharedString,
     branch: Option<SharedString>,
-    kind: AttentionKind,
+    pub(super) kind: AttentionKind,
 }
 
-enum AttentionKind {
+pub(super) enum AttentionKind {
     /// 承認待ち（インライン許可/拒否。選択肢ラベルは ACP がエージェントから広告されたものをそのまま使う）。
     Permission(agent_panel::PermissionCard),
+    /// 質問待ち（O12）。選択肢はスレッドのカードで選ぶ（複数フィールドにまたがり得る）ので、
+    /// ここは質問文を見せて没入させるだけ。
+    Question(agent_panel::QuestionCard),
     /// Task が failed（没入して修正指示 / 破棄）。
     Failed {
         digest: Option<SharedString>,
@@ -41,6 +45,8 @@ enum AttentionKind {
         digest: Option<SharedString>,
         tier2: Option<SharedString>,
     },
+    /// Captain の分解案（承認した行だけ worktree とブランチを切る・FLEET-V2 §5.5）。
+    Proposal { proposal_id: String, rows: usize },
 }
 
 /// ✳ 総括に渡す件数（キュー収集と同じ 1 パスで数える）。
@@ -181,6 +187,11 @@ impl Workspace {
                     "elapsed" => elapsed_label(card.waited_secs),
                     "title" => &card.title,
                 ),
+                AttentionKind::Question(card) => i18n::t!(
+                    "control.facts_question",
+                    "elapsed" => elapsed_label(card.waited_secs),
+                    "message" => &card.message,
+                ),
                 AttentionKind::Failed { digest, .. } => {
                     i18n::t!("control.facts_failed", "digest" => digest.clone().unwrap_or_default())
                 }
@@ -189,6 +200,9 @@ impl Workspace {
                 }
                 AttentionKind::DoneUnread { digest, .. } => {
                     i18n::t!("control.facts_done_unread", "digest" => digest.clone().unwrap_or_default())
+                }
+                AttentionKind::Proposal { rows, .. } => {
+                    i18n::t!("captain.facts_proposal", "n" => rows)
                 }
             };
             let branch = item
@@ -213,7 +227,7 @@ impl Workspace {
     }
 
     /// 要対応キューを組む（描画のたびに memory から再導出・状態は持たない＝台帳が記憶の原則）。
-    fn control_attention_queue(&self, cx: &App) -> Vec<AttentionItem> {
+    pub(super) fn control_attention_queue(&self, cx: &App) -> Vec<AttentionItem> {
         let mut blocked: Vec<(u64, AttentionItem)> = Vec::new();
         let mut failed = Vec::new();
         let mut review = Vec::new();
@@ -247,9 +261,17 @@ impl Workspace {
                 let thread_index = *thread_index;
                 match status.activity {
                     agent_panel::ThreadActivity::Blocked => {
-                        if let Some(card) = panel.read(cx).permission_card(thread_index) {
+                        // 承認待ちが先（両方来たらスレッドのカードも承認を先に出す）、無ければ質問待ち。
+                        let waiting = match panel.read(cx).permission_card(thread_index) {
+                            Some(card) => Some((card.waited_secs, AttentionKind::Permission(card))),
+                            None => panel
+                                .read(cx)
+                                .question_card(thread_index)
+                                .map(|card| (card.waited_secs, AttentionKind::Question(card))),
+                        };
+                        if let Some((waited_secs, kind)) = waiting {
                             blocked.push((
-                                card.waited_secs,
+                                waited_secs,
                                 AttentionItem {
                                     session_index: index,
                                     panel: panel.clone(),
@@ -257,7 +279,7 @@ impl Workspace {
                                     color: status.color,
                                     title: card_title.clone(),
                                     branch: branch.clone(),
-                                    kind: AttentionKind::Permission(card),
+                                    kind,
                                 },
                             ));
                         }
@@ -327,6 +349,7 @@ impl Workspace {
         // Blocked は待ち時間の長い順（mock: 経過時間順）。
         blocked.sort_by(|a, b| b.0.cmp(&a.0));
         let mut queue: Vec<AttentionItem> = blocked.into_iter().map(|(_, item)| item).collect();
+        queue.extend(self.proposal_attention_items(cx));
         queue.extend(failed);
         queue.extend(review);
         queue.extend(done);
@@ -335,25 +358,103 @@ impl Workspace {
 
     /// titlebar のモード切替に出す**要対応の件数**（`◐ N`・FLEET-V2 §3.0）。キュー全体を組まずに
     /// 数だけ数える（titlebar は毎フレーム描かれるので、カードの生成と clone を持ち込まない）。
-    /// 数える対象は管制の `◐` チップと同じ = 承認待ち（permission card 有り）+ Failed な Task。
+    /// 数える対象 = 承認待ち・質問待ち（Blocked）のスレッド + Failed な Task + Captain の分解案。Dock の
+    /// バッジ（O12）もこれを全窓で足す（数え方は `dock_badge::attention_count` の 1 か所）。
     pub(crate) fn attention_badge_count(&self, cx: &App) -> usize {
-        let mut count = 0;
+        let mut activities = Vec::new();
+        let mut failed_tasks = 0;
+        let mut proposals = 0;
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
             let Some(session) = self.project_sessions.sessions.get(index) else {
                 continue;
             };
-            for (panel, thread_index, status) in session.agent_statuses(cx) {
-                if status.activity == agent_panel::ThreadActivity::Blocked
-                    && panel.read(cx).permission_card(thread_index).is_some()
-                {
-                    count += 1;
-                }
+            for panel in &session.fleet_agents {
+                activities.extend(
+                    panel
+                        .read(cx)
+                        .beacons()
+                        .into_iter()
+                        .map(|(_, _, activity)| activity),
+                );
             }
             if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Failed {
-                count += 1;
+                failed_tasks += 1;
+            }
+            // 分解案はリポジトリに付く。統合先扱いの slot が複数あっても 1 度だけ数える（O21 と同じメイン）。
+            if self.integration_slot_for(slot.repository_key()) == Some(index) {
+                proposals += self.captain_proposals_for(slot.repository_key()).count();
             }
         }
-        count
+        super::dock_badge::attention_count(activities, failed_tasks, proposals)
+    }
+
+    /// Task が**質問だけ**で止まっているなら、その質問のスレッド（承認待ちが 1 つでもあれば None
+    /// ＝ Task カードの「次へ」は従来どおり「許可」）。「次へ」を「答える」にするのに使う（O12）。
+    pub(super) fn question_only_thread(
+        &self,
+        session_index: usize,
+        cx: &App,
+    ) -> Option<(Entity<AgentPanel>, usize)> {
+        let session = self.project_sessions.sessions.get(session_index)?;
+        let mut question = None;
+        for panel in &session.fleet_agents {
+            let reader = panel.read(cx);
+            for (thread, (_, _, activity)) in reader.beacons().into_iter().enumerate() {
+                if activity != agent_panel::ThreadActivity::Blocked {
+                    continue;
+                }
+                if reader.permission_card(thread).is_some() {
+                    return None;
+                }
+                if question.is_none() && reader.question_card(thread).is_some() {
+                    question = Some((panel.clone(), thread));
+                }
+            }
+        }
+        question
+    }
+
+    /// 分解案のカード（開いている統合先のリポジトリの分）。Captain の会話へ没入できるよう、
+    /// カードは統合先の panel と Captain の席のスレッドに結ぶ。
+    fn proposal_attention_items(&self, cx: &App) -> Vec<AttentionItem> {
+        let mut items = Vec::new();
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
+            // 統合先扱いの slot が複数あっても、カードはメインの統合先（Captain の住まい）に 1 枚だけ。
+            if self.integration_slot_for(slot.repository_key()) != Some(index) {
+                continue;
+            }
+            let Some(panel) = self
+                .project_sessions
+                .sessions
+                .get(index)
+                .and_then(|session| session.fleet_agents.first())
+                .cloned()
+            else {
+                continue;
+            };
+            let thread_index = panel
+                .read(cx)
+                .seat_thread(captain::CAPTAIN_SEAT)
+                .unwrap_or_else(|| panel.read(cx).active_thread());
+            for proposal in self.captain_proposals_for(slot.repository_key()) {
+                items.push(AttentionItem {
+                    session_index: index,
+                    panel: panel.clone(),
+                    thread_index,
+                    color: slot.color,
+                    title: SharedString::from(i18n::t!(
+                        "captain.proposal_title",
+                        "n" => proposal.tasks.len()
+                    )),
+                    branch: None,
+                    kind: AttentionKind::Proposal {
+                        proposal_id: proposal.record.id.clone(),
+                        rows: proposal.tasks.len(),
+                    },
+                });
+            }
+        }
+        items
     }
 
     /// ヘッダの数字（キューと同じソースから 1 パス・render 内 memory 読みのみ）。
@@ -365,7 +466,10 @@ impl Workspace {
         };
         for item in queue {
             match &item.kind {
-                AttentionKind::Permission(_) | AttentionKind::Failed { .. } => stats.attention += 1,
+                AttentionKind::Permission(_)
+                | AttentionKind::Question(_)
+                | AttentionKind::Failed { .. }
+                | AttentionKind::Proposal { .. } => stats.attention += 1,
                 AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                     stats.done_unread += 1
                 }
@@ -403,9 +507,18 @@ impl Workspace {
         let session_index = item.session_index;
         let thread_index = item.thread_index;
         let focus_panel = item.panel.clone();
-        let urgent = matches!(item.kind, AttentionKind::Permission(_));
+        let urgent = matches!(
+            item.kind,
+            AttentionKind::Permission(_)
+                | AttentionKind::Question(_)
+                | AttentionKind::Proposal { .. }
+        );
         let activity = match &item.kind {
-            AttentionKind::Permission(_) => agent_panel::ThreadActivity::Blocked,
+            AttentionKind::Permission(_)
+            | AttentionKind::Question(_)
+            | AttentionKind::Proposal { .. } => {
+                agent_panel::ThreadActivity::Blocked
+            }
             AttentionKind::Failed { .. } => agent_panel::ThreadActivity::Done { interrupted: true },
             AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                 agent_panel::ThreadActivity::Done { interrupted: false }
@@ -529,6 +642,8 @@ impl Workspace {
                                     None,
                                     cx,
                                 );
+                                // 解決した要求への Captain の推薦を片付ける（応答そのものは変えない・§5.5）。
+                                this.prune_captain_recommendations(cx);
                             }),
                         ),
                     );
@@ -539,6 +654,16 @@ impl Workspace {
                     elapsed_label(permission.waited_secs),
                     i18n::t!("control.files", "n" => permission.diff_files)
                 ));
+                // Captain の推薦（あれば・FLEET-V2 §3.2 / §5.5）: この要求の id で引く＝前の要求への推薦は出ない。
+                // 表示だけで、ボタンの働きは変えない。
+                let recommendation = self
+                    .captain_recommendation_for(
+                        &self.project_sessions.projects[session_index].task_space.id,
+                        &permission.id,
+                    )
+                    .map(|recommendation| {
+                        self.render_captain_recommendation(position, recommendation)
+                    });
                 card.child(
                     div()
                         .text_size(px(10.5))
@@ -554,8 +679,43 @@ impl Workspace {
                         .text_color(theme.err)
                         .child(meta),
                 )
+                .children(recommendation)
                 .child(buttons)
             }
+            AttentionKind::Question(question) => card
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(format!("「{}」", question.message))),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.5))
+                        .text_color(theme.err)
+                        .child(SharedString::from(format!(
+                            "{} {}",
+                            i18n::t!("control.waiting"),
+                            elapsed_label(question.waited_secs)
+                        ))),
+                )
+                .child(
+                    div().flex().gap(px(5.)).child(
+                        button(
+                            ("control-answer", position),
+                            SharedString::from(i18n::t!("control.answer")),
+                            true,
+                            &theme,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.immerse_from_control(session_index, thread_index, window, cx);
+                            }),
+                        ),
+                    ),
+                ),
             AttentionKind::Failed { digest, tier2 } => card
                 .when_some(digest.clone(), |element, digest| {
                     element.child(
@@ -571,26 +731,61 @@ impl Workspace {
                     div()
                         .flex()
                         .gap(px(5.))
-                        .child(
-                            button(
-                                ("control-fix", position),
-                                SharedString::from(i18n::t!("control.fix_instruct")),
-                                true,
-                                &theme,
+                        // 準備に失敗して依頼を控えている Task（O20）: やり直す / 飛ばして始める。
+                        .when(self.task_waits_for_setup(session_index), |row| {
+                            row.child(
+                                button(
+                                    ("control-retry-setup", position),
+                                    SharedString::from(i18n::t!("control.retry_setup")),
+                                    true,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.retry_task_setup(session_index, cx);
+                                    }),
+                                ),
                             )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.immerse_from_control(
-                                        session_index,
-                                        thread_index,
-                                        window,
-                                        cx,
-                                    );
-                                }),
-                            ),
-                        )
+                            .child(
+                                button(
+                                    ("control-skip-setup", position),
+                                    SharedString::from(i18n::t!("control.skip_setup")),
+                                    false,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.start_task_without_setup(session_index, cx);
+                                    }),
+                                ),
+                            )
+                        })
+                        .when(!self.task_waits_for_setup(session_index), |row| {
+                            row.child(
+                                button(
+                                    ("control-fix", position),
+                                    SharedString::from(i18n::t!("control.fix_instruct")),
+                                    true,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.immerse_from_control(
+                                            session_index,
+                                            thread_index,
+                                            window,
+                                            cx,
+                                        );
+                                    }),
+                                ),
+                            )
+                        })
                         .child(
                             button(
                                 ("control-discard", position),
@@ -624,6 +819,10 @@ impl Workspace {
                     .id
                     .clone();
                 let space_for_integrate = space.clone();
+                let space_for_resolve = space.clone();
+                // 統合の下見で競合した Task は、統合の前に「競合を直させる」（O19）。
+                let conflicted =
+                    phase == TaskPhase::MergeReady && self.task_conflicts(&space).is_some();
                 card.child(
                     div()
                         .flex()
@@ -658,6 +857,26 @@ impl Workspace {
                     div()
                         .flex()
                         .gap(px(5.))
+                        .when(conflicted, |element| {
+                            element.child(
+                                button(
+                                    ("control-resolve", position),
+                                    SharedString::from(i18n::t!("fleet.next_resolve")),
+                                    true,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.ask_task_to_resolve_conflicts(
+                                            space_for_resolve.clone(),
+                                            cx,
+                                        );
+                                    }),
+                                ),
+                            )
+                        })
                         .when(phase == TaskPhase::MergeReady, |element| {
                             element.child(
                                 button(
@@ -770,7 +989,75 @@ impl Workspace {
                         ),
                 )
             }
+            AttentionKind::Proposal { proposal_id, .. } => {
+                let proposal_id = proposal_id.clone();
+                card.child(self.render_proposal_body(position, &proposal_id, cx))
+            }
         };
         card.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 質問（Elicitation）で止まったスレッドは承認待ちと同じ網に載る（O12）: ◐N（= Dock バッジ）・
+    /// 要対応の先頭・statusbar の待ち表示・押せるトースト。以前は音だけでどれにも出なかった。
+    #[gpui::test]
+    fn a_question_is_treated_like_a_permission_wait(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_question_attention_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace.attention_badge_count(cx)),
+            0
+        );
+
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let panel = workspace.project_sessions.sessions[0].agent_panel.clone();
+            panel.update(cx, |panel, cx| panel.debug_ask_question(cx));
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.attention_badge_count(cx),
+                1,
+                "質問待ちも ◐N と Dock バッジに数える"
+            );
+            let queue = workspace.control_attention_queue(cx);
+            assert!(
+                matches!(queue.first().map(|item| &item.kind), Some(AttentionKind::Question(card)) if card.message.as_ref() == "バッファはどちらで実装しますか？"),
+                "要対応の先頭に質問のカードが出る"
+            );
+            assert!(
+                workspace.project_sessions.sessions[0].waiting_thread.is_some(),
+                "statusbar の待ち表示"
+            );
+            let waiting = i18n::t!("agent.waiting_question");
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|toast| toast.text.contains(&waiting) && toast.action.is_some()),
+                "押すとスレッドへ飛べるトースト"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

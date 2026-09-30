@@ -6,9 +6,15 @@
 //!
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
+pub mod codex_limits;
+pub mod custom;
+pub mod deploy;
+pub mod history;
+mod install;
 pub mod mcp;
 pub mod preset;
 pub mod registry;
+pub mod usage;
 
 use acp::schema::v1;
 use acp::schema::ProtocolVersion;
@@ -23,6 +29,11 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
+
+pub use custom::{
+    Agent, AgentCatalog, CustomAgent, CustomAgentSpec, CustomLaunch, DeployOutcome, LaunchError,
+    LaunchPlan,
+};
 
 /// 権限リクエストの選択肢の種類（UI のスタイル分け用。ACP `PermissionOptionKind` を簡約）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +82,7 @@ pub struct ConfigOption {
 }
 
 /// 権限リクエストに含まれるファイル編集の差分（accept/reject の diff レビュー用）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PermissionDiff {
     pub path: String,
     /// 変更前の内容（新規ファイルなら `None`）。
@@ -111,6 +122,9 @@ pub struct ToolCallInfo {
     pub output: Option<String>,
     /// 完了したか（Some(true)=成功 / Some(false)=失敗 / None=進行中・不明）。
     pub completed: Option<bool>,
+    /// サブエージェントの手順なら、それを走らせている親のツール呼び出しの相関 ID（O17）。
+    /// Claude は `_meta.claudeCode.parentToolUseId` に載せる（Task / Agent ツールの id）。
+    pub parent: Option<String>,
 }
 
 /// プラン 1 項目の状態（ACP `PlanEntryStatus` の写し）。
@@ -132,6 +146,84 @@ pub struct PlanItem {
     pub status: PlanStatus,
 }
 
+/// エージェントが広告する slash コマンド 1 件（ACP `AvailableCommand` の簡約・O2）。
+/// composer の `/` 補完が名前・説明・引数ヒントを並べる。呼び出しは `/{name} 引数` の平文 prompt。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommand {
+    /// コマンド名（先頭の `/` は含まない）。例: `compact` / Claude の MCP prompt は `mcp:server:cmd` /
+    /// Codex の skill は `$name`。
+    pub name: String,
+    pub description: String,
+    /// 引数の入力ヒント（`input: Unstructured { hint }`）。引数を取らないコマンドは `None`。
+    pub hint: Option<String>,
+}
+
+/// エージェントの「目標」（`/goal`）の状態。Claude / Codex が `SessionInfoUpdate._meta.goal` で送る
+/// 拡張の `status` を簡約したもの（知らない値は [`GoalStatus::Other`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Blocked,
+    Complete,
+    /// 利用上限・予算上限で止まった（Codex の `usageLimited` / `budgetLimited` → `limited`）。
+    Limited,
+    Other,
+}
+
+/// 目標への操作（O17）。Codex は initialize の `_meta.goal` で操作の入口（`controlMethod`）と使える
+/// 操作（`actions`）を広告する。目標を立てる（set）のは `/goal <目的>` の prompt で足りるので扱わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalAction {
+    Pause,
+    Resume,
+    Clear,
+}
+
+impl GoalAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            GoalAction::Pause => "pause",
+            GoalAction::Resume => "resume",
+            GoalAction::Clear => "clear",
+        }
+    }
+
+    fn parse(action: &str) -> Option<Self> {
+        match action {
+            "pause" => Some(GoalAction::Pause),
+            "resume" => Some(GoalAction::Resume),
+            "clear" => Some(GoalAction::Clear),
+            _ => None,
+        }
+    }
+}
+
+/// initialize の `_meta.goal` から (操作の入口, 使える操作)。入口は拡張メソッド（`_` で始まる）だけ
+/// 受ける（広告を根拠に標準のメソッドを呼ばない）。使える操作が無ければ None。
+fn goal_controls(meta: Option<&v1::Meta>) -> Option<(String, Vec<GoalAction>)> {
+    let goal = meta?.get("goal")?;
+    let method = goal
+        .get("controlMethod")?
+        .as_str()
+        .filter(|method| method.starts_with('_'))?
+        .to_string();
+    let actions: Vec<GoalAction> = goal
+        .get("actions")?
+        .as_array()?
+        .iter()
+        .filter_map(|action| action.as_str().and_then(GoalAction::parse))
+        .collect();
+    (!actions.is_empty()).then_some((method, actions))
+}
+
+/// エージェントが追っている目標（`/goal <objective>` で立つ・O2）。composer の上に 1 行で出す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentGoal {
+    pub objective: String,
+    pub status: GoalStatus,
+}
+
 /// Elicitation（選択肢付き質問）の 1 フィールド。ACP の `ElicitationSchema` の 1 プロパティ
 /// （単一選択 = enum/oneOf 付き string / 複数選択 = anyOf 付き array）を UI 非依存に簡約したもの。
 #[derive(Debug, Clone)]
@@ -144,6 +236,11 @@ pub struct ElicitationField {
     pub options: Vec<ElicitationChoice>,
     /// 複数選択か（true = ACP の array プロパティ。応答は `StringArray` で返す）。
     pub multi: bool,
+    /// この質問に付いた自由入力の Other 欄のプロパティ名（O17）。あれば UI は選択肢の下に
+    /// 入力欄を出し、書いた文字を**この名前**で返す（選択と両方返してよい。どう読むかは
+    /// エージェント側: Claude の AskUserQuestion は、単一選択なら「選ばずに書いた = 答え」
+    /// 「選んで書いた = 選択に添えるメモ」、複数選択なら選択に足す）。
+    pub custom_answer: Option<String>,
 }
 
 /// Elicitation の 1 選択肢（ACP `EnumOption` / `enum` 値の簡約）。
@@ -172,6 +269,15 @@ pub enum AgentEvent {
     ToolUpdated(ToolCallInfo),
     /// コンテキスト使用量の更新（`UsageUpdate`）。`used`/`size` はトークン数。
     Usage { used: u64, size: u64 },
+    /// 会話の累計コスト（`UsageUpdate.cost`・O11）。Claude はターンの結果ごとに**会話全体の累計**
+    /// （Claude Code の推定）を送る。ターンの分は UI が前回との差で数える（`session/load` で引き継いだ
+    /// 会話の最初の値は、トランスクリプトに残る過去の分を含む）。
+    SessionCost { amount: f64, currency: String },
+    /// レート制限の知らせ（O11）。Claude は `usage_update._meta["_claude/rateLimit"]` で送ってくる。
+    /// アカウント単位の値。1 回の知らせに全部の窓が載るとは限らないので、受け手は窓ごとに差し替える。
+    RateLimits(usage::RateLimits),
+    /// ターンに使ったトークン（`PromptResponse._meta.quota`・O11）。`TurnEnded` の直前に流す。
+    TurnUsage(usage::TurnTokens),
     /// エージェントが広告する権限モード一覧 + 現在モード（セッション開始時）。`(mode_id, 表示名)`。
     Modes {
         modes: Vec<(String, String)>,
@@ -199,14 +305,34 @@ pub enum AgentEvent {
         /// 「何が実行されるか」を必ず可視化する（tool poisoning 対策・ACP #1979 / GHSA-f2g4）。
         raw_input: Option<String>,
         options: Vec<PermissionChoice>,
+        /// 許可を求めている道具の呼び出しの id（先に届いた `ToolStarted` と同じ）。題名の無い要求
+        /// （codex-acp の MCP の承認）は、これで先の呼び出しの題名を引く。
+        tool_call_id: String,
+        /// MCP の道具の呼び出しへの承認か（[`is_mcp_tool_request`]）。codex-acp はこれを種別「実行」で
+        /// 送ってくるので、種別だけでは shell と見分けられない。
+        mcp_tool: bool,
         respond: mpsc::UnboundedSender<usize>,
     },
     /// エージェントの実行プラン全量（`SessionUpdate::Plan`）。UI は常設チェックリストへ置換反映する。
     Plan(Vec<PlanItem>),
+    /// エージェントが使える slash コマンドの一覧（`AvailableCommandsUpdate`）。届くたびに**全量置換**
+    /// （差分ではない）。`session/new` / `session/load` の直後＝**待機中**に届くのが普通なので、
+    /// [`run_session_on`] は待機中も update を読む。
+    Commands(Vec<SlashCommand>),
+    /// 会話名が変わった（`SessionInfoUpdate.title`）。`None` = エージェントが名前を消した（null）。
+    /// 名前を含まない `SessionInfoUpdate`（`_meta` だけの通知）では流さない。Claude はターン終了の
+    /// 数秒後（待機中）に送ってくる。
+    TitleChanged(Option<String>),
+    /// 目標（`/goal`）が変わった（`SessionInfoUpdate._meta.goal`）。`None` = 目標が消えた。
+    GoalChanged(Option<AgentGoal>),
+    /// このエージェントが受ける目標への操作（O17）。広告したエージェントだけ、セッションが開いた
+    /// 直後（SessionStarted の次）に 1 回。
+    GoalControls(Vec<GoalAction>),
     /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**選択式フィールドのみ対応**し、
     /// テキスト/数値/真偽を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
     /// `respond` に **(name, 選んだ値の並び) の群**を送ると Accept、`None` を送ると Decline。
-    /// 単一選択フィールドは要素 1 つ、複数選択は 0 個以上。drop で Cancel。
+    /// 単一選択フィールドは要素 1 つ、複数選択は 0 個以上。自由入力の答えは
+    /// `(field.custom_answer, [書いた文字])` として同じ群に入れる（O17）。drop で Cancel。
     ElicitationRequest {
         message: String,
         fields: Vec<ElicitationField>,
@@ -223,6 +349,13 @@ pub enum AgentEvent {
     /// 失敗ではないが黙って進めたくない知らせ（MCP サーバを渡せなかった等）。transcript に 1 行
     /// 出すだけで、ターン状態（running / auth_required）には触らない。
     Notice(String),
+    /// `session/load` が再生した履歴（O15）。[`SessionPreferences::replay_history`] の時だけ、load が
+    /// 成功したら [`AgentEvent::SessionStarted`] の直前に 1 回流す。`items` は古い順・最大
+    /// [`history::REPLAY_KEEP`] 件で、`omitted` はそれより前に捨てた項目の数。
+    HistoryReplayed {
+        items: Vec<history::ReplayItem>,
+        omitted: usize,
+    },
     /// セッションが開いた（`session/new` または `session/load` の直後・Modes/Configs より前）。
     /// `session_id` はエージェント側の会話の鍵。UI はスレッドに控えて、次にこのスレッドの
     /// エージェントを立ち上げ直すとき [`SessionPreferences::resume`] に渡す。
@@ -239,6 +372,179 @@ pub enum AgentEvent {
     /// （[`run_session_on`] が戻り、イベントチャネルも閉じる）。ターン中なら UI はそのターンを
     /// 畳み、以後の送信は新しいセッションを立ち上げる。待機中にも届く（EOF を待機中も見張るため）。
     SessionLost,
+    /// エージェントが起動してすぐ（セッションを開く前に）終わった。終わり方と stderr の末尾を画面に
+    /// 出すためのもので、**保存もログもしない**（[`AgentExited`]）。[`run_session_on`] はこれを流して
+    /// から同じ [`AgentExited`] のエラーで戻る（UI はそのエラーを `Failed` の文にする）。
+    ExitedAtStartup(AgentExited),
+}
+
+/// エージェントが起動してすぐ（`session/new` を終える前に）終わった。理由はエージェントが stderr に
+/// 書いた末尾。[`run_session_on`] はこの型のエラーで戻る。
+///
+/// **`Display` には stderr を入れない** — エラーの文はログや保存される transcript に載り得るので、秘密が
+/// 混ざり得る stderr は画面（[`Self::stderr`] を読む UI）にだけ出す。stderr の行は、エージェントへ渡した
+/// env のうち秘密らしい名前の値と、よく知られた鍵の形を伏せ字にしてある（[`mask_secrets`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExited {
+    /// 終了コード（シグナルで終わった等で無ければ `None`）。
+    pub code: Option<i32>,
+    /// 終わらせたシグナル（unix だけ・分からなければ `None`）。
+    pub signal: Option<i32>,
+    /// stderr の末尾（古い順・上限つき・伏せ字済み）。
+    pub stderr: Vec<String>,
+}
+
+impl std::fmt::Display for AgentExited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.code, self.signal) {
+            (Some(code), _) => write!(
+                formatter,
+                "エージェントが起動してすぐ終了した（終了コード {code}）"
+            ),
+            (None, Some(signal)) => write!(
+                formatter,
+                "エージェントが起動してすぐ終了した（シグナル {signal}）"
+            ),
+            (None, None) => write!(formatter, "エージェントが起動してすぐ終了した"),
+        }
+    }
+}
+
+impl std::error::Error for AgentExited {}
+
+/// 伏せ字（秘密らしい値の代わりに出す）。
+const MASK: &str = "••••";
+
+/// env の名前が秘密を持つ物らしいか（名前を `_` で区切った語で見る）。使用量の指紋の語
+/// （`agent_panel::usage` の `CREDENTIAL_WORDS`）のうち、値そのものが秘密になる語だけ。接続先や
+/// 置き場（URL・HOME）は理由を読むのに要るので伏せない。
+fn is_secret_variable(name: &str) -> bool {
+    const SECRET_WORDS: &[&str] = &[
+        "KEY",
+        "APIKEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "AUTH",
+        "OAUTH",
+        "BEARER",
+        "COOKIE",
+        "HEADER",
+        "HEADERS",
+    ];
+    name.to_ascii_uppercase()
+        .split('_')
+        .any(|word| SECRET_WORDS.contains(&word))
+}
+
+/// stderr の行から秘密らしい物を伏せる: エージェントへ渡した env のうち秘密らしい名前の値（6 文字以上）と、
+/// よく知られた鍵の形（`sk-…`・`ghp_…`・`xoxb-…`・`AKIA…`・`AIza…` 等 16 文字以上）と `Bearer` の後ろの語。
+/// 取りこぼしはあり得るので、伏せた後も画面にだけ出す（保存しない）のが前提。
+pub fn mask_secrets<'a>(
+    lines: Vec<String>,
+    env: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Vec<String> {
+    let mut secrets: Vec<&str> = env
+        .into_iter()
+        .filter(|(name, value)| is_secret_variable(name) && value.chars().count() >= 6)
+        .map(|(_, value)| value.as_str())
+        .collect();
+    // 長い値から伏せる（短い値が長い値の一部だと、長い方を伏せ損ねる）。
+    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    lines
+        .into_iter()
+        .map(|line| {
+            let line = secrets
+                .iter()
+                .fold(line, |line, secret| line.replace(secret, MASK));
+            mask_token_shapes(&line)
+        })
+        .collect()
+}
+
+/// よく知られた鍵の形の語と、`Bearer` の次の語を伏せる（区切りは空白・引用符・`=`・`:`・`,`）。
+fn mask_token_shapes(line: &str) -> String {
+    const PREFIXES: &[&str] = &[
+        "sk-",
+        "sk_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "AKIA",
+        "AIza",
+    ];
+    let is_delimiter =
+        |character: char| character.is_whitespace() || "\"'`=:,;()[]{}<>".contains(character);
+    let mut masked = String::with_capacity(line.len());
+    let mut word = String::new();
+    let mut after_bearer = false;
+    let flush = |word: &mut String, masked: &mut String, after_bearer: &mut bool| {
+        if word.is_empty() {
+            return;
+        }
+        let shaped =
+            word.chars().count() >= 16 && PREFIXES.iter().any(|prefix| word.starts_with(prefix));
+        if shaped || *after_bearer {
+            masked.push_str(MASK);
+        } else {
+            masked.push_str(word);
+        }
+        *after_bearer = word.eq_ignore_ascii_case("bearer");
+        word.clear();
+    };
+    for character in line.chars() {
+        if is_delimiter(character) {
+            flush(&mut word, &mut masked, &mut after_bearer);
+            masked.push(character);
+        } else {
+            word.push(character);
+        }
+    }
+    flush(&mut word, &mut masked, &mut after_bearer);
+    masked
+}
+
+/// セッションを開く前に失敗した時、子が終わっていればその終わり方と stderr の末尾を返す（まだ動いて
+/// いる＝無言ハングや ACP の食い違いなら `None`）。落ちた直後は終わりの回収と stderr の読み切りが
+/// 追いついていないことがあるので少しだけ待つ（終わりは最長 1.5 秒・stderr は最長 0.5 秒）。
+async fn startup_exit(
+    process: &mut host::HostProcess,
+    env: &std::collections::HashMap<String, String>,
+) -> Option<AgentExited> {
+    let mut status = process.try_exit_status();
+    for _ in 0..30 {
+        if status.is_some() {
+            break;
+        }
+        async_io::Timer::after(Duration::from_millis(50)).await;
+        status = process.try_exit_status();
+    }
+    let status = status?;
+    let tail = process.stderr_tail();
+    let waiting = tail.clone();
+    let closed = blocking::unblock(move || waiting.wait_closed(Duration::from_millis(500))).await;
+    if !closed {
+        eprintln!("起動してすぐ終わったエージェントの stderr を読み切れなかった（残りは捨てる）");
+    }
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+    #[cfg(not(unix))]
+    let signal = None;
+    Some(AgentExited {
+        code: status.code(),
+        signal,
+        stderr: mask_secrets(tail.lines(), env),
+    })
 }
 
 /// ターンの終わり方（ACP `StopReason` の簡約）。UI の「完了/中断」の出し分けに使う。
@@ -278,6 +584,9 @@ pub enum SessionCommand {
     SetMode(String),
     /// 設定オプション（モデル・思考レベル等）を変更する（`session/set_config_option`）。
     SetConfig { config_id: String, value_id: String },
+    /// 目標を一時停止 / 再開 / 取り消す（エージェントが広告した拡張メソッド・O17）。
+    /// ターン中でも待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
+    Goal(GoalAction),
 }
 
 /// ターンループが待つ 3 系統（エージェントからの更新 / UI からのコマンド / prompt 応答）。
@@ -290,8 +599,19 @@ enum TurnEvent {
     PromptFinished(Result<v1::PromptResponse, acp::Error>),
 }
 
+/// 待機中（ターンとターンの間）に待つ 3 系統。エージェントは待機中にも更新を送ってくる
+/// （`session/new` 直後のコマンド一覧・ターン後に非同期で付く会話名・自走する目標のターン）。
+/// 読まずにおくと SDK のチャネルに溜まり、次の prompt の頭でまとめて流れて遅れる。
+enum IdleEvent {
+    Update(Result<acp::SessionMessage, acp::Error>),
+    Command(Option<SessionCommand>),
+    /// transport が閉じた（プロセス終了・SSH 切断）。
+    Closed,
+}
+
 /// ACP エージェント（claude-agent-acp）の起動設定。
 pub struct AgentCommand {
+    managed_npm: Option<(String, String)>,
     pub path: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
@@ -308,6 +628,7 @@ impl AgentCommand {
     /// env 無しで組む（既存経路の短縮形）。
     fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
         Self {
+            managed_npm: None,
             path,
             args,
             cwd,
@@ -344,7 +665,7 @@ pub struct AgentKind {
     /// （necoder が検証した版。npm 外＝kimi は None）。
     package: Option<&'static str>,
     extra_args: &'static [&'static str],
-    /// セットアップ画面の「入れ方」でターミナルに流す導入コマンド（vendor の CLI 本体を入れる）。
+    /// セットアップ画面の「入れ方」で流す導入コマンド（CLI 本体と必要な ACP アダプタ）。
     pub install_cmd: &'static str,
     /// セットアップ画面の「ログイン」でターミナルに流す認証コマンド（vendor 自身のログイン導線）。
     /// necoder は鍵を持たず、CLI 側の認証にそのまま乗る（Zed の ACP と同じ流儀）。
@@ -381,7 +702,7 @@ pub const AGENTS: &[AgentKind] = &[
         registry_id: Some("claude-acp"),
         package: Some("@agentclientprotocol/claude-agent-acp@0.73.0"),
         extra_args: &[],
-        install_cmd: "npm i -g @anthropic-ai/claude-code",
+        install_cmd: "npm i -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp",
         login_cmd: "claude auth login",
         icon: Some("icons/brand-claude.svg"),
         brand_color: 0xd9_77_57,
@@ -395,7 +716,7 @@ pub const AGENTS: &[AgentKind] = &[
         registry_id: Some("codex-acp"),
         package: Some("@agentclientprotocol/codex-acp@1.8.0"),
         extra_args: &[],
-        install_cmd: "npm i -g @openai/codex",
+        install_cmd: "npm i -g @openai/codex @agentclientprotocol/codex-acp",
         login_cmd: "codex login",
         icon: None,
         brand_color: 0x10_a3_7f,
@@ -574,7 +895,13 @@ pub fn cached_agent_auth_states() -> Vec<AgentAuthState> {
 
 /// CLI/config 判定に加え、必要な Agent はプロンプト無しの ACP session を短時間だけ開く。
 /// probe は並列・タイムアウト付きで、終了時に子プロセスを必ず kill/wait する。
-pub async fn refresh_agent_auth_states(cwd: impl Into<PathBuf>) -> Vec<AgentAuthState> {
+///
+/// `disabled`（設定の `disabled_agents`・`AgentKind::id`）のエージェントは子プロセスを起こさず、
+/// ファイルだけの軽い判定のまま返す（使わないと決めたものを確かめに行かない・O16）。
+pub async fn refresh_agent_auth_states(
+    cwd: impl Into<PathBuf>,
+    disabled: &[String],
+) -> Vec<AgentAuthState> {
     let cwd = cwd.into();
     let initial = detect_configured_agent_states();
     let probes = AGENTS
@@ -582,8 +909,9 @@ pub async fn refresh_agent_auth_states(cwd: impl Into<PathBuf>) -> Vec<AgentAuth
         .zip(initial.iter().copied())
         .map(|(agent, state)| {
             let cwd = cwd.clone();
+            let skip = disabled.iter().any(|id| id == agent.id);
             async move {
-                if !agent.cli_installed() {
+                if skip || !agent.cli_installed() {
                     return state;
                 }
                 // status コマンドは最大 2 秒掛かり得るので、この明示 refresh の背景処理にだけ置く。
@@ -691,12 +1019,25 @@ impl AgentKind {
             }
         }
 
-        // 2) レジストリ。npx 経路だけ起動できる（binary 配備は未実装＝黙って落とさず次へ）。
+        // 2) レジストリ。組み込みは npm の版だけをここから取る（binary / uvx の配備は設定で足した
+        //    エージェントだけ・組み込みの既定の起動＝PATH / npx は変えない）。npx 以外は次へ。
         if let Some(entry) = self
             .registry_id
             .and_then(|id| registry.and_then(|reg| reg.agent(id)))
         {
             if let Some(registry::Launch::Npx(npx)) = entry.launch() {
+                if npx.args.is_empty() {
+                    if let Some(mut resolved) = install::cached_command(
+                        &npx.package,
+                        self.bin,
+                        self.extra_args.iter().map(|arg| arg.to_string()).collect(),
+                        cwd.clone(),
+                    ) {
+                        resolved.env = npx.env.clone();
+                        resolved.env.extend(settings_env);
+                        return Some(resolved);
+                    }
+                }
                 // 同じ版が npx のキャッシュに在れば直接起こす（`npm exec` の親プロセスを持たない）。
                 // レジストリの起動引数が付いている時は npx の解釈に任せる（取り違えない）。
                 let cached = npm_npx_cache_root()
@@ -720,6 +1061,9 @@ impl AgentKind {
                     let mut resolved = AgentCommand::new(npx_path, args, cwd);
                     resolved.env = npx.env.clone();
                     resolved.env.extend(settings_env);
+                    if npx.args.is_empty() {
+                        resolved.managed_npm = Some((npx.package.clone(), self.bin.to_string()));
+                    }
                     return Some(resolved);
                 }
             }
@@ -732,7 +1076,7 @@ impl AgentKind {
     }
 
     /// このエージェントの起動コマンドを解決する（組み込みカタログのみ）。
-    /// 探索順: (1) PATH の単体バイナリ → (2) Zed の npx キャッシュ(.bin) → (3) `npx <package> <args>`。
+    /// 探索順: PATH → necoder の管理導入 → 既存 npm キャッシュ → 管理導入を予約した npx フォールバック。
     ///
     /// 設定とレジストリまで見るのは [`Self::resolve_command`]。
     pub fn command(&self, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
@@ -741,6 +1085,11 @@ impl AgentKind {
         // 1) PATH の単体バイナリ
         if let Some(path) = find_in_path(self.bin) {
             return Some(AgentCommand::new(path, extra, cwd));
+        }
+        if let Some(command) = self.package.and_then(|package| {
+            install::cached_command(package, self.bin, extra.clone(), cwd.clone())
+        }) {
+            return Some(command);
         }
         // 2) Zed が展開済みの npx キャッシュ（ネット不要）
         if let Some(bin) = zed_cached_agent(self.bin) {
@@ -757,7 +1106,9 @@ impl AgentKind {
         let npx = find_in_path("npx")?;
         let mut args = vec!["-y".to_string(), bounded_npm_spec(package)];
         args.extend(extra);
-        Some(AgentCommand::new(npx, args, cwd))
+        let mut command = AgentCommand::new(npx, args, cwd);
+        command.managed_npm = Some((package.to_string(), self.bin.to_string()));
+        Some(command)
     }
 
     /// ローカルでの導入状況（設定画面のステータス表示用）。認証状態までは見ない（＝CLI 任せ）。
@@ -934,22 +1285,7 @@ impl AgentKind {
             return Ok(self.command(cwd));
         }
         // ここは上の `if !host.is_remote()` で早期 return した後＝**必ずリモート（Linux）**。
-        // だから `sh` で正しい。`cfg!(windows)` で `cmd.exe` に振ってはいけない
-        // （Windows クライアントからリモート Linux へ cmd.exe を送ることになる・WINDOWS-PORT.md §D3）。
-        //
-        // `command -v` は読み取り専用なので **再送可**で送る。切断直後の 1 発目は「送ったが結果
-        // 不明」で接続が張り直されるが、非冪等扱いだとそこで失敗して次の候補（npx）へ落ちていた。
-        let resolve = |binary: &str| -> Result<Option<PathBuf>> {
-            let output = host
-                .run_command_retry_safe(&CommandSpec::new("sh", &cwd).args([
-                    "-lc".to_string(),
-                    format!("command -v -- {}", shell_word(binary)),
-                ]))
-                .with_context(|| format!("remote で {binary} を探せない"))?;
-            Ok(output
-                .success()
-                .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())))
-        };
+        let resolve = |binary: &str| find_on_remote(host, &cwd, binary);
         let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
         if let Some(path) = resolve(self.bin)? {
             return Ok(Some(AgentCommand::new(path, extra, cwd)));
@@ -964,6 +1300,25 @@ impl AgentKind {
         args.extend(extra);
         Ok(Some(AgentCommand::new(npx, args, cwd)))
     }
+}
+
+/// リモートで `command -v` して実行ファイルのパスを引く（`Ok(None)` = 探せたが無い）。
+///
+/// リモートは**必ず Linux** なので `sh` で正しい。`cfg!(windows)` で `cmd.exe` に振ってはいけない
+/// （Windows クライアントからリモート Linux へ cmd.exe を送ることになる・WINDOWS-PORT.md §D3）。
+///
+/// `command -v` は読み取り専用なので **再送可**で送る。切断直後の 1 発目は「送ったが結果
+/// 不明」で接続が張り直されるが、非冪等扱いだとそこで失敗して次の候補（npx）へ落ちていた。
+fn find_on_remote(host: &dyn Host, cwd: &Path, binary: &str) -> Result<Option<PathBuf>> {
+    let output = host
+        .run_command_retry_safe(&CommandSpec::new("sh", cwd).args([
+            "-lc".to_string(),
+            format!("command -v -- {}", shell_word(binary)),
+        ]))
+        .with_context(|| format!("remote で {binary} を探せない"))?;
+    Ok(output
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())))
 }
 
 /// npm の指定を**完全一致ピンから上限つき範囲へ**変える（`pkg@1.2.3` → `pkg@0.0.0 - 1.2.3`）。
@@ -1423,6 +1778,10 @@ pub struct SessionPreferences {
     /// セッションの作り方のプリセット（Chat モード・`docs/CHAT.md` §5）。`session/new` と
     /// `session/load` の**両方**に同じ `_meta` を載せる — 片方だけだと再開した会話から設定が抜ける。
     pub preset: preset::SessionPreset,
+    /// `session/load` が再生する履歴を [`AgentEvent::HistoryReplayed`] として渡す（O15）。
+    /// エージェント側の過去の会話（CLI で作った物など）を necoder で開いた時だけ立てる。普段の再開は
+    /// transcript が DB に在るので、再生は捨てる（二重に載せない）。
+    pub replay_history: bool,
 }
 
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
@@ -1459,6 +1818,11 @@ pub async fn run_session_on(
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
+    let command = if !host.is_remote() && command.managed_npm.is_some() {
+        blocking::unblock(move || install::prepare(command)).await
+    } else {
+        command
+    };
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
         .envs(host::task_environment(host.as_ref(), &command.cwd)?)
@@ -1479,6 +1843,10 @@ pub async fn run_session_on(
     );
 
     let cwd = command.cwd.clone();
+    // セッションを開けたか（開く前の失敗だけを「起動してすぐ終わった」として理由を見せる）。
+    let session_opened = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opened = session_opened.clone();
+    let exit_events = event_tx.clone();
     let outcome = acp::Client
         .builder()
         .connect_with(transport, async move |connection| {
@@ -1494,6 +1862,10 @@ pub async fn run_session_on(
             // ハンドラ未登録のセッション宛て通知を捨てずに**溜めて attach 時に流す**ので、先に
             // 仮の応答で attach し、load を待つ間に届く update を自分のチャネルで受けて捨てる
             // ＝ transcript に古い会話が二重に載らない。応答と同時に ready だった分も捨て切る。
+            // ただし**状態**（コマンド一覧・会話名・目標）は捨てずに流す（[`forward_replayed_state`]）。
+            // 再生と同じ窓で届くことがあり、捨てると次の更新まで `/` 補完が空になる。
+            // エージェント側の過去の会話を開いた時（`replay_history`）だけは、再生を transcript の
+            // 項目へ畳んで load の成功後に 1 回で渡す（O15・[`history::ReplayLog`]）。
             // load が失敗したら（id が古い・エージェント側の記録が消えた）新規セッションで続ける。
             // ただし transport が閉じていたら続けても無駄なのでそのまま抜ける。
             // このセッションで使える MCP サーバを ACP の型へ写す。**渡さない限りエージェントからは
@@ -1521,6 +1893,9 @@ pub async fn run_session_on(
             let mut resumed_session = None;
             if let Some(previous) = resume_id {
                 use futures::future::FutureExt as _;
+                let mut replay_log = preferences
+                    .replay_history
+                    .then(|| history::ReplayLog::new(history::REPLAY_KEEP));
                 let mut session = connection
                     .attach_session(v1::NewSessionResponse::new(previous.clone()), Vec::new())?;
                 let load = connection
@@ -1537,15 +1912,28 @@ pub async fn run_session_on(
                     futures::pin_mut!(update);
                     futures::select_biased! {
                         update = update => match update {
-                            Ok(_replayed) => continue, // 履歴の再生。捨てる
+                            // 履歴の再生。状態は流し、本文は畳む（replay_history の時）か捨てる。
+                            Ok(replayed) => {
+                                forward_replayed_state(replayed, &event_tx, replay_log.as_mut())
+                                    .await;
+                                continue;
+                            }
                             Err(error) => break Err(error),
                         },
                         result = load => break result,
                     }
                 };
-                while matches!(session.read_update().now_or_never(), Some(Ok(_))) {}
+                while let Some(Ok(replayed)) = session.read_update().now_or_never() {
+                    forward_replayed_state(replayed, &event_tx, replay_log.as_mut()).await;
+                }
                 match loaded {
                     Ok(loaded) => {
+                        if let Some(replay_log) = replay_log.take() {
+                            let (items, omitted) = replay_log.finish();
+                            event_tx
+                                .unbounded_send(AgentEvent::HistoryReplayed { items, omitted })
+                                .ok();
+                        }
                         resumed_session = Some((session, loaded.modes, loaded.config_options));
                     }
                     Err(error) if acp::is_incoming_transport_closed(&error) => return Err(error),
@@ -1575,6 +1963,7 @@ pub async fn run_session_on(
                     (session, modes_state, config_options)
                 }
             };
+            opened.store(true, std::sync::atomic::Ordering::SeqCst);
             event_tx
                 .unbounded_send(AgentEvent::SessionStarted {
                     session_id: session.session_id().to_string(),
@@ -1582,6 +1971,29 @@ pub async fn run_session_on(
                     resumable: can_load,
                 })
                 .ok();
+            // 目標への操作の入口（Codex の `_meta.goal`・O17）。広告した時だけ流す（UI は
+            // SessionStarted で前の操作を消すので、広告が無ければ操作は出ない）。
+            let goal_control = goal_controls(initialized.meta.as_ref());
+            if let Some((_, actions)) = goal_control.as_ref() {
+                event_tx
+                    .unbounded_send(AgentEvent::GoalControls(actions.clone()))
+                    .ok();
+            }
+            // 目標への操作を送る（応答は待たない・結果は `_meta.goal` の更新で届く）。
+            let session_id_text = session.session_id().to_string();
+            let send_goal_action = |action: GoalAction| {
+                let Some((method, _)) = goal_control.as_ref() else {
+                    return;
+                };
+                let params = serde_json::json!({
+                    "sessionId": session_id_text,
+                    "action": action.as_str(),
+                });
+                match acp::UntypedMessage::new(method, params) {
+                    Ok(message) => connection.send_request(message).detach(),
+                    Err(error) => eprintln!("目標の操作を組めない: {error}"),
+                }
+            };
 
             // エージェントが広告する権限モード一覧 + 現在モードを UI へ（セレクタを実モードで組む）。
             // 希望モードが広告に在れば**ここで**（初回 prompt より前に）set_mode し、UI へは
@@ -1671,17 +2083,49 @@ pub async fn run_session_on(
                         // 待機中も transport の EOF を見張る。command だけを待つと、SSH 切断で
                         // エージェントが消えても次の送信まで気付けず、送信して初めて
                         // 「Incoming transport closed」になる（2026-09-08 の報告の片割れ）。
+                        //
+                        // エージェントからの更新も待機中に読む（ターン中と同じ道を通す）。コマンド
+                        // 一覧は `session/new` の直後、会話名はターン終了の数秒後に届くのが普通で、
+                        // 読まずにいると次の prompt の頭まで UI に届かない（O2）。更新を先に読むのは
+                        // ターン中と同じ理由（送った prompt より前に届いた更新を後回しにしない）。
                         use futures::future::FutureExt as _;
-                        let next_command = command_rx.next().fuse();
-                        let closed = connection.incoming_closed().fuse();
-                        futures::pin_mut!(next_command, closed);
-                        futures::select_biased! {
-                            command = next_command => match command {
-                                Some(command) => command,
-                                // UI が送信ハンドルを drop した＝このセッションは終わり。
-                                None => break,
-                            },
-                            _ = closed => {
+                        let idle_event = {
+                            let update = session.read_update().fuse();
+                            let next_command = command_rx.next().fuse();
+                            let closed = connection.incoming_closed().fuse();
+                            futures::pin_mut!(update, next_command, closed);
+                            futures::select_biased! {
+                                update = update => IdleEvent::Update(update),
+                                command = next_command => IdleEvent::Command(command),
+                                _ = closed => IdleEvent::Closed,
+                            }
+                        };
+                        match idle_event {
+                            IdleEvent::Update(Ok(message)) => {
+                                handle_session_message(message, &event_tx).await?;
+                                continue;
+                            }
+                            IdleEvent::Update(Err(error)) => {
+                                if acp::is_incoming_transport_closed(&error) {
+                                    event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                    break;
+                                }
+                                // 更新のチャネルが壊れた（セッションが持つ限り起きない）。読み直しても
+                                // 同じ失敗が即返るだけなので、空回りさせずにセッションを畳む。
+                                return Err(error);
+                            }
+                            IdleEvent::Command(Some(command)) => command,
+                            // UI が送信ハンドルを drop した＝このセッションは終わり。
+                            IdleEvent::Command(None) => break,
+                            IdleEvent::Closed => {
+                                // 閉じる直前に届いていた更新（会話名など）は取りこぼさず流してから畳む。
+                                while let Some(Ok(message)) = session.read_update().now_or_never() {
+                                    if let Err(error) =
+                                        handle_session_message(message, &event_tx).await
+                                    {
+                                        eprintln!("切断直前の更新を処理できない: {error}");
+                                    }
+                                }
                                 event_tx.unbounded_send(AgentEvent::SessionLost).ok();
                                 break;
                             }
@@ -1693,6 +2137,10 @@ pub async fn run_session_on(
                     SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
+                    SessionCommand::Goal(action) => {
+                        send_goal_action(action);
+                        continue;
+                    }
                     SessionCommand::SetMode(mode_id) => {
                         connection
                             .send_request(v1::SetSessionModeRequest::new(
@@ -1771,6 +2219,11 @@ pub async fn run_session_on(
                                 .ok();
                             continue;
                         }
+                        // 目標の操作は待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
+                        TurnEvent::Command(Some(SessionCommand::Goal(action))) => {
+                            send_goal_action(action);
+                            continue;
+                        }
                         // ターン中のモデル変更等は畳んでから処理する（取りこぼさない）。
                         TurnEvent::Command(Some(other)) => {
                             deferred.push_back(other);
@@ -1798,6 +2251,14 @@ pub async fn run_session_on(
                                 }
                                 _ => TurnEnd::Completed,
                             };
+                            // このターンに使ったトークン（O11）。UI は TurnEnded でコストと一緒に台帳へ書く。
+                            if let Some(tokens) = response
+                                .meta
+                                .as_ref()
+                                .and_then(usage::turn_tokens_from_quota)
+                            {
+                                event_tx.unbounded_send(AgentEvent::TurnUsage(tokens)).ok();
+                            }
                             event_tx
                                 .unbounded_send(AgentEvent::TurnEnded { reason: end })
                                 .ok();
@@ -1824,160 +2285,258 @@ pub async fn run_session_on(
                             break;
                         }
                     };
-                    match update {
-                        acp::SessionMessage::SessionMessage(dispatch) => {
-                            acp::util::MatchDispatch::new(dispatch)
-                                .if_notification(async |notification: v1::SessionNotification| {
-                                    match notification.update {
-                                        v1::SessionUpdate::AgentMessageChunk(
-                                            v1::ContentChunk {
-                                                content: v1::ContentBlock::Text(text),
-                                                ..
-                                            },
-                                        ) => {
-                                            event_tx
-                                                .unbounded_send(AgentEvent::AgentChunk(text.text))
-                                                .ok();
-                                        }
-                                        v1::SessionUpdate::AgentThoughtChunk(
-                                            v1::ContentChunk {
-                                                content: v1::ContentBlock::Text(text),
-                                                ..
-                                            },
-                                        ) => {
-                                            event_tx
-                                                .unbounded_send(AgentEvent::ThoughtChunk(text.text))
-                                                .ok();
-                                        }
-                                        v1::SessionUpdate::ToolCall(tool_call) => {
-                                            event_tx
-                                                .unbounded_send(AgentEvent::ToolStarted(
-                                                    ToolCallInfo {
-                                                        id: tool_call.tool_call_id.0.to_string(),
-                                                        title: Some(tool_call.title),
-                                                        kind: Some(map_tool_kind(tool_call.kind)),
-                                                        locations: tool_locations(
-                                                            &tool_call.locations,
-                                                        ),
-                                                        diffs: tool_diffs(&tool_call.content),
-                                                        output: tool_output(&tool_call.content),
-                                                        completed: tool_completed(tool_call.status),
-                                                    },
-                                                ))
-                                                .ok();
-                                        }
-                                        v1::SessionUpdate::ToolCallUpdate(update) => {
-                                            let content =
-                                                update.fields.content.as_deref().unwrap_or(&[]);
-                                            event_tx
-                                                .unbounded_send(AgentEvent::ToolUpdated(
-                                                    ToolCallInfo {
-                                                        id: update.tool_call_id.0.to_string(),
-                                                        title: update.fields.title.clone(),
-                                                        kind: update.fields.kind.map(map_tool_kind),
-                                                        locations: update
-                                                            .fields
-                                                            .locations
-                                                            .as_deref()
-                                                            .map(tool_locations)
-                                                            .unwrap_or_default(),
-                                                        diffs: tool_diffs(content),
-                                                        output: tool_output(content),
-                                                        completed: update
-                                                            .fields
-                                                            .status
-                                                            .and_then(tool_completed),
-                                                    },
-                                                ))
-                                                .ok();
-                                        }
-                                        v1::SessionUpdate::UsageUpdate(usage) => {
-                                            event_tx
-                                                .unbounded_send(AgentEvent::Usage {
-                                                    used: usage.used,
-                                                    size: usage.size,
-                                                })
-                                                .ok();
-                                        }
-                                        v1::SessionUpdate::CurrentModeUpdate(update) => {
-                                            event_tx
-                                                .unbounded_send(AgentEvent::ModeChanged(
-                                                    update.current_mode_id.to_string(),
-                                                ))
-                                                .ok();
-                                        }
-                                        v1::SessionUpdate::ConfigOptionUpdate(update) => {
-                                            event_tx
-                                                .unbounded_send(AgentEvent::Configs(
-                                                    map_config_options(&update.config_options),
-                                                ))
-                                                .ok();
-                                        }
-                                        v1::SessionUpdate::Plan(plan) => {
-                                            let items = plan
-                                                .entries
-                                                .iter()
-                                                .map(|entry| PlanItem {
-                                                    content: entry.content.clone(),
-                                                    status: match entry.status {
-                                                        v1::PlanEntryStatus::InProgress => {
-                                                            PlanStatus::InProgress
-                                                        }
-                                                        v1::PlanEntryStatus::Completed => {
-                                                            PlanStatus::Completed
-                                                        }
-                                                        // Pending + 将来の未知値は未着手扱い（non_exhaustive）。
-                                                        _ => PlanStatus::Pending,
-                                                    },
-                                                })
-                                                .collect();
-                                            event_tx.unbounded_send(AgentEvent::Plan(items)).ok();
-                                        }
-                                        _ => {}
-                                    }
-                                    Ok(())
-                                })
-                                .await
-                                // エージェントからの **リクエスト**（権限確認）を捌く。応答するまでこの
-                                // await は返らない＝ターンは正しくブロックされる（agent 側も待っている）。
-                                .if_request(
-                                    async |request: v1::RequestPermissionRequest,
-                                           responder: acp::Responder<
-                                        v1::RequestPermissionResponse,
-                                    >| {
-                                        handle_permission_request(request, responder, &event_tx)
-                                            .await
-                                    },
-                                )
-                                .await
-                                // Elicitation（選択肢付き質問）。権限確認と同じく応答するまで await は
-                                // 返らない＝ターンは正しくブロックされる。
-                                .if_request(
-                                    async |request: v1::CreateElicitationRequest,
-                                           responder: acp::Responder<
-                                        v1::CreateElicitationResponse,
-                                    >| {
-                                        handle_elicitation_request(request, responder, &event_tx)
-                                            .await
-                                    },
-                                )
-                                .await
-                                .otherwise_ignore()?;
-                        }
-                        // StopReason は `send_prompt` 経由でしか流れず、ここは自前送信
-                        // （PromptFinished で終端を受ける）なので届かない。将来のバリアント
-                        // （enum は #[non_exhaustive]）ともども無視して読み続ける。
-                        _ => {}
-                    }
+                    // 通知（本文・ツール・状態）とリクエスト（権限確認・Elicitation）を捌く。リクエストは
+                    // 応答するまで返らない＝ターンは正しくブロックされる（agent 側も待っている）。
+                    handle_session_message(update, &event_tx).await?;
                 }
             }
             Ok::<(), acp::Error>(())
         })
-        .await
-        .context("ACP セッションが異常終了");
+        .await;
+    // 開く前に落ちた（initialize の前後でプロセスが終わった）なら、ACP の「Broken pipe」ではなく
+    // 終わり方と stderr の末尾を理由にする（何が悪いかはエージェントしか知らない）。
+    if outcome.is_err() && !session_opened.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(exited) = startup_exit(&mut process, &spec.env).await {
+            drop(process);
+            exit_events
+                .unbounded_send(AgentEvent::ExitedAtStartup(exited.clone()))
+                .ok();
+            return Err(anyhow::Error::new(exited));
+        }
+    }
+    let outcome = outcome.context("ACP セッションが異常終了");
 
     drop(process);
     outcome
+}
+
+/// エージェントからの 1 通（`session/update` 通知・権限確認・Elicitation）を捌く。**ターン中と
+/// 待機中で同じ道**を通す — 待機中に届いた更新も、ターン中と同じ写像（[`session_update_events`]）で
+/// UI へ流れる。リクエストは応答するまで返らない＝呼び出し側のループもそのぶん止まる
+/// （エージェント側も待っている）。
+async fn handle_session_message(
+    message: acp::SessionMessage,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Result<(), acp::Error> {
+    let acp::SessionMessage::SessionMessage(dispatch) = message else {
+        // StopReason は `send_prompt` 経由でしか流れず、ここは自前送信（PromptFinished で終端を
+        // 受ける）なので届かない。将来のバリアント（enum は #[non_exhaustive]）ともども無視する。
+        return Ok(());
+    };
+    acp::util::MatchDispatch::new(dispatch)
+        .if_notification(async |notification: v1::SessionNotification| {
+            session_update_events(notification.update, |event| {
+                event_tx.unbounded_send(event).ok();
+            });
+            Ok(())
+        })
+        .await
+        // エージェントからの **リクエスト**（権限確認）を捌く。応答するまでこの await は返らない。
+        .if_request(
+            async |request: v1::RequestPermissionRequest,
+                   responder: acp::Responder<v1::RequestPermissionResponse>| {
+                handle_permission_request(request, responder, event_tx).await
+            },
+        )
+        .await
+        // Elicitation（選択肢付き質問）。権限確認と同じく応答するまで await は返らない。
+        .if_request(
+            async |request: v1::CreateElicitationRequest,
+                   responder: acp::Responder<v1::CreateElicitationResponse>| {
+                handle_elicitation_request(request, responder, event_tx).await
+            },
+        )
+        .await
+        .otherwise_ignore()
+}
+
+/// `session/load` が再生する履歴のうち、**状態**（[`is_session_state_event`]）だけを UI へ流す。
+/// 本文・ツール呼び出しは transcript に二重に載るので流さない — `replay` があればそこへ畳む
+/// （エージェント側の過去の会話を開いた時・O15）。リクエストは再生中には来ない想定で、来ても
+/// 従来どおり応答しない（再生を捨てていた頃と同じ扱い）。
+async fn forward_replayed_state(
+    message: acp::SessionMessage,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    replay: Option<&mut history::ReplayLog>,
+) {
+    let acp::SessionMessage::SessionMessage(dispatch) = message else {
+        return;
+    };
+    let result = acp::util::MatchDispatch::new(dispatch)
+        .if_notification(async |notification: v1::SessionNotification| {
+            if let Some(replay) = replay {
+                replay.push(notification.update.clone());
+            }
+            session_update_events(notification.update, |event| {
+                if is_session_state_event(&event) {
+                    event_tx.unbounded_send(event).ok();
+                }
+            });
+            Ok(())
+        })
+        .await
+        .otherwise_ignore();
+    if let Err(error) = result {
+        eprintln!("session/load の再生中の更新を読めない: {error}");
+    }
+}
+
+/// 会話の本文ではなくセッションの**状態**を運ぶイベントか（再生中も捨てない物）。
+fn is_session_state_event(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::Commands(_) | AgentEvent::TitleChanged(_) | AgentEvent::GoalChanged(_)
+    )
+}
+
+/// ACP の `SessionUpdate` 1 件を UI 向けの [`AgentEvent`] へ簡約して `emit` に渡す（UI に出さない
+/// 種類は何も渡さない）。ターン中・待機中・`session/load` の再生で同じ写像を使う。
+/// 1 件から 2 つ出ることがある（会話名と目標が同じ `SessionInfoUpdate` に載った時）。
+fn session_update_events(update: v1::SessionUpdate, mut emit: impl FnMut(AgentEvent)) {
+    match update {
+        v1::SessionUpdate::AgentMessageChunk(v1::ContentChunk {
+            content: v1::ContentBlock::Text(text),
+            ..
+        }) => emit(AgentEvent::AgentChunk(text.text)),
+        v1::SessionUpdate::AgentThoughtChunk(v1::ContentChunk {
+            content: v1::ContentBlock::Text(text),
+            ..
+        }) => emit(AgentEvent::ThoughtChunk(text.text)),
+        v1::SessionUpdate::ToolCall(tool_call) => emit(AgentEvent::ToolStarted(ToolCallInfo {
+            id: tool_call.tool_call_id.0.to_string(),
+            title: Some(tool_call.title),
+            kind: Some(map_tool_kind(tool_call.kind)),
+            locations: tool_locations(&tool_call.locations),
+            diffs: tool_diffs(&tool_call.content),
+            output: tool_output(&tool_call.content),
+            completed: tool_completed(tool_call.status),
+            parent: subagent_parent(tool_call.meta.as_ref()),
+        })),
+        v1::SessionUpdate::ToolCallUpdate(update) => {
+            let content = update.fields.content.as_deref().unwrap_or(&[]);
+            emit(AgentEvent::ToolUpdated(ToolCallInfo {
+                id: update.tool_call_id.0.to_string(),
+                title: update.fields.title.clone(),
+                kind: update.fields.kind.map(map_tool_kind),
+                locations: update
+                    .fields
+                    .locations
+                    .as_deref()
+                    .map(tool_locations)
+                    .unwrap_or_default(),
+                diffs: tool_diffs(content),
+                output: tool_output(content),
+                completed: update.fields.status.and_then(tool_completed),
+                parent: subagent_parent(update.meta.as_ref()),
+            }));
+        }
+        v1::SessionUpdate::UsageUpdate(update) => {
+            emit(AgentEvent::Usage {
+                used: update.used,
+                size: update.size,
+            });
+            // 会話の累計コスト（Claude はターンの結果の分にだけ付く）。負・NaN は捨てる。
+            if let Some(cost) = update.cost {
+                if cost.amount.is_finite() && cost.amount >= 0.0 {
+                    emit(AgentEvent::SessionCost {
+                        amount: cost.amount,
+                        currency: cost.currency,
+                    });
+                }
+            }
+            // Claude のレート制限（`rate_limit_event` の中継）。
+            if let Some(limits) = update
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("_claude/rateLimit"))
+                .and_then(usage::rate_limits_from_claude)
+            {
+                emit(AgentEvent::RateLimits(limits));
+            }
+        }
+        v1::SessionUpdate::CurrentModeUpdate(update) => {
+            emit(AgentEvent::ModeChanged(update.current_mode_id.to_string()))
+        }
+        v1::SessionUpdate::ConfigOptionUpdate(update) => emit(AgentEvent::Configs(
+            map_config_options(&update.config_options),
+        )),
+        v1::SessionUpdate::Plan(plan) => {
+            let items = plan
+                .entries
+                .iter()
+                .map(|entry| PlanItem {
+                    content: entry.content.clone(),
+                    status: match entry.status {
+                        v1::PlanEntryStatus::InProgress => PlanStatus::InProgress,
+                        v1::PlanEntryStatus::Completed => PlanStatus::Completed,
+                        // Pending + 将来の未知値は未着手扱い（non_exhaustive）。
+                        _ => PlanStatus::Pending,
+                    },
+                })
+                .collect();
+            emit(AgentEvent::Plan(items));
+        }
+        // 一覧は毎回全量で届く（差分ではない）＝そのまま置き換えに使える形で渡す。
+        v1::SessionUpdate::AvailableCommandsUpdate(update) => emit(AgentEvent::Commands(
+            update
+                .available_commands
+                .into_iter()
+                .map(slash_command_from)
+                .collect(),
+        )),
+        v1::SessionUpdate::SessionInfoUpdate(update) => {
+            // `title` は「無い（未定義）」と「消した（null）」が別。`_meta` だけの通知（Claude の
+            // ファイル変更報告・目標など）で名前を消してはいけないので、未定義は何も出さない。
+            match update.title {
+                acp::schema::MaybeUndefined::Value(title) => {
+                    emit(AgentEvent::TitleChanged(Some(title)))
+                }
+                acp::schema::MaybeUndefined::Null => emit(AgentEvent::TitleChanged(None)),
+                acp::schema::MaybeUndefined::Undefined => {}
+            }
+            if let Some(goal) = update.meta.as_ref().and_then(|meta| meta.get("goal")) {
+                emit(AgentEvent::GoalChanged(goal_from_meta(goal)));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// ACP の `AvailableCommand` を [`SlashCommand`] へ。入力の種類は今は Unstructured（ヒント文字列）だけ。
+fn slash_command_from(command: v1::AvailableCommand) -> SlashCommand {
+    let hint = match command.input {
+        Some(v1::AvailableCommandInput::Unstructured(input)) => {
+            Some(input.hint).filter(|hint| !hint.trim().is_empty())
+        }
+        _ => None,
+    };
+    SlashCommand {
+        name: command.name,
+        description: command.description,
+        hint,
+    }
+}
+
+/// `_meta.goal` の値を [`AgentGoal`] へ。null・目的文の無い物は「目標なし」（`None`）。
+/// 形は Claude（`claude-agent-acp` の goal 拡張）と Codex（`codex-acp`）で共通の
+/// `{ objective, status, … }`。
+fn goal_from_meta(goal: &serde_json::Value) -> Option<AgentGoal> {
+    let objective = goal.get("objective")?.as_str()?.trim();
+    if objective.is_empty() {
+        return None;
+    }
+    let status = match goal.get("status").and_then(serde_json::Value::as_str) {
+        Some("active") | None => GoalStatus::Active,
+        Some("paused") => GoalStatus::Paused,
+        Some("blocked") => GoalStatus::Blocked,
+        Some("complete") => GoalStatus::Complete,
+        Some("limited") => GoalStatus::Limited,
+        Some(_) => GoalStatus::Other,
+    };
+    Some(AgentGoal {
+        objective: objective.to_string(),
+        status,
+    })
 }
 
 /// `session/request_permission` を UI へ橋渡しして応答する。
@@ -2031,6 +2590,11 @@ fn tool_output(content: &[v1::ToolCallContent]) -> Option<String> {
 
 /// prompt を ACP の content ブロック列へ。画像は本文の**前**に置く（「この画像について…」と
 /// 続く文が自然に読める順）。受け取れないエージェントには送らず、黙って落とさずに知らせる。
+///
+/// **slash コマンド（`/compact` 等）は本文 1 ブロックだけで送ること**（画像も添付も付けない。
+/// 付けないのは UI 側＝agent_panel の責務）。エージェントごとに「コマンドとして読むブロック」が
+/// 違い、複数ブロックでは両立しない: Claude Code は**最後の**ブロック（CLI の入力処理）、
+/// `claude-agent-acp` の一部判定と `codex-acp` は**先頭の**ブロックを見る。1 ブロックなら両方に効く。
 fn prompt_blocks(
     text: String,
     images: Vec<PromptImage>,
@@ -2098,6 +2662,26 @@ fn tool_completed(status: v1::ToolCallStatus) -> Option<bool> {
     }
 }
 
+/// MCP の道具の呼び出しへの許可要求か。ACP には道具の出所の欄が無いので、アダプタが付ける印で見分ける:
+/// codex-acp は要求全体の `_meta.is_mcp_tool_approval`（題名を付けず、先の `tool_call` と id で結ぶ）と
+/// 呼び出し側の `_meta.is_mcp_tool_call`、rawInput の `server` + `tool`（codex-acp の MCP 呼び出しの形）。
+/// Claude Code は MCP の道具を `mcp__<server>__<tool>` の題名で問うので、こちらは題名で足りる。
+pub fn is_mcp_tool_request(request: &v1::RequestPermissionRequest) -> bool {
+    let flag = |meta: Option<&v1::Meta>, key: &str| {
+        meta.and_then(|meta| meta.get(key))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    };
+    flag(request.meta.as_ref(), "is_mcp_tool_approval")
+        || flag(request.tool_call.meta.as_ref(), "is_mcp_tool_call")
+        || request
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .is_some_and(|raw| raw.get("server").is_some() && raw.get("tool").is_some())
+}
+
 async fn handle_permission_request(
     request: v1::RequestPermissionRequest,
     responder: acp::Responder<v1::RequestPermissionResponse>,
@@ -2127,6 +2711,8 @@ async fn handle_permission_request(
         .collect();
     let kind = request.tool_call.fields.kind.map(map_tool_kind);
     let paths = permission_paths(&request.tool_call.fields, &diffs);
+    let tool_call_id = request.tool_call.tool_call_id.0.to_string();
+    let mcp_tool = is_mcp_tool_request(&request);
     // Diff の無いツール（Bash/Fetch/MCP）の実引数を承認前に必ず見せる（ACP #1979 / GHSA-f2g4）。
     // 編集系（Diff あり）は差分表示で内容が見えるので冗長回避のため省く。
     let raw_input = if diffs.is_empty() {
@@ -2163,6 +2749,8 @@ async fn handle_permission_request(
             diffs,
             raw_input,
             options,
+            tool_call_id,
+            mcp_tool,
             respond: respond_tx,
         })
         .ok();
@@ -2192,17 +2780,26 @@ const CUSTOM_ANSWER_META_KEY: &str = "_askUserQuestionCustomAnswer";
 /// 例外は [`CUSTOM_ANSWER_META_KEY`] 印の Other 欄だけ。Claude Code の AskUserQuestion は
 /// 質問ごとに「選択肢 + Other 欄」の 2 プロパティを送るため、Other 欄を非対応扱いにすると
 /// **質問そのものが Decline されて UI に出ない**（＝エージェントの質問に答えられない）。
-/// 印つき Other 欄は任意入力なので、読み飛ばして選択欄だけ返す方が仕様に忠実。
+/// 印つき Other 欄は独立したフィールドにせず、付属先の選択欄の [`ElicitationField::custom_answer`]
+/// に結び付ける（O17・UI は選択肢の下に入力欄を出す）。付属先が見つからない Other 欄は任意入力
+/// なので読み飛ばす。
 fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<ElicitationField>> {
     if schema.properties.is_empty() {
         return None;
     }
     let mut fields = Vec::new();
+    // 付属先の質問（選択欄の名前）→ Other 欄の名前。プロパティは名前順に来るので、選択欄より
+    // 先に Other 欄が来ても結べるよう、最後にまとめて結ぶ。
+    let mut custom_answers = std::collections::BTreeMap::new();
     for (name, property) in &schema.properties {
         let (options, multi, title) = match property {
             v1::ElicitationPropertySchema::String(string_schema) => {
                 if is_custom_answer_field(string_schema) {
-                    continue; // 選択欄に付属する任意の Other 欄 — 出さないだけで非対応にはしない
+                    // 選択欄に付属する任意の Other 欄 — 独立した欄にはせず、非対応にもしない
+                    if let Some(question) = custom_answer_question(name, string_schema) {
+                        custom_answers.insert(question, name.clone());
+                    }
+                    continue;
                 }
                 let options = single_select_options(string_schema)?;
                 (options, false, string_schema.title.clone())
@@ -2221,13 +2818,31 @@ fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<Elici
             label: title.unwrap_or_else(|| name.clone()),
             options,
             multi,
+            custom_answer: None,
         });
     }
     // Other 欄だけを読み飛ばした結果 0 件＝選ばせるものが無いフォーム。非対応として Decline に回す。
     if fields.is_empty() {
         return None;
     }
+    for field in &mut fields {
+        field.custom_answer = custom_answers.remove(&field.name);
+    }
     Some(fields)
+}
+
+/// Other 欄がどの質問に付属するか。`_meta` の `questionId` を正とし、無ければ名前の
+/// `<質問>_custom` 形から引く（Claude のブリッジは両方付ける・印だけのブリッジもあり得る）。
+fn custom_answer_question(name: &str, schema: &v1::StringPropertySchema) -> Option<String> {
+    let from_meta = schema
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(CUSTOM_ANSWER_META_KEY))
+        .and_then(|marker| marker.get("questionId"))
+        .and_then(|question| question.as_str());
+    from_meta
+        .or_else(|| name.strip_suffix("_custom"))
+        .map(str::to_string)
 }
 
 /// 単一選択 string の選択肢（`oneOf` 優先・無ければ `enum`）。どちらも無い自由入力は `None`＝非対応。
@@ -2288,6 +2903,16 @@ fn is_custom_answer_field(schema: &v1::StringPropertySchema) -> bool {
         .meta
         .as_ref()
         .is_some_and(|meta| meta.contains_key(CUSTOM_ANSWER_META_KEY))
+}
+
+/// サブエージェントの手順の親（O17）: `_meta.claudeCode.parentToolUseId`。空文字は無いものとする。
+fn subagent_parent(meta: Option<&v1::Meta>) -> Option<String> {
+    meta?
+        .get("claudeCode")?
+        .get("parentToolUseId")?
+        .as_str()
+        .filter(|parent| !parent.is_empty())
+        .map(str::to_string)
 }
 
 /// `session/request_elicitation`（選択肢付き質問）を UI へ橋渡しして応答する。form かつ全フィールドが
@@ -2632,6 +3257,11 @@ mod tests {
         assert_eq!(fields[0].name, "question_0");
         assert_eq!(fields[0].label, "PDF の見せ方");
         assert_eq!(fields[0].options.len(), 2);
+        assert_eq!(
+            fields[0].custom_answer.as_deref(),
+            Some("question_0_custom"),
+            "Other 欄は付属先の質問に結ぶ（O17・自由入力欄を出す）"
+        );
 
         // 印が無いただの自由入力なら従来どおり非対応（返せない入力を勝手に握り潰さない）。
         let unmarked: v1::ElicitationSchema = serde_json::from_value(json!({
@@ -2667,6 +3297,11 @@ mod tests {
         let multi_fields = simplify_elicitation_form(&multi).expect("複数選択も対応");
         assert_eq!(multi_fields.len(), 1);
         assert!(multi_fields[0].multi, "複数選択として印を付ける");
+        assert_eq!(
+            multi_fields[0].custom_answer.as_deref(),
+            Some("question_0_custom"),
+            "questionId が無ければ名前の <質問>_custom 形で結ぶ"
+        );
         assert_eq!(multi_fields[0].label, "入れる機能");
         assert_eq!(multi_fields[0].options.len(), 2);
         assert_eq!(
@@ -2685,6 +3320,10 @@ mod tests {
         let plain = simplify_elicitation_form(&plain_multi).expect("items.enum も対応");
         assert!(plain[0].multi);
         assert_eq!(plain[0].options[2].title, "c");
+        assert!(
+            plain[0].custom_answer.is_none(),
+            "Other 欄の無い質問は入力欄を出さない"
+        );
 
         // Other 欄しか無い＝選ばせるものが無いので非対応。
         let only_custom: v1::ElicitationSchema = serde_json::from_value(json!({
@@ -2698,6 +3337,32 @@ mod tests {
         }))
         .expect("schema をパースできる");
         assert!(simplify_elicitation_form(&only_custom).is_none());
+    }
+
+    /// Other 欄の結び先（O17）: `questionId` を名前より優先し、名前順で選択欄より先に来ても結ぶ。
+    /// 付属先の無い Other 欄は捨てる（任意入力なので、読み飛ばしても答えは作れる）。
+    #[test]
+    fn custom_answer_fields_attach_to_their_question() {
+        use serde_json::json;
+        let schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "a_note": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"questionId": "z_pick"}}
+                },
+                "z_pick": {"type": "string", "enum": ["x", "y"]},
+                "other_custom": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"isCustomAnswer": true}}
+                }
+            }
+        }))
+        .expect("schema をパースできる");
+        let fields = simplify_elicitation_form(&schema).expect("選択欄が 1 つある");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "z_pick");
+        assert_eq!(fields[0].custom_answer.as_deref(), Some("a_note"));
     }
 
     /// 回帰テスト: `session/prompt` がエラー応答（例: API のストリーミング切断「Connection
@@ -2868,6 +3533,109 @@ sys.stdout.reconfigure(encoding='utf-8')\n";
             };
             futures::join!(session, collect)
         }))
+    }
+
+    /// 起動してすぐ落ちたエージェント（stderr に理由を書いて exit 1）: 終了コードと stderr の末尾を
+    /// `ExitedAtStartup` で流し、同じ理由のエラーで戻る。エラーの文（ログや保存される transcript に
+    /// 載る側）には stderr を入れない。渡した env の秘密らしい値と鍵の形は伏せる。
+    #[test]
+    fn an_agent_that_exits_at_startup_reports_its_stderr() {
+        let script = r#"
+import os, sys
+sys.stderr.write("error: DEEPSEEK_API_KEY is invalid\n")
+sys.stderr.write("got key " + os.environ.get("DEEPSEEK_API_KEY", "") + "\n")
+sys.stderr.write("Authorization: Bearer abcdefghijklmnopqrstu\n")
+sys.stderr.flush()
+sys.exit(1)
+"#;
+        let Some(mut command) = fake_agent_command(script) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        command.env.insert(
+            "DEEPSEEK_API_KEY".to_string(),
+            "ds-0123456789abcdef".to_string(),
+        );
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                drop(command_tx);
+                seen
+            };
+            futures::join!(session, collect)
+        });
+        let Err(error) = outcome else {
+            panic!("起動してすぐ落ちたら Err で戻る");
+        };
+        let exited = error
+            .downcast_ref::<AgentExited>()
+            .expect("理由の型（AgentExited）で戻る");
+        assert_eq!(exited.code, Some(1));
+        assert_eq!(
+            exited.stderr,
+            vec![
+                "error: DEEPSEEK_API_KEY is invalid".to_string(),
+                "got key ••••".to_string(),
+                "Authorization: Bearer ••••".to_string(),
+            ]
+        );
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains("invalid") && !text.contains("Bearer"),
+            "エラーの文に stderr を入れない: {text}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ExitedAtStartup(seen) if seen == exited
+            )),
+            "画面へ出す分を流す: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::SessionStarted { .. })),
+            "セッションは開いていない"
+        );
+    }
+
+    /// 伏せ字: 渡した env のうち秘密らしい名前の値・よく知られた鍵の形・`Bearer` の次の語。秘密でない
+    /// 名前の値（モデル・置き場）と短い語は残す（理由を読むのに要る）。
+    #[test]
+    fn secrets_in_stderr_are_masked() {
+        let env: BTreeMap<String, String> = [
+            ("OPENAI_API_KEY", "sk-live-abcdef123456"),
+            ("OPENAI_MODEL", "gpt-5-codex"),
+            ("CLAUDE_CONFIG_DIR", "/Users/me/.claude-work"),
+            ("MY_TOKEN", "short"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let masked = mask_secrets(
+            vec![
+                "key=sk-live-abcdef123456 model=gpt-5-codex dir=/Users/me/.claude-work".to_string(),
+                "token ghp_0123456789abcdef0123 and sk-12".to_string(),
+                "header \"Authorization: bearer eyJhbGciOiJIUzI1NiJ9\"".to_string(),
+                "short value is short".to_string(),
+            ],
+            &env,
+        );
+        assert_eq!(
+            masked,
+            vec![
+                "key=•••• model=gpt-5-codex dir=/Users/me/.claude-work".to_string(),
+                "token •••• and sk-12".to_string(),
+                "header \"Authorization: bearer ••••\"".to_string(),
+                "short value is short".to_string(),
+            ]
+        );
     }
 
     /// 偽エージェント: `session/prompt` を受けた瞬間にプロセスごと消える（SSH 切断で remote の
@@ -3064,6 +3832,218 @@ for line in sys.stdin:
             chunks,
             vec!["order=initialize,session/load,session/prompt"],
             "再生された履歴（old history）は流れず、session/new も呼ばれない: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::HistoryReplayed { .. })),
+            "頼まれていない再生は畳んで渡さない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント: `session/load` で CLI の会話らしい履歴（発話・本文・ツール・思考・サブエージェントの
+    /// 内側）を再生してから応答し、そのまま消える（prompt は受けない＝送らないことの確認も兼ねる）。
+    const AGENT_THAT_REPLAYS_A_CONVERSATION: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def update(sid, body):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid, "update": body}})
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/load":
+        sid = params["sessionId"]
+        update(sid, {"sessionUpdate": "user_message_chunk", "messageId": "u1",
+                     "content": {"type": "text", "text": "README を直して"}})
+        update(sid, {"sessionUpdate": "agent_thought_chunk", "messageId": "a1",
+                     "content": {"type": "text", "text": "考え中"}})
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "a1",
+                     "content": {"type": "text", "text": "読みます。"}})
+        update(sid, {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read README.md",
+                     "kind": "read", "status": "pending"})
+        update(sid, {"sessionUpdate": "user_message_chunk",
+                     "_meta": {"claudeCode": {"parentToolUseId": "toolu_9"}},
+                     "content": {"type": "text", "text": "サブエージェントへの指示"}})
+        update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                     "status": "completed"})
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "a2",
+                     "content": {"type": "text", "text": "直しました。"}})
+        update(sid, {"sessionUpdate": "session_info_update", "title": "README の修正"})
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+        sys.exit(0)
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fresh"}})
+    elif method == "session/prompt":
+        sys.exit(3)
+"#;
+
+    /// エージェント側の過去の会話を開く（O15）: `replay_history` なら、load が再生した履歴を
+    /// transcript の項目に畳んで `SessionStarted` の直前に 1 回渡す。状態（会話名）は従来どおり流す。
+    #[test]
+    fn replay_history_hands_the_replayed_conversation_to_the_ui() {
+        let preferences = SessionPreferences {
+            resume: Some("cli-session".into()),
+            replay_history: true,
+            ..SessionPreferences::default()
+        };
+        let Some((outcome, events)) =
+            run_fake_agent_until_session_ends(AGENT_THAT_REPLAYS_A_CONVERSATION, preferences, None)
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("load の後に消えても正常に畳む");
+        let replayed_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::HistoryReplayed { .. }))
+            .expect("再生を渡す");
+        let started_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::SessionStarted { resumed: true, .. }))
+            .expect("load で引き継いだ");
+        assert!(replayed_at < started_at, "{events:?}");
+        let AgentEvent::HistoryReplayed { items, omitted } = &events[replayed_at] else {
+            unreachable!("上で位置を確かめた");
+        };
+        assert_eq!(*omitted, 0);
+        let described: Vec<String> = items
+            .iter()
+            .map(|item| match item {
+                history::ReplayItem::User(text) => format!("user:{text}"),
+                history::ReplayItem::Agent(text) => format!("agent:{text}"),
+                history::ReplayItem::Tool(info) => format!(
+                    "tool:{}:{:?}",
+                    info.title.as_deref().unwrap_or(""),
+                    info.completed
+                ),
+            })
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                "user:README を直して",
+                "agent:読みます。",
+                "tool:Read README.md:Some(true)",
+                "agent:直しました。",
+            ]
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::TitleChanged(Some(title)) if title == "README の修正"
+            )),
+            "会話名は状態として流れる: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::AgentChunk(_) | AgentEvent::ToolStarted(_) | AgentEvent::TurnStarted
+            )),
+            "再生の本文は live のイベントとしては流さない・prompt は送らない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント（`LIST_CAP` を置換して使う）: `session/list` を広告し、cwd の会話を 3 ページで
+    /// 返す（2 ページ目は空＝codex-acp の「ページ内だけの絞り込み」）。`session/new` と prompt は拒む。
+    const AGENT_WITH_SESSION_LIST: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        caps = {"loadSession": True}
+        if LIST_CAP:
+            caps["sessionCapabilities"] = {"list": {}}
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": caps}})
+    elif method == "session/list":
+        cwd = params.get("cwd")
+        cursor = params.get("cursor")
+        if cursor is None:
+            result = {"sessions": [{"sessionId": "a", "cwd": cwd, "title": "最初の会話",
+                                    "updatedAt": "2026-09-20T10:00:00.000Z"}],
+                      "nextCursor": "p2"}
+        elif cursor == "p2":
+            result = {"sessions": [], "nextCursor": "p3"}
+        else:
+            result = {"sessions": [{"sessionId": "b", "cwd": cwd,
+                                    "updatedAt": "2026-09-25T10:00:00Z"}]}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    else:
+        send({"jsonrpc": "2.0", "id": rid,
+              "error": {"code": -32601, "message": "unexpected " + str(method)}})
+"#;
+
+    fn list_scenario(list_advertised: bool) -> Option<Result<history::SessionListing>> {
+        let script = AGENT_WITH_SESSION_LIST
+            .replace("LIST_CAP", if list_advertised { "True" } else { "False" });
+        let command = fake_agent_command(&script)?;
+        let cwd = command.cwd.clone();
+        Some(futures::executor::block_on(history::list_sessions_on(
+            LocalHost::shared(),
+            command,
+            cwd,
+            50,
+        )))
+    }
+
+    /// 一覧（O15）: 広告があれば `session/list` を cursor が尽きるまで読む（空のページも越える）。
+    /// `session/new` も prompt も送らない（送ると偽エージェントがエラーを返して失敗になる）。
+    #[test]
+    fn list_sessions_reads_every_page_without_starting_a_session() {
+        let Some(outcome) = list_scenario(true) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let history::SessionListing::Listed(sessions) = outcome.expect("一覧を読める") else {
+            panic!("広告しているので一覧が返る");
+        };
+        let ids: Vec<&str> = sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(sessions[0].title.as_deref(), Some("最初の会話"));
+        assert_eq!(sessions[1].title, None);
+        assert_eq!(sessions[1].updated_at_ms, Some(1_790_330_400_000));
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(sessions[0].cwd, cwd, "cwd を渡して絞り込ませる");
+    }
+
+    /// 広告の無いエージェントには `session/list` を送らない（一覧を出せない、と分かる形で返す）。
+    #[test]
+    fn list_sessions_reports_agents_without_the_capability() {
+        let Some(outcome) = list_scenario(false) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            outcome.expect("失敗ではない"),
+            history::SessionListing::Unsupported
         );
     }
 
@@ -3357,6 +4337,36 @@ for line in sys.stdin:
         );
     }
 
+    /// MCP の道具への承認の見分け（codex-acp の実際の形から）。codex-acp は題名を付けず、要求全体の
+    /// `_meta.is_mcp_tool_approval` と id だけを送る。shell は種別が同じ「実行」でも印が無い。
+    #[test]
+    fn mcp_tool_approvals_are_told_apart_from_the_shell() {
+        let request = |value: serde_json::Value| -> v1::RequestPermissionRequest {
+            serde_json::from_value(value).expect("ACP の許可要求として読める")
+        };
+        let codex_approval = request(serde_json::json!({
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "call-1", "kind": "execute", "status": "pending" },
+            "options": [],
+            "_meta": { "is_mcp_tool_approval": true }
+        }));
+        assert!(is_mcp_tool_request(&codex_approval));
+        let codex_standalone = request(serde_json::json!({
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "call-2", "kind": "execute",
+                          "rawInput": { "server": "necoder", "tool": "fleet_list_tasks", "arguments": {} } },
+            "options": []
+        }));
+        assert!(is_mcp_tool_request(&codex_standalone));
+        let shell = request(serde_json::json!({
+            "sessionId": "s",
+            "toolCall": { "toolCallId": "call-3", "kind": "execute", "title": "ls",
+                          "rawInput": { "command": "ls" } },
+            "options": []
+        }));
+        assert!(!is_mcp_tool_request(&shell));
+    }
+
     /// 偽エージェント: `session/new` で受け取った `mcpServers` をそのまま prompt 応答に載せる。
     /// **ACP の線に何が乗ったか**を本文で検証できる（渡し忘れると空配列が返って落ちる）。
     /// `mcpCapabilities` は http だけ広告する＝sse は渡してはいけない側の検証にも使う。
@@ -3588,6 +4598,7 @@ for line in sys.stdin:
             resume: None,
             mcp_servers: Vec::new(),
             preset: preset::SessionPreset::default(),
+            replay_history: false,
         };
 
         let events = futures::executor::block_on(async move {
@@ -3768,7 +4779,7 @@ for line in sys.stdin:
     #[ignore = "ローカルの vendor CLI / 資格情報を調べる"]
     fn live_auth_states() {
         let cwd = std::env::current_dir().expect("cwd");
-        let states = futures::executor::block_on(refresh_agent_auth_states(cwd));
+        let states = futures::executor::block_on(refresh_agent_auth_states(cwd, &[]));
         for (agent, state) in AGENTS.iter().zip(states) {
             println!("{}: {state:?}", agent.label);
         }
@@ -3826,6 +4837,11 @@ for line in sys.stdin:
                             info.output.map(|text| text.lines().count()).unwrap_or(0)
                         ),
                         AgentEvent::Usage { used, size } => eprintln!("[usage] {used}/{size}"),
+                        AgentEvent::SessionCost { amount, currency } => {
+                            eprintln!("[cost] {amount} {currency}")
+                        }
+                        AgentEvent::RateLimits(limits) => eprintln!("[rate limits] {limits:?}"),
+                        AgentEvent::TurnUsage(tokens) => eprintln!("[turn usage] {tokens:?}"),
                         AgentEvent::Modes { modes, current } => {
                             eprintln!("[modes] current={current} available={modes:?}")
                         }
@@ -3858,6 +4874,14 @@ for line in sys.stdin:
                             respond.unbounded_send(0).ok(); // テストでは先頭を選んで進める
                         }
                         AgentEvent::Plan(items) => eprintln!("[plan] {} items", items.len()),
+                        AgentEvent::Commands(commands) => {
+                            eprintln!("[commands] {} items", commands.len())
+                        }
+                        AgentEvent::TitleChanged(title) => eprintln!("[title] {title:?}"),
+                        AgentEvent::GoalChanged(goal) => eprintln!("[goal] {goal:?}"),
+                        AgentEvent::GoalControls(actions) => {
+                            eprintln!("[goal controls] {actions:?}")
+                        }
                         AgentEvent::ElicitationRequest {
                             message, fields, ..
                         } => eprintln!("[elicitation] {message} fields={}", fields.len()),
@@ -3867,12 +4891,17 @@ for line in sys.stdin:
                         }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
                         AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
+                        AgentEvent::HistoryReplayed { items, omitted } => {
+                            eprintln!("[history] {} items, {omitted} omitted", items.len())
+                        }
                         AgentEvent::SessionStarted {
                             session_id,
                             resumed,
                             ..
                         } => eprintln!("[session started] {session_id} resumed={resumed}"),
                         AgentEvent::SessionLost => eprintln!("[session lost]"),
+                        // stderr は画面だけの物なので、ここでも終わり方だけを出す。
+                        AgentEvent::ExitedAtStartup(exited) => eprintln!("[exited] {exited}"),
                     }
                 }
                 chunks
@@ -3884,6 +4913,592 @@ for line in sys.stdin:
 
         println!("\n--- 受信チャンク数: {}", chunks.len());
         assert!(!chunks.is_empty(), "少なくとも 1 つの AgentChunk が来る");
+    }
+
+    // ── O2: slash コマンド一覧・会話名・目標（待機中の更新） ──
+
+    use serde_json::json;
+
+    fn mapped(update: v1::SessionUpdate) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        session_update_events(update, |event| events.push(event));
+        events
+    }
+
+    /// 目標への操作の広告（Codex の initialize `_meta.goal`・O17）: 入口は拡張メソッドだけ受け、
+    /// 知らない操作（set など）は捨てる。操作が 1 つも無ければ出さない。
+    #[test]
+    fn goal_controls_come_from_the_initialize_meta() {
+        let meta = |value: serde_json::Value| -> v1::Meta {
+            serde_json::from_value(value).expect("オブジェクト")
+        };
+        let codex = meta(json!({"goal": {
+            "version": 1,
+            "controlMethod": "_session/goal",
+            "actions": ["set", "pause", "resume", "clear"]
+        }}));
+        assert_eq!(
+            goal_controls(Some(&codex)),
+            Some((
+                "_session/goal".to_string(),
+                vec![GoalAction::Pause, GoalAction::Resume, GoalAction::Clear]
+            ))
+        );
+        let standard =
+            meta(json!({"goal": {"controlMethod": "session/prompt", "actions": ["pause"]}}));
+        assert_eq!(
+            goal_controls(Some(&standard)),
+            None,
+            "標準のメソッドは呼ばない"
+        );
+        let only_set =
+            meta(json!({"goal": {"controlMethod": "_session/goal", "actions": ["set"]}}));
+        assert_eq!(goal_controls(Some(&only_set)), None);
+        assert_eq!(goal_controls(None), None);
+        assert_eq!(GoalAction::Pause.as_str(), "pause");
+    }
+
+    /// サブエージェントの手順（O17）: Claude が `_meta.claudeCode.parentToolUseId` に載せる親の id を
+    /// 開始にも更新にも写す。印の無い手順・空の id は親なし。
+    #[test]
+    fn subagent_steps_carry_their_parent_tool_call() {
+        let child: v1::ToolCall = serde_json::from_value(json!({
+            "toolCallId": "toolu_child",
+            "title": "Read src/lib.rs",
+            "kind": "read",
+            "_meta": {"claudeCode": {"parentToolUseId": "toolu_task", "toolName": "Read"}}
+        }))
+        .expect("ToolCall をパースできる");
+        let events = mapped(v1::SessionUpdate::ToolCall(child));
+        let [AgentEvent::ToolStarted(started)] = events.as_slice() else {
+            panic!("ToolStarted 1 つ: {events:?}");
+        };
+        assert_eq!(started.parent.as_deref(), Some("toolu_task"));
+
+        let update: v1::ToolCallUpdate = serde_json::from_value(json!({
+            "toolCallId": "toolu_child",
+            "status": "completed",
+            "_meta": {"claudeCode": {"parentToolUseId": "toolu_task"}}
+        }))
+        .expect("ToolCallUpdate をパースできる");
+        let events = mapped(v1::SessionUpdate::ToolCallUpdate(update));
+        let [AgentEvent::ToolUpdated(updated)] = events.as_slice() else {
+            panic!("ToolUpdated 1 つ: {events:?}");
+        };
+        assert_eq!(updated.parent.as_deref(), Some("toolu_task"));
+
+        for meta in [json!({}), json!({"claudeCode": {"parentToolUseId": ""}})] {
+            let top: v1::ToolCall = serde_json::from_value(json!({
+                "toolCallId": "toolu_top",
+                "title": "Task",
+                "_meta": meta
+            }))
+            .expect("ToolCall をパースできる");
+            let events = mapped(v1::SessionUpdate::ToolCall(top));
+            let [AgentEvent::ToolStarted(started)] = events.as_slice() else {
+                panic!("ToolStarted 1 つ: {events:?}");
+            };
+            assert!(started.parent.is_none(), "親の印が無ければ普通の手順");
+        }
+    }
+
+    /// `AvailableCommandsUpdate` は一覧まるごと（ヒント付き・ヒント無し）で `Commands` になる。
+    /// `SessionInfoUpdate` は title の「値 / null / 無し」を区別し、`_meta.goal` は目標になる。
+    #[test]
+    fn session_updates_map_commands_titles_and_goals() {
+        let commands = mapped(v1::SessionUpdate::AvailableCommandsUpdate(
+            v1::AvailableCommandsUpdate::new(vec![
+                v1::AvailableCommand::new("compact", "会話を要約して文脈を空ける"),
+                v1::AvailableCommand::new("review", "変更をレビューする").input(
+                    v1::AvailableCommandInput::Unstructured(v1::UnstructuredCommandInput::new(
+                        "optional review instructions",
+                    )),
+                ),
+                v1::AvailableCommand::new("mcp:github:pr", "PR を作る").input(
+                    v1::AvailableCommandInput::Unstructured(v1::UnstructuredCommandInput::new(
+                        "  ",
+                    )),
+                ),
+            ]),
+        ));
+        let [AgentEvent::Commands(commands)] = commands.as_slice() else {
+            panic!("Commands 1 つ: {commands:?}");
+        };
+        assert_eq!(
+            commands,
+            &vec![
+                SlashCommand {
+                    name: "compact".into(),
+                    description: "会話を要約して文脈を空ける".into(),
+                    hint: None,
+                },
+                SlashCommand {
+                    name: "review".into(),
+                    description: "変更をレビューする".into(),
+                    hint: Some("optional review instructions".into()),
+                },
+                SlashCommand {
+                    name: "mcp:github:pr".into(),
+                    description: "PR を作る".into(),
+                    hint: None,
+                },
+            ],
+            "空白だけのヒントはヒント無し扱い"
+        );
+
+        let titled = mapped(v1::SessionUpdate::SessionInfoUpdate(
+            v1::SessionInfoUpdate::new().title("ログイン修正"),
+        ));
+        assert!(
+            matches!(titled.as_slice(), [AgentEvent::TitleChanged(Some(title))] if title == "ログイン修正"),
+            "{titled:?}"
+        );
+        let cleared = mapped(v1::SessionUpdate::SessionInfoUpdate(
+            v1::SessionInfoUpdate::new().title(None),
+        ));
+        assert!(
+            matches!(cleared.as_slice(), [AgentEvent::TitleChanged(None)]),
+            "null は名前を消す: {cleared:?}"
+        );
+
+        let mut goal_meta = serde_json::Map::new();
+        goal_meta.insert(
+            "goal".into(),
+            json!({"objective": " テストを緑にする ", "status": "paused", "tokensUsed": 12}),
+        );
+        let goal = mapped(v1::SessionUpdate::SessionInfoUpdate(
+            v1::SessionInfoUpdate::new().meta(goal_meta),
+        ));
+        assert_eq!(
+            goal.len(),
+            1,
+            "title の無い通知で会話名を消さない（目標だけ）: {goal:?}"
+        );
+        assert!(
+            matches!(
+                &goal[0],
+                AgentEvent::GoalChanged(Some(AgentGoal { objective, status: GoalStatus::Paused }))
+                    if objective == "テストを緑にする"
+            ),
+            "{goal:?}"
+        );
+        let mut goal_cleared = serde_json::Map::new();
+        goal_cleared.insert("goal".into(), serde_json::Value::Null);
+        let cleared_goal = mapped(v1::SessionUpdate::SessionInfoUpdate(
+            v1::SessionInfoUpdate::new().meta(goal_cleared),
+        ));
+        assert!(
+            matches!(cleared_goal.as_slice(), [AgentEvent::GoalChanged(None)]),
+            "{cleared_goal:?}"
+        );
+        // Claude のファイル変更報告のような `_meta` だけの通知は何も出さない。
+        let mut other_meta = serde_json::Map::new();
+        other_meta.insert("jetbrains".into(), json!({"air": {}}));
+        assert!(mapped(v1::SessionUpdate::SessionInfoUpdate(
+            v1::SessionInfoUpdate::new().meta(other_meta)
+        ))
+        .is_empty());
+    }
+
+    /// `usage_update`（claude-agent-acp が送る実際の形）: 文脈の使用量に加えて、ターンの結果の
+    /// `cost`（会話の累計）と、`rate_limit_event` の中継 `_meta["_claude/rateLimit"]` を捨てずに流す。
+    #[test]
+    fn usage_updates_carry_cost_and_rate_limits() {
+        let result: v1::SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "usage_update",
+            "used": 52_000,
+            "size": 200_000,
+            "cost": {"amount": 1.25, "currency": "USD"},
+            "_meta": {"_claude/model": "claude-opus-5[1m]"}
+        }))
+        .expect("usage_update を読める");
+        let events = mapped(result);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    AgentEvent::Usage { used: 52_000, size: 200_000 },
+                    AgentEvent::SessionCost { amount, currency },
+                ] if (*amount - 1.25).abs() < 1e-9 && currency == "USD"
+            ),
+            "{events:?}"
+        );
+
+        let rate_limit: v1::SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "usage_update",
+            "used": 52_000,
+            "size": 200_000,
+            "_meta": {
+                "_claude/rateLimit": {
+                    "status": "allowed_warning",
+                    "resetsAt": 1_790_000_000,
+                    "rateLimitType": "five_hour",
+                    "utilization": 0.85,
+                    "unifiedWindows": {
+                        "five_hour": {"utilization": 0.85, "resetsAt": 1_790_000_000},
+                        "seven_day": {"utilization": 0.2, "resetsAt": 1_790_400_000}
+                    }
+                },
+                "_claude/model": "claude-opus-5[1m]"
+            }
+        }))
+        .expect("usage_update を読める");
+        let events = mapped(rate_limit);
+        let [AgentEvent::Usage { .. }, AgentEvent::RateLimits(limits)] = events.as_slice() else {
+            panic!("Usage と RateLimits: {events:?}");
+        };
+        assert_eq!(limits.status, Some(usage::LimitStatus::Warning));
+        assert_eq!(limits.windows.len(), 2);
+
+        // 壊れた cost（負）は流さない。rate limit の無い `_meta` も何も足さない。
+        let odd: v1::SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "usage_update",
+            "used": 1,
+            "size": 2,
+            "cost": {"amount": -3.0, "currency": "USD"},
+            "_meta": {"_claude/origin": {"kind": "task-notification"}}
+        }))
+        .expect("usage_update を読める");
+        assert!(
+            matches!(
+                mapped(odd).as_slice(),
+                [AgentEvent::Usage { used: 1, size: 2 }]
+            ),
+            "負のコストは捨てる"
+        );
+    }
+
+    /// 偽エージェント: prompt を受けると、ターン中に rate limit とコストを送り、`_meta.quota` 付きで
+    /// 応答する（claude-agent-acp の `turnOutcome` と同じ形）。
+    const AGENT_THAT_REPORTS_USAGE: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def update(sid, body):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid, "update": body}})
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "sess-1"}})
+    elif method == "session/prompt":
+        sid = params["sessionId"]
+        update(sid, {"sessionUpdate": "usage_update", "used": 900, "size": 200000,
+                     "_meta": {"_claude/rateLimit": {"status": "allowed", "rateLimitType": "five_hour",
+                                                     "resetsAt": 1790000000, "utilization": 0.42}}})
+        update(sid, {"sessionUpdate": "agent_message_chunk",
+                     "content": {"type": "text", "text": "done"}})
+        update(sid, {"sessionUpdate": "usage_update", "used": 1200, "size": 200000,
+                     "cost": {"amount": 0.37, "currency": "USD"}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 20, "cachedReadTokens": 30,
+                      "cachedWriteTokens": 40, "totalTokens": 100},
+            "_meta": {"quota": {
+                "token_count": {"totalTokens": 100, "inputTokens": 10, "cachedInputTokens": 30,
+                                "cachedWriteTokens": 40, "outputTokens": 20,
+                                "reasoningOutputTokens": 0},
+                "model_usage": [{"model": "claude-opus-5[1m]", "token_count": {
+                    "totalTokens": 100, "inputTokens": 10, "cachedInputTokens": 30,
+                    "cachedWriteTokens": 40, "outputTokens": 20, "reasoningOutputTokens": 0}}]}}}})
+        sys.exit(0)
+"#;
+
+    /// ターンの終わりの `_meta.quota` は `TurnUsage` になり、`TurnEnded` より先に届く。ターン中の
+    /// コストと rate limit も流れる。
+    #[test]
+    fn turn_usage_arrives_before_turn_end() {
+        let Some((outcome, events)) = run_fake_agent_until_session_ends(
+            AGENT_THAT_REPORTS_USAGE,
+            SessionPreferences::default(),
+            Some("やって"),
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("セッションは正常終了する");
+        let usage_at = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::TurnUsage(usage::TurnTokens {
+                        input: 10,
+                        output: 20,
+                        cached_read: 30,
+                        cached_write: 40,
+                        total: 100,
+                    })
+                )
+            })
+            .unwrap_or_else(|| panic!("TurnUsage が届く: {events:?}"));
+        let ended_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::TurnEnded { .. }))
+            .unwrap_or_else(|| panic!("TurnEnded が届く: {events:?}"));
+        assert!(
+            usage_at < ended_at,
+            "TurnUsage は TurnEnded の前: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SessionCost { amount, .. } if (*amount - 0.37).abs() < 1e-9
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, AgentEvent::RateLimits(limits) if limits.windows.len() == 1)
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// slash コマンドは本文 1 ブロックだけで送る（先頭 = 末尾 = `/…`）。Claude は末尾、Codex は
+    /// 先頭のブロックをコマンドとして読むため、1 ブロックでないとどちらかで効かない。
+    #[test]
+    fn a_slash_command_travels_as_a_single_text_block() {
+        let (event_tx, _event_rx) = mpsc::unbounded();
+        let blocks = prompt_blocks("/review 認証まわり".into(), Vec::new(), true, &event_tx);
+        let [v1::ContentBlock::Text(text)] = blocks.as_slice() else {
+            panic!("本文 1 ブロックだけ: {blocks:?}");
+        };
+        assert_eq!(text.text, "/review 認証まわり");
+    }
+
+    /// 偽エージェントを立て、prompt を送らずに `until` が満たされるまで（最長 10 秒）イベントを
+    /// 集め、送信路を閉じてセッションを終わらせる（待機中に届く更新の検証用）。
+    fn collect_idle_events(
+        script: &str,
+        until: impl Fn(&[AgentEvent]) -> bool,
+    ) -> Option<Vec<AgentEvent>> {
+        use futures::future::FutureExt as _;
+        let command = fake_agent_command(script)?;
+        let (command_tx, command_rx) = mpsc::unbounded::<SessionCommand>();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        Some(futures::executor::block_on(async move {
+            let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                // 上限は偽エージェント（python）の起動込み。テストが並んで重い Windows のランナーでは
+                // 起動だけで 10 秒近くかかり、届く前に打ち切っていた（PR #30 の check-windows）。
+                // 条件がそろえばすぐ抜けるので、長くしても通る時は遅くならない（固まった時の保険）。
+                let deadline =
+                    blocking::unblock(|| std::thread::sleep(Duration::from_secs(60))).fuse();
+                futures::pin_mut!(deadline);
+                loop {
+                    let next = event_rx.next().fuse();
+                    futures::pin_mut!(next);
+                    futures::select! {
+                        event = next => match event {
+                            Some(event) => {
+                                seen.push(event);
+                                if until(&seen) {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        },
+                        () = deadline => break,
+                    }
+                }
+                drop(command_tx);
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                seen
+            };
+            let (outcome, seen) = futures::join!(session, collect);
+            outcome.expect("セッションは正常終了する");
+            seen
+        }))
+    }
+
+    /// 偽エージェント: `session/new` に答えた直後（prompt は来ない）にコマンド一覧を 2 回
+    /// （2 回目は全量の差し替え）、`_meta` だけの `session_info_update`、会話名を送る。
+    const AGENT_WITH_IDLE_UPDATES: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def update(sid, body):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid, "update": body}})
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "sess-1"}})
+        update("sess-1", {"sessionUpdate": "available_commands_update",
+                          "availableCommands": [
+                              {"name": "compact", "description": "Compact", "input": None},
+                              {"name": "review", "description": "Review",
+                               "input": {"hint": "instructions"}}]})
+        update("sess-1", {"sessionUpdate": "available_commands_update",
+                          "availableCommands": [
+                              {"name": "compact", "description": "Compact", "input": None},
+                              {"name": "goal", "description": "Set a goal",
+                               "input": {"hint": "[<objective>|clear]"}},
+                              {"name": "mcp:github:pr", "description": "Open a PR"}]})
+        update("sess-1", {"sessionUpdate": "session_info_update",
+                          "_meta": {"jetbrains": {"air": {}}}})
+        update("sess-1", {"sessionUpdate": "session_info_update",
+                          "title": "ログイン修正", "updatedAt": "2026-09-26T00:00:00Z"})
+"#;
+
+    /// 回帰テスト（O2）: 待機中（ターンの外）に届く更新も読む。以前の待機ループは command と
+    /// EOF しか待たず、`session/new` 直後のコマンド一覧も、ターン後に付く会話名も、次の prompt を
+    /// 送るまで UI に届かなかった。prompt を 1 通も送らずに両方が届くことを確かめる。
+    #[test]
+    fn commands_and_title_reach_the_ui_while_idle() {
+        let Some(events) = collect_idle_events(AGENT_WITH_IDLE_UPDATES, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TitleChanged(_)))
+        }) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let lists: Vec<Vec<String>> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Commands(commands) => Some(
+                    commands
+                        .iter()
+                        .map(|command| command.name.clone())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lists,
+            vec![
+                vec!["compact".to_string(), "review".to_string()],
+                vec![
+                    "compact".to_string(),
+                    "goal".to_string(),
+                    "mcp:github:pr".to_string()
+                ],
+            ],
+            "一覧は届いた順に、毎回全量で流れる: {events:?}"
+        );
+        let titles: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TitleChanged(title) => Some(title.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            vec![Some("ログイン修正".to_string())],
+            "`_meta` だけの通知は名前を消さない: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnStarted)),
+            "prompt は送っていない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント: `session/load` の最中に履歴の本文・コマンド一覧・会話名を流してから応答する。
+    const AGENT_THAT_REPLAYS_STATE_ON_LOAD: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def update(sid, body):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid, "update": body}})
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/load":
+        sid = params["sessionId"]
+        update(sid, {"sessionUpdate": "agent_message_chunk",
+                     "content": {"type": "text", "text": "old history"}})
+        update(sid, {"sessionUpdate": "available_commands_update",
+                     "availableCommands": [{"name": "compact", "description": "Compact"}]})
+        update(sid, {"sessionUpdate": "session_info_update", "title": "前回の会話"})
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    /// `session/load` の再生は本文を捨てる（二重表示しない）が、状態（コマンド一覧・会話名）は
+    /// 捨てずに UI へ流す。
+    #[test]
+    fn resume_keeps_replayed_state_but_drops_replayed_history() {
+        let preferences = SessionPreferences {
+            resume: Some("prev-1".into()),
+            ..SessionPreferences::default()
+        };
+        let Some((outcome, events)) = run_fake_agent_until_session_ends(
+            AGENT_THAT_REPLAYS_STATE_ON_LOAD,
+            preferences,
+            Some("続き"),
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("セッションは正常終了する");
+        assert!(
+            !events.iter().any(
+                |event| matches!(event, AgentEvent::AgentChunk(text) if text == "old history")
+            ),
+            "再生された本文は流さない: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Commands(commands) if commands.len() == 1 && commands[0].name == "compact"
+            )),
+            "再生中のコマンド一覧は流す: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::TitleChanged(Some(title)) if title == "前回の会話"
+            )),
+            "再生中の会話名も流す: {events:?}"
+        );
     }
 }
 

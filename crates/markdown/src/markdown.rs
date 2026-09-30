@@ -460,6 +460,107 @@ pub struct TableColumn {
     pub min_units: f32,
 }
 
+/// 文書の頭の front matter（Jekyll / Hugo / Obsidian などの `---` YAML・`+++` TOML・O29）。
+/// 整形プレビューは表の形で見せ、残りだけを [`parse`] に回す（front matter の閉じの `---` が
+/// 直前の行を setext 見出しにしてしまうのを防ぐ）。Agent の発話には使わない（文書の約束なので）。
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct FrontMatter {
+    /// 上の階層のキーと値（書かれた順）。入れ子や一覧は値の 1 行に畳む（`a, b`）。
+    pub entries: Vec<(String, String)>,
+}
+
+/// 頭の front matter を切り出す。無ければ `(None, source)`。1 行目がちょうど `---`（YAML）か
+/// `+++`（TOML）で、閉じの行（YAML は `---` か `...`・TOML は `+++`）がある時だけ。閉じが無ければ
+/// front matter とみなさない（ただの水平線と段落として読む）。先頭の BOM と CRLF は許す。
+pub fn split_front_matter(source: &str) -> (Option<FrontMatter>, &str) {
+    let text = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let mut lines = text.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return (None, source);
+    };
+    let (closers, separator): (&[&str], char) = match first.trim_end() {
+        "---" => (&["---", "..."], ':'),
+        "+++" => (&["+++"], '='),
+        _ => return (None, source),
+    };
+    let mut offset = first.len();
+    let mut body = Vec::new();
+    for line in lines {
+        let end = offset + line.len();
+        if closers.contains(&line.trim_end()) {
+            let entries = front_matter_entries(&body, separator);
+            return (Some(FrontMatter { entries }), &text[end..]);
+        }
+        body.push(line.trim_end_matches(['\r', '\n']));
+        offset = end;
+    }
+    (None, source)
+}
+
+/// front matter の行からキーと値を拾う。上の階層の `key: value`（TOML は `key = value`）が 1 項目で、
+/// 字下げされた行や `- ` の一覧は直前の項目の値へ `, ` で足す。コメントと空行、TOML の `[表]` は飛ばす。
+fn front_matter_entries(lines: &[&str], separator: char) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if separator == '=' && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            continue;
+        }
+        let top_level = !line.starts_with([' ', '\t']) && !trimmed.starts_with("- ");
+        if top_level {
+            if let Some((key, value)) = line.split_once(separator) {
+                entries.push((
+                    front_matter_value(key.trim()),
+                    front_matter_value(value.trim()),
+                ));
+                continue;
+            }
+        }
+        let Some((_, value)) = entries.last_mut() else {
+            continue;
+        };
+        let item = front_matter_value(trimmed.strip_prefix("- ").unwrap_or(trimmed).trim());
+        if item.is_empty() {
+            continue;
+        }
+        if !value.is_empty() {
+            value.push_str(", ");
+        }
+        value.push_str(&item);
+    }
+    entries
+}
+
+/// 値の見た目: 囲みの引用符を外し、`[a, "b"]` の一覧は `a, b` にする。
+fn front_matter_value(value: &str) -> String {
+    let unquote = |text: &str| -> String {
+        let text = text.trim();
+        let quoted = text.len() >= 2
+            && ((text.starts_with('"') && text.ends_with('"'))
+                || (text.starts_with('\'') && text.ends_with('\'')));
+        if quoted {
+            text[1..text.len() - 1].to_string()
+        } else {
+            text.to_string()
+        }
+    };
+    match value
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+    {
+        Some(inner) => inner
+            .split(',')
+            .map(unquote)
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => unquote(value),
+    }
+}
+
 /// 表の列レイアウト（内容の最長表示幅ベース）。GPUI にテーブルレイアウトが無いため、
 /// 比率 + 最小幅の 2 段構えで近似する: ID のような短い列は内容ぶんを確保して折り返さず、
 /// 本文列は残りを比率で分け合い、極端な長文列は頭打ちにして他列を潰さない。
@@ -537,6 +638,55 @@ fn heading_level(level: pulldown_cmark::HeadingLevel) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn front_matter_is_cut_off_and_read_as_properties() {
+        let source = "---\ntitle: \"Release notes\"\ndate: 2026-09-26\ntags:\n  - rust\n  - gpui\naliases: [notes, 'changelog']\n# comment\nurl: https://example.com/a\n---\n# Heading\n";
+        let (front, body) = split_front_matter(source);
+        let entries = front.expect("front matter").entries;
+        assert_eq!(
+            entries,
+            vec![
+                ("title".to_string(), "Release notes".to_string()),
+                ("date".to_string(), "2026-09-26".to_string()),
+                ("tags".to_string(), "rust, gpui".to_string()),
+                ("aliases".to_string(), "notes, changelog".to_string()),
+                ("url".to_string(), "https://example.com/a".to_string()),
+            ]
+        );
+        assert_eq!(body, "# Heading\n");
+        assert!(matches!(
+            parse(body).first(),
+            Some(Block::Heading { level: 1, .. })
+        ));
+
+        let (front, body) = split_front_matter(
+            "\u{feff}+++\r\ntitle = \"TOML\"\r\n[extra]\r\ndraft = false\r\n+++\r\nText\r\n",
+        );
+        assert_eq!(
+            front.expect("TOML").entries,
+            vec![
+                ("title".to_string(), "TOML".to_string()),
+                ("draft".to_string(), "false".to_string()),
+            ]
+        );
+        assert_eq!(body, "Text\r\n");
+    }
+
+    #[test]
+    fn a_rule_without_a_closing_line_is_not_front_matter() {
+        let source = "---\ntitle: no end\n\nParagraph\n";
+        assert_eq!(split_front_matter(source), (None, source));
+        let source = "# Title\n---\nkey: value\n---\n";
+        assert_eq!(
+            split_front_matter(source),
+            (None, source),
+            "頭でなければ読まない"
+        );
+        let (front, body) = split_front_matter("---\n---\nbody");
+        assert_eq!(front, Some(FrontMatter::default()), "空でも front matter");
+        assert_eq!(body, "body");
+    }
 
     #[test]
     fn link_spans_carry_their_destination() {

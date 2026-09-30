@@ -108,7 +108,7 @@ if inside_necoder; then
     echo "necoder の統合ターミナルから実行されている → 差し替えを別プロセスへ渡す"
     nohup "$SELF" --swap-only "$PROFILE" >"$LOG" 2>&1 &
     disown 2>/dev/null || true
-    echo "→ 数秒で終了・再起動します（ログ: $LOG）"
+    echo "→ 数秒で終了・再起動します（ログ: ${LOG}）"
     exit 0
 fi
 

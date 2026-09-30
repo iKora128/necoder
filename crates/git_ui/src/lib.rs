@@ -1,8 +1,9 @@
 //! Workspace-independent Git panel state and typed shell events.
 
+use editor_view::EditorView;
 use gpui::{
-    div, Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString,
-    Window,
+    div, Context, Entity, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render,
+    SharedString, Window,
 };
 use project::{DiffHunk, GitWorktree, GraphCommit, WorkingChange};
 use std::path::PathBuf;
@@ -38,8 +39,11 @@ pub enum GitPanelEvent {
 /// 1 ProjectSession に属する Git UI state。
 pub struct GitPanel {
     pub open: bool,
-    pub message: String,
-    pub branch_name: Option<String>,
+    /// コミットメッセージの入力欄（IME の正しい平坦 `EditorView`＝⌘V・undo・日本語入力が効く。
+    /// Enter は改行、⌘⏎ でコミット）。
+    pub message: Entity<EditorView>,
+    /// 新しいブランチ名の入力欄（＋ を押している間だけ在る。⏎ で作成・Esc で取消）。
+    pub branch_name: Option<Entity<EditorView>>,
     pub focus: FocusHandle,
     pub busy: bool,
     pub branch_menu: Option<BranchMenu>,
@@ -47,10 +51,11 @@ pub struct GitPanel {
 }
 
 impl GitPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    /// `message` = コミットメッセージ欄（テーマ・色を知っている shell が作って渡す）。
+    pub fn new(message: Entity<EditorView>, cx: &mut Context<Self>) -> Self {
         Self {
             open: false,
-            message: String::new(),
+            message,
             branch_name: None,
             focus: cx.focus_handle(),
             busy: false,

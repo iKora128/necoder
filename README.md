@@ -78,6 +78,7 @@ Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live 
 git clone https://github.com/iKora128/necoder.git && cd necoder
 cargo run -p necoder          # toolchain pinned by rust-toolchain.toml (rustup fetches it)
 ./scripts/bundle-mac.sh        # optional: assemble necoder.app with the app icon
+./scripts/bundle-mac.sh release dev  # optional: necoder Dev.app that runs next to your regular necoder (state in ~/.necoder-dev)
 ```
 
 The first build compiles GPUI and takes a while. Without full Xcode (Command Line Tools only), `bundle-mac.sh` automatically falls back to runtime shader compilation.
@@ -196,6 +197,7 @@ AI 機能には [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) �
 git clone https://github.com/iKora128/necoder.git && cd necoder
 cargo run -p necoder          # toolchain は rust-toolchain.toml で固定(rustup が自動取得)
 ./scripts/bundle-mac.sh        # 任意: アイコン付きの necoder.app を組み立て
+./scripts/bundle-mac.sh release dev  # 任意: 常用の necoder と並べて動かす検証用の necoder Dev.app(状態は ~/.necoder-dev)
 ```
 
 初回ビルドは GPUI のコンパイルで時間がかかります。フル Xcode が無い環境(CLT のみ)では `bundle-mac.sh` が自動でランタイムシェーダにフォールバックします。

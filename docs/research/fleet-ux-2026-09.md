@@ -19,6 +19,14 @@ GLOSSARY を書き換えてから実装に入る（文書が正・CLAUDE.md の�
 
 ## 2. 比較調査（2026-09 時点）
 
+> **訂正（2026-09-21・深掘りは [`captain-orchestrators-2026-09.md`](./captain-orchestrators-2026-09.md)）**:
+> ① herdr の「横に最大 3 本（各 ≥50 桁）」と「SessionStart hook で pane 自動作成」は **herdr 本体の仕様ではない**。
+> Zenn 記事の著者が自作 hook に入れた設定値と運用（`MAX_COLUMNS=3` / `MIN_COLS=50`・既存 pane を寄せるだけ）で、本体に pane 数の上限は無い。
+> ② herdr の状態は 4 値ではなく `blocked / working / done / idle / unknown` の 5 値（内部は 4 値 + pane ごとの既読 1 bit。done = idle かつ未読）。
+> ③ herdr のライセンスは 2026-07-22 に AGPL-3.0-or-later から Apache-2.0 へ変わった（それ以前の記事は AGPL と書いている）。
+> ④ 下の「グリッドは GUI 勢の誰もやっていない」は 2026-09 時点では言い過ぎ。VS Code の Agents window・Cursor 3 の Agent Tabs・
+> Claude desktop が**明示操作での**タイル表示を持つ（既定が 1 枚である点は各社とも同じ = 本メモの結論は変わらない）。
+
 | ツール | 単位 | 画面の骨格 | 状態の見せ方 | 取り入れる点 |
 |---|---|---|---|---|
 | **herdr**（Rust TUI・Apache-2.0） | Space = worktree、Pane = その中 | 1 repo = 1 画面 = worktree を**横に最大 3 本**（各 ≥50 桁）。左サイドバーに全 Space の状態 | working / blocked / idle / done の 4 値を一列で | 「横並びは 3 本まで」「サイドバー = 状態一覧」「SessionStart hook で pane 自動作成」 |

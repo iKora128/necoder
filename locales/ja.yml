@@ -5,6 +5,23 @@
 app:
   name: necoder
 editor:
+  table_truncated: "先頭の %{n} 行だけを表にしています（全部は本文で・⌘⇧V で戻る）"
+  drop_remote: "リモートのプロジェクトのエディタには落とせません（エクスプローラのフォルダへ落とすとアップロードします）"
+  toc: 目次
+  toc_empty: 見出しがありません
+  slash_h1: 見出し 1
+  slash_h2: 見出し 2
+  slash_h3: 見出し 3
+  slash_bullet: 箇条書き
+  slash_numbered: 番号付きの一覧
+  slash_todo: チェックリスト
+  slash_quote: 引用
+  slash_code: コードブロック
+  slash_table: 表
+  slash_divider: 区切り線
+  slash_image: 画像
+  slash_link: リンク
+  slash_toc: 目次
   empty_hint: 起動引数でファイルを渡すと開きます（例 necoder README.md）
   blame_uncommitted: 未コミット
 common:
@@ -14,7 +31,12 @@ finder:
   projects: プロジェクトを切り替え…
   new_file: 新規ファイル…
   new_dir: 新規フォルダ…
+  search_ignored: 無視されたファイルも探す（.gitignore）
+  searching_ignored: 無視されたファイルを探しています…
+  ignored_not_found: 無視されたファイルにも見つかりません
+  ignored_detail: 無視
 agent:
+  disabled_agent: "%{agent} は使わない設定です（設定 › AI エージェント のスイッチで戻せます）"
   pasted_image: 貼り付けた画像
   search_placeholder: この会話を検索
   search_count: "%{position}/%{entries} · %{total} 件"
@@ -31,11 +53,14 @@ agent:
   default_thread_name: スレッド%{n}
   open_diff_tab: エディタで開く（diff タブ）
   waiting_permission: 承認待ちで停止中
+  waiting_question: 質問に答えてください
   todos: Todos
   copy_tip: このエントリをコピー
   input_expand: "全 %{n} 行を表示"
   input_expand_tip: この入力を全文表示
   input_collapse_tip: この入力を折り畳む
+  auto_prompt: イベント
+  auto_prompt_source: "%{label}（%{source}）"
   jump_to_previous_user: 前の指示へ
   jump_to_latest: 最新へ
   pill_agent: エージェント（どの AI で話すか）
@@ -47,11 +72,35 @@ agent:
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
   err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
+  err_launch_not_in_registry: "%{id} が ACP レジストリに見つかりません（設定 → AI エージェント → エージェントを追加 で取り直してください）"
+  err_launch_no_distribution: "このマシン（%{platform}）向けの配布がありません"
+  err_launch_needs_node: node（npx）が要ります。node を入れてから再開してください
+  err_launch_needs_uv: uv（uvx）が要ります。uv を入れてから再開してください（necoder は入れません）
+  err_launch_binary_on_remote: このエージェントは binary の配布しか無いので、リモート（SSH）では起動できません
+  err_launch_not_deployed: まだ落としていません（最初の送信で落として検証します）
+  err_deploy_download: "%{url} を落とせませんでした: %{reason}"
+  err_deploy_checksum: "落とした物の sha256 がレジストリの値と合わないので、使いませんでした（レジストリ %{expected} / 落とした物 %{actual}）"
+  err_deploy_unsafe: "書庫の中に置き場の外を指す名前（%{entry}）があるので、展開しませんでした"
+  err_deploy_other: "binary を置けませんでした: %{reason}"
+  deploying: "%{agent} %{version} を落としています（binary・最初の 1 回だけ）…"
+  deploy_verified: レジストリの sha256 と照合しました
+  deploy_unverified: レジストリに sha256 の値が無いので、照合せずに使います
+  deploy_fallback: "新しい版（%{new}）を落とせなかったので、手元の版（%{version}）で起動します"
   err_session_lost: セッションが切れました。もう一度送信してください
   err_session_ended: エージェントのセッションが終了しました（中断扱い）
   err_cancel_session_lost: セッションが応答しないため中断しました
   err_session_lost_transport: エージェントとの接続が切れました（SSH 切断など）
   session_lost_banner: セッションが切れました（SSH 切断など）。次の送信で立ち上げ直します
+  session_lost_banner_local: エージェントが終了しました。次の送信で立ち上げ直します
+  err_session_lost_process: エージェントのプロセスが終了しました
+  err_agent_exited: "エージェントが起動してすぐ終了しました（%{status}）。エージェントが stderr に書いた理由は画面にだけ出し、保存しません"
+  exit_code: "終了コード %{code}"
+  exit_signal: "シグナル %{signal} で終了"
+  exit_unknown: 終わり方は不明
+  exit_title: 起動してすぐ終了しました
+  exit_body: "%{status}。エージェントが stderr に最後に書いた行です（画面だけ・保存しません。渡した鍵などは伏せています）"
+  exit_no_stderr: （stderr には何も書かれていませんでした）
+  exit_dismiss: 閉じる
   session_resume: 再開
   session_resume_tip: 送信せずに今すぐ立ち上げ直す（前回の会話は対応エージェントなら引き継ぎます）
   session_resuming: 再開中…
@@ -66,6 +115,8 @@ agent:
   permission_files: "%{title}（%{n} ファイル）"
   done: 完了 %{elapsed}
   done_touched: 完了 %{elapsed}・触ったファイル %{n}
+  turn_failed: 失敗 %{elapsed}
+  turn_interrupted: 中断 %{elapsed}
   close_thread_tip: スレッドを閉じる  ⌘W
   rename_thread_tip: 名前を変更（ダブルクリック）
   rename_thread_title: スレッド名を変更
@@ -74,7 +125,7 @@ agent:
   rename_thread_cancel: キャンセル
   rename_thread_confirm: 保存
   history_tip: スレッド履歴
-  history_placeholder: 過去のスレッドを開く…
+  history_placeholder: 過去のスレッドを開く・全スレッドの本文を検索…
   new_thread_tip: 新規スレッド  ⌘⇧A
   full_screen_tip: AI を全画面（エディタを畳む）  ⌘⇧⏎
   view_list: 縦リストで表示
@@ -98,6 +149,8 @@ agent:
   attach_tip: ファイルを文脈に添付
   compact: /compact
   compact_tip: 文脈を要約して圧縮する（/compact）
+  compact_queued_tip: "実行中 — ターンが終わったら /compact を送る（送信待ちに積む）"
+  compact_none_tip: "まだ会話がありません"
   output_truncated: "… (%{n} 行省略)"
   result_lines: "%{n} 行"
   file_write: "書き込み %{path}"
@@ -106,6 +159,9 @@ agent:
   queue_send_now: 中断して今すぐ
   elicitation_submit: これで回答
   elicitation_decline: 答えない
+  elicitation_custom_single: 自分で書く（案を選んだ時はその案に添えるメモになる）
+  elicitation_custom_multi: 自分で書く（選んだ案に足される）
+  subagent_steps: "サブエージェント · %{count} 手順"
   code_show_more: "… 残り %{n} 行を表示"
   code_collapse: コードを折りたたむ
   code_streaming_more: "… 実行中（%{n} 行）"
@@ -115,23 +171,70 @@ agent:
   send_enter: 送信 ⏎
   send_cmd: 送信 ⌘⏎
   stop: 停止 esc
-  shell_badge: "! シェル"
-  shell_hint: エージェントには送らずシェルで実行 · 出力は次の送信に添えます
-  shell_run_enter: 実行 ⏎
-  shell_run_cmd: 実行 ⌘⏎
-  shell_place_chat: チャットのフォルダ
-  shell_running: 実行中…
-  shell_stop: 停止
-  shell_exit: 終了コード %{code}
-  shell_signal: シグナルで終了
-  shell_stopped: 停止しました
-  shell_failed: 実行できません
-  shell_no_output: （出力なし）
-  shell_output_clipped: … （出力が大きすぎるため、ここから先は省きました）
-  shell_context_tip: 次の送信でこの出力をエージェントに渡します（× で外す）
   running_hint: esc で中断
   running_thinking: 考えています
+  slash_footer: "%{count} 件 · ↑↓ で選ぶ · Enter / Tab で入れる · esc で閉じる"
+  shell_badge: "! シェル"
+  shell_run_enter: 実行 ⏎
+  shell_run_cmd: 実行 ⌘⏎
+  shell_hint: シェルで実行（エージェントには送らない・結果は次の送信に添える）
+  shell_hint_no_project: シェルで実行するには、プロジェクトを開いてください
+  shell_hint_no_folder: このチャットにはまだフォルダがありません。最初のメッセージを送ると、そのフォルダでシェルを実行できます
+  shell_running: 実行中
+  shell_stopping: 止めています…
+  shell_stop: 止める
+  shell_stop_tip: このコマンドを止める（esc でも止まる）
+  shell_exit_code: "終了コード %{code}"
+  shell_signal: シグナルで終了
+  shell_interrupted: 中断
+  shell_interrupted_remote: 中断（SSH 先のコマンドは止められないため、向こうでは最後まで動きます）
+  shell_failed: "実行できませんでした: %{message}"
+  shell_no_output: （出力なし）
+  shell_output_cut: "…（長いので途中を省きました）…"
+  shell_pending_tip: このシェルの結果を次の送信に添えます（× で外す）
+  shell_context_intro: "（ユーザーがこの会話の作業ディレクトリで、次のシェルコマンドを実行しました。結果を文脈として使ってください）"
+  goal_label: 目標
+  goal_status_active: 進行中
+  goal_pause: 一時停止
+  goal_resume: 再開
+  goal_clear: 取り消す
+  goal_status_paused: 一時停止
+  goal_status_blocked: 止まっています
+  goal_status_complete: 達成
+  goal_status_limited: 上限で停止
   more_lines: … （他 %{n} 行）
+  history_section_threads: このプロジェクトのスレッド
+  history_section_agent: "エージェントの過去の会話 — %{agent}"
+  history_section_agent_remote: "エージェントの過去の会話 — %{agent}（%{host}）"
+  history_section_matches: 本文の一致（全スレッド）
+  history_agent_loading: 一覧を読み込んでいます…
+  history_agent_unsupported: "%{agent} は会話の一覧に対応していません"
+  history_agent_failed: "一覧を読めませんでした: %{error}"
+  history_agent_empty: このプロジェクトの会話はありません（necoder で開いた物を除く）
+  history_threads_empty: このプロジェクトのスレッドはありません
+  history_matches_searching: 検索中…
+  history_matches_empty: 一致はありません
+  history_matches_failed: "検索できませんでした: %{error}"
+  history_scope_chat: Chat
+  history_footer: ↑↓ で選ぶ · ⏎ で開く · esc で閉じる
+  history_project_closed: "このウィンドウで開いていないプロジェクトの会話です（%{project}）"
+  history_untitled_session: （題のない会話）
+  history_loading: 過去の会話を読み込んでいます…
+  history_omitted: "以前の %{count} 件は省略しました"
+  thread_menu_rename: 名前を変更
+  thread_menu_continue: 新しいセッションで続ける
+  thread_menu_continue_tip: 今の会話の要点（直近のやり取りと頼んだこと）を前置きにして、同じタブで新しいセッションを始めます。文脈が大きくなった時に。実行中・承認待ちの間は使えません
+  thread_menu_close: 閉じる
+  handoff_note: 新しいセッションで続けます。次の送信に前の会話の抜粋を付けます
+  handoff_divider: ここから新しいセッション
+  handoff_unavailable: 新しいセッションで続けられません（会話がない・実行中・承認待ち）
+  handoff_preamble_intro: "（necoder より: 前のセッションの文脈が大きくなったため、この新しいセッションで続きをお願いします。以下は前の会話の抜粋です。要約ではないので、細部はファイルや git の状態で確かめてください）"
+  handoff_preamble_requests: "## 人が頼んだこと（古い順）"
+  handoff_preamble_recent: "## 直近のやり取り"
+  handoff_preamble_you: "### 人"
+  handoff_preamble_agent: "### エージェント"
+  handoff_preamble_files: "## このスレッドで編集したファイル"
+  handoff_preamble_request_now: "## 今回の依頼"
 hunk:
   stage: この hunk を stage
   revert: この hunk を巻き戻す
@@ -198,11 +301,21 @@ cmd:
   trigger_completion: "編集: 補完を出す"
   show_hover: "編集: ホバー情報"
   open_diff: "Git: diff タブを開く"
+  open_review: "Git: 変更をレビュー"
   next_hunk: "Git: 次の変更へ"
   prev_hunk: "Git: 前の変更へ"
   theme_selector: "表示: テーマ切り替え"
   project_color: "表示: プロジェクトの色を変更"
   toggle_terminal: "表示: ターミナル"
+  new_terminal_tab: "ターミナル: エディタ領域に新しく開く"
+  move_terminal_to_editor: "ターミナル: エディタ領域へ移す"
+  toggle_floating_terminal: "ターミナル: どこからでも（浮かべる）"
+  resolve_conflict_ours: "マージ: 衝突を今の側で解決"
+  resolve_conflict_theirs: "マージ: 衝突を入ってくる側で解決"
+  resolve_conflict_both: "マージ: 衝突を両方残して解決"
+  next_conflict: "マージ: 次の衝突へ"
+  abort_merge_or_rebase: "Git: マージ / リベースを中止"
+  show_conflict_side_by_side: "マージ: 衝突を並べて見る"
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
   toggle_fleet: "表示: 編隊モード"
@@ -210,14 +323,31 @@ cmd:
   new_chat: "Chat: 新しいチャット"
   toggle_agent_full_screen: "表示: AI を全画面（エディタを畳む）"
   split_right: "表示: 右に分割"
+  open_localhost_preview: "プレビュー: localhost を開く…"
+  toggle_design_mode: "プレビュー: Design モード（要素を選んで AI に渡す）"
+  toggle_web_inspector: "プレビュー: Web Inspector を開く / 閉じる"
+  open_html_in_web_tab: "プレビュー: HTML を Web タブで開く（Design モードが使える）"
   new_thread: "AI: 新しいスレッド"
+  new_thread_claude: "AI: 新しいスレッド（Claude Code）"
+  new_thread_codex: "AI: 新しいスレッド（Codex）"
+  new_thread_copilot: "AI: 新しいスレッド（GitHub Copilot）"
+  new_thread_qwen: "AI: 新しいスレッド（Qwen Code）"
+  new_thread_opencode: "AI: 新しいスレッド（OpenCode）"
+  new_thread_kimi: "AI: 新しいスレッド（Kimi CLI）"
+  new_thread_grok: "AI: 新しいスレッド（Grok Build）"
+  new_thread_with: "AI: 新しいスレッド（%{agent}）"
   next_tab: "タブ: 次へ"
   prev_tab: "タブ: 前へ"
   next_thread: "AI: 次のスレッド"
   prev_thread: "AI: 前のスレッド"
   remote_ssh: "リモート: SSH ホストに接続"
+  test_ssh: "リモート: SSH の接続を確かめる…"
+  register_ssh: "リモート: 接続先を登録…"
   thread_history: "AI: スレッド履歴"
+  continue_in_new_session: "AI: 新しいセッションで続ける"
   report_bug: "ヘルプ: バグを報告"
+  open_logs: "ヘルプ: ログのフォルダを開く"
+  open_manual: "ヘルプ: necoder のマニュアルを開く"
   about: "ヘルプ: necoder について"
   check_updates: "ヘルプ: アップデートを確認"
   open_settings: "表示: 設定を開く"
@@ -225,6 +355,20 @@ cmd:
   open_recent: "ファイル: 最近使った項目を開く…"
   open_dialog: "ファイル: フォルダを開く…"
   shortcut_sheet: "ヘルプ: キーボードショートカット"
+  usage_limits: "使用量: レート制限を表示"
+  usage_stats: "使用量: 統計を開く"
+  copy_path_line: "編集: パス:行をコピー"
+  quote_selection: "エディタ: 選んだ行をスレッドで引用"
+  close_all_tabs: "タブ: 全部閉じる（未保存は残す）"
+  toggle_pin_tab: "タブ: ピン留め / 外す"
+  open_in_vscode: "外部: VS Code で開く"
+  open_in_cursor: "外部: Cursor で開く"
+  open_in_zed: "外部: Zed で開く"
+  open_in_terminal: "外部: ターミナルでフォルダを開く"
+  show_ports: "Ports: 開いているポート（開く / 止める）"
+  show_inbox: "通知: 履歴を開く"
+  show_resources: "リソース: メモリとプロセス"
+  show_cleanup: "Task: 片付け…"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -234,6 +378,7 @@ control:
   summary_prompt: 入力はマルチエージェント編隊の現況です。Captain として状況と次の一手を日本語で1文にまとめて。60文字以内・1行だけ・記号や引用符や前置きなしで出力して。
   facts_stats: "稼働 %{working} · 要対応 %{attention} · 完了未確認 %{done}"
   facts_permission: "承認待ち %{elapsed}: %{title}"
+  facts_question: "質問待ち %{elapsed}: %{message}"
   facts_failed: "失敗: %{digest}"
   facts_done_unread: "完了未確認: %{digest}"
   next_badge: "次 ⏎"
@@ -246,43 +391,120 @@ control:
   integrate: Integrate
   review: Radar 実行
   fix_instruct: 修正を指示
+  retry_setup: 準備をやり直す
+  skip_setup: 準備を飛ばして始める
+  answer: 開いて答える
 news:
   waiting: "承認待ち — %{title}"
   failed: "失敗 — %{detail}"
 captain:
   log: "采配ログ"
-  tasks: "Task"
   human_gate: "采配のみ · 統合と承認は人間が操作"
-  ledger_event: "台帳イベント"
+  ledger_source: "台帳"
   title: Captain
-  appoint: Captain を任命する（設定 › AI エージェント）
+  appoint: "未任命 — 押して任命する"
+  appoint_tab: "Captain を任命"
+  tab_tip: "Captain（main に住む采配役）へ · ⌘0"
+  appoint_title: "Captain を任命する"
+  appoint_body: "Captain は main に住む采配役です。目標を渡すと Task（worktree）に分けて起動し、終わり・失敗・承認待ちを見張って報告します。自分ではコードを書きません。どのエージェントでも務まり、あとで設定から交代・解任できます。"
+  appoint_no_agent: "使えるエージェントがありません。設定 → エージェント でサインインしてください。"
+  log_empty: "まだ采配はありません。Captain に目標を渡すと、ここに判断の履歴が並びます。"
   role: |
     あなたは necoder 編隊の Captain（采配役）です。
-    役割: 状況を読み、次の采配を決めて fleet CLI で指示する。人間から目標を渡されたら、Task に分解して起動する。
-    規律: 自分ではコードを書かない・ファイルを編集しない・手を動かさない（指示と采配のみ）。1 件だけの作業でも Task を切って任せる。integrate の最終承認は人間（あなたは `fleet review` で radar を確認して提案するまで）。
-
-    道具（shell で実行）:
-    %{exe} fleet create . <title>   — Task を切る（worktree とブランチができる・出力の id を使う）
-    %{exe} fleet list .              — この repo の Task 一覧
-    %{exe} fleet digest <id>        — Task の事実層 + digest（今なにをしているか）
-    %{exe} fleet events [since-id]  — 台帳イベントの差分
-    %{exe} fleet spawn-agent <id> [agent] [prompt...] — Task にエージェントを起こす
-    %{exe} fleet send <id> <message...>               — 追撃指示
-    %{exe} fleet status <id> <phase> [summary]        — phase 遷移の報告
-    %{exe} fleet wait <id> <phase|activity> [秒]      — 待つ（phase=台帳 / activity=live）
-    %{exe} fleet depend <id> <on...> / wait-deps <id> <phase> — 依存の宣言と待ち
-    %{exe} fleet review <id>        — Conflict Radar（merge_ready / changes_requested へ）
-
-    まず `%{exe} fleet list .` と `digest` で現況を読み、必要な采配だけ実行して、最後に判断を 1〜3 行で要約してください。何もする必要がなければ「静観」とだけ答えてください。
+    役割: 状況を読み、次の采配を決めて、MCP サーバ necoder の fleet 道具で指示する。人間から目標を渡されたら、Task に分けて提案する。
+    規律:
+    - 自分ではコードを書かない・ファイルを編集しない・shell を使わない。この席では necoder が断る。
+    - 新しい Task は fleet_propose_tasks で提案する。ブランチと worktree は、人間が承認した分だけ necoder が切る。承認と却下は次の知らせで届くので、待たずにこのターンを終える。
+    - 承認された Task には necoder が担当を起こし、目的と完了条件を最初の指示として送る。あなたが起こし直す必要はない（同じ Task に担当が 2 人並ぶ）。
+    - 提案の各行には目的と完了条件を必ず書く。触る範囲が重なる作業は 1 本にまとめる。1 件だけの作業でも Task にして任せる。
+    - 既存の Task への追撃（fleet_send）と担当の追加（fleet_spawn_agent）は、確認なしで行ってよい。
+    - phase は担当エージェントが報告する。あなたは書き換えない。integrate は人間が行う。あなたは fleet_review_task で radar を確かめて提案するまで。
+    進め方: まず fleet_list_tasks と fleet_digest で現況を読み、必要な采配だけ行い、最後に判断を 1〜3 行で要約する。何もする必要がなければ「静観」とだけ答える。
   facts: "現況（この repo の Task · id | 名前 | phase | digest）:"
-  event: "イベント: [%{event}] %{title}%{digest}"
+  recent: "直近の采配（古い順）:"
+  wake_header: "台帳の新しい出来事（前回の続き。#通し番号 Task-id 題名: 何が起きたか）:"
+  wake_omitted: "（古い %{n} 件は省いた。fleet_events で読める）"
+  line_created: "Task が作られた"
+  line_human_send: "人間が直接指示した「%{text}」"
+  line_approved: "分解案が承認され、necoder が Task を切って担当を起こした（最初の指示は送り済み）。切った: %{approved}／外した: %{skipped}"
+  line_rejected: "分解案が却下された（何も切っていない）"
+  rotated: "会話を交代しました（現況と直近の采配は前置きで渡します）"
+  retired_name: "Captain（%{agent}・交代前）"
+  seat_denied: "⚑ Captain の席では使えないので断った:"
+  seat_violation: "⚑ Captain の席で許可なしに編集されたので止めた:"
+  seat_violation_news: "Captain の席で許可なしの編集を止めた（%{tool}）"
+  proposal_title: "⚑ Captain の分解案 · %{n} 本"
+  proposal_goal: "目的: %{text}"
+  proposal_done_when: "完了: %{text}"
+  proposal_scope: "範囲: %{text}"
+  proposal_approve: "承認（%{n} 本を切る）"
+  proposal_reject: "却下"
+  proposal_pending_reply: "人間の承認待ち。承認されると necoder が Task を切って担当を起こし、最初の指示も送る（あなたは起こさなくてよい）。結果は次の知らせで届くので、このターンは待たずに終えてよい。"
+  proposal_err_tasks: "tasks に 1 本以上の Task を並べてください（title / goal / done_when は必須）"
+  proposal_err_too_many: "1 つの提案は %{max} 本まで。分けすぎると逐次の依存で遅くなるので、まとめてください"
+  proposal_err_field: "%{row} 行目の %{field} がありません（title / goal / done_when は必須）"
+  proposal_err_agent: "%{row} 行目のエージェント %{agent} は使えません（使える: %{known}）"
+  proposal_err_no_integration: "統合先（main の worktree）が開いていないので分解案を扱えません"
+  proposal_err_resolve: "分解案を裁けなかった: %{detail}"
+  facts_proposal: "Captain の分解案 %{n} 本が承認待ち"
+  delegation: |
+    %{title}
+
+    目的: %{goal}
+    完了条件: %{done_when}
+    完了条件を満たしたら、何を変えたかを 3 文でまとめて終えてください。
+  delegation_scope: "範囲: %{scope}"
+  recommend_allow: "許可してよい"
+  recommend_deny: "拒否を勧める"
+  recommend_ask_human: "判断はあなたに"
+  recommend_card: "Captain: %{verdict}"
+  recommend_news: "推薦 · %{task}: %{verdict} — %{reason}"
+  recommend_reply: "要対応のカードに添えた（人間が読むための 1 行）。許可・拒否は人間が押すので、あなたは応答しない。このターンは待たずに終えてよい。"
+  recommend_wake_header: "承認待ち（Task の担当が許可を求めて止まっている・まだ推薦していない要求）。許可してよいか判断できる要求には、fleet_recommend（task_id・permission_id・verdict = allow / deny / ask_human・reason は 1 行）で推薦を 1 行だけ返してよい。応答はしない — 許可・拒否は人間が押す:"
+  recommend_wake_line: "- %{task} %{title}: 「%{request}」 permission_id=%{permission}"
+  recommend_err_field: "%{field} がありません（task_id・permission_id・verdict・reason は必須）"
+  recommend_err_verdict: "verdict %{verdict} は使えません（使える: %{known}）"
+  recommend_err_line: "reason は 1 行で書いてください（改行なし）"
+  recommend_err_long: "reason は %{max} 字までにしてください（1 行の見立て）"
+  recommend_err_no_captain: "Captain が任命されていないので推薦を受けません"
+  recommend_err_task: "Task %{id} が開いていません（推薦は今の承認待ちにだけ付く）"
+  recommend_err_integration: "統合先のスレッドには推薦しません（推薦するのは Task の承認待ちだけ）"
+  recommend_err_stale: "承認要求 %{permission} はもう解決したか、取り消されたか、別の要求に替わった（推薦は付けない）。%{current}"
+  recommend_err_stale_current: "今の承認待ち: permission_id=%{permission}「%{request}」"
+  recommend_err_stale_none: "この Task は今は承認待ちではない"
 fleet:
+  details_kind_task: Task
+  details_kind_integration: 統合先
+  details_state: 種類と状態
+  details_branch: ブランチ
+  details_base: 起点
+  details_parent: 親の Task
+  details_parent_closed: （閉じた Task）
+  details_children: 子の Task
+  details_path: 場所
+  details_created: 作った
+  details_threads: スレッド
+  details_asked: 最後の依頼
+  details_tokens: トークン
+  details_close: 閉じる
   new_task_worktree: "worktree: %{path}"
   new_task_setup_ready: "準備スクリプト ✓ .necoder/worktree-setup.sh"
   new_task_setup_missing: "準備スクリプトなし"
   new_task_setup_create: "作る（.env の持ち込み・target 共有のテンプレ）"
+  new_task_details: 詳細（ブランチ名・起点）
+  new_task_branch_label: "ブランチ（空 = task/<1 行目>。既にあるブランチ名なら、そのブランチの worktree を作る）"
+  new_task_base_label: "起点（空 = 統合先の今の HEAD。ブランチ / タグ / コミット）"
+  new_task_base_label_default: "起点（空 = この repo の既定 %{base}。ブランチ / タグ / コミット）"
+  new_task_skip_setup: 今回は準備スクリプトを実行しない（.worktreeinclude のファイルは写す）
+  new_task_fanout: 並べて比べる（選んだエージェントごとに Task を切る・選ばなければ既定のエージェントで 1 本）
+  new_task_fanout_each: 各
+  new_task_fanout_preview: "→ Task を %{count} 本: %{names}"
+  fanout_created: "Task を %{count} 本切りました。舞台に並べています"
+  fanout_created_outside: "Task を %{count} 本切りました。Fleet（%{key}）で並べて比べられます"
+  new_task_from_base: "⎇ %{branch}（起点 %{base}）"
   new_task_no_repository: "統合先（main の worktree）が開いていないので Task を切れません"
   next_allow: "許可"
+  next_answer: "答える"
   phase_working: "稼働中"
   phase_blocked: "承認待ち"
   phase_failed: "失敗"
@@ -297,9 +519,29 @@ fleet:
   tab_diff: "変更"
   tab_terminal: "ターミナル"
   tab_files: "ファイル"
-  tab_add_thread: "＋ 会話"
-  tab_add_terminal: "＋ 端末"
+  tab_add_thread: "会話を足す（同じ worktree）"
+  tab_add_terminal: "ターミナルを足す"
+  side_tip: "会話の横に開く（もう一度押すと閉じる）"
+  diff_empty: "base からの変更はありません"
+  diff_files: "%{count} files"
+  tab_close_thread: "この会話を閉じる（⌘⇧T で戻せる）"
+  side_close: "閉じる"
+  files_hint: "クリックで Editor に開く"
   tasks_count: "%{n} Tasks"
+  tokens_total: "Σ %{tokens}"
+  tokens_total_tip: "Fleet のトークン: Task 行と Captain の合計（いま各会話が持っている文脈の量で、使った量の累計ではない。累計はパレットの「使用量: 統計を開く」）"
+  filter_placeholder: Task を絞り込む
+  filter_none: 一致する Task はありません
+  sort_rail: "並び: レール"
+  sort_recent: "並び: 最近"
+  sort_attention: "並び: 要対応"
+  external_header: "外部の worktree（%{count}）"
+  external_tip: このリポジトリの worktree のうち Task になっていないもの（Orca・Claude Code・手で git worktree add したもの等）。押すと畳む
+  external_adopt: 取り込む
+  external_adopt_tip: レールに開いて Task にする（ブランチもファイルもそのまま・再起動しても Task のまま）
+  worktree_vanished: 消えています（necoder の外で削除）
+  worktree_forget: 片付け
+  worktree_forget_tip: この worktree のフォルダは necoder の外で消されました。レールから外します
   integration_row: "統合先 · 保護"
   integration_sub: "%{branched} 本が分岐中 · 今日 %{integrated} 件統合"
   asked: "› %{text}"
@@ -315,11 +557,12 @@ fleet:
   stage_two: 舞台 2 列
   stage_three: 舞台 3 列
   lineage: 系譜グラフ
+  formation: "編隊図"
+  formation_tip: "ブリッジで編隊図を開く / 閉じる（⌘⇧G）"
   graph_fan: 扇形
   graph_tree: ツリー
   graph_card: カード
   graph_hub: ハブ
-  graph_collapse: グラフの表示/非表示
   graph_main: main
   graph_main_sub: IntegrationSpace
   graph_tree_caption: "base ・ %{count} エージェント並走"
@@ -335,21 +578,67 @@ fleet:
   delete_worktree_tip: worktree を削除…
   cleanup_tip: 片付け — 閉じる / 止める / 終了 / 削除
   cleanup_title: この Task をどう片付ける？
-  cleanup_close: セルを閉じる
-  cleanup_close_sub: 画面から外すだけ。エージェントは動き続ける
+  cleanup_close: カードを閉じる
+  cleanup_close_sub: 舞台から外すだけ。エージェントは動き続ける
   cleanup_stop: エージェントを止める
   cleanup_stop_sub: 実行中のターンを中断（esc と同じ）。Task は残る
+  cleanup_sleep: 休ませる
+  selection_count: "%{n} 本を選択"
+  selection_rest_tip: "選んだ Task の静かなエージェントを止めてメモリを空ける（会話は残り、次に送ると続きから）"
+  selection_stage: 舞台に並べる
+  selection_stage_tip: "舞台に横に並べる（先に選んだ 3 本まで）"
+  selection_stage_first: "舞台は 3 枚までなので、先に選んだ 3 本を並べました（%{count} 本を選択）"
+  selection_cleanup: 片付け…
+  selection_cleanup_tip: "片付けの画面を、選んだ Task に印を付けて開く（失うものを数えてから消す）"
+  selection_clear_tip: 選択を外す
+  cleanup_sleep_sub: "静かなエージェント %{count} 体を止めてメモリを空ける。会話は残り、次に送ると続きから"
+  cleanup_sleep_family_sub: "静かなエージェント %{count} 体を止めてメモリを空ける（子の Task %{children} 本も）。会話は残り、次に送ると続きから"
+  cleanup_family: 子の Task ごと片付ける…
+  cleanup_family_sub: "片付けの画面を、この Task と子の Task %{children} 本に印を付けて開く（失うものを数えてから消す）"
   cleanup_archive: Task を終了
   cleanup_archive_sub: 編隊と herd から消す。worktree はディスクに残る
   cleanup_remove_worktree: worktree を削除
   cleanup_remove_worktree_sub: ⚠ ディスクから消す。未コミットの変更は失われる
   cleanup_delete_branch: worktree ごとブランチを削除
   cleanup_delete_branch_sub: ⚠ 作業ツリーとブランチの両方を消す。復帰できない
-  closed_still_running: セルを閉じました。エージェントは動いたままです（herd から戻せます）
+  closed_still_running: カードを閉じました。エージェントは動いたままです（サイドバーの Task 行から戻せます）
   stopped_agents: "エージェント %{n} 本を中断しました"
   no_running_agent: 動いているエージェントはありません
   task_archived: Task を終了しました（worktree はディスクに残っています）
   base_synced: "%{branch} を upstream に追従（%{count} コミット早送り）してから Task を作成しました"
+  next_resolve: 競合を直させる
+  toast_integrate_conflicts: "%{count} ファイルが統合先と競合しました。「競合を直させる」で Task のエージェントに頼めます"
+  conflicts_sent: "競合した %{count} ファイルを直すよう Task のエージェントに頼みました。終わったらもう一度「統合」"
+  conflict_prompt: "統合先 `%{base}` に取り込もうとしたら、次のファイルが競合しました:\n%{files}\n\nこの worktree で `git merge %{base}` を実行して競合を解消し（両方の変更の意図を残す）、コミットしてください。テストがあれば通してから、何をどう解消したか短く教えてください。%{base} への取り込み（統合）は人がやるので、しなくてよいです。"
+  creating_untitled: "新しい Task"
+  creating_waiting: "順番を待っています…"
+  creating_sync: "統合先を最新にしています…"
+  creating_worktree: "worktree を作っています…"
+  creating_setup: "準備スクリプトを流しています…"
+  creating_cancelling: "取り消しています…（この段が終わったら作った分を消します）"
+  creating_failed: "作れませんでした: %{reason}"
+  creating_retry: "やり直す"
+  creating_retry_tip: "同じ依頼・同じ詳細でもう一度作る"
+  creating_cancel_tip: "取り消す（作り終えた分は消します）"
+  creating_dismiss_tip: "閉じる"
+  creating_discard_failed: "取り消した Task の worktree を消せませんでした（%{path}）: %{error}"
+  creating_interrupted: "中断: %{step}"
+  creating_step_waiting: "未着手"
+  creating_step_worktree: "worktree 作成"
+  creating_step_setup: "準備"
+  creating_step_register: "Task 登録"
+  creating_step_spawn: "担当の起動"
+  creating_step_send: "委任文の送信"
+  creating_resume: "再開"
+  creating_resume_tip: "止まった段から続けます（作ってあった worktree・Task はそのまま使います）"
+  creating_resume_send_tip: "委任文が担当に届いたかは分かりません。Task の会話に発話が無ければ、もう一度送ります"
+  creating_proposal_retry_tip: "失敗した段から続けます（作ってあった worktree・Task はそのまま使います）"
+  creating_proposal_discard_tip: "この行をやめる（記録を閉じます。作ってあった worktree・Task は残ります）"
+  creating_proposal_running_elsewhere: "この行は別の窓で作っています"
+  creating_proposal_done_elsewhere: "この行はもう済んでいます（別の窓で作り終えたか、やめました）"
+  creating_proposal_no_panel: "Task の会話を開けません"
+  creating_proposal_not_task: "この worktree は Task として開けません"
+  creating_proposal_taken: "この worktree は別の Task（%{title}）が使っています。この行には使いません: %{path}"
 worktree_delete:
   title: この worktree を削除しますか？
   title_branch: worktree とブランチを削除しますか？
@@ -362,6 +651,28 @@ worktree_delete:
   skip_next: 次回から確認しない（失うものが無いときだけ省略します）
   cancel: キャンセル
   confirm: 削除する
+notify:
+  done: "完了: %{thread}"
+  interrupted: "中断: %{thread}"
+  failed: "失敗: %{thread}"
+  permission: "承認待ち: %{thread}"
+  question: "質問: %{thread}"
+quit_confirm:
+  title: まだ動いているものがあります
+  working: "実行中のエージェント %{n}"
+  waiting: "承認・質問を待っているエージェント %{n}"
+  terminals: "前面でプロセスが動いているターミナル %{n}"
+  detail_quit_hide: 終了すると、これらは止まります。隠しておけば裏で動き続け、Dock のアイコンで戻れます。
+  detail_quit_minimize: 終了すると、これらは止まります。最小化しておけば裏で動き続けます。
+  detail_close_hide: この窓を閉じると、これらは止まります。隠しておけば裏で動き続け、Dock のアイコンで戻れます。
+  detail_close_minimize: この窓を閉じると、これらは止まります。最小化しておけば裏で動き続けます。
+  detail_close_window: この窓を閉じると、この窓のこれらは止まります。この窓を最小化しておけば裏で動き続けます（ほかの窓はそのまま）。
+  keep_running_hide: 隠して動かし続ける
+  keep_running_minimize: 最小化して動かし続ける
+  quit: 終了する
+  close: 閉じる
+  cancel: キャンセル
+  setting_hint: この確認は 設定 › 動作とエディタ の「終了時の確認」で切れます
 launcher:
   placeholder: 開く、または最近のプロジェクトを選択…
   open_folder: フォルダを開く…
@@ -379,6 +690,11 @@ rail:
   add_tip: 開く — フォルダ / ファイル / リモート / 最近（⌘O は切替）
   add_prompt: 開く
   menu_new_window: 新しいウィンドウで開く
+  menu_details: 詳細…
+  menu_new_child_task: この Task から新しい Task…
+  menu_copy_path: パスをコピー
+  menu_copy_branch: ブランチ名をコピー
+  copied: "コピーしました: %{text}"
   menu_remove: レールから外す
   menu_remove_worktree: worktree を削除
   menu_delete_branch: worktree ごとブランチを削除
@@ -391,6 +707,8 @@ rail:
   fleet: 編隊モード
   git: ソース管理  ⌃⇧G
   todos: Todo ボード
+  threads: AI スレッド一覧（全プロジェクト）
+  fleet_sidebar: Fleet サイドバー（Task 一覧）
   agent: AI エージェントの表示切替
   terminal: ターミナル  ⌘J
   remote: リモート SSH
@@ -404,6 +722,8 @@ titlebar:
 settings:
   pref_agent_idle_stop: 使っていないエージェントを止めるまで（分）
   pref_agent_idle_stop_sub: エージェントは 1 本で数百 MB を握ります。止めても会話は残り、次の送信で引き継ぎます。0 = 止めない
+  pref_allow_terminal_send: CLI から端末へ入力を送る
+  pref_allow_terminal_send_sub: "`ne terminal send` で、エージェントやスクリプトが necoder の端末に文字を打てるようにします。送った文字はその端末でそのまま実行されます（一覧・読み取り・待機は off でも使えます）"
   chat_heading: CHAT
   chat_directory: チャットのフォルダの置き場
   chat_directory_default: 書類フォルダの necoder（既定）
@@ -418,6 +738,11 @@ settings:
   title: 設定
   agents_heading: AI エージェント
   agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を necoder は保存しません。
+  permission_default: 権限の既定
+  permission_default_sub: 新しいスレッドを始めるモード。選ぶとピルで選んだモードの記憶を全エージェントで消して揃える。「聞かずに進める」はそのモードを持つエージェントだけに効く（Claude Code の bypassPermissions など）。Chat には効かない
+  permission_default_agent: エージェントの既定
+  permission_default_bypass: 聞かずに進める（Yolo）
+  permission_remembered: ピルで選んだモード（押すと忘れる）
   installed: 導入済み
   available_npx: 初回に取得（npx）
   not_installed: 未導入
@@ -425,6 +750,63 @@ settings:
   agent_available: 利用可能
   agent_configured: 設定あり・未確認
   agent_signed_out: 未ログイン
+  agent_disabled: 使わない（選択肢に出さない）
+  agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
+  agent_remove: 外す
+  agent_remove_binary_failed: "%{agent} の落とした binary を消せませんでした: %{reason}"
+  custom_command_ready: "自分のコマンドで起動（%{command}）"
+  custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
+  custom_registry_npx: "レジストリ %{version} · npx（初回に取得）"
+  custom_not_in_registry: "レジストリに見つかりません（%{id}）。エージェントを追加 で取り直してください"
+  custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
+  custom_needs_node: node が要ります（npx で起動する配布）
+  custom_needs_uv: uv が要ります（uvx で起動する配布）。uv を入れると使えます（necoder は入れません）
+  custom_registry_uvx: "レジストリ %{version} · uvx（初回に取得）"
+  custom_binary_ready: "レジストリ %{version} · binary（置いてあります・sha256 で照合済み）"
+  custom_binary_ready_unverified: "レジストリ %{version} · binary（置いてあります・検証の値がありません）"
+  custom_binary_download: "レジストリ %{version} · binary（最初の起動で落として sha256 で照合します）"
+  custom_binary_download_unverified: "レジストリ %{version} · binary（最初の起動で落とします・検証の値がありません）"
+  custom_binary_on_remote: binary の配布しか無いので、リモート（SSH）では起動できません
+  custom_not_deployed: まだ落としていません（最初の起動で落とします）
+  custom_deploy_failed: "binary を置けませんでした: %{reason}"
+  add_agent_sha256: binary は落とした後にレジストリの sha256 で照合します
+  add_agent_no_sha256: 検証の値がありません（sha256 なし）。落とした binary を照合せずに使います
+  agents_add: ＋ エージェントを追加
+  agents_add_hint: ACP レジストリの全件から選んで足す。一覧に無い物は settings.json の agent_servers に自分のコマンドを書いて足せます
+  add_agent_title: エージェントを追加
+  add_agent_sub: "ACP レジストリの %{count} 件。足すと AI エージェントの一覧に並び、使う / 使わない・既定・起動の変更は組み込みと同じ行でできます"
+  add_agent_search: 名前・説明・配布の形（npx / binary / uvx）・OS で探す
+  add_agent_add: 追加
+  add_agent_added: 追加済み
+  add_agent_builtin: "組み込み（%{agent}）"
+  add_agent_unusable: このマシンでは使えません
+  add_agent_os_any: "対応: どの OS でも"
+  add_agent_os: "対応: %{os}"
+  add_agent_license: "ライセンス: %{license}"
+  add_agent_empty: 一致するエージェントはありません
+  add_agent_no_registry: ACP レジストリをまだ取得していません
+  add_agent_fetch: 取得する
+  add_agent_fetching: 取得しています…
+  add_agent_refresh: 取り直す
+  add_agent_fetch_failed: "取得できませんでした: %{reason}"
+  add_agent_custom_hint: 一覧に無いエージェントは settings.json の agent_servers に自分のコマンドを書いて足せます
+  add_agent_open_settings_json: settings.json を開く
+  add_agent_close: 閉じる
+  launch_default: 起動は既定のまま（レジストリの版とコマンド）
+  launch_env: "起動: 既定 + 環境変数（%{names}）"
+  launch_custom: "起動: 自分のコマンド（%{command}）"
+  launch_edit: 変える…
+  launch_reset: 既定に戻す
+  launch_title: "%{agent} の起動"
+  launch_mode_registry: 既定の起動に環境変数を足す
+  launch_mode_custom: 自分のコマンドで起動
+  launch_command: コマンド（絶対パスか PATH にある名前）
+  launch_args: 引数（1 行に 1 つ）
+  launch_env_field: 環境変数（1 行に 1 つ KEY=VALUE）
+  launch_note: 効くのは次に起動するエージェントから。値は settings.json にそのまま残るので、API キーなどの秘密は書かないでください（CLAUDE_CONFIG_DIR のように置き場を指す変数にする）
+  launch_command_missing: コマンドを入れてください
+  launch_cancel: キャンセル
+  launch_save: 保存
   logged_in: ログイン済み
   login_required: ログインが必要
   login_status_unknown: ログイン状態は CLI で確認
@@ -452,18 +834,30 @@ settings:
   mcp_filtered_empty: この条件に合う MCP サーバはありません。
   prefs_heading: 動作とエディタ
   prefs_sub: 真実は settings.json。ここはそれを操作するだけです。
+  search_placeholder: 設定を検索
+  search_count: "%{count} 件"
+  search_none: 一致する設定はありません
   pref_submit_on_enter: Enter で送信
   pref_submit_on_enter_sub: オフ=⌘Enter 送信（日本語 IME で誤送信しない安全側）
   pref_soft_wrap: ソフトラップ（折り返し）
   pref_soft_wrap_sub: ⌥Z で一時トグルもできます
   pref_format_on_save: 保存時にフォーマット
   pref_format_on_save_sub: 対応言語のみ・⌘S で整形→保存
+  pref_preview_tabs: プレビュータブ
+  pref_preview_tabs_sub: エクスプローラで 1 回クリックしたファイルは、次にクリックしたファイルで置き換わるタブ（名前が斜体）で開きます。編集するか、ダブルクリックで普通のタブになります
+  pref_auto_save: 自動保存
+  pref_auto_save_sub: 他のタブ・パネル・アプリへ移った時に保存します。「手を止めた時」は打つのを 1 秒止めた時にも保存します（自動保存ではフォーマットしません）
+  auto_save_off: しない
+  auto_save_focus_change: 他へ移った時
+  auto_save_after_delay: 手を止めた時
   pref_agent_auto_name: スレッドの自動命名
   pref_agent_auto_name_sub: 最初のやり取りから AI が題名を付けます
   pref_agent_prewarm: エージェントを先に起動
   pref_agent_prewarm_sub: 送信を待たずに接続し、モデル一覧をすぐ選べるようにします
   pref_sound_done: 完了音
   pref_sound_waiting: 入力待ちの音
+  pref_sound_volume: 通知音の大きさ（%）
+  pref_sound_volume_sub: 0 で鳴らしません（選んだ声はそのまま）。100 が音源そのまま
   sound_nya: にゃっ
   sound_nyaan: にゃー
   sound_mew: みゃっ
@@ -473,14 +867,80 @@ settings:
   pref_reduce_motion_sub: 点字スピナーや猫などの装飾アニメーションを静止します
   pref_font_size: フォントサイズ
   pref_tab_size: タブ幅
+  pref_terminal_font_size: ターミナルの文字の大きさ
+  pref_terminal_scrollback: ターミナルで遡れる行数
+  pref_terminal_scrollback_sub: "減らすと古い行から捨てます。フォントは settings.json の terminal_font_family で変えられます"
+  terminal_scrollback_lines: "%{n} 行"
+  pref_terminal_cursor: ターミナルのカーソル
+  pref_terminal_color_scheme: ターミナルの配色
+  pref_ghostty_import: Ghostty から取り込む
+  pref_ghostty_import_sub: Ghostty の設定の書体・大きさ・カーソル・配色を、ターミナルの設定にする（キーやスクロールバックは持ってこない）
+  ghostty_import: 取り込む
+  ghostty_not_found: Ghostty の設定（~/.config/ghostty/config など）が見つかりません
+  ghostty_nothing: Ghostty の設定に、取り込める物がありませんでした
+  ghostty_imported: "Ghostty から取り込みました: %{items}"
+  ghostty_item_font: 書体
+  ghostty_item_size: 大きさ
+  ghostty_item_cursor: カーソル
+  ghostty_item_colors: 配色
+  terminal_color_scheme_default: 既定（アプリのテーマに合わせる）。Ghostty のテーマ・Windows Terminal の配色（JSON）・iTerm2 の .itermcolors・Warp のテーマ（YAML）を読めます
+  terminal_color_scheme_pick: ファイルを選ぶ…
+  terminal_color_scheme_reset: 既定に戻す
+  pref_terminal_shell: ターミナルのシェル
+  terminal_shell_default: 既定（OS のシェル）。新しく開く手元の端末から効きます
+  terminal_shell_pick: 選ぶ…
+  terminal_shell_reset: 既定に戻す
+  shell_picker_placeholder: シェルを探す…
+  shell_picker_default: 既定に戻す（OS のシェル）
+  pref_terminal_cursor_sub: "vim などが形を指定した時はそちらが優先されます"
+  terminal_cursor_block: ブロック
+  terminal_cursor_bar: 縦線
+  terminal_cursor_underline: 下線
   pref_tabs_view: スレッドタブの表示
   tabs_view_bar: 横タブ
   tabs_view_list: 縦リスト
+  pref_system_notifications: OS の通知
+  pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
+  account_label: "アカウント:"
+  account_default: 既定
+  account_elsewhere: （ほかの場所）
+  account_add: ＋ 新しいアカウント
+  account_login: ログイン
+  account_hint: 切り替えは次に起動するエージェントから（動いているスレッドは今のアカウントのまま）。アカウントの資格情報は necoder が読まず、公式 CLI が扱います
+  pref_confirm_quit: 終了時の確認
+  pref_confirm_quit_sub: ⌘Q・窓を閉じる時、エージェントや端末が動いていれば「隠して動かし続ける」を選べます
+  confirm_quit_running: 動いている時だけ
+  confirm_quit_never: しない
+  pref_keep_awake: 作業中はスリープさせない
+  pref_keep_awake_sub: エージェントが作業している間は、放っておいてもスリープしません。画面は消えます。自分で選んだスリープと、ノートの蓋を閉じた時のスリープは止めません
+  keep_awake_working: 作業中の間
+  keep_awake_off: しない
+  pref_tabs_position: タブの既定位置
+  tabs_position_top: 上
+  tabs_position_left: 左
   appearance_heading: 外観
   appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
+  locale_label: 表示言語
+  locale_sub: 押した瞬間に切り替わります（macOS のメニューバーは次の起動から）
+  locale_follow_os: OS に合わせる
+  locale_ja: 日本語
+  locale_en: English
   theme_label: テーマ
   theme_sub: ⌘K ⌘T のセレクタでも切り替えられます
   open_json: settings.json を開く
+  font_ui: UI の書体
+  font_code: コードの書体
+  font_terminal: ターミナルの書体
+  font_default: 既定（同梱の書体）
+  font_terminal_default: 既定（コードの書体に揃える）
+  density_label: 行の間隔
+  density_sub: エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さ
+  density_compact: 詰める
+  density_cozy: ゆったり
+  font_pick: 選ぶ…
+  font_reset: 既定に戻す
+  font_picker_placeholder: 書体を探す…
+  font_picker_default: 既定に戻す
   open_json_sub: すべての設定の真実。保存すると約1秒で全体へ反映されます
   open_json_button: 開く
   cli_heading: コマンドライン
@@ -514,6 +974,26 @@ settings:
   cli_busy: 実行中…
   cli_admin_prompt: necoder の ne コマンドを /usr/local/bin にインストールします。
   cli_admin_prompt_remove: necoder の ne コマンドを /usr/local/bin から削除します。
+  dev_bundle_shared_install: necoder Dev.app からは変えません。この置き場は常用の necoder と共有しているので、常用の necoder から操作してください。
+  save_unreadable: "%{file} を読めないので保存しませんでした（%{reason}）"
+  save_failed: "設定を保存できませんでした（%{reason}）"
+  skills_heading: Skills
+  skills_sub: エージェント（Claude Code / Codex）が読む手順書（SKILL.md）。necoder の skill を入れると、エージェントが necoder の CLI の使い方をこの版に合わせて読めます。
+  skills_necoder_label: necoder の skill
+  skills_checking: 確認中…
+  skills_busy: 実行中…
+  skills_install_button: 入れる
+  skills_update_button: 更新する
+  skills_update_available: 更新があります
+  skills_installed_chip: インストール済み
+  skills_foreign: "%{path} は necoder が書いたものではないので上書きしません（上書きするなら `ne skills install --force`）"
+  skills_read_error: "%{path} を読めません（%{error}）"
+  skills_found: "見つかった skill（%{count} 件）"
+  skills_empty: skill は見つかりませんでした（~/.claude/skills・~/.codex/skills・~/.agents/skills と、プロジェクトの .claude/skills・.agents/skills を探しました）
+  skills_skipped: "%{count} 件は front matter が読めないので一覧から外しました（理由は `ne skills list` で出ます）"
+  skills_scope_shared: 共通（~/.agents）
+  skills_scope_claude_project: Claude Code・プロジェクト
+  skills_scope_shared_project: 共通・プロジェクト
 explorer:
   main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ
@@ -526,6 +1006,7 @@ explorer:
   ctx_open_window: 新規ウィンドウで開く
   ctx_open: 開く
   ctx_open_default: 既定のアプリで開く
+  ctx_open_web_tab: Web タブで開く（Design モード）
   ctx_reveal: Finder で表示
   ctx_new_file: 新規ファイル
   ctx_new_dir: 新規フォルダ
@@ -534,8 +1015,43 @@ explorer:
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる
   ctx_copy_path: パスをコピー
+  ctx_download: ダウンロード…
+  ctx_upload_into: このフォルダへアップロード…
+  ctx_upload_beside: 同じフォルダへアップロード…
+  upload_prompt: アップロード
+  uploading_one: "「%{name}」をアップロードしています…"
+  uploading_many: "%{n} 個の項目をアップロードしています…"
+  uploaded: "%{n} 個のファイル（%{size}）をアップロードしました"
+  upload_failed: "アップロードできませんでした: %{error}"
+  downloading: "「%{name}」をダウンロードしています…"
+  downloaded: "「%{name}」に保存しました（%{n} 個のファイル・%{size}）"
+  download_failed: "ダウンロードできませんでした: %{error}"
+  transfer_skipped: "（シンボリックリンクなど %{n} 個は飛ばしました）"
+  ctx_search_folder: フォルダ内を検索
+  ctx_stage: ステージ
+  ctx_discard: 変更を破棄…
+  discard_title: "「%{name}」の変更を破棄しますか？"
+  discard_body: 最後のコミットの内容に戻します。ステージした変更も消えます。この操作は取り消せません。
+  discard_body_untracked: git の管理外のファイルなので、ゴミ箱へ入れます（エクスプローラで ⌘Z を押すと戻せます）。
+  discard_confirm: 破棄する
+  discard_cancel: キャンセル
+  discard_untracked_remote: リモートでは未追跡のファイルを片付けられません（git の管理からは外しました）
+  undo_empty: 取り消せるファイル操作はありません
+  undid_create: "「%{name}」の作成を取り消しました"
+  undid_move: "「%{name}」を元の名前・場所に戻しました"
+  undid_trash: "「%{name}」をゴミ箱から戻しました"
+  undid_many: "%{n} 件のファイル操作を取り消しました"
+  undo_trash_unknown: "「%{name}」はゴミ箱のどこに入ったか分からないため戻せません"
+  undo_not_in_trash: "「%{name}」がゴミ箱に見つからないため戻せません（ゴミ箱を空にしたか、Finder で戻した）"
+  undo_exists: "「%{name}」と同じ名前の項目があるため戻せません"
+  undo_missing: "「%{name}」が見つからないため戻せません"
+  undo_dirty: "「%{name}」に保存していない変更があるため取り消しません（保存するか閉じてから）"
+  undo_failed: "取り消せませんでした: %{error}"
 searchpanel:
   placeholder: プロジェクトを横断検索…
+  placeholder_scoped: このフォルダの中を検索…
+  scope: "範囲: %{path}"
+  scope_clear: 範囲を外す（プロジェクト全体を検索・空欄で ⌫ でも外せる）
   searching: 検索中…
   results: "%{n} 件 / %{files} ファイル"
   hint_enter: Enter で検索
@@ -562,6 +1078,8 @@ git:
   changes: 変更
   no_changes: 変更はありません
   stage_all_tip: すべてステージ
+  review_changes: 変更をレビュー
+  review_changes_tip: 全ファイルの変更を 1 画面で読む（比較の基準を選べる）
   stage: ステージ
   unstage: ステージ解除
   history: 履歴
@@ -579,11 +1097,32 @@ git:
   idle: 待機中
   branch_menu_tip: ブランチ / worktree
   switcher_tip: プロジェクト / ブランチを切替  ⌘O
+  commit_failed: コミットできませんでした
+  stage_failed: ステージできませんでした
+  unstage_failed: ステージを解除できませんでした
+  push_failed: push できませんでした
+  pull_failed: pull できませんでした
+  pr_create_failed: PR の作成ページを開けませんでした
+  pr_open_failed: PR / リポジトリを開けませんでした
+  ai_message_failed: コミットメッセージを生成できませんでした
+  branch_create_failed: ブランチを作成できませんでした
+  worktree_no_parent: worktree の作成先を決められません（プロジェクトのフォルダに親フォルダがありません）
+  output_title: "%{command} の出力"
 dock:
   left: 左パネル（エクスプローラ）を表示/隠す
   bottom: 下パネル（ターミナル等）を表示/隠す
   right: 右パネル（エージェント）を表示/隠す
 tabs:
+  ctx_close_all: 全部閉じる（未保存は残す）
+  ctx_pin: ピン留め
+  ctx_unpin: ピン留めを外す
+  unpin_tip: ピン留めを外す  ⌘K ⇧⏎
+  pinned_kept: ピン留めしたタブは ⌘W で閉じません（ピンを押して外すか、右クリック › タブを閉じる）
+  copied_path_line: "コピーしました: %{path}"
+  quote_no_file: 引用できるのは開いているファイルの行です（無題のタブは引用できません）
+  kept_unsaved: "未保存のタブ %{count} 枚は残しました"
+  external_remote: SSH 先のファイルは手元のアプリで開けません
+  external_missing: "%{app} が見つかりません（CLI を PATH に入れるか、アプリを入れてください）"
   untitled: 無題
   close_tip: 閉じる  ⌘W
   close_split_tip: 分割を閉じる  ⌘\\
@@ -591,38 +1130,231 @@ tabs:
   ctx_close: タブを閉じる
   ctx_close_others: 他のタブを閉じる
   ctx_close_right: 右側のタブを閉じる
+  split_needs_file: ファイルのタブだけ右に並べられます
+  ctx_terminal_rename: 名前を変更…
+  ctx_terminal_to_dock: 下ドックへ移す
 image:
   load_failed: 画像を表示できません
 breadcrumb:
   md_preview: プレビュー
   md_source: ソース
   md_preview_tip: 整形プレビューを切替  ⌘⇧V
+  md_side_preview_tip: "本文の右にプレビューを並べる（打つたびに更新）  %{key}"
   html_preview: プレビュー
   html_source: ソース
   html_preview_tip: OS 標準 WebView で表示  ⌘⇧V
   html_reload_tip: HTML プレビューを再読み込み
+  html_open_web_tab: Web タブで開く
+  html_open_web_tab_tip: 内蔵の配信で Web タブに開く（Design モードが使える）
 webview:
   outside_sandbox: このファイルは表示できる範囲の外にあります
   failed: HTML プレビューを開けませんでした
   unsupported: HTML プレビューは現在 macOS / Windows に対応しています
   hidden_by_overlay: 前面の UI を閉じると表示に戻ります
+  outside_localhost: localhost の URL だけ開けます
+  web_failed: プレビューを開けませんでした
+  unreachable: "%{target} に接続できませんでした"
+  unreachable_hint: 開発サーバを起動してから、ツールバーの再読み込みで読み直してください
+webtab:
+  back_tip: 戻る
+  forward_tip: 進む
+  reload_tip: 再読み込み
+  zoom_in_tip: 拡大
+  zoom_out_tip: 縮小
+  zoom_reset_tip: 100% に戻す
+  viewport_full: 全幅
+  viewport_full_tip: ペインの幅いっぱいに表示
+  viewport_tip: "幅 %{width}px で表示"
+  devtools_tip: Web Inspector を開く（別の窓）
+  devtools_close_tip: Web Inspector を閉じる
+  devtools_needs_web_tab: Web Inspector は Web タブで使えます（HTML プレビューはページの右クリック →「要素の詳細を表示」）
+  open_browser_tip: 既定のブラウザで開く
+  unsupported: この環境では Web タブを表示できません（macOS / Windows のみ）
+  picker_placeholder: "ポート番号か localhost の URL（例: 3000 / localhost:5173/app）"
+  picker_action: localhost を開く
+  invalid_url: "localhost の URL だけ開けます: %{input}"
+  static_tip: "内蔵の配信: %{path}"
+  static_failed: "内蔵の配信を始められません: %{error}"
+  static_needs_html: 手元の HTML ファイルを開いてから使ってください
+  static_remote: SSH のプロジェクトの HTML は、まだ Web タブで開けません（内蔵の配信は手元のファイルだけ）
+  static_chat: Chat の HTML はエージェントが書いた物として閉じ込めて見せるので、Web タブでは開けません
+  ctx_open_browser: 既定のブラウザで開く
+  ctx_copy_url: URL をコピー
+design:
+  toggle: Design
+  toggle_tip: "Design: ページの要素を選んで AI への入力に添える"
+  hint: 要素をクリックで選ぶ（Shift+クリックで続けて選ぶ・Esc で終わる）
+  prompt_heading: "### 画面の要素: %{label}"
+  prompt_page: ページ
+  prompt_selector: セレクタ
+  prompt_path: 場所
+  prompt_source: ソース
+  prompt_components: コンポーネント
+  prompt_accessibility: アクセシビリティ
+  prompt_bounds: 位置と大きさ
+  prompt_bounds_value: "x=%{x} y=%{y} %{width}×%{height}（ビューポート %{viewport}）"
+  prompt_styles: スタイル
+  prompt_text: テキスト
+  prompt_nearby: 近くのテキスト
+  capture_failed: 要素の切り抜きを撮れませんでした（テキストだけ添えました）
+  target_moved: "選んだ要素は添えませんでした — 撮っている間に「%{thread}」から別のスレッドへ移ったため。そのスレッドに戻ってから選び直してください"
+  target_gone: 選んだ要素は添えませんでした — 選んだ時のスレッドが閉じられています
+  needs_web_tab: "Design は Web タブで使えます（プレビュー: localhost を開く… / HTML は「Web タブで開く」）"
+  not_ready: ページが表示されてから Design を始めてください
 pdf:
   unsupported: この環境では PDF をタブに表示できません
   unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます
+conflict:
+  bar: "⑂ 衝突 %{count} か所（%{line} 行目）"
+  ours: 今の側
+  theirs: 入ってくる側
+  both: 両方
+  next: 次へ ↓
+  none: このファイルに衝突の印（<<<<<<<）はありません
+  nothing_to_abort: 進行中のマージもリベースもありません
+  abort_merge_title: マージを中止しますか
+  abort_merge_detail: "git merge --abort を流します。マージ中の変更（衝突の解決も）は捨てられ、マージを始める前に戻ります。"
+  abort_merge_confirm: マージを中止
+  abort_rebase_title: リベースを中止しますか
+  abort_rebase_detail: "git rebase --abort を流します。リベース中の変更は捨てられ、始める前のブランチに戻ります。"
+  abort_rebase_confirm: リベースを中止
+  abort_cancel: キャンセル
+  aborted: 中止しました
+  side_by_side: 並べて見る
+  view_title: "衝突 %{index} / %{count}（%{line} 行目）"
+  view_base: 元（共通の祖先）
+  view_no_base: "元の版は印に入っていません（git config merge.conflictStyle diff3 で入ります）"
+  view_empty: （空）
+  view_more: "… 他 %{count} 行"
+  view_close: 閉じる
+  view_result: "結果（直してから %{key} で解決）"
+  view_fill_ours: 今の側から
+  view_fill_base: 元から
+  view_fill_theirs: 入ってくる側から
+  view_fill_both: 両方から
+  use_result: 結果で解決
 terminal:
+  quick_tip: "よく使うコマンド（settings.json の quick_commands）。押すと並ぶので、選ぶと新しいターミナルで走らせる"
   tab_title: ターミナル %{n}
+  rename_title: 端末の名前
+  rename_hint: 空にして確定すると、シェルが付けるタイトルに戻ります
+  rename_cancel: キャンセル
+  rename_confirm: 変更
+  close_busy_title: "ターミナル %{n} でプロセスが動いています"
+  close_busy_detail: 閉じるとこのプロセスも止まります。
+  close_busy_confirm: 閉じる
+  close_busy_cancel: キャンセル
+  close_busy_named_title: "「%{name}」でプロセスが動いています"
+  close_busy_many_title: "%{n} 個のターミナルでプロセスが動いています"
+  tab_needs_project: ターミナルのタブはプロジェクトで開けます（Chat では開けません）
+  tab_split_hint: エディタ領域のターミナルは分割できません。タブを右クリック › 下ドックへ移すと分割できます
+  float_hide_tip: "隠す（止めない）  %{key}"
   add_tip: ターミナルを追加
+  split_tip: "横に分割（%{key}）"
+  pane_title: "端末 %{n}"
+  pane_close_tip: この端末を閉じる
   close_dock_tip: 下ドックを閉じる  ⌘J
   git_tip: ソース管理  ⌃⇧G
+  search_invalid_regex: 正規表現が不正です
+  menu_copy: コピー
+  menu_paste: 貼り付け
+  menu_select_all: すべて選択
+  menu_clear: クリア
+  menu_find: 検索
 theme:
   builtin: 組み込み
   user: ユーザー
   picker_placeholder: テーマを選択
 link:
   open_failed: "開けませんでした: %{target}"
+  remote_localhost: "%{url} は SSH 先（%{host}）の開発サーバです。手元へ転送できなかったので開いていません"
+  remote_forwarded: "SSH 先（%{host}）の %{port} を手元の localhost:%{local} へ転送して開きました"
+  remote_localhost_title: SSH 先の localhost を手元で見るには
+  remote_localhost_details: "%{url} は SSH 先（%{host}）の localhost です。necoder から手元へ転送できませんでした:\n\n    %{reason}\n\n手元のターミナルで次を実行してから、手元の http://localhost:%{port} を開いてください:\n\n    ssh -N -L %{port}:localhost:%{port} %{host}\n\n（手元で同じポートを使っているアプリがあれば、左の %{port} を空いている番号に変えます）\n"
+toast:
+  open_details: 全文 ›
+  reveal: Finder で表示 ›
+review:
+  tab_title: 変更レビュー
+  compare: 比較
+  base_task: "Task の base · %{sha}"
+  base_head: HEAD（未コミットの変更）
+  base_branch: "⎇ %{branch} · 分岐点 %{sha}"
+  base_branch_pending: "⎇ %{branch}"
+  base_commit: "コミット %{sha}"
+  menu_task: Task の base（Task を作った時点）
+  menu_head: HEAD — 未コミットの変更だけ
+  menu_branches: ブランチ（分岐点から）
+  menu_commits: コミット
+  menu_loading: 読み込み中…
+  ignore_whitespace: 空白を無視
+  ignore_whitespace_tip: 空白だけの違いを隠す（git diff -w）
+  files: "%{count} ファイル"
+  refresh_tip: 読み直す
+  outdated: 新しい変更があります
+  tree_tip: ファイルツリーを表示 / 隠す
+  loading: 変更を読み込み中…
+  empty: "変更はありません（比較: %{base}）"
+  error_not_repo: git リポジトリではありません
+  error_unknown_base: "比較の基準が見つかりません: %{base}"
+  error_git: "git に失敗しました: %{message}"
+  notice_binary: バイナリファイル — 中身は表示しません
+  notice_too_large: "大きすぎるため表示しません（%{counts}）— 「開く」でエディタへ"
+  notice_mode: 権限（モード）の変更だけ
+  notice_empty: 中身の変更はありません
+  fold: "⋯ %{count} 行"
+  fold_tip: 押すと前後 20 行ずつ開く
+  open_file: 開く
+  open_file_tip: このファイルをエディタで開く
+  reviewed: 見た
+  reviewed_tip: 見た印を付けて畳む（もう一度押すと外して開く）
+  reviewed_stale: 見た後に変更あり
+  reviewed_stale_tip: 「見た」を付けた後で、このファイルの差分が変わりました。見直したらもう一度押して印を付ける
+  renamed_from: "← %{path}"
+  no_newline: 末尾に改行なし
+  add_note_tip: 注記を付ける（行を選んで c でも）
+  note_unsent: 未送信
+  note_sent: 送信済み
+  note_resolved: 解決
+  note_edit: 編集
+  note_resolve: 解決
+  note_reopen: 未解決に戻す
+  note_delete: 削除
+  note_new: 注記
+  note_editing: 注記を直す
+  draft_hint: "%{save} で保存 · Esc で取り消し"
+  draft_save: 保存
+  draft_cancel: 取り消し
+  tray_summary: "注記 %{count} 件（未送信 %{unsent}）"
+  send: 送る
+  resend: 未解決だけ再送
+  send_to: "送り先（%{count} 件を 1 通にまとめて）"
+  send_new_thread: ＋ 新しいスレッドで送る
+  send_default: 既定
+  send_empty: 送れるスレッドがありません
+  sent_toast: "注記 %{count} 件を %{thread} へ送りました"
+  send_target_gone: 送れませんでした — 選んだスレッドが閉じられています。注記は未送信のままなので、送り先を選び直してください
+  save_failed: "⚠ 保存できていない変更 %{count} 件"
+  save_retry: 再試行
+  prompt_header: "レビューコメント（%{count} 件）— 比較: %{base}..作業ツリー"
+  prompt_old_side: "%{location}（削除された行・比較元の行番号）"
+  prompt_lost: "%{location}（付けた時の場所・今の差分では見つからない）"
+  note_lost: "位置が変わった注記 — 付けた時の場所 %{location} の中身が変わり、同じ中身の場所も決まりません"
 difftab:
   proposal_title: "%{title} ⇄ 提案"
+  title: "%{name} ⇄ %{base}"
+  title_deleted: "%{name} ⇄ %{base}（削除）"
+  header_side: "%{path}（%{side}）"
+  side_working_tree: 作業ツリー
+  side_buffer: バッファ
+  new_file: 新規ファイル
+  deleted_file: 削除されたファイル
+  no_changes: "%{name} は %{base} と同じです（差分はありません）"
+  missing: "%{name} は %{base} にも作業ツリーにもありません"
+  unreadable: "%{name} をテキストとして読めないので diff を出せません"
 update:
+  just_updated: "necoder を v%{version} に更新しました"
+  whats_new: 変更点 ›
   available: ⬆ v%{version} に更新
   get: ⬆ v%{version} を入手
   installing: ⬇ 更新中…
@@ -665,6 +1397,17 @@ ipc:
   err_unknown_method: "未知の method: %{name}"
   err_bad_json: "JSON が読めない: %{detail}"
   err_gui_timeout: GUI の応答が timeout しました
+  err_no_active_task: GUI で選択中の Task がありません（Chat を開いているか、プロジェクトが開いていません）
+  err_active_is_integration: "GUI で選択中なのは統合先（%{title}）で、Task ではありません"
+  err_terminal_required: terminal（端末のハンドルか active）が必要です
+  err_terminal_not_found: "端末が見つかりません: %{handle}（`ne terminal list` でハンドルを取り直してください）"
+  err_no_active_terminal: 選択中のプロジェクトの下ドックに端末がありません
+  err_terminal_send_disabled: 端末への送信は許可されていません（設定 › 動作とエディタ の「CLI から端末へ入力を送る」を on にしてください）
+  err_text_required: text が必要です
+  err_diff_paths_required: left と right（比べる 2 つのファイルの絶対パス）が必要です
+  err_not_a_file: "ファイルではありません: %{path}"
+  err_read_file: "%{path} を読めません（%{error}）"
+  err_no_project: 開いているプロジェクトがありません
 crash:
   notice: ⚠ 前回終了時にクラッシュ — クリックで報告
 menu:
@@ -746,6 +1489,8 @@ menu:
   help: ヘルプ
   shortcut_sheet: キーボードショートカット
   report_bug: バグを報告…
+  open_logs: ログのフォルダを開く
+  open_manual: necoder のマニュアル
 welcome:
   title: necoder — 色による方向感覚
   open_project: プロジェクト / worktree を開く
@@ -759,6 +1504,26 @@ ssh:
   browse_hint: "接続しました。フォルダを右クリック →「ここをプロジェクトとして開く」で開けます"
   picker_placeholder: SSH ホストを選択（~/.ssh/config）
   manual_entry: URI を手入力…
+  register_entry: ＋ 接続先を登録…
+  register_title: 接続先を登録
+  register_sub: "%{path} の末尾に足します（今ある行は変えません・ssh や scp からも使えます）"
+  register_alias: 名前
+  register_alias_hint: "ssh <名前> で使う短い名前（例: devbox）"
+  register_hostname: ホスト名・IP
+  register_hostname_hint: "例: 192.168.1.20 / build.example.com"
+  register_user: ユーザー
+  register_user_hint: 空なら手元と同じユーザー
+  register_port: ポート
+  register_port_hint: 空なら 22
+  register_identity: 鍵のファイル
+  register_identity_hint: "空なら ssh の既定（例: ~/.ssh/id_ed25519）"
+  register_proxy_jump: 経由するホスト（ProxyJump）
+  register_proxy_jump_hint: "直接入れない時だけ（例: bastion・admin@gw.example.com:2222）"
+  register_cancel: キャンセル
+  register_confirm: 登録して確かめる
+  register_bad_port: "ポートは 1〜65535 の数です: %{port}"
+  register_no_config: SSH の config の置き場が分かりません（ホームのフォルダが無い）
+  registered: "%{alias} を登録しました（%{path}）。接続を確かめています…"
   restore_failed: "%{project} に接続できません。操作すると再接続を試みます"
   state_connected: 接続済み
   state_connecting: 接続中…
@@ -768,9 +1533,23 @@ ssh:
   reconnect_now: 再接続
   connect_now: 接続
   reconnecting: "%{host} へ再接続中…"
+  testing: "%{host} へ試しに接続しています…"
+  test_ok: "%{host} に接続できました（%{ms} ms）"
+  connect_failed: "%{host} に接続できません"
+  failure_details: SSH の接続ログ
+  hint_host_key_unknown: "ホストの指紋を確かめられませんでした。初めてのホストなら、出てくる確認で指紋を確かめて yes と入力してください（ターミナルで一度 ssh %{host} しても同じです）"
+  hint_host_key_changed: "%{host} の鍵が前と変わっています（作り直した・なりすましの恐れ）。作り直したと分かっている時だけ、ターミナルで ssh-keygen -R %{host} を実行してから開き直してください"
+  hint_authentication: "鍵かパスワードが通りませんでした。鍵を ssh-agent に入れる（macOS は ssh-add --apple-use-keychain ~/.ssh/id_ed25519 でパスフレーズを Keychain に）か、~/.ssh/config の IdentityFile と、サーバの authorized_keys を確かめてください"
+  hint_too_many_keys: "鍵を試しすぎて断られました。~/.ssh/config の Host %{host} に IdentityFile と IdentitiesOnly yes を書いて、使う鍵を 1 つにしてください"
+  hint_unknown_host: "%{host} という名前が見つかりません。綴りと ~/.ssh/config の HostName、VPN を確かめてください"
+  hint_refused: "接続を断られました。サーバで sshd が動いているかと、ポート（~/.ssh/config の Port）を確かめてください"
+  hint_timed_out: "応答がありません。ネットワーク・VPN・ファイアウォールと、ホスト名・ポートを確かめてください"
+  hint_bad_permissions: "~/.ssh の権限が広すぎて OpenSSH が読みません。chmod 700 ~/.ssh と chmod 600 ~/.ssh/config（鍵も 600）にしてください"
+  hint_negotiation: "サーバと暗号の方式が合いません（古い sshd）。~/.ssh/config の Host %{host} に、サーバが示した方式（KexAlgorithms / HostKeyAlgorithms）を足してください"
 askpass:
   hint: Enter で送信・Escape で取り消し（入力内容は保存されません）
   hint_click: 入力欄をクリックしてから入力してください
+  passphrase_tip: "毎回訊かれないようにするには、ターミナルで %{command} を一度実行してください（鍵を ssh-agent に預けます）"
   retry: "入力が拒否されました（%{attempt} 回目）"
   cancelled: 入力が取り消されました
   err_busy: 別の SSH 入力を待っています
@@ -802,10 +1581,45 @@ search:
 key:
   find_in_transcript: この会話を検索
   sheet_title: キーボードショートカット
+  sheet_hint: 行を押すと、次に押したキーに割り当てる（Esc でやめる）。↺ で既定に戻す
+  open_keymap: keymap.json を開く
+  press_keys: キーを押す…（Esc でやめる）
+  reset: 既定に戻す
+  conflict: "%{keys} は %{actions} でも使っています。置き換えますか"
+  replace: 置き換える
+  keep: やめる
+  unreadable: "keymap.json を読めないので、ここでは変えられません（%{error}）。keymap.json を開いて直してください"
+  write_failed: "keymap.json に書けません: %{path}: %{error}"
+  os_conflict: "OS の「%{feature}」が先に取るので、このキーは necoder まで届かないことがあります（OS の設定で外すか、別のキーに変えてください）"
+  os_bound: "%{keys} は OS の「%{feature}」と同じキーです。OS の設定で外していなければ necoder まで届きません"
+  os:
+    spotlight: Spotlight
+    input_source: 入力ソースの切り替え
+    character_viewer: 絵文字と記号
+    app_switcher: アプリの切り替え
+    window_cycle: ウインドウの切り替え
+    screenshot: スクリーンショット
+    mission_control: Mission Control
+    spaces: 操作スペースの切り替え
+    force_quit: 強制終了
+    lock_screen: 画面のロック
+    dock: Dock の表示 / 非表示
+    secure_attention: Ctrl+Alt+Del の画面
+    task_manager: タスク マネージャー
+    start_menu: スタート メニュー
+    window_menu: ウィンドウのメニュー
+    windows_key: Windows キーの操作
+    terminal_launcher: 端末の起動
+    log_out: ログアウト
+    workspaces: ワークスペースの切り替え
+    run_command: コマンドの実行
+    super_key: Super キーの操作
   section_editor: エディタ
   section_agent: AI チャット
   section_control: 管制
   section_global: グローバル
+  section_explorer: エクスプローラ
+  undo_file_operation: ファイル操作を取り消す
   backspace: 前の文字を削除
   delete: 次の文字を削除
   newline: 改行
@@ -827,6 +1641,7 @@ key:
   outdent: アウトデント
   toggle_soft_wrap: 折り返しの切替
   toggle_rendered_markdown: プレビューの切替
+  toggle_side_preview: プレビューを右に並べる
   move_left: 左へ移動
   move_right: 右へ移動
   move_up: 上へ移動
@@ -859,52 +1674,21 @@ key:
   close_active_thread: アクティブスレッドを閉じる
   command_palette: コマンドパレット
   control_next: "管制: 次の要対応へ"
+  cleanup_task: "Task: 選んだ Task を片付ける…"
   minimize: ウィンドウを最小化
   hide: necoder を隠す
   hide_others: 他のアプリを隠す
   activate_project: プロジェクトを切替（レール順）
   quit: necoder を終了
-work:
-  repositories: リポジトリ / 作業
-  open_beside: 隣に開く
-  terminal: Terminal
-  agent: Agent
-  diff: 変更
-  add_worktree: ＋ 作業を追加
-  add_worktree_tip: 既存worktreeを開く / ブランチからworktreeを作る
-  choose_worktree: worktreeを選択 / 新しいブランチ名を入力
-  create_existing: このブランチのworktreeを作成
-  create_branch: 現在のHEADからworktreeを作成
-  empty: 左の一覧からworktreeを選ぶと、ここに開きます
-  empty_pane: ＋からAgent・Terminal・ファイルを開けます
-  unavailable: このworktreeは開かれていません。左の一覧から開き直してください。
-  columns: 横並び
-  grid: グリッド
-  toggle_layout: 横並び / グリッドを切り替え
-  restore: 配置に戻る
-  close_column: 列を隠す（セッションは継続）
-  close_pane: ペインを閉じる（タブは隣へ移動）
-  pane_menu: タブを追加 / ペインを配置
-  terminal_stopped: Terminalは停止しています。配置の復元ではコマンドを再実行しません。
-  start_terminal: シェルを起動
-  open_file: ファイルを開く…
-  new_thread: 新しいスレッド
-  new_terminal: 新しいTerminal
-  move_terminal: 下ドックのTerminalをここへ移動
-  split: 下に分割してTerminalを開く
-  tabs_top: タブを上に表示
-  tabs_left: タブを左に表示
-  focus: ペインに集中 / 配置に戻る
-  move_left: 列を左へ移動
-  move_right: 列を右へ移動
-  tab_previous: タブを前へ移動
-  tab_next: タブを後ろへ移動
-  hide_tab: タブを隠す（セッションは継続）
-  return_terminal: Terminalを下ドックへ移動
-  stop_terminal: Terminalセッションを終了
-  tabs_setting: タブの既定位置
-  top: 上
-  left: 左
+  section_terminal: ターミナル
+  terminal_copy: 選択をコピー
+  terminal_paste: 貼り付け
+  terminal_select_all: すべて選択
+  terminal_clear: 画面をクリア
+  terminal_find: ターミナル内を検索
+  terminal_new_tab: ターミナルのタブを開く
+  terminal_close_tab: ターミナルのタブを閉じる
+  terminal_split: ターミナルを横に分割
 chat:
   destination: Chat
   new_chat: 新しいチャット
@@ -950,3 +1734,120 @@ chat:
   copy_to_project: "プロジェクト「%{project}」へコピー"
   copied_to_project: "コピーしました: %{path}"
   copy_failed: "コピーできませんでした: %{message}"
+usage:
+  window_five_hour: 5 時間枠
+  window_five_hour_short: 5h
+  window_weekly: 週枠
+  window_weekly_short: 週
+  window_opus: Opus の週枠
+  window_opus_short: Opus 週
+  window_sonnet: Sonnet の週枠
+  window_sonnet_short: Sonnet 週
+  window_weekly_extra: 週枠（追加の使用枠を含む）
+  window_weekly_extra_short: 週+追加
+  window_extra: 追加の使用枠
+  window_extra_short: 追加枠
+  window_days: "%{days} 日枠"
+  window_days_short: "%{days}日"
+  window_hours: "%{hours} 時間枠"
+  window_hours_short: "%{hours}h"
+  window_minutes: "%{minutes} 分枠"
+  window_minutes_short: "%{minutes}m"
+  resets_in: "あと %{time}でリセット"
+  reset_done: リセット済み（新しい値はまだ届いていません）
+  duration_minutes: "%{minutes} 分"
+  duration_hours: "%{hours} 時間 %{minutes} 分"
+  duration_hours_only: "%{hours} 時間"
+  duration_days: "%{days} 日 %{hours} 時間"
+  duration_days_only: "%{days} 日"
+  credential_env: "設定の env %{id}"
+  chip_tip: "%{agent} の使用量（最後に受け取った値）。クリックで詳細"
+  popover_title: 使用量・レート制限
+  received: "受信 %{when}"
+  status_warning: 上限が近い
+  status_rejected: 上限に達しています
+  no_values: まだ値を受け取っていません。エージェントが知らせてきたら出ます
+  note: "値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。同じエージェントでも、SSH の接続先や認証の設定（agent_servers の env の置き場・API キーなど）が違えば分けて出します（「設定の env #…」は見分けるための印で、キーの値ではありません）。"
+  codex_note: Codex だけは ACP で知らせてこないので、このポップオーバーを開いた時に codex 本体（codex app-server）に訊きます。
+  codex_loading: Codex の値を読み込み中…
+  codex_failed: "Codex の値を読めませんでした: %{error}"
+  reload: 再読み込み
+  open_stats: 統計を開く
+  stats_title: 使用量の統計
+  stats_subtitle: 直近 30 日 · necoder で記録したターンだけ
+  stats_date: 日付
+  stats_agent: エージェント
+  stats_turns: ターン
+  stats_tokens: トークン
+  stats_cost: 推定コスト
+  stats_total: 30 日の合計
+  stats_empty: まだ記録がありません。エージェントが使用量を知らせたターンから記録します。
+  stats_loading: 読み込み中…
+  stats_failed: "使用量を読めませんでした: %{error}"
+  stats_note: トークンと推定コストは、エージェントがターンごとに報告した値です。コストは Claude Code が出す推定（USD）で、実際の請求額ではありません（請求の正は各社の請求画面）。報告の無い値は —（0 ではありません）、一部のターンにしか報告が無い合計には ≥ を付けています。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけです。~/.claude などのローカルのログは読みません。
+ports:
+  title: 開いているポート
+  loading: 読んでいます…
+  empty: necoder の中で待ち受けているポートはありません（端末やエージェントで開発サーバを立てると出ます）
+  others: "ほかのプロセス（%{count}）"
+  no_project: どのプロジェクトでもない
+  open: 開く
+  stop: 止める
+  stop_failed: "止められませんでした（pid %{pid}）— もう終わっているか、necoder の中のプロセスではありません"
+  hint: 開いた時と ↻ の時だけ読みます（lsof / ps・接続先は ss / lsof）。止められるのは necoder の中のプロセスだけ。接続先のポートは「転送」で手元の localhost に出します
+  unsupported: この OS ではまだ使えません（macOS / Linux）
+  remote_heading: "接続先 · %{host}"
+  remote_empty: 接続先で待ち受けているポートはありません（自分のユーザーのプロセスだけ見えます）
+  remote_other_user: ほかのユーザーのプロセス
+  forward: 転送
+  stop_forward: やめる
+  forwarded: "localhost:%{local} → %{host}:%{remote} に転送しました（「開く」で Web タブ）"
+  forwarded_to: "手元の localhost:%{local} へ転送中"
+inbox:
+  title: 通知の履歴
+  bell_tip: 通知の履歴
+  bell_tip_unread: "通知の履歴（未読 %{count}）"
+  mark_all_read: すべて既読
+  mark_read: 既読にする
+  mark_unread: 未読に戻す
+  empty: まだ通知はありません（エージェントの完了・失敗・承認待ち・質問待ちがここに残ります）
+  note: "この窓の最新 %{count} 件・起動している間だけ残ります"
+resources:
+  title: リソース（メモリ）
+  loading: 読んでいます…
+  unsupported: この OS ではまだ読めません
+  summary: "necoder 本体 %{own} · 子プロセス %{children}（%{count} 本）"
+  outside: プロジェクトの外
+  process: "%{command}（pid %{pid}・%{count} プロセス）"
+  stop_quiet: "使っていないエージェントを止める（%{count}）"
+  stopped: "エージェントを %{count} 本止めました（会話は残っています・次に送ると続きから）"
+  hint: 読むのは開いた時と ↻ の時だけ。止めるのは静かで会話を引き継げるエージェントだけです（端末・開発サーバは止めません）
+cleanup:
+  title: Task の片付け
+  select_finished: 統合済み・終了済みを選ぶ
+  order_by_age: "並び: 作った順"
+  order_by_size: "並び: 大きい順"
+  counting: 数えています…
+  nothing_to_lose: 失うもの無し
+  dirty: "未コミット %{n}"
+  unmerged: "未統合のコミット %{n}"
+  unknown_base: 比較先が分からない
+  phase_archived: 終了済み
+  empty: このリポジトリに Task はありません
+  selected: "選んだ %{count} 本（worktree を消せるのは %{deletable} 本）"
+  archive: 終了する（worktree は残す）
+  delete: "worktree を削除（%{count}・ブランチは残す）"
+  archived: "Task を %{count} 本終了しました"
+  deleted: "worktree を %{count} 本消しました（%{kept} 本は失うものが出たので残しました）"
+  hint: worktree を消せるのは、未コミットの変更も統合先に無いコミットも無い Task だけです（消す直前にもう一度数えます）。失うものがある Task は ⋯ メニューの削除で 1 本ずつ
+statusbar:
+  menu_title: statusbar に出す項目
+  item_color: プロジェクトの色
+  item_branch: ブランチ
+  item_diagnostics: 診断
+  item_terminal: ターミナル
+  item_activity: エージェントの状況
+  item_usage: 使用量
+  item_cursor: 行:列
+  item_encoding: 文字コード
+  item_language: 言語

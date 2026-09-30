@@ -53,16 +53,27 @@ Agent の permission wait は `blocked`、turn end は `review_ready` へ写像�
 `task_events` は phase change / spawn / result / integration の追記ログ。rail index や cell index は identity
 に使わない。Agent thread は同じ Space ID を storage scope として保存し、別 Task の Panel に混入しない。
 
+Captain の分解案（FLEET-V2 §5.5）は `captain_proposals`、承認した行の実行記録は `captain_proposal_rows`
+（鍵 = 案の id + 行の番号・状態 = 待機 / 作成中 / 成功 / 失敗 / やめた・段・決めたブランチ名と worktree の場所・
+Task の id・理由。2026-09-28・UX-CODE-REVIEW R09）。DB と git は 1 つのトランザクションにできないので、段の**前に**
+記録を書き（名前と場所は `git worktree add` の前）、落ちた段のやり直しは既にある worktree・ブランチ・Task を使う。
+待機の行は承認と、Task の id は Task の登録（`task_spaces`・作った `phase_changed`・`captain_task`）と同じ
+トランザクションで書く。起動時は終わっていない行を画面に戻すだけで、人が押すまで続けない。
+
 Captain / script の操作面は GUI と同じ ledger と Git safety gate を使う。
 
 ```bash
 necoder fleet create [integration-root] [title]
 necoder fleet list [integration-root]
-necoder fleet status <task-id> <phase> [summary]
-necoder fleet wait <task-id> <phase> [timeout-seconds]
-necoder fleet review <task-id> [integration-root]
-necoder fleet integrate <task-id> [integration-root]
+necoder fleet status <task> <phase> [summary]
+necoder fleet wait <task> <phase> [timeout-seconds]
+necoder fleet review <task> [integration-root]
+necoder fleet integrate <task> [integration-root]
 ```
+
+`<task>` は id のほか `branch:<ブランチ>` / `name:<名前>` / `active`（GUI で選択中）で指せる。前置きなしは
+id → ブランチ → 名前の順。ブランチと名前は今いるリポジトリの Task だけから探し、統合先は id でしか選べない
+（`fleet.rs` の `select_task`）。全サブコマンドと使い方は `necoder skills get --full` が実装から出す。
 
 MCP にも `fleet_create_task`, `fleet_list_tasks`, `fleet_update_task`, `fleet_wait_task`,
 `fleet_review_task`, `fleet_integrate_task` を公開する。wait は GUI process の一時 state でなく永続 ledger を
@@ -85,4 +96,6 @@ TaskSpace-first ドメインモデルから独立に設計する。herdr のコ�
 - cell を閉じても Task/Agent は終了しない。Agent の終了は thread archive、Task の終了は lifecycle 操作。
 - IntegrationSpace への write は明示 Integrate のみ。
 - Git/DB/Host I/O は render 中に行わない。
+- 分解案の 1 行が作る Task は 1 本だけ: 名前と場所は作る前に記録し、再開はそれを使う。行に Task の id が無いのに
+  その worktree が別の Task として台帳にあれば使わない。同じリポジトリの Task 作成（＋ Task・分解案の行）は 1 回ずつ順に。
 - 色は identity、状態は形と動き。Task phase、ThreadActivity、Git health を一つの enum に潰さない。

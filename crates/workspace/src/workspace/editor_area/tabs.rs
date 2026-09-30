@@ -15,9 +15,6 @@ impl Workspace {
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_work_tab(window, cx) {
-            return;
-        }
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
@@ -39,9 +36,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.work_cycle_tab(1, window, cx) {
-            return;
-        }
         if self.tabs.len() > 1 {
             self.select_tab((self.active_tab + 1) % self.tabs.len(), window, cx);
         }
@@ -54,9 +48,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.work_cycle_tab(-1, window, cx) {
-            return;
-        }
         let count = self.tabs.len();
         if count > 1 {
             self.select_tab((self.active_tab + count - 1) % count, window, cx);
@@ -91,6 +82,25 @@ impl Workspace {
         }
         self.agent_panel
             .update(cx, |panel, cx| panel.new_thread(cx));
+        cx.notify();
+    }
+
+    /// エージェントを決めて新規スレッド（B28）。使わないと決めたエージェント（O16）なら開かずに知らせる
+    /// （keymap.json に残したキーから来た時）。
+    pub(crate) fn new_agent_thread_with(&mut self, agent: &str, cx: &mut Context<Self>) {
+        if !settings::agent_label_enabled(cx, agent) {
+            self.push_toast(
+                SharedString::from(i18n::t!("agent.disabled_agent", "agent" => agent)),
+                self.accent(),
+                cx,
+            );
+            return;
+        }
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel
+            .update(cx, |panel, cx| panel.new_thread_with_agent(agent, cx));
         cx.notify();
     }
 
@@ -204,7 +214,8 @@ impl Workspace {
     ) {
         if (self.chrome.resizing_agent
             || self.chrome.resizing_explorer
-            || self.chrome.resizing_bottom)
+            || self.chrome.resizing_bottom
+            || self.chrome.resizing_side.is_some())
             && event.pressed_button != Some(MouseButton::Left)
         {
             // ウィンドウ外で mouse-up を離してイベントを取りこぼしても、戻ってきた最初の
@@ -212,6 +223,7 @@ impl Workspace {
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
             self.chrome.resizing_bottom = false;
+            self.chrome.resizing_side = None;
             cx.notify();
             return;
         }
@@ -236,6 +248,10 @@ impl Workspace {
             self.chrome.explorer_width =
                 (self.chrome.resize_start_width + dx).clamp(DOCK_MIN, DOCK_MAX);
             cx.notify();
+        } else if let Some((start_ratio, card_width)) = self.chrome.resizing_side {
+            // 境を左へ動かすとサイドペインが広がる（dx 負 → 割合増）。会話もサイドも潰れない範囲に留める。
+            self.chrome.side_pane_ratio = (start_ratio - dx / card_width.max(1.)).clamp(0.25, 0.65);
+            cx.notify();
         } else if self.chrome.resizing_bottom {
             // 上縁を上へ動かすと高くなる（dy 負 → 高さ増）。
             let dy = f32::from(event.position.y) - self.chrome.resize_start_y;
@@ -254,12 +270,14 @@ impl Workspace {
         if self.chrome.resizing_agent
             || self.chrome.resizing_explorer
             || self.chrome.resizing_bottom
+            || self.chrome.resizing_side.is_some()
         {
             // 左ドックの幅は窓の状態として残す（次に開いた時も同じ幅）。
             let save_width = self.chrome.resizing_explorer;
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
             self.chrome.resizing_bottom = false;
+            self.chrome.resizing_side = None;
             if save_width {
                 self.save_state(cx);
             }
@@ -375,6 +393,16 @@ impl Workspace {
             )),
             _ => shell,
         };
+        // 開発用（debug のみ）: NECODER_TERM_SCRIPT="<sh の文>" で起動時にその文を実行してから
+        // rc を読まない zsh へ（下線・色・リンクなど端末の描画を offscreen で撮るためのフック）。
+        #[cfg(debug_assertions)]
+        let shell = match std::env::var("NECODER_TERM_SCRIPT") {
+            Ok(script) if !script.is_empty() && shell.is_none() => Some((
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), format!("{script}; exec zsh -f")],
+            )),
+            _ => shell,
+        };
         TerminalLaunch { cwd, shell }
     }
 
@@ -412,17 +440,33 @@ impl Workspace {
         cx.notify();
     }
 
-    /// アクティブなエディタタブを閉じて隣へ移る（⌘W / タブの ×）。
+    /// アクティブなエディタタブを閉じて隣へ移る（⌘W）。ピン留めしたタブは閉じずに知らせる（O26）。
     pub(crate) fn close_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if tab.pinned {
+            let color = self.accent();
+            self.push_toast(i18n::t!("tabs.pinned_kept").into(), color, cx);
             return;
         }
         self.close_tab_at(self.active_tab, window, cx);
     }
 
-    /// `index` 番目のタブを閉じ、アクティブを隣へ寄せる。閉じたファイルは ⌘⇧T 用に履歴へ積み、
-    /// LSP には didClose を送る。最後の 1 枚を閉じると空状態（分割も畳む）。
+    /// `index` 番目のタブを閉じる。前面でプロセスが動いている端末のタブなら先に確かめる（O24・
+    /// `terminal_tabs`）。
     pub(crate) fn close_tab_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tabs_asking(vec![index], window, cx);
+    }
+
+    /// `index` 番目のタブを確かめずに閉じ、アクティブを隣へ寄せる。閉じたファイルは ⌘⇧T 用に履歴へ
+    /// 積み、LSP には didClose を送る。端末のタブは端末も終える。最後の 1 枚を閉じると空状態（分割も畳む）。
+    pub(crate) fn close_tab_now(
         &mut self,
         index: usize,
         window: &mut Window,
@@ -437,12 +481,27 @@ impl Workspace {
             self.close_hover(cx);
         }
         let tab = self.tabs.remove(index);
+        // 変更レビューは session が持ち続ける（Fleet の「変更」タブと共用）。閉じたら読み込みを止める（R02）。
+        if let TabContent::Review(review) = &tab.content {
+            self.review_tab_closed(review, cx);
+        }
+        // Web タブの Web Inspector（別の窓）を取り残さない。WebView を手放せば WebKit も閉じるが、
+        // view を他が握っていても閉じるよう、ここで明示的に閉じる。
+        if let Some(web) = tab.web() {
+            web.update(cx, |web, cx| web.close_devtools(cx));
+        }
         if !tab.transient {
             self.recently_closed_files.push(tab.path.clone());
             // 画像タブは didOpen していないので didClose も送らない。
             if tab.editor().is_some() {
                 self.lsp_did_close(&tab.path);
             }
+        }
+        // 端末のタブ: ドックの id から外す＝このタブが最後の持ち主になり、タブと一緒に落ちて止まる。
+        // 下ドックへ移した端末は先に `detached` から抜けているので止まらない。
+        if let Some((_, session)) = tab.terminal() {
+            self.terminal_dock
+                .update(cx, |dock, cx| dock.terminate_session(session, cx));
         }
         // hot exit: タブを閉じる＝未保存編集の破棄（現仕様）なのでスナップショットも消す。
         if let Some(storage) = self.persistence.storage.clone() {
@@ -475,6 +534,10 @@ impl Workspace {
             } else {
                 let handle = tab.focus_handle(cx);
                 window.focus(&handle, cx);
+                // Web タブはキーを WebView へ渡す（HTML プレビューと同じ）。
+                if let Some(web) = tab.web().cloned() {
+                    web.update(cx, |web, cx| web.set_surface_active(true, true, cx));
+                }
             }
         }
         let selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
@@ -489,7 +552,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// `index` 番目を残して他を全部閉じる（タブメニュー）。後ろから閉じて添字のズレを避ける。
+    /// `index` 番目を残して他を全部閉じる（タブメニュー）。ピン留めは残す（O26）。後ろから閉じて
+    /// 添字のズレを避ける。
     pub(crate) fn close_other_tabs(
         &mut self,
         index: usize,
@@ -499,14 +563,13 @@ impl Workspace {
         if index >= self.tabs.len() {
             return;
         }
-        for target in (0..self.tabs.len()).rev() {
-            if target != index {
-                self.close_tab_at(target, window, cx);
-            }
-        }
+        let targets: Vec<usize> = (0..self.tabs.len())
+            .filter(|target| *target != index && !self.tabs[*target].pinned)
+            .collect();
+        self.close_tabs_asking(targets, window, cx);
     }
 
-    /// `index` より右のタブを全部閉じる（タブメニュー）。
+    /// `index` より右のタブを全部閉じる（タブメニュー）。ピン留めは残す（O26）。
     pub(crate) fn close_tabs_to_right(
         &mut self,
         index: usize,
@@ -516,9 +579,10 @@ impl Workspace {
         if index >= self.tabs.len() {
             return;
         }
-        for target in ((index + 1)..self.tabs.len()).rev() {
-            self.close_tab_at(target, window, cx);
-        }
+        let targets: Vec<usize> = ((index + 1)..self.tabs.len())
+            .filter(|target| !self.tabs[*target].pinned)
+            .collect();
+        self.close_tabs_asking(targets, window, cx);
     }
 
     /// `index` 番目のタブをアクティブにする（タブクリック・⌘{ / ⌘}・重複オープン時）。
@@ -531,26 +595,40 @@ impl Workspace {
             self.dismiss_buffer_search(cx);
             self.close_hover(cx);
         }
-        let Some((handle, path, editor)) = self.tabs.get(index).map(|tab| {
+        let Some((handle, path, editor, web, terminal)) = self.tabs.get(index).map(|tab| {
             (
                 tab.focus_handle(cx),
                 tab.path.clone(),
                 tab.editor().cloned(),
+                tab.web().cloned(),
+                tab.is_terminal(),
             )
         }) else {
             return;
         };
         self.active_tab = index;
-        self.reveal_work_file(path.clone(), cx);
+        // 移った先のエディタの衝突の印を数える（O19・E05・帯をすぐ出す）。
+        if let Some(editor) = editor.as_ref() {
+            self.refresh_conflicts(editor, cx);
+        }
         if let Some(editor) = editor.filter(|editor| editor.read(cx).rendered_html()) {
             editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
         } else {
             window.focus(&handle, cx);
+            // Web タブはキーを WebView へ渡す（HTML プレビューと同じ）。
+            if let Some(web) = web {
+                web.update(cx, |web, cx| web.set_surface_active(true, true, cx));
+            }
         }
         let active = self.project_sessions.active;
+        let file_position = self.file_position_of_tab(index);
         if let Some(slot) = self.project_sessions.slot_mut(active) {
-            slot.explorer.selected = Some(path);
-            slot.active_file = index;
+            if !terminal {
+                slot.explorer.note_opened(&path); // ⌘P の「最近開いた」の先頭へ（D19）
+                slot.explorer.selected = Some(path);
+            }
+            // タブ列の位置ではなく、ファイルの並びの中の位置（端末のタブを数えない・O24）。
+            slot.active_file = file_position;
         }
         self.push_active_diagnostics(cx);
         self.save_state(cx);
@@ -558,26 +636,14 @@ impl Workspace {
     }
 
     /// タブを `from` から `to` へ移動する（ドラッグ並べ替え。active は同じタブを指し続ける）。
+    /// ピン留めの区切りは越えない（ピン留めはピン留めの中・そうでないタブはその外へ寄せる・O26）。
     pub(crate) fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let count = self.tabs.len();
         if from >= count || to >= count || from == to {
             return;
         }
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
-        // active が指すタブを追従させる（remove→insert のインデックスずれを補正）。
-        self.active_tab = if self.active_tab == from {
-            to
-        } else {
-            let mut active = self.active_tab;
-            if from < active {
-                active -= 1;
-            }
-            if to <= active {
-                active += 1;
-            }
-            active
-        };
+        let to = self.clamp_tab_move(from, to);
+        self.reorder_tab(from, to);
         self.sync_active_slot();
         self.save_state(cx);
         cx.notify();
@@ -602,11 +668,48 @@ impl Workspace {
         let Some(path) = self.active_tab_path() else {
             return;
         };
+        self.open_path_in_split(path, true, window, cx);
+    }
+
+    /// タブを右へドラッグして落とした（O24・C03）: そのタブのファイルを右の分割ペインに並べる
+    /// （分割が開いていれば中身を差し替える・主ペインのタブはそのまま）。エディタのタブでない物
+    /// （画像・PDF・Web・端末・変更レビュー・diff の一時タブ）は並べられないので知らせる。
+    pub(crate) fn split_dragged_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .tabs
+            .get(index)
+            .filter(|tab| tab.editor().is_some() && !tab.transient)
+            .map(|tab| tab.path.clone())
+        else {
+            let color = self.accent();
+            self.push_toast(i18n::t!("tabs.split_needs_file").into(), color, cx);
+            return;
+        };
+        self.split_editor = None;
+        self.open_path_in_split(path, false, window, cx);
+    }
+
+    /// `path` を読んで右分割ペインに開く。local は同期（マイクロ秒）・remote は読みを背景へ
+    /// （再接続待ちで固まらない）。`follow_active` = ⌘\ の複製（読む間にタブを移ったら開かない）。
+    fn open_path_in_split(
+        &mut self,
+        path: PathBuf,
+        follow_active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
         let host = worktree.host().clone();
-        // local は同期（マイクロ秒）。remote は読みを背景へ（再接続待ちで固まらない）。
+        let root = worktree.root().to_path_buf();
+        self.split_generation = self.split_generation.wrapping_add(1);
+        let generation = self.split_generation;
         if !host.is_remote() {
             match Buffer::from_host(host, &path) {
                 Ok(buffer) => self.open_split_editor(buffer, window, cx),
@@ -625,9 +728,16 @@ impl Workspace {
                 .spawn(async move { read_host.read_file(&read_path) })
                 .await;
             let _ = handle.update(cx, |workspace, window, cx| {
-                // 読んでいる間に開いた/閉じた分割やタブ切替があれば、古い読みで上書きしない。
-                if workspace.split_editor.is_some()
-                    || workspace.active_tab_path() != Some(path.clone())
+                // 読んでいる間に別のプロジェクトへ移った（分割はプロジェクトごと）・次の読みを始めた
+                // （続けて落とした・⌘\）・分割を開き閉めした・（⌘\ の複製なら）タブを移った時は、
+                // 古い読みで上書きしない。
+                let same_project = workspace
+                    .active_worktree()
+                    .is_some_and(|worktree| worktree.root() == root.as_path());
+                if !same_project
+                    || workspace.split_generation != generation
+                    || workspace.split_editor.is_some()
+                    || (follow_active && workspace.active_tab_path() != Some(path.clone()))
                 {
                     return;
                 }
@@ -655,6 +765,8 @@ impl Workspace {
     }
 
     pub(crate) fn close_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 読みかけの分割も取り消す（閉じた後に開かない）。
+        self.split_generation = self.split_generation.wrapping_add(1);
         if self.split_editor.take().is_none() {
             return;
         }
@@ -663,5 +775,197 @@ impl Workspace {
             window.focus(&handle, cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O24・C03: 接続先（SSH）のファイルは背景で読む。続けて落とせば後の方だけが開き、読んでいる間に
+    /// 別のプロジェクトへ移れば、移った先の分割には開かない（遅れて届いた古い読みで上書きしない）。
+    #[gpui::test]
+    fn late_remote_reads_do_not_land_in_the_wrong_split(cx: &mut gpui::TestAppContext) {
+        /// 手元のファイルを読むが、接続先として振る舞う host（読みが背景に回る）。
+        struct RemoteLike;
+        impl host::Host for RemoteLike {
+            fn id(&self) -> &str {
+                "remote-like"
+            }
+            fn display_name(&self) -> &str {
+                "devbox"
+            }
+            fn is_remote(&self) -> bool {
+                true
+            }
+            fn host_for_project(&self, _path: &Path) -> anyhow::Result<Arc<dyn host::Host>> {
+                Ok(Arc::new(RemoteLike))
+            }
+            fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+                host::LocalHost.canonicalize(path)
+            }
+            fn metadata(&self, path: &Path) -> anyhow::Result<host::HostMetadata> {
+                host::LocalHost.metadata(path)
+            }
+            fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<host::HostEntry>> {
+                host::LocalHost.read_dir(path)
+            }
+            fn read_file(&self, path: &Path) -> anyhow::Result<host::FileContent> {
+                host::LocalHost.read_file(path)
+            }
+            fn write_file(
+                &self,
+                path: &Path,
+                bytes: &[u8],
+                condition: host::WriteCondition,
+            ) -> anyhow::Result<host::FileRevision> {
+                host::LocalHost.write_file(path, bytes, condition)
+            }
+            fn list_files(&self, root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+                host::LocalHost.list_files(root, limit)
+            }
+            fn search_project(
+                &self,
+                root: &Path,
+                spec: &host::TextSearchSpec,
+                file_limit: usize,
+            ) -> anyhow::Result<Vec<host::TextSearchHit>> {
+                host::LocalHost.search_project(root, spec, file_limit)
+            }
+            fn run_command(&self, spec: &host::CommandSpec) -> anyhow::Result<host::CommandOutput> {
+                host::LocalHost.run_command(spec)
+            }
+            fn spawn_process(&self, spec: &host::CommandSpec) -> anyhow::Result<host::HostProcess> {
+                host::LocalHost.spawn_process(spec)
+            }
+            fn terminal_launch(&self, cwd: &Path) -> anyhow::Result<Option<host::TerminalLaunch>> {
+                host::LocalHost.terminal_launch(cwd)
+            }
+        }
+
+        let base =
+            std::env::temp_dir().join(format!("necoder_split_remote_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("remote")).unwrap();
+        std::fs::create_dir_all(base.join("local")).unwrap();
+        let base = paths::canonicalize(&base).unwrap();
+        let remote = base.join("remote");
+        std::fs::write(remote.join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(remote.join("b.txt"), "beta\n").unwrap();
+        std::fs::write(base.join("local").join("c.txt"), "gamma\n").unwrap();
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let sources = vec![
+            ProjectSource::new(Arc::new(RemoteLike), remote.clone()),
+            ProjectSource::new(host::LocalHost::shared(), base.join("local")),
+        ];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        let split_text = |workspace: &Workspace, cx: &App| {
+            workspace
+                .split_editor
+                .as_ref()
+                .map(|split| split.read(cx).plain_text())
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.switch_project(0, window, cx);
+            workspace.open_file_sync(remote.join("a.txt"), window, cx);
+            workspace.open_file_sync(remote.join("b.txt"), window, cx);
+            // 続けて 2 回落とす（どちらも背景で読む）。
+            workspace.split_dragged_tab(0, window, cx);
+            workspace.split_dragged_tab(1, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                split_text(workspace, cx).as_deref(),
+                Some("beta\n"),
+                "後に落とした方"
+            );
+            // 落として、読み終わる前に別のプロジェクトへ。
+            workspace.split_dragged_tab(0, window, cx);
+            workspace.switch_project(1, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert_eq!(
+                split_text(workspace, cx),
+                None,
+                "移った先のプロジェクトの分割には開かない"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// O24・C03: タブを右へドラッグして落とすと、そのファイルを右の分割ペインに並べる（主ペインの
+    /// タブと選択はそのまま・開いていれば差し替える）。ファイルでないタブは並べずに知らせる。
+    #[gpui::test]
+    fn a_dragged_tab_opens_on_the_right(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_split_drop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(root.join("b.txt"), "beta\n").unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_file_sync(root.join("a.txt"), window, cx);
+            workspace.open_file_sync(root.join("b.txt"), window, cx);
+            assert_eq!(workspace.active_tab, 1);
+            let split_text = |workspace: &Workspace, cx: &App| {
+                workspace
+                    .split_editor
+                    .as_ref()
+                    .map(|split| split.read(cx).plain_text())
+            };
+
+            workspace.split_dragged_tab(0, window, cx);
+            assert_eq!(split_text(workspace, cx).as_deref(), Some("alpha\n"));
+            assert_eq!(workspace.tabs.len(), 2, "主ペインのタブはそのまま");
+            assert_eq!(workspace.active_tab, 1);
+
+            workspace.split_dragged_tab(1, window, cx);
+            assert_eq!(
+                split_text(workspace, cx).as_deref(),
+                Some("beta\n"),
+                "差し替える"
+            );
+
+            workspace
+                .terminal_dock
+                .update(cx, |dock, _cx| dock.use_test_terminals());
+            workspace.new_terminal_tab(&NewTerminalTab, window, cx);
+            workspace.split_dragged_tab(2, window, cx);
+            assert_eq!(split_text(workspace, cx).as_deref(), Some("beta\n"));
+            assert!(workspace
+                .notifications
+                .toasts
+                .iter()
+                .any(|toast| toast.text.as_ref() == i18n::t!("tabs.split_needs_file")));
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1,6 +1,8 @@
 //! ⌘P の in-process fuzzy の実測（M13・terminal-stack-2026 §4「巨大 repo で fzf+rg に負けないか」）。
 //! zed クローン（数万ファイル級）で「1 キー入力毎の全件再スコア」の実コストを測る。
 //! 予算: 1 refilter < 16ms（1 フレーム以内なら体感ゼロ）。超過で exit 1。
+//! スコアだけの計測に加え、Picker の並べ替えまで含めた `rank_items`（⌘P の最近開いたファイルの
+//! 加点あり / なし）も測る。
 //!
 //! 実行: `cargo run --release -p ui --example bench_fuzzy -- [dir=./zed]`
 
@@ -55,6 +57,38 @@ fn main() {
                 "ok"
             };
             println!("  {mark:4} query={query:14} {matched:>6} 件一致  {micros:>7} µs / refilter");
+        }
+    }
+    // Picker::refilter の本体（スコア + 加点 + 並べ替え）。⌘P は最近開いた 20 件に加点する（D19）。
+    // 加点の有無で差が出ないこと（＝ 1 キーの予算を食わないこと）を見る。
+    for (label, boosted) in [("rank 加点なし", 0usize), ("rank 最近 20 件に加点", 20)] {
+        let items: Vec<ui::PickerItem> = synthetic
+            .iter()
+            .enumerate()
+            .map(|(id, path)| {
+                let boost = if id % 2_500 == 0 && id / 2_500 < boosted {
+                    10_000
+                } else {
+                    0
+                };
+                ui::PickerItem::new(id, path.clone()).with_boost(boost)
+            })
+            .collect();
+        println!("{label}（{} 件）:", items.len());
+        for query in queries {
+            let started = Instant::now();
+            let ranked = ui::rank_items(query, &items);
+            let micros = started.elapsed().as_micros();
+            let mark = if micros > 16_000 {
+                failed = true;
+                "FAIL"
+            } else {
+                "ok"
+            };
+            println!(
+                "  {mark:4} query={query:14} {:>6} 件一致  {micros:>7} µs / refilter",
+                ranked.len()
+            );
         }
     }
     if failed {

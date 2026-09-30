@@ -428,6 +428,34 @@ impl Workspace {
                     ),
                 )
             })
+            .when(rail.threads, |element| {
+                if chat_mode {
+                    return element
+                        .child(self.rail_icon_inert("rail-threads", "icons/activity.svg"));
+                }
+                // AI スレッド一覧（herd・2026-09-24 本人要望）。Fleet から戻ると左カラムに残っていた一覧を、
+                // レールから開ける場所にした。Fleet 中は同じ枠が Fleet サイドバーなので、名札だけ替える。
+                element.child(
+                    self.rail_icon(
+                        "rail-threads",
+                        "icons/activity.svg",
+                        if self.chrome.fleet_mode {
+                            i18n::t!("rail.fleet_sidebar")
+                        } else {
+                            i18n::t!("rail.threads")
+                        },
+                        if self.herd_column_visible(cx) {
+                            accent
+                        } else {
+                            theme.fg2
+                        },
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| this.toggle_herd_sidebar(cx)),
+                    ),
+                )
+            })
             .when(rail.fleet, |element| {
                 // Fleet の入口（FLEET-V2 §3.0）。**herd サイドバーを開くのではなく面ごと切り替える**。
                 // 稼働中の Task があればアイコン下に activity ドット（既存のレール流儀）。
@@ -568,9 +596,7 @@ impl Workspace {
                         this.chrome.show_settings = !this.chrome.show_settings;
                         if this.chrome.show_settings {
                             this.exit_agent_full_screen(cx); // 全画面のままだと設定が出ない
-                            this.chrome
-                                .settings_view
-                                .update(cx, |view, cx| view.refresh_availability(cx));
+                            this.refresh_settings_view(cx);
                         }
                         cx.notify();
                     }),

@@ -38,11 +38,15 @@ impl CachedRemotePdf {
     /// `<cache>/remote-pdf/<pid>-<連番>-<元のファイル名>` へ書く。ファイル名は拡張子を保つ
     /// （WebView は拡張子と Content-Type で PDF と判断するため `.pdf` を落とせない）。
     fn write(source: &Path, bytes: &[u8]) -> Option<Self> {
+        Self::write_in(&paths::cache_dir()?.join("remote-pdf"), source, bytes)
+    }
+
+    /// [`Self::write`] の本体。置き場を渡す（テストは一時フォルダ・本物のキャッシュに書かない）。
+    fn write_in(directory: &Path, source: &Path, bytes: &[u8]) -> Option<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SERIAL: AtomicU64 = AtomicU64::new(0);
 
-        let directory = paths::cache_dir()?.join("remote-pdf");
-        std::fs::create_dir_all(&directory).ok()?;
+        std::fs::create_dir_all(directory).ok()?;
         let name = source
             .file_name()
             .unwrap_or_else(|| "document.pdf".as_ref());
@@ -221,8 +225,10 @@ mod tests {
     #[test]
     fn remote_pdf_is_cached_locally_and_removed_on_drop() {
         let bytes = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n%%EOF\n";
-        let cached =
-            CachedRemotePdf::write(Path::new("/srv/papers/spec.pdf"), bytes).expect("複製を書ける");
+        let directory =
+            std::env::temp_dir().join(format!("necoder_remote_pdf_{}", std::process::id()));
+        let cached = CachedRemotePdf::write_in(&directory, Path::new("/srv/papers/spec.pdf"), bytes)
+            .expect("複製を書ける");
         let path = cached.path.clone();
         assert!(path.exists(), "複製が置かれる");
         assert_eq!(std::fs::read(&path).unwrap(), bytes, "中身がそのまま");
@@ -240,6 +246,9 @@ mod tests {
 
         drop(cached);
         assert!(!path.exists(), "タブを閉じたら複製は消える");
+        if let Err(error) = std::fs::remove_dir(&directory) {
+            eprintln!("テストの一時フォルダを消せない: {error}");
+        }
     }
 
     #[test]

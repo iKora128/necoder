@@ -57,6 +57,17 @@ impl Workspace {
         }
         // タイプしたら hover は消す。
         self.close_hover(cx);
+        // Markdown の行頭の `/` = スラッシュメニュー（O29・見出し・一覧・コード・表などの形を選んで入れる）。
+        if text == "/" && self.session().completion.is_none() {
+            let starts_line = {
+                let view = editor.read(cx);
+                view.is_markdown() && view.line_before_caret().trim_start() == "/"
+            };
+            if starts_line {
+                self.show_slash_menu(window, cx);
+                return;
+            }
+        }
         let (before, word_start) = {
             let view = editor.read(cx);
             (
@@ -107,7 +118,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let index = self.work_switch_target(index);
+        // スレッド履歴は開いた時のプロジェクトの物（O15）。⌘1..9 などで切り替えたら閉じる
+        // （前のプロジェクトのパネルへ開いてしまわない）。
+        if self.overlays.thread_history.take().is_some() {
+            cx.notify();
+        }
         // Chat からプロジェクトを選んだら Chat を抜ける（同じプロジェクトでも「そこへ戻る」）。
         if self.chat_mode() {
             self.set_chat_mode(false, window, cx);
@@ -138,7 +153,6 @@ impl Workspace {
         let follow_focus = !self.chrome.fleet_mode && !self.chrome_owns_focus(window);
         self.project_sessions.active = active;
         self.load_active_slot(window, cx);
-        self.work_project_changed(cx);
         // 編隊は「このリポジトリの編隊」。跨いだらグリッドを行き先のものへ差し替える。
         if self.chrome.fleet_mode {
             self.seed_fleet_cells(cx);
@@ -309,6 +323,7 @@ impl Workspace {
     /// フォーカスを持っているか。持っている間はフォーカス追従で奪わない（overlay の操作を壊さない）。
     fn chrome_owns_focus(&self, window: &Window) -> bool {
         self.overlays.picker.is_some()
+            || self.overlays.thread_history.is_some()
             || self.overlays.color_picker.is_some()
             || self.overlays.ssh_input.is_some()
             || self.overlays.askpass.is_some()
@@ -316,6 +331,7 @@ impl Workspace {
             || self.overlays.rail_menu.is_some()
             || self.overlays.add_project_dialog_open
             || self.chrome.task_renaming.is_some()
+            || self.chrome.terminal_renaming.is_some()
             || self.chrome.control_focus.is_focused(window)
             // レールにフォーカスがある間は着地先へ飛ばさない。飛ばすと 1 回目の ↑ でエディタへ抜け、
             // 2 回目の ↑ がキャレット移動になって連打できなくなる（2026-09-12）。

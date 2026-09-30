@@ -1,3 +1,6 @@
+// 出典: ⌘P の「最近開いたファイルを上に・無視されたファイルは 2 回目に」（D19）は、
+// stablyai/orca@646e9a5 の `docs/site/content/docs/model/quick-open.mdx` と
+// `src/shared/quick-open-filter.ts`（ignoredPass）の考え方を参考にした（実装は独立）。
 use crate::workspace::*;
 
 impl Workspace {
@@ -24,10 +27,27 @@ impl Workspace {
         cx.spawn(async move |_workspace, cx| {
             let files = files_task.await;
             let _ = handle.update(cx, |workspace, window, cx| {
+                // 最近開いたファイルを上へ（D19）。新しい順の添字 → 加点。
+                let recent: HashMap<&Path, usize> = workspace
+                    .active_slot()
+                    .map(|slot| {
+                        slot.explorer
+                            .recent_files()
+                            .iter()
+                            .enumerate()
+                            .map(|(rank, path)| (path.as_path(), rank))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let mut items: Vec<PickerItem> = files
                     .iter()
                     .enumerate()
-                    .map(|(id, (_, relative))| PickerItem::new(id, relative.clone()))
+                    .map(|(id, (path, relative))| {
+                        let boost = recent
+                            .get(path.as_path())
+                            .map_or(0, |rank| finder_recent_boost(*rank));
+                        PickerItem::new(id, relative.clone()).with_boost(boost)
+                    })
                     .collect();
                 // 空プロジェクト（列挙 0 件）では作成アクションを出す — 「⌘P で何も出来ない」を
                 // 避ける。ファイル操作は local のみ（M10・エクスプローラの右クリックと同じ制約）。
@@ -53,7 +73,90 @@ impl Workspace {
                     window,
                     cx,
                 );
+                // 1 回目で見つからない時だけ「無視されたファイルも探す」を出す（2 回目・local のみ）。
+                if is_local {
+                    if let Some(picker) = workspace.overlays.picker.clone() {
+                        picker.update(cx, |picker, cx| {
+                            picker.set_fallback_action(
+                                Some((
+                                    FINDER_ACTION_SEARCH_IGNORED,
+                                    SharedString::from(i18n::t!("finder.search_ignored")),
+                                )),
+                                cx,
+                            )
+                        });
+                    }
+                }
             });
+        })
+        .detach();
+    }
+
+    /// ⌘P の 2 回目（D19）: gitignore で隠れたファイルを背景で集め、今の Picker の後ろに足す
+    /// （加点はマイナス＝1 回目の一致より必ず下）。Picker は開いたまま・クエリもそのまま。
+    fn search_ignored_files(&mut self, cx: &mut Context<Self>) {
+        let Some(picker) = self.overlays.picker.clone() else {
+            return;
+        };
+        let Some(root) = self
+            .active_worktree()
+            .filter(|worktree| !worktree.is_remote())
+            .map(|worktree| worktree.root().to_path_buf())
+        else {
+            return;
+        };
+        let listed: std::collections::HashSet<PathBuf> =
+            self.overlays.picker_files.iter().cloned().collect();
+        picker.update(cx, |picker, cx| {
+            picker.set_fallback_action(
+                Some((
+                    FINDER_ACTION_IGNORED_EMPTY,
+                    SharedString::from(i18n::t!("finder.searching_ignored")),
+                )),
+                cx,
+            )
+        });
+        cx.spawn(async move |workspace, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { project::ignored_files_local(&root, &listed, 50_000) })
+                .await;
+            let updated = workspace.update(cx, |workspace, cx| {
+                // 待つ間に閉じた・別の Picker を開いた場合は捨てる。
+                if workspace.overlays.picker.as_ref() != Some(&picker)
+                    || workspace.overlays.picker_mode != PickerMode::Files
+                {
+                    return;
+                }
+                let start = workspace.overlays.picker_files.len();
+                let detail = SharedString::from(i18n::t!("finder.ignored_detail"));
+                let items = found
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, (_, relative))| {
+                        PickerItem::new(start + offset, relative.clone())
+                            .with_detail(detail.clone())
+                            .with_boost(FINDER_IGNORED_BOOST)
+                    })
+                    .collect();
+                workspace
+                    .overlays
+                    .picker_files
+                    .extend(found.into_iter().map(|(path, _)| path));
+                picker.update(cx, |picker, cx| {
+                    picker.append_items(items, cx);
+                    picker.set_fallback_action(
+                        Some((
+                            FINDER_ACTION_IGNORED_EMPTY,
+                            SharedString::from(i18n::t!("finder.ignored_not_found")),
+                        )),
+                        cx,
+                    );
+                });
+            });
+            if let Err(error) = updated {
+                eprintln!("無視されたファイルの一覧を反映できない: {error:#}");
+            }
         })
         .detach();
     }
@@ -70,10 +173,15 @@ impl Workspace {
             keymap_core::KeymapPlatform::current(),
         ))
         .unwrap_or_default();
-        let items = COMMAND_REGISTRY
+        let mut items: Vec<PickerItem> = COMMAND_REGISTRY
             .entries()
             .iter()
             .enumerate()
+            // 使わないエージェント（O16）の「新しいスレッド（…）」は出さない。
+            .filter(|(_, entry)| {
+                editor_area::agent_for_thread_action(entry.action_name)
+                    .is_none_or(|agent| settings::agent_label_enabled(cx, agent))
+            })
             .map(|(id, entry)| {
                 let mut item = PickerItem::new(id, i18n::t!(entry.label_key));
                 if let Some(keystrokes) = keymap_core::key_for_action(&sections, entry.action_name)
@@ -83,6 +191,21 @@ impl Workspace {
                 item
             })
             .collect();
+        // 設定で足したエージェント（H1）の「新しいスレッド（…）」。action を持たないので行の id で引く。
+        self.overlays.picker_agent_threads = settings::agent_catalog(cx)
+            .customs()
+            .iter()
+            .map(|custom| SharedString::from(custom.label.clone()))
+            .filter(|label| settings::agent_label_enabled(cx, label))
+            .collect();
+        items.extend(self.overlays.picker_agent_threads.iter().enumerate().map(
+            |(position, label)| {
+                PickerItem::new(
+                    PALETTE_CUSTOM_AGENT_ROW + position,
+                    i18n::t!("cmd.new_thread_with", "agent" => label.as_ref()),
+                )
+            },
+        ));
         self.open_picker(
             PickerMode::Commands,
             i18n::t!("palette.placeholder"),
@@ -468,10 +591,30 @@ impl Workspace {
                     TabContent::Pdf(view) => {
                         view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
                     }
+                    // session の `review` と同じ Entity（下でまとめて塗り直す）。
+                    TabContent::Review(_) => {}
+                    TabContent::Web { view, .. } => {
+                        view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
+                    }
+                    // 端末は session の `terminal_dock` の物（下でドックごと塗り直す）。
+                    TabContent::Terminal { .. } => {}
                 }
+            }
+            if let Some(review) = &session.review {
+                review.update(cx, |review, cx| review.set_theme(theme.clone(), cx));
             }
             if let Some(split) = &session.split_editor {
                 split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+            }
+            // ソース管理パネルの入力欄（コミットメッセージ / ブランチ名）も EditorView。
+            let git_inputs: Vec<Entity<EditorView>> = {
+                let panel = session.git_panel.read(cx);
+                std::iter::once(panel.message.clone())
+                    .chain(panel.branch_name.clone())
+                    .collect()
+            };
+            for editor in git_inputs {
+                editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
             }
             for panel in &session.fleet_agents {
                 panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
@@ -494,6 +637,14 @@ impl Workspace {
         }
         if let Some(picker) = &self.overlays.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
+        }
+        // どこからでも呼べる端末（O24・C13）はプロジェクトに属さないので、ここで塗り直す。
+        if let Some(floating) = &self.chrome.floating_terminal {
+            let accent = theme.fg2;
+            floating.dock.update(cx, |dock, cx| {
+                dock.set_theme(theme.clone(), cx);
+                dock.set_accent(accent, cx);
+            });
         }
         cx.notify();
     }
@@ -518,7 +669,8 @@ impl Workspace {
         self.apply_theme(theme, cx);
         self.overlays.theme_before_preview = None;
         // set_user_value = 永続化 + global 即時 reload（設定画面のテーマチップも同じ描画で追従する）。
-        settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        let result = settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        self.report_settings_save(result, cx);
     }
 
     pub(crate) fn open_picker(
@@ -576,8 +728,22 @@ impl Workspace {
             PickerEvent::Confirmed(id) => {
                 let id = *id;
                 let mode = self.overlays.picker_mode;
+                // ⌘P の一致なしの行は Picker を閉じない（2 回目を探して同じ場所に足す）。
+                if mode == PickerMode::Files
+                    && (id == FINDER_ACTION_SEARCH_IGNORED || id == FINDER_ACTION_IGNORED_EMPTY)
+                {
+                    if id == FINDER_ACTION_SEARCH_IGNORED {
+                        self.search_ignored_files(cx);
+                    }
+                    return;
+                }
+                // URL 入力は行ではなく入力欄の中身が答え（閉じる前に読む）。
+                let query = _picker.read(cx).query().to_string();
                 self.close_picker(window, cx);
                 match mode {
+                    PickerMode::PreviewUrl => self.confirm_localhost_input(&query, window, cx),
+                    PickerMode::Fonts => self.commit_font(id, cx),
+                    PickerMode::Shells => self.commit_shell(id, cx),
                     PickerMode::Files => {
                         // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
                         // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。
@@ -633,6 +799,16 @@ impl Workspace {
                         }
                     }
                     PickerMode::Commands => {
+                        // 設定で足したエージェントの「新しいスレッド（…）」（H1）。
+                        if let Some(label) =
+                            id.checked_sub(PALETTE_CUSTOM_AGENT_ROW)
+                                .and_then(|position| {
+                                    self.overlays.picker_agent_threads.get(position).cloned()
+                                })
+                        {
+                            self.new_agent_thread_with(&label, cx);
+                            return;
+                        }
                         // パレットは既に閉じた（上の close_picker）ので、フォーカスは
                         // エディタへ戻っている = Editor/Workspace コンテキストで解決される。
                         if let Some(entry) = COMMAND_REGISTRY.get(id) {
@@ -643,6 +819,19 @@ impl Workspace {
                                     entry.action_name
                                 ),
                             }
+                        }
+                    }
+                    // 「接続を確かめる」で開いた時は、選んだ先を試すだけ（開かない・手入力の行は無視）。
+                    PickerMode::SshHosts if std::mem::take(&mut self.picker_ssh_testing) => {
+                        let uri = match self.picker_ssh_recent.get(id) {
+                            Some(uri) => Some(uri.clone()),
+                            None => self
+                                .picker_ssh_hosts
+                                .get(id - self.picker_ssh_recent.len())
+                                .map(|host| format!("ssh://{}", host.alias)),
+                        };
+                        if let Some(uri) = uri {
+                            self.test_ssh_uri(uri, cx);
                         }
                     }
                     PickerMode::SshHosts => {
@@ -671,39 +860,15 @@ impl Workspace {
                                         }
                                     }
                                 }
+                                // 最後の「＋ 接続先を登録…」（O37・G01）。
+                                None if host_id > self.picker_ssh_hosts.len() => {
+                                    self.open_ssh_register(window, cx)
+                                }
                                 // 末尾の「手入力」= 空の ssh:// 入力バー。
                                 None => {
                                     self.open_ssh_input_seeded("ssh://".to_string(), window, cx)
                                 }
                             }
-                        }
-                    }
-                    PickerMode::ThreadHistory => {
-                        if let Some((thread_id, name, color_index, created_at, last_input_at)) =
-                            self.picker_history.get(id).cloned()
-                        {
-                            let panel = self.agent_panel.clone();
-                            let thread_index = panel.update(cx, |panel, cx| {
-                                panel.open_thread_from_history(
-                                    &thread_id,
-                                    &name,
-                                    color_index as usize,
-                                    created_at,
-                                    last_input_at,
-                                    cx,
-                                )
-                            });
-                            if self.chrome.fleet_mode {
-                                // 編隊モード: 復元した会話をグリッドのセルとして前面へ
-                                // （Agent ドックは編隊では出ないので show_right は触らない・M14）。
-                                if let Some(thread_index) = thread_index {
-                                    let space = self.project_sessions.active;
-                                    self.reveal_agent_in_fleet(space, thread_index, window, cx);
-                                }
-                            } else if !self.chrome.show_right {
-                                self.chrome.show_right = true; // Agent ドックを開く
-                            }
-                            cx.notify();
                         }
                     }
                     PickerMode::OpenLauncher => match self.picker_open_rows.get(id).cloned() {
@@ -830,6 +995,26 @@ impl Workspace {
         let return_focus = self.search_return_focus(cx);
         let panel = cx.new(|cx| SearchPanel::new(host, root, theme, accent, return_focus, cx));
         self.install_search_panel(panel, window, cx);
+    }
+
+    /// エクスプローラの「フォルダ内を検索」（D18）: ⌘⇧F の検索パネルを、そのフォルダに絞った
+    /// 状態で開く（既に開いていれば範囲だけ差し替える）。範囲はパネルのチップで外せる。
+    pub(crate) fn open_folder_search(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        if self.search_panel.is_none() {
+            self.open_project_search(&ProjectSearch, window, cx);
+        }
+        let Some(panel) = self.search_panel.clone() else {
+            return;
+        };
+        panel.update(cx, |panel, cx| panel.set_scope(Some(folder), cx));
+        window.focus(&panel.read(cx).focus_handle(), cx);
+        cx.notify();
     }
 
     // ── ⌘F バッファ内検索/置換（M10） ──
@@ -1301,85 +1486,19 @@ impl Workspace {
 
     // ターミナルの file:line リンク（M13）。相対パスはアクティブプロジェクトの root 基準。
     // subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
+}
 
-    /// スレッド履歴を開く（#5）。**アクティブプロジェクトの**スレッド（アーカイブ含む・updated_at
-    /// 降順）を Picker に出す。絞り込みキーは Agent パネルの復元（`set_storage_for_scope`）と同じ
-    /// 「TaskSpace の stable id + 旧版が表示名で保存した行」— 全プロジェクト混在になっていた件の修正
-    /// （2026-08-28。DB は最初から project 列を持っていて、読み側の絞り込みだけが抜けていた）。
-    /// 行頭●= スレッド色・detail = ⎇ branch / トークン累計 / 開始・最終入力の相対時刻。
-    /// 確定で復元してアクティブに（編隊モードでは復元セルとして前面へ・M14）。
-    pub(crate) fn open_thread_history(
-        &mut self,
-        _: &ThreadHistory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(storage) = self.persistence.storage.clone() else {
-            return;
-        };
-        let Some((scope, legacy)) = self.active_slot().map(|slot| {
-            (
-                slot.task_space.id.as_str().to_string(),
-                slot.name.to_string(),
-            )
-        }) else {
-            return;
-        };
-        let threads = storage.load_all_threads().unwrap_or_default();
-        let mut history = Vec::new();
-        let mut items = Vec::new();
-        for (
-            id,
-            name,
-            color_index,
-            project,
-            branch,
-            tokens_used,
-            archived,
-            created_at,
-            last_input_at,
-        ) in threads
-        {
-            if project != scope && project != legacy {
-                continue;
-            }
-            let mut detail = String::new();
-            if let Some(branch) = &branch {
-                detail.push_str(&format!("  ⎇ {branch}"));
-            }
-            if tokens_used > 0 {
-                detail.push_str(&format!("  Σ {:.1}k", tokens_used as f32 / 1000.0));
-            }
-            // いつスタートして最終いつ入力したか（サクッと見える相対時刻・M14）。
-            detail.push_str(&format!(
-                "  {}",
-                i18n::t!("time.started", "when" => agent_panel::relative_time_label(created_at))
-            ));
-            if let Some(last_input_at) = last_input_at {
-                detail.push_str(&format!(
-                    " · {}",
-                    i18n::t!("time.last_input", "when" => agent_panel::relative_time_label(last_input_at))
-                ));
-            }
-            if archived {
-                detail.push_str(&format!("  {}", i18n::t!("agent.history_archived_mark")));
-            }
-            let mut item = PickerItem::new(history.len(), name.clone())
-                .with_accent(theme_core::thread_color(color_index as usize));
-            let detail = detail.trim_start().to_string();
-            if !detail.is_empty() {
-                item = item.with_detail(detail);
-            }
-            items.push(item);
-            history.push((id, name, color_index, created_at, last_input_at));
-        }
-        self.picker_history = history;
-        self.open_picker(
-            PickerMode::ThreadHistory,
-            i18n::t!("agent.history_placeholder"),
-            items,
-            window,
-            cx,
-        );
-    }
+/// パレットの「新しいスレッド（…）」のうち設定で足したエージェント（H1）の行の id の始まり。
+/// コマンドの登録簿の番号（数百）と重ならないよう大きく離す。
+pub(crate) const PALETTE_CUSTOM_AGENT_ROW: usize = 100_000;
+
+/// ⌘P の並びの加点（D19）。あいまい一致のスコアはおおむね数十〜数百の幅なので、桁を分けて
+/// 「最近開いたファイルは一致したものの中で必ず上」「無視されたファイル（2 回目）は必ず下」にする。
+const FINDER_RECENT_BOOST: i32 = 10_000;
+const FINDER_IGNORED_BOOST: i32 = -10_000;
+
+/// 最近開いた順位 → 加点。新しいほど少しだけ上（同じくらいの一致なら新しい方）。
+fn finder_recent_boost(rank: usize) -> i32 {
+    let newer = ExplorerProject::RECENT_LIMIT.saturating_sub(rank) as i32;
+    FINDER_RECENT_BOOST + newer * 2
 }

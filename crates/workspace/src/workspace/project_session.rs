@@ -1,5 +1,8 @@
 use crate::workspace::*;
 
+/// git 更新 1 回で、追跡外ファイルの行数を数えるために読む量の上限（`+N −M` 用）。超えた分は 0 行として並べる。
+const UNTRACKED_COUNT_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Rail 上の project metadata と、遅延復元に必要なファイル一覧。
 pub(crate) struct ProjectSlot {
     pub(crate) worktree: Rc<Worktree>,
@@ -18,6 +21,8 @@ pub(crate) struct ProjectSlot {
     /// アクティブ session の `EditorArea.tabs` から [`Workspace::sync_active_slot`] で同期する。
     pub(crate) open_files: Vec<PathBuf>,
     pub(crate) active_file: usize,
+    /// ピン留めしたタブのファイル（O26）。`open_files` の先頭側に並ぶ。`sync_active_slot` で同期する。
+    pub(crate) pinned_files: Vec<PathBuf>,
     /// `.necoder/settings.json` の絵文字アイコン（None = 頭文字モノグラム）。
     pub(crate) icon: Option<SharedString>,
     /// 画像アイコン（settings の `icon` 画像パス or 規約 `.necoder/icon.png`）。絵文字より優先。
@@ -74,6 +79,9 @@ pub struct ProjectSession {
     pub(crate) search_panel: Option<Entity<SearchPanel>>,
     pub(crate) repository: RepositoryController,
     pub(crate) git_panel: Entity<GitPanel>,
+    /// 変更レビュー（エディタのタブと Fleet の「変更」タブで同じ 1 枚を使う・Chat には無い）。
+    /// 表示するまで git を叩かない（`Workspace::activate_review`）。
+    pub(crate) review: Option<Entity<ReviewView>>,
     pub(crate) terminal_dock: Entity<TerminalDock>,
     /// Fleet の Tests surface 専用。通常 Terminal と同じ Entity を二箇所へ描画しない。
     pub(crate) tests_dock: Entity<TerminalDock>,
@@ -81,9 +89,8 @@ pub struct ProjectSession {
     pub(crate) picker_worktree_rows: Vec<PathBuf>,
     pub(crate) picker_ssh_hosts: Vec<host::SshConfigHost>,
     pub(crate) picker_ssh_recent: Vec<String>,
-    /// スレッド履歴 Picker の行データ (id, name, color_index, created_at_ms, last_input_at_ms)。
-    /// 時刻は復元時に Thread へ引き継ぐ（「いつスタート/最終入力」表示・M14）。
-    pub(crate) picker_history: Vec<(String, String, i64, i64, Option<i64>)>,
+    /// SSH のホストピッカーを「接続を確かめる」で開いた（選んでも開かずに試すだけ・O37）。
+    pub(crate) picker_ssh_testing: bool,
     /// 「＋」統一オープンの行データ（id → 動作）。[`OpenRow`] を参照。
     pub(crate) picker_open_rows: Vec<OpenRow>,
     pub(crate) todo_panel: Entity<TodoPanel>,
@@ -139,9 +146,21 @@ impl ProjectSessions {
     }
 }
 
+impl RepositoryController {
+    /// base からの `+N −M`（`task_files` の合計）。差分なし・未取得は `None`（表示しない）。
+    pub(crate) fn shortstat(&self) -> Option<(usize, usize)> {
+        let added: usize = self.task_files.iter().map(|file| file.added).sum();
+        let deleted: usize = self.task_files.iter().map(|file| file.deleted).sum();
+        (added + deleted > 0).then_some((added, deleted))
+    }
+}
+
 pub(crate) struct RepositoryController {
     pub(crate) status: HashMap<PathBuf, StatusKind>,
     pub(crate) refresh_generation: u32,
+    /// Task の base（無ければ HEAD）から作業ツリーまでに変わったファイル（コミット済み + 未コミット + untracked）。
+    /// git 更新と同じ background で取る（render 中に git を呼ばない）。「変更」ペインと `+N −M` の両方の正。
+    pub(crate) task_files: Vec<project::DiffFile>,
 }
 
 impl Deref for ProjectSessions {
@@ -189,16 +208,23 @@ impl Workspace {
                 agent_panel.update(cx, |panel, cx| panel.set_storage(storage, cx));
             }
         }
-        let terminal_launch = Self::terminal_launch_for(slot);
-        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-        let tests_dock =
-            cx.new(|_| TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()));
-        let explorer = cx.new(|_| Explorer::new(explorer_view));
-        let git_panel = cx.new(GitPanel::new);
         let accent = slot
             .map(|slot| slot.color)
             .unwrap_or_else(|| project_color(0));
+        let terminal_launch = Self::terminal_launch_for(slot);
+        let terminal_dock =
+            cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()).with_accent(accent));
+        let tests_dock = cx.new(|_| {
+            TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()).with_accent(accent)
+        });
+        let explorer = cx.new(|_| Explorer::new(explorer_view));
+        let git_panel = Self::new_git_panel(&theme, accent, cx);
         let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
+        let review = slot.map(|_| {
+            let review = cx.new(|cx| ReviewView::new(theme.clone(), cx));
+            PanelRegistry::bind_review(&review, cx);
+            review
+        });
         PanelRegistry::bind_session(
             &agent_panel,
             &explorer,
@@ -217,15 +243,17 @@ impl Workspace {
             repository: RepositoryController {
                 status: HashMap::new(),
                 refresh_generation: 0,
+                task_files: Vec::new(),
             },
             git_panel,
+            review,
             terminal_dock,
             tests_dock,
             agent_active: false,
             picker_worktree_rows: Vec::new(),
             picker_ssh_hosts: Vec::new(),
             picker_ssh_recent: Vec::new(),
-            picker_history: Vec::new(),
+            picker_ssh_testing: false,
             picker_open_rows: Vec::new(),
             todo_panel,
             pending_open_history: false,
@@ -316,15 +344,7 @@ impl Workspace {
                 let mut missing = Vec::new();
                 for slot in &mut workspace.project_sessions.projects {
                     if let Some(record) = by_id.get(slot.task_space.id.as_str()) {
-                        // lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
-                        slot.task_space.repository_id = record.repository_id.clone();
-                        slot.task_space.title = SharedString::from(record.title.clone());
-                        slot.task_space.phase = record.phase;
-                        slot.task_space.base_oid = record.base_oid.clone();
-                        slot.task_space.head_oid = record.head_oid.clone();
-                        slot.task_space.result_summary =
-                            record.result_summary.clone().map(SharedString::from);
-                        slot.task_space.created_at_ms = record.created_at;
+                        slot.task_space.overlay_stored(record);
                     } else {
                         missing.push(slot.task_space.to_record(slot));
                     }
@@ -382,6 +402,7 @@ impl Workspace {
                             title: SharedString::from(record.title.clone()),
                             text,
                             kind,
+                            space: Some(SpaceId(event.task_id.clone())),
                         });
                     }
                     workspace.notifications.news = backfill; // 既に新しい順（id DESC）
@@ -390,6 +411,9 @@ impl Workspace {
                 if workspace.chrome.fleet_mode {
                     workspace.seed_fleet_cells(cx);
                 }
+                // Captain: 裁いていない分解案と ⚑ 帰属を戻し、未読があれば 1 回起こす（FLEET-V2 §5.3 / §5.5）。
+                workspace.restore_captain_proposals(cx);
+                workspace.resume_captains(cx);
                 cx.notify();
             });
         })
@@ -413,6 +437,29 @@ impl Workspace {
             .detach();
     }
 
+    /// 作ったばかりの Task を台帳に書く。**親は必ず書く（無ければ消す）**（O21・A07）: Task の id は worktree の
+    /// 場所から決まるので、片付けた Task と同じフォルダに作り直すと、前の Task の親子の行が残っていて、
+    /// 関係の無い新しい Task が前の親の下に出る（upsert は親を知らない書き手のために `Some` の時だけ書く）。
+    pub(crate) fn persist_new_task_space(&self, session_index: usize, cx: &mut Context<Self>) {
+        let (Some(storage), Some(slot)) = (
+            self.persistence.storage.clone(),
+            self.project_sessions.projects.get(session_index),
+        ) else {
+            return;
+        };
+        let record = slot.task_space.to_record(slot);
+        cx.background_executor()
+            .spawn(async move {
+                let written = storage
+                    .upsert_task_space(&record)
+                    .and_then(|()| storage.set_task_parent(&record.id, record.parent.as_deref()));
+                if let Err(error) = written {
+                    eprintln!("TaskSpace を永続化できない: {error:#}");
+                }
+            })
+            .detach();
+    }
+
     /// Task lifecycle と event log を同時に進める。Agent runtime の状態とは別軸だが、
     /// permission wait / turn end の確定イベントを lifecycle へ写像する入口はここに集約する。
     /// `digest` = 遷移スナップショット（Tier 1・P1）。task_events の payload に載せて再起動後も残す。
@@ -424,38 +471,19 @@ impl Workspace {
         digest: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let Some(slot) = self.project_sessions.projects.get_mut(session_index) else {
+        let Some(mut record) = self.apply_task_transition(session_index, phase, digest, cx) else {
             return;
         };
-        if slot.task_space.is_integration() {
+        let Some(slot) = self.project_sessions.projects.get(session_index) else {
             return;
-        }
-        slot.task_space.phase = phase;
+        };
         let host = slot.worktree.host().clone();
         let root = slot.worktree.root().to_path_buf();
-        // HEAD の取得は `git rev-parse` ＝ remote では SSH の往復。local だけ同期で取り、
-        // remote は台帳へ書く直前に背景で取る（遷移そのもの・ニュース・総括は待たせない）。
-        if !host.is_remote() {
-            slot.task_space.head_oid = project::git_head_oid_on(host.as_ref(), &root);
+        if phase == TaskPhase::Archived {
+            // Captain の分解案の行（準備の失敗で依頼を控えていた・中断した）は、Task を片付けたら閉じる（R09）。
+            let space = slot.task_space.id.clone();
+            self.close_proposal_rows_for_task(&space, &root, cx);
         }
-        let mut record = slot.task_space.to_record(slot);
-        let news_color = slot.color;
-        let news_title = slot.task_space.title.clone();
-        // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
-        let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
-        self.push_news(news_kind, news_color, news_title, news_text);
-        // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
-        self.schedule_control_summary(cx);
-        if phase == TaskPhase::Integrated {
-            self.wake_captain(
-                session_index,
-                "integrated",
-                record.title.clone().into(),
-                digest.map(|text| text.to_string().into()),
-                cx,
-            );
-        }
-        cx.notify();
         let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
@@ -495,8 +523,54 @@ impl Workspace {
         .detach();
     }
 
+    /// 遷移を画面に反映する（phase・手元なら HEAD・ニュース・監督バー・Dock のバッジ・integrated の wake）。
+    /// 台帳へ書くのは呼び手（[`Self::transition_task_space`] か、Captain の分解案の行の登録のトランザクション・
+    /// R09）。返すのは台帳に書く snapshot。統合先・範囲外なら `None`。
+    pub(crate) fn apply_task_transition(
+        &mut self,
+        session_index: usize,
+        phase: TaskPhase,
+        digest: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<storage::TaskSpaceRecord> {
+        let slot = self.project_sessions.projects.get_mut(session_index)?;
+        if slot.task_space.is_integration() {
+            return None;
+        }
+        slot.task_space.phase = phase;
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        // HEAD の取得は `git rev-parse` ＝ remote では SSH の往復。local だけ同期で取り、
+        // remote は台帳へ書く直前に背景で取る（遷移そのもの・ニュース・総括は待たせない）。
+        if !host.is_remote() {
+            slot.task_space.head_oid = project::git_head_oid_on(host.as_ref(), &root);
+        }
+        let record = slot.task_space.to_record(slot);
+        let news_color = slot.color;
+        let news_title = slot.task_space.title.clone();
+        let news_space = slot.task_space.id.clone();
+        // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
+        let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
+        self.push_news(
+            news_kind,
+            news_color,
+            news_title,
+            news_text,
+            Some(news_space),
+        );
+        // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
+        self.schedule_control_summary(cx);
+        // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。
+        cx.defer(super::dock_badge::refresh_dock_badge);
+        if phase == TaskPhase::Integrated {
+            self.wake_captain(session_index, cx);
+        }
+        cx.notify();
+        Some(record)
+    }
+
     /// task_events に載せる遷移 payload（GUI 起点）。
-    fn transition_payload(
+    pub(crate) fn transition_payload(
         phase: TaskPhase,
         reason: &str,
         digest: Option<&str>,
@@ -573,6 +647,7 @@ impl Workspace {
                         explorer: ExplorerProject::default(),
                         open_files: Vec::new(),
                         active_file: 0,
+                        pinned_files: Vec::new(),
                         icon: identity.icon,
                         icon_image: identity.icon_image,
                         worktree_branch: None,
@@ -666,16 +741,19 @@ impl Workspace {
                     Self::terminal_launch_for(slot)
                 }
             };
-            let terminal_launch = launch_for(projects.get(index));
-            let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-            let tests_dock =
-                cx.new(|_| TerminalDock::new(launch_for(projects.get(index)), theme.clone()));
-            let explorer = cx.new(|_| Explorer::new(explorer_view));
-            let git_panel = cx.new(GitPanel::new);
             let accent = projects
                 .get(index)
                 .map(|slot| slot.color)
                 .unwrap_or_else(|| project_color(0));
+            let terminal_launch = launch_for(projects.get(index));
+            let terminal_dock =
+                cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()).with_accent(accent));
+            let tests_dock = cx.new(|_| {
+                TerminalDock::new(launch_for(projects.get(index)), theme.clone())
+                    .with_accent(accent)
+            });
+            let explorer = cx.new(|_| Explorer::new(explorer_view));
+            let git_panel = Self::new_git_panel(&theme, accent, cx);
             let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
             PanelRegistry::bind_session(
                 &agent_panel,
@@ -712,6 +790,8 @@ impl Workspace {
             } else {
                 None
             };
+            let review = cx.new(|cx| ReviewView::new(theme.clone(), cx));
+            PanelRegistry::bind_review(&review, cx);
             sessions.push(ProjectSession {
                 editor_area: EditorArea::new(),
                 fleet_agents: vec![agent_panel.clone()],
@@ -721,15 +801,17 @@ impl Workspace {
                 repository: RepositoryController {
                     status: HashMap::new(),
                     refresh_generation: 0,
+                task_files: Vec::new(),
                 },
                 git_panel,
+                review: Some(review),
                 terminal_dock,
                 tests_dock,
                 agent_active: false,
                 picker_worktree_rows: Vec::new(),
                 picker_ssh_hosts: Vec::new(),
                 picker_ssh_recent: Vec::new(),
-                picker_history: Vec::new(),
+                picker_ssh_testing: false,
                 picker_open_rows: Vec::new(),
                 todo_panel,
                 pending_open_history: false,
@@ -751,6 +833,16 @@ impl Workspace {
             workspace.sync_chat_search(cx)
         })
         .detach();
+        // Fleet サイドバーの Task の絞り込み欄（O21）。打つたびに写しを更新して描き直す。
+        let fleet_filter = cx.new(|cx| EditorView::plain(theme.clone(), theme.fg2, true, cx));
+        cx.observe(&fleet_filter, |workspace, filter, cx| {
+            let query = filter.read(cx).plain_text();
+            if workspace.chrome.fleet_filter_query != query {
+                workspace.chrome.fleet_filter_query = query;
+                cx.notify();
+            }
+        })
+        .detach();
         let mut workspace = Workspace {
             project_sessions: ProjectSessions {
                 projects,
@@ -762,9 +854,8 @@ impl Workspace {
             theme,
             focus_handle,
             chrome: ChromeState {
-                work_layout: WorkLayoutState::default(),
-                work_menu: None,
-                work_embedded: None,
+                embedded_synced: None,
+                next_terminal_id: 1,
                 show_left: true,
                 show_right: true,
                 show_bottom: false,
@@ -782,31 +873,53 @@ impl Workspace {
                 pending_chat_mode: false,
                 fleet_cells: Vec::new(),
                 new_task: None,
-                captain_pending: HashMap::new(),
-                captain_space: None,
-                captain_tab: 0,
+                captain_proposals: Vec::new(),
+                captain_recommendations: Vec::new(),
+                captain_inflight: HashMap::new(),
+                captain_wake_scheduled: std::collections::HashSet::new(),
+                captain_wakes_since_rotation: HashMap::new(),
+                captain_recent: HashMap::new(),
+                captain_appointing: false,
                 stage_columns: 1,
                 stage_width: 1200.,
                 stage_pinned: Vec::new(),
                 stage_tabs: HashMap::new(),
                 fleet_repository: None,
                 fleet_grids: HashMap::new(),
+                fleet_worktrees: HashMap::new(),
+                hide_external_worktrees: false,
+                fleet_filter,
+                fleet_filter_query: String::new(),
+                fleet_sort: Default::default(),
+                fleet_selection: Vec::new(),
+                fleet_selection_anchor: None,
+                adopt_as_task: std::collections::HashSet::new(),
+                pending_task_prompts: HashMap::new(),
+                pending_task_agents: HashMap::new(),
+                held_proposal_rows: HashMap::new(),
+                task_conflicts: HashMap::new(),
+                task_creations: Vec::new(),
+                next_task_creation_id: 0,
+                #[cfg(test)]
+                proposal_row_crash: None,
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
                 agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),
                 pending_agent_full_screen_toggle: false,
                 bottom_height: BOTTOM_DOCK_HEIGHT,
                 resizing_bottom: false,
+                side_pane_ratio: 0.44,
+                resizing_side: None,
                 resize_start_y: 0.0,
                 resize_start_height: 0.0,
-                fleet_center_view: FleetCenterView::Graph,
+                // 既定はハブ: ブリッジのサイドペイン（縦長〜正方形）いっぱいに割合座標で描けるのはハブだけで、
+                // 扇形 / ツリー / カードは横長の版面（固定高）。Captain を任命していれば中心が Captain になる。
                 graph_view: match std::env::var("NECODER_GRAPH").as_deref() {
-                    Ok("hub") => GraphView::Hub,
+                    Ok("fan") => GraphView::Fan,
                     Ok("tree") => GraphView::Tree,
                     Ok("card") => GraphView::Card,
-                    _ => GraphView::Fan,
+                    _ => GraphView::Hub,
                 },
-                graph_collapsed: true,
                 fleet_clock: false,
                 rollup_index: 0,
                 rollup_ticker: false,
@@ -818,6 +931,7 @@ impl Workspace {
                 pending_settings_command: None,
                 pending_open_settings_json: false,
                 pending_external_open: Vec::new(),
+                pending_external_goto: Vec::new(),
                 pending_askpass: None,
                 pending_askpass_focus: false,
                 pending_remote_open: Vec::new(),
@@ -828,32 +942,58 @@ impl Workspace {
                 resize_start_width: 0.0,
                 explorer_width: DOCK_WIDTH,
                 resizing_explorer: false,
+                explorer_scroll: gpui::UniformListScrollHandle::new(),
+                explorer_focus: cx.focus_handle(),
                 should_move_window: false,
                 rail_drag: None,
                 rail_focus: cx.focus_handle(),
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: true,
                 task_renaming: None,
+                terminal_renaming: None,
+                floating_terminal: None,
+                conflicts: None,
+                conflict_view: None,
+                focus_next_frame: None,
+                pending_font_picker: None,
+                pending_shell_picker: false,
+                statusbar_menu: None,
+                task_details: None,
+                ssh_registering: None,
+                auto_branches: HashMap::new(),
             },
             overlays: WorkspaceOverlays {
                 picker: None,
                 picker_mode: PickerMode::Files,
                 picker_files: Vec::new(),
                 picker_themes: Vec::new(),
+                picker_fonts: Vec::new(),
+                picker_font_key: "",
+                picker_shells: Vec::new(),
+                picker_agent_threads: Vec::new(),
                 theme_before_preview: None,
                 picker_observation: None,
                 color_picker: None,
                 rail_menu: None,
                 tab_menu: None,
                 worktree_delete: None,
+                quit_confirm: None,
                 ssh_input: None,
                 askpass: None,
                 ssh_connecting: false,
                 add_project_dialog_open: false,
                 pending_project_switch: None,
                 shortcut_sheet: None,
+                keymap_editing: None,
                 // offscreen QA: NECODER_ABOUT=1 で起動時から About モーダルを開く（NECODER_SETTINGS と同型）。
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
+                usage_popover: None,
+                ports: None,
+                inbox: None,
+                resources: None,
+                cleanup: None,
+                usage_stats: None,
+                thread_history: None,
                 project_flash: None,
                 project_flash_gen: 0,
             },
@@ -862,6 +1002,7 @@ impl Workspace {
                 toast_gen: 0,
                 crash_notice: None,
                 news: Vec::new(),
+                inbox: Vec::new(),
             },
             persistence: WorkspacePersistence {
                 session_writer: None,
@@ -877,9 +1018,11 @@ impl Workspace {
             connection_pumps: std::collections::HashMap::new(),
             control_summary: None,
             control_summary_gen: 0,
+            auto_save_generation: 0,
             focus_recovery_installed: false,
             last_focused: None,
             restored_source_map: source_map,
+            window_handle: None,
         };
         // remote の接続状態を statusbar へ（購読は host ごとに 1 本・I/O 無し）。
         workspace.ensure_connection_pumps(cx);
@@ -936,6 +1079,7 @@ impl Workspace {
                 insert_text: label.to_string(),
                 detail: Some(SharedString::from(detail.to_string())),
                 kind: SharedString::from(kind.to_string()),
+                caret: None,
             };
             workspace.completion = Some(CompletionState {
                 items: vec![
@@ -949,6 +1093,7 @@ impl Workspace {
                 selected: 1,
                 position: point(px(380.), px(210.)),
                 focus: cx.focus_handle(),
+                slash: false,
             });
         }
         // 開発用: NECODER_NAMING=1 でルートへの新規ファイル命名入力を開いた状態で撮る。
@@ -980,7 +1125,8 @@ impl Workspace {
         workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・10s 後に背景で）
         workspace.schedule_agent_registry_refresh(cx); // ACP レジストリの更新（12s 後に背景で）
         workspace.check_crash_notice(cx); // 前回クラッシュの通知（M13・pending マーカーを 1 回だけ消費）
-                                          // 開発用: NECODER_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
+        workspace.check_update_notice(cx); // 更新の後の最初の起動の「変更点」（O45・H17・1 回だけ）
+                                           // 開発用: NECODER_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("NECODER_UPDATE_PROBE") {
             if !version.is_empty() {
                 // 経路も実 OS に合わせる（Windows 実機で「クリック → ブラウザ」まで確認できるように）。
@@ -1044,8 +1190,10 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        // 使用量（O11）: エージェントのレート制限が届いたら statusbar とポップオーバーを描き直す（全窓）。
+        cx.observe_global::<agent_panel::usage::UsageLimits>(|_workspace, cx| cx.notify())
+            .detach();
         workspace.hydrate_restored_projects(restored_indexes, cx);
-        workspace.ensure_work_layout(cx);
         workspace.save_state(cx); // 起動時点で状態を書く（再起動復元のため）
         workspace
     }
@@ -1147,6 +1295,7 @@ impl Workspace {
             if let Some(slot) = self.project_sessions.projects.get_mut(index) {
                 slot.open_files = tabs.files.clone();
                 slot.active_file = tabs.active;
+                slot.pinned_files = tabs.pinned.clone();
             }
         }
         self.open_slot_files(window, cx);
@@ -1191,6 +1340,17 @@ impl Workspace {
         self.tabs.get(self.active_tab).map(|tab| tab.path.clone())
     }
 
+    /// タブ列の `index` 番目を、覚えておくファイルの並び（`open_files`＝一時タブを除く）の中の位置へ直す。
+    /// 一時タブ（端末・diff 等）なら、その後ろで最初のファイルの位置（無ければ並びの長さ）。開き直す時は
+    /// 残した端末のタブの後ろにファイルを積むので、この位置に端末の数を足せば同じタブに戻る（O24）。
+    pub(crate) fn file_position_of_tab(&self, index: usize) -> usize {
+        self.tabs
+            .iter()
+            .take(index)
+            .filter(|tab| !tab.transient)
+            .count()
+    }
+
     /// 現在のタブ列をアクティブ slot へ書き戻す（永続化・切替復元の真実源を同期）。
     pub(crate) fn sync_active_slot(&mut self) {
         // 一時タブ（diff 等）は永続化しない。
@@ -1200,11 +1360,20 @@ impl Workspace {
             .filter(|tab| !tab.transient)
             .map(|tab| tab.path.clone())
             .collect();
-        let active_file = self.active_tab.min(files.len().saturating_sub(1));
+        let active_file = self
+            .file_position_of_tab(self.active_tab)
+            .min(files.len().saturating_sub(1));
+        let pinned: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.pinned && !tab.transient)
+            .map(|tab| tab.path.clone())
+            .collect();
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.open_files = files;
             slot.active_file = active_file;
+            slot.pinned_files = pinned;
         }
     }
 
@@ -1234,6 +1403,8 @@ impl Workspace {
         let observation = cx.observe(&editor, Self::on_editor_changed);
         let input_subscription = cx.subscribe_in(&editor, window, Self::on_editor_typed);
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
+        let link_subscription = cx.subscribe_in(&editor, window, Self::on_preview_link);
+        let blur_subscription = self.auto_save_on_blur(&editor, window, cx);
         self.tabs.push(EditorTab {
             path: title_path,
             content: TabContent::Editor {
@@ -1241,8 +1412,12 @@ impl Workspace {
                 _observation: observation,
                 _input_subscription: input_subscription,
                 _hover_subscription: hover_subscription,
+                _link_subscription: link_subscription,
+                _blur_subscription: blur_subscription,
             },
             transient: true,
+            pinned: false,
+            preview: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -1255,30 +1430,55 @@ impl Workspace {
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
         let rail_had_focus = self.chrome.rail_focus.is_focused(window);
-        let (files, active_file) = match self.active_slot() {
-            Some(slot) => (slot.open_files.clone(), slot.active_file),
+        // ピン留めは開き終えてから戻す（1 枚開くたびに `sync_active_slot` が slot を今のタブ列で
+        // 書き直すので、先に控えておく）。
+        let (files, active_file, pinned) = match self.active_slot() {
+            Some(slot) => (
+                slot.open_files.clone(),
+                slot.active_file,
+                slot.pinned_files.clone(),
+            ),
             None => return,
         };
         let Some(worktree) = self.active_worktree() else {
             return;
         };
         let host = worktree.host().clone();
-        self.tabs.clear();
+        // 端末のタブ（O24）はファイルではないので開き直さずに残す（ブランチを切り替えてもシェルは
+        // 動き続けている）。ファイルのタブはその後ろへ積み直すので、選ぶ位置はその分ずらす。
+        // 変更レビューのタブ（一時タブ）は開き直さない＝閉じたのと同じく読み込みを止める（R02）。
+        let reviews: Vec<Entity<ReviewView>> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match &tab.content {
+                TabContent::Review(review) => Some(review.clone()),
+                _ => None,
+            })
+            .collect();
+        self.tabs.retain(EditorTab::is_terminal);
+        for review in &reviews {
+            self.review_tab_closed(review, cx);
+        }
         self.active_tab = 0;
         if host.is_remote() {
-            self.open_slot_files_remote(host, files, active_file, window, cx);
+            self.open_slot_files_remote(host, files, active_file, pinned, window, cx);
             return;
         }
+        let first_file = self.tabs.len();
         for path in files {
-            if host.metadata(&path).is_ok() {
+            if web_tab_url(&path).is_some()
+                || static_tab_file(&path).is_some_and(|file| file.is_file())
+                || host.metadata(&path).is_ok()
+            {
                 // 背景読み込みだと完了順でタブ順が崩れるため、local の復元は同期で開く
                 // （ローカル FS の stat/read はマイクロ秒。UI スレッドで払ってよい）。
                 self.open_file_sync(path, window, cx);
             }
         }
-        if active_file < self.tabs.len() {
-            self.select_tab(active_file, window, cx);
+        if first_file + active_file < self.tabs.len() {
+            self.select_tab(first_file + active_file, window, cx);
         }
+        self.restore_tab_pins(&pinned);
         self.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
     }
 
@@ -1317,6 +1517,7 @@ impl Workspace {
         host: Arc<dyn Host>,
         files: Vec<PathBuf>,
         active_file: usize,
+        pinned: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1330,15 +1531,23 @@ impl Workspace {
         let root = self
             .active_worktree()
             .map(|worktree| worktree.root().to_path_buf());
+        /// 背景で読み終えた 1 枚。Web タブ（鍵が URL）は読むものが無いので並びだけ保つ。
+        enum RestoredTab {
+            File(PathBuf, host::FileContent),
+            Web(String),
+        }
         cx.spawn(async move |_workspace, cx| {
-            let loaded: Vec<(PathBuf, host::FileContent)> = cx
+            let loaded: Vec<RestoredTab> = cx
                 .background_executor()
                 .spawn(async move {
                     files
                         .into_iter()
                         .filter_map(|path| {
+                            if let Some(url) = web_tab_url(&path) {
+                                return Some(RestoredTab::Web(url));
+                            }
                             let content = host.read_file(&path).ok()?;
-                            Some((path, content))
+                            Some(RestoredTab::File(path, content))
                         })
                         .collect()
                 })
@@ -1355,12 +1564,19 @@ impl Workspace {
                     return;
                 }
                 let rail_had_focus = workspace.chrome.rail_focus.is_focused(window);
-                for (path, content) in loaded {
-                    workspace.open_loaded_file(path, content, window, cx);
+                let first_file = workspace.tabs.len();
+                for tab in loaded {
+                    match tab {
+                        RestoredTab::File(path, content) => {
+                            workspace.open_loaded_file(path, content, window, cx)
+                        }
+                        RestoredTab::Web(url) => workspace.show_web_tab(url, window, cx),
+                    }
                 }
-                if active_file < workspace.tabs.len() {
-                    workspace.select_tab(active_file, window, cx);
+                if first_file + active_file < workspace.tabs.len() {
+                    workspace.select_tab(first_file + active_file, window, cx);
                 }
+                workspace.restore_tab_pins(&pinned);
                 workspace.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
             });
         })
@@ -1414,6 +1630,11 @@ impl Workspace {
         };
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
+        let base = self.project_sessions.projects[session_index]
+            .task_space
+            .base_oid
+            .clone()
+            .unwrap_or_else(|| "HEAD".to_string());
         let Some(session) = self.project_sessions.sessions.get_mut(session_index) else {
             return;
         };
@@ -1429,6 +1650,31 @@ impl Workspace {
                     let changes = project::git_changes_on(host.as_ref(), &root);
                     let history = project::git_log_graph_on(host.as_ref(), &root, 30);
                     let slug = project::github_slug_on(host.as_ref(), &root);
+                    let mut task_files =
+                        project::git_diff_files_on(host.as_ref(), &root, &base).unwrap_or_default();
+                    // untracked は git の diff に出ない。エージェントが作ったばかりのファイルを落とさない。
+                    // 行数も変更レビューと同じ規則で数える（数えないと、見出しのトグルとサイドバーの `+N −M` が
+                    // レビューの見出しより少なく出ていた）。読むのは 1 回の更新で UNTRACKED_COUNT_BYTES まで。
+                    let mut count_budget = UNTRACKED_COUNT_BYTES;
+                    for (path, kind) in &status {
+                        if *kind == StatusKind::Untracked
+                            && !task_files.iter().any(|file| &file.path == path)
+                        {
+                            let size = host.metadata(path).map_or(u64::MAX, |metadata| metadata.len);
+                            let added = if size <= project::review::MAX_TEXT_BYTES as u64 && size <= count_budget {
+                                count_budget -= size;
+                                host.read_file(path).map_or(0, |content| project::review::untracked_line_count(&content.bytes))
+                            } else {
+                                0
+                            };
+                            task_files.push(project::DiffFile {
+                                path: path.clone(),
+                                kind: *kind,
+                                added,
+                                deleted: 0,
+                            });
+                        }
+                    }
                     // linked worktree か（＝削除できる作業ツリーか）を **git に聞く**（2026-07-27）。
                     // 以前は「このセッションで worktree として開いたか」の記憶だけが根拠だったので、
                     // 再起動すると worktree なのに削除メニューが消え、消す手段が無くなっていた。
@@ -1446,7 +1692,7 @@ impl Workspace {
                             })
                             .map(|worktree| worktree.branch.clone())
                     };
-                    (status, branch, changes, history, slug, linked)
+                    (status, branch, changes, history, slug, linked, task_files)
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
@@ -1457,8 +1703,9 @@ impl Workspace {
                 if session.repository.refresh_generation != generation {
                     return; // 古い結果（その後に別の refresh が走った）
                 }
-                let (status, branch, changes, history, slug, linked) = snapshot;
+                let (status, branch, changes, history, slug, linked, task_files) = snapshot;
                 session.repository.status = status.into_iter().collect();
+                session.repository.task_files = task_files;
                 let git_panel = session.git_panel.clone();
                 git_panel.update(cx, |panel, cx| {
                     panel.set_snapshot(

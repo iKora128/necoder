@@ -142,8 +142,7 @@ impl Workspace {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "repo".to_string());
         let Some(parent) = root.parent().map(Path::to_path_buf) else {
-            eprintln!("worktree の作成先を決められない（root に親が無い）");
-            cx.notify();
+            self.push_failure_toast(i18n::t!("git.worktree_no_parent").into(), None, cx);
             return;
         };
         // 列挙も `git worktree add`（checkout 相当で重い）も背景で。busy 表示付き。
@@ -248,14 +247,75 @@ impl Workspace {
             self.chrome.show_herd = false;
             self.todo_panel
                 .update(cx, |panel, cx| panel.set_open(false, cx));
-            let focus = self.git_panel.read(cx).focus.clone();
-            window.focus(&focus, cx);
+            self.focus_git_input(window, cx);
             self.refresh_git_status(cx);
         }
         cx.notify();
     }
 
-    /// git パネルのキー入力（コミットメッセージ / ブランチ名を手書きで積む。検索パネルと同流儀）。
+    /// ソース管理パネルを作る。コミットメッセージ欄は平坦 `EditorView`（IME・⌘V・undo が効く。
+    /// Enter は改行・⌘⏎ でコミット）。入力に合わせて欄を伸ばす（composer と同じ auto-grow）。
+    pub(crate) fn new_git_panel(
+        theme: &Theme,
+        accent: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Entity<GitPanel> {
+        let message = cx.new(|cx| EditorView::plain(theme.clone(), accent, false, cx));
+        cx.subscribe(
+            &message,
+            |_workspace, _editor, event: &ComposerEvent, cx| {
+                if matches!(event, ComposerEvent::ContentHeightChanged) {
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        cx.new(|cx| GitPanel::new(message, cx))
+    }
+
+    /// パネルの入力欄へフォーカス（ブランチ名の入力中ならそちら・無ければコミットメッセージ）。
+    pub(crate) fn focus_git_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = {
+            let panel = self.git_panel.read(cx);
+            panel
+                .branch_name
+                .as_ref()
+                .unwrap_or(&panel.message)
+                .read(cx)
+                .focus_handle(cx)
+        };
+        window.focus(&focus, cx);
+    }
+
+    /// Esc（入力欄の `editor::Cancel` が親へ流れてきた / パネル自体にフォーカス）。
+    /// ブランチ名の入力中なら入力だけ畳み、そうでなければパネルを閉じる。
+    pub(crate) fn cancel_git_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_naming = self.git_panel.update(cx, |panel, cx| {
+            let was_naming = panel.branch_name.take().is_some();
+            if was_naming {
+                cx.notify();
+            }
+            was_naming
+        });
+        if was_naming {
+            self.focus_git_input(window, cx);
+            return;
+        }
+        self.toggle_git_panel(&ToggleGitPanel, window, cx);
+    }
+
+    /// ⌘⏎（`agent::SubmitPrompt`・入力欄が親へ流す）: ブランチ名の入力中なら作成、それ以外はコミット。
+    pub(crate) fn submit_git_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_panel.read(cx).branch_name.is_some() {
+            self.confirm_new_branch(window, cx);
+        } else {
+            self.git_commit(window, cx);
+        }
+    }
+
+    /// keymap に束ねられていないキー（入力欄の中からも上がってくる）。Esc はパネル自体に
+    /// フォーカスがある時の取消、⌃⏎ は従来どおりのコミット（⌘⏎ は既定 keymap の
+    /// `agent::SubmitPrompt` で届く。Windows の Ctrl+Enter もそちら）。
     pub(crate) fn on_git_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -263,68 +323,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event.keystroke.key.as_str() {
-            "escape" => {
-                // ブランチ名モードなら入力だけ畳む。そうでなければパネルを閉じる。
-                let was_naming = self.git_panel.update(cx, |panel, cx| {
-                    let was_naming = panel.branch_name.take().is_some();
-                    if was_naming {
-                        cx.notify();
-                    }
-                    was_naming
-                });
-                if was_naming {
-                    return;
-                }
-                self.toggle_git_panel(&ToggleGitPanel, window, cx);
+            "escape" => self.cancel_git_input(window, cx),
+            "enter" if event.keystroke.modifiers.control => {
+                cx.stop_propagation();
+                self.submit_git_input(window, cx);
             }
-            "enter" => {
-                let naming = self.git_panel.read(cx).branch_name.is_some();
-                if naming {
-                    self.confirm_new_branch(window, cx);
-                } else if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
-                    self.git_commit(window, cx); // ⌘/⌃⏎ = コミット
-                } else {
-                    self.git_panel.update(cx, |panel, cx| {
-                        panel.message.push('\n'); // 素の Enter は改行
-                        cx.notify();
-                    });
-                }
-            }
-            "backspace" => {
-                self.git_panel.update(cx, |panel, cx| {
-                    match &mut panel.branch_name {
-                        Some(name) => {
-                            name.pop();
-                        }
-                        None => {
-                            panel.message.pop();
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-            _ => {
-                let modifiers = event.keystroke.modifiers;
-                if modifiers.platform || modifiers.control || modifiers.function {
-                    return;
-                }
-                if let Some(text) = &event.keystroke.key_char {
-                    if !text.is_empty() && !text.chars().any(char::is_control) {
-                        self.git_panel.update(cx, |panel, cx| {
-                            match &mut panel.branch_name {
-                                Some(name) => name.push_str(text),
-                                None => panel.message.push_str(text),
-                            }
-                            cx.notify();
-                        });
-                    }
-                }
-            }
+            _ => {}
         }
     }
 
-    /// staged 変更をコミット。staged が無ければ全変更を stage してからコミット（簡便動線）。
     /// コミット（何も staged でなければ全部 stage してから）。git はフックで長引きうる → 背景 + busy。
+    /// 失敗（フックが止めた等）は理由つきでトーストに出す。
     pub(crate) fn git_commit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.git_is_busy(cx) {
             return;
@@ -332,7 +341,8 @@ impl Workspace {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
-        let message = self.git_panel.read(cx).message.clone();
+        let message_editor = self.git_panel.read(cx).message.clone();
+        let message = message_editor.read(cx).plain_text();
         if message.trim().is_empty() {
             return;
         }
@@ -357,13 +367,13 @@ impl Workspace {
             let _ = workspace.update(cx, |workspace, cx| {
                 git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
-                    Ok(()) => {
-                        git_panel.update(cx, |panel, cx| {
-                            panel.message.clear();
-                            cx.notify();
-                        });
-                    }
-                    Err(error) => eprintln!("コミットに失敗: {error:#}"),
+                    Ok(()) => message_editor.update(cx, |editor, cx| editor.clear(cx)),
+                    Err(error) => workspace.toast_git_failure(
+                        i18n::t!("git.commit_failed"),
+                        "git commit",
+                        &error,
+                        cx,
+                    ),
                 }
                 workspace.refresh_git_status(cx);
                 cx.notify();
@@ -372,10 +382,38 @@ impl Workspace {
         .detach();
     }
 
+    /// git / gh の失敗を知らせる。トーストは見出し + 理由の要点（`hint:` 行を落とした先頭数行）で、
+    /// 収まらない出力（フックの出力など）は押すと `<command> の出力` タブで全文を読める。
+    pub(crate) fn toast_git_failure(
+        &mut self,
+        headline: String,
+        command: &str,
+        error: &anyhow::Error,
+        cx: &mut Context<Self>,
+    ) {
+        eprintln!("{headline}: {error:#}");
+        let output = project::failure_output(error);
+        let (gist, truncated) = failure_gist(&output);
+        let text = if gist.is_empty() {
+            headline
+        } else {
+            format!("{headline}\n{gist}")
+        };
+        let details = truncated.then(|| {
+            (
+                SharedString::from(i18n::t!("git.output_title", "command" => command)),
+                output,
+            )
+        });
+        self.push_failure_toast(SharedString::from(text), details, cx);
+    }
+
     /// stage/unstage 系を背景で実行し、完了後に git 状態を更新する共通ヘルパ。
+    /// 失敗は `headline`（i18n 済みの見出し）と `command` の出力でトーストに出す。
     pub(crate) fn run_git_index_op(
         &mut self,
-        describe: String,
+        headline: String,
+        command: &'static str,
         operation: impl FnOnce(Arc<dyn Host>, PathBuf) -> anyhow::Result<()> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -391,7 +429,7 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
                 if let Err(error) = result {
-                    eprintln!("{describe}に失敗: {error:#}");
+                    workspace.toast_git_failure(headline, command, &error, cx);
                 }
                 workspace.refresh_git_status(cx);
                 cx.notify();
@@ -403,7 +441,8 @@ impl Workspace {
     /// 1 ファイルを stage。
     pub(crate) fn git_stage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.run_git_index_op(
-            "stage".to_string(),
+            i18n::t!("git.stage_failed"),
+            "git add",
             move |host, root| project::stage_path_on(host.as_ref(), &root, &path),
             cx,
         );
@@ -412,7 +451,8 @@ impl Workspace {
     /// 1 ファイルを unstage。
     pub(crate) fn git_unstage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.run_git_index_op(
-            "unstage".to_string(),
+            i18n::t!("git.unstage_failed"),
+            "git restore --staged",
             move |host, root| project::unstage_path_on(host.as_ref(), &root, &path),
             cx,
         );
@@ -421,7 +461,8 @@ impl Workspace {
     /// 全変更を stage。
     pub(crate) fn git_stage_all(&mut self, cx: &mut Context<Self>) {
         self.run_git_index_op(
-            "stage".to_string(),
+            i18n::t!("git.stage_failed"),
+            "git add -A",
             |host, root| project::stage_all_on(host.as_ref(), &root),
             cx,
         );
@@ -474,10 +515,12 @@ impl Workspace {
                     Ok(()) if !is_push => workspace.reload_active_project(window, cx),
                     Ok(()) => workspace.refresh_git_status(cx),
                     Err(error) => {
-                        eprintln!(
-                            "{} に失敗: {error:#}",
-                            if is_push { "push" } else { "pull" }
-                        );
+                        let (headline, command) = if is_push {
+                            (i18n::t!("git.push_failed"), "git push")
+                        } else {
+                            (i18n::t!("git.pull_failed"), "git pull")
+                        };
+                        workspace.toast_git_failure(headline, command, &error, cx);
                         workspace.refresh_git_status(cx);
                     }
                 }
@@ -519,10 +562,15 @@ impl Workspace {
                     }
                 })
                 .await;
-            let _ = handle.update(cx, |_workspace, _window, cx| {
+            let _ = handle.update(cx, |workspace, _window, cx| {
                 git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 if let Err(error) = result {
-                    eprintln!("GitHub 操作に失敗: {error:#}");
+                    let (headline, command) = if create {
+                        (i18n::t!("git.pr_create_failed"), "gh pr create")
+                    } else {
+                        (i18n::t!("git.pr_open_failed"), "gh pr view")
+                    };
+                    workspace.toast_git_failure(headline, command, &error, cx);
                 }
                 cx.notify();
             });
@@ -551,16 +599,19 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move { project::ai_commit_message_on(host.as_ref(), &root) })
                 .await;
-            let _ = handle.update(cx, |_workspace, _window, cx| {
+            let _ = handle.update(cx, |workspace, _window, cx| {
                 git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
                     Ok(message) => {
-                        git_panel.update(cx, |panel, cx| {
-                            panel.message = message;
-                            cx.notify();
-                        });
+                        let editor = git_panel.read(cx).message.clone();
+                        editor.update(cx, |editor, cx| editor.set_plain_text(&message, cx));
                     }
-                    Err(error) => eprintln!("コミットメッセージ生成に失敗: {error:#}"),
+                    Err(error) => workspace.toast_git_failure(
+                        i18n::t!("git.ai_message_failed"),
+                        "claude -p",
+                        &error,
+                        cx,
+                    ),
                 }
                 cx.notify();
             });
@@ -568,14 +619,26 @@ impl Workspace {
         .detach();
     }
 
-    /// git パネルの入力行を「新しいブランチ名」モードにする（＋ボタン）。
+    /// git パネルの入力行を「新しいブランチ名」モードにする（＋ボタン）。入力欄は IME の正しい
+    /// 1 行の `EditorView`（⏎ で作成・Esc で取消）。
     pub(crate) fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = self.git_panel.update(cx, |panel, cx| {
-            panel.branch_name = Some(String::new());
+        let accent = self.accent();
+        let editor = cx.new(|cx| EditorView::plain(self.theme.clone(), accent, true, cx));
+        cx.subscribe_in(
+            &editor,
+            window,
+            |workspace, _editor, event: &ComposerEvent, window, cx| {
+                if matches!(event, ComposerEvent::Submit) {
+                    workspace.confirm_new_branch(window, cx);
+                }
+            },
+        )
+        .detach();
+        self.git_panel.update(cx, |panel, cx| {
+            panel.branch_name = Some(editor);
             cx.notify();
-            panel.focus.clone()
         });
-        window.focus(&focus, cx);
+        self.focus_git_input(window, cx);
     }
 
     /// 入力中のブランチ名で作成＆切替 → プロジェクト再読込。
@@ -584,7 +647,8 @@ impl Workspace {
             .git_panel
             .read(cx)
             .branch_name
-            .clone()
+            .as_ref()
+            .map(|editor| editor.read(cx).plain_text())
             .unwrap_or_default()
             .trim()
             .to_string();
@@ -593,6 +657,7 @@ impl Workspace {
                 panel.branch_name = None;
                 cx.notify();
             });
+            self.focus_git_input(window, cx);
             return;
         }
         let Some(worktree) = self.active_worktree() else {
@@ -616,8 +681,14 @@ impl Workspace {
                             cx.notify();
                         });
                         workspace.reload_active_project(window, cx);
+                        workspace.focus_git_input(window, cx);
                     }
-                    Err(error) => eprintln!("ブランチ作成に失敗: {error:#}"),
+                    Err(error) => workspace.toast_git_failure(
+                        i18n::t!("git.branch_create_failed"),
+                        "git switch -c",
+                        &error,
+                        cx,
+                    ),
                 }
                 cx.notify();
             });
@@ -685,4 +756,232 @@ impl Workspace {
     // アクティブファイルの言語に合った言語サーバを（必要なら）起動する。
     // 別プロジェクト or 別言語に移ったら張り替える。サーバ未登録の拡張子では何もしない
     // （既存接続は温存＝別タブに戻れば診断が残る）。
+}
+
+/// 失敗出力の要点（トースト 1 枚に載せる分）。git の `hint:` 行と空行を落として先頭 3 行・240 文字まで。
+/// 落とした行・文字があれば true（全文は別のタブで読ませる）。
+fn failure_gist(output: &str) -> (String, bool) {
+    const MAX_LINES: usize = 3;
+    const MAX_CHARS: usize = 240;
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let kept: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !line.starts_with("hint:"))
+        .take(MAX_LINES)
+        .collect();
+    let mut truncated = kept.len() < lines.len();
+    let mut gist = kept.join("\n");
+    if gist.chars().count() > MAX_CHARS {
+        gist = format!("{}…", gist.chars().take(MAX_CHARS).collect::<String>());
+        truncated = true;
+    }
+    (gist, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_gist_keeps_short_output_whole() {
+        let (gist, truncated) = failure_gist("fatal: not a git repository\n");
+        assert_eq!(gist, "fatal: not a git repository");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn failure_gist_drops_hints_and_offers_the_rest() {
+        let push =
+            "To github.com:owner/repo.git\n ! [rejected]        main -> main (fetch first)\n\
+            error: failed to push some refs to 'github.com:owner/repo.git'\n\
+            hint: Updates were rejected because the remote contains work that you do not\n\
+            hint: have locally.\n";
+        let (gist, truncated) = failure_gist(push);
+        assert_eq!(gist.lines().count(), 3);
+        assert!(gist.contains("[rejected]") && gist.contains("error: failed to push"));
+        assert!(!gist.contains("hint:"));
+        assert!(truncated, "hint を落としたら全文を読めるようにする");
+
+        // フックの長い出力は先頭だけ（全文は別タブ）。
+        let hook: String = (1..=10)
+            .map(|line| format!("lint error {line}\n"))
+            .collect();
+        let (gist, truncated) = failure_gist(&hook);
+        assert_eq!(gist, "lint error 1\nlint error 2\nlint error 3");
+        assert!(truncated);
+    }
+
+    /// ソース管理パネル（受入）: 変更の行を押すと diff タブが開く。コミット欄は ⌘V・打鍵・undo が効き、
+    /// ⌘⏎ のコミットが pre-commit フックで止まると、フックの出力つきのトースト（全文つき）が出て
+    /// メッセージは残る。
+    #[cfg(unix)]
+    #[gpui::test]
+    fn git_panel_rows_open_diffs_and_hook_failures_reach_a_toast(cx: &mut gpui::TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!(
+            "necoder_git_panel_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("hooks")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // git 無し環境はスキップ
+        }
+        for (key, value) in [
+            ("user.email", "t@example.com"),
+            ("user.name", "tester"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "hooks"),
+        ] {
+            assert!(git(&["config", key, value]));
+        }
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        assert!(git(&["add", "-A"]) && git(&["commit", "-q", "-m", "init"]));
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let hook = repo.join("hooks").join("pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nfor n in 1 2 3 4 5; do echo \"pre-commit: lint error $n\" >&2; done\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            // ⌘V / ⌘Z / ⌘⏎ を実キーで通すため既定 keymap を張る。
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![repo.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+                session
+                    .terminal_dock
+                    .update(cx, |dock, _| dock.use_test_terminals());
+            }
+            workspace.toggle_git_panel(&ToggleGitPanel, window, cx);
+        });
+        cx.run_until_parked();
+
+        // 変更の行を押す → HEAD との diff タブ。
+        let row = cx
+            .debug_bounds("git-unstaged-0")
+            .expect("ソース管理パネルに変更の行が描かれている");
+        cx.simulate_mouse_down(row.center(), MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let tab = &workspace.tabs[workspace.active_tab];
+            assert_eq!(
+                tab.path.file_name().and_then(|name| name.to_str()),
+                Some("a.txt ⇄ HEAD")
+            );
+            let text = tab
+                .editor()
+                .map(|editor| editor.read(cx).plain_text())
+                .unwrap_or_default();
+            assert!(text.contains("-one") && text.contains("+two"), "{text}");
+        });
+
+        // コミット欄: ⌘V（テスト用クリップボード）・打鍵（IME と同じ入力経路）・⌘Z。
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_git_input(window, cx)
+        });
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("fix: 貼り付け".to_string()));
+        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_input(" と打鍵");
+        cx.run_until_parked();
+        let message = |workspace: &Workspace, cx: &App| {
+            workspace.git_panel.read(cx).message.read(cx).plain_text()
+        };
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert_eq!(message(workspace, cx), "fix: 貼り付け と打鍵");
+        });
+        // ⌘Z は打鍵を戻す（戻す単位はバッファの undo の粒度）。貼り付けまでは戻さない。
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let undone = message(workspace, cx);
+            assert!(
+                undone.len() < "fix: 貼り付け と打鍵".len() && undone.starts_with("fix: 貼り付け"),
+                "⌘Z で打鍵が戻らない: {undone}"
+            );
+            let editor = workspace.git_panel.read(cx).message.clone();
+            editor.update(cx, |editor, cx| editor.set_plain_text("fix: 貼り付け", cx));
+        });
+
+        // ⌘⏎ でコミット → pre-commit が止める → フックの出力つきのトースト。メッセージは残る。
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let toasts = workspace.toast_snapshot();
+            let (text, has_details) = toasts.last().cloned().expect("失敗のトーストが出る");
+            assert!(text.contains("pre-commit: lint error 1"), "{text}");
+            assert!(has_details, "5 行の出力は要点に収まらないので全文を開ける");
+            assert_eq!(
+                message(workspace, cx),
+                "fix: 貼り付け",
+                "失敗したらメッセージを消さない"
+            );
+        });
+        // ⌃⏎ も従来どおりコミットを試みる（改行は入らない）。
+        cx.simulate_keystrokes("ctrl-enter");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert_eq!(
+                workspace.toast_snapshot().len(),
+                2,
+                "⌃⏎ でもコミットを試みる"
+            );
+            assert_eq!(message(workspace, cx), "fix: 貼り付け", "⌃⏎ で改行が入った");
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let count = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&count.stdout).trim(),
+            "1",
+            "フックが止めたのでコミットは増えない"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failure_gist_clips_long_lines() {
+        let (gist, truncated) = failure_gist(&"x".repeat(500));
+        assert_eq!(gist.chars().count(), 241, "240 文字 + …");
+        assert!(gist.ends_with('…') && truncated);
+    }
 }

@@ -111,7 +111,9 @@ pub(super) fn pane_space(pane: &FleetPane) -> &SpaceId {
         | FleetPane::Terminal { space }
         | FleetPane::Editor { space }
         | FleetPane::Diff { space }
-        | FleetPane::Tests { space } => space,
+        | FleetPane::Tests { space }
+        | FleetPane::Formation { space }
+        | FleetPane::CaptainLog { space } => space,
     }
 }
 
@@ -130,7 +132,6 @@ impl Workspace {
             self.chrome.fleet_mode = !self.chrome.fleet_mode;
         }
         if self.chrome.fleet_mode {
-            self.ensure_work_layout(cx);
             self.seed_fleet_cells(cx);
             // 編隊の左カラム既定は herd。以後はレールの エクスプローラ/git/Todo で切り替わる。
             self.chrome.show_left = true;
@@ -182,6 +183,29 @@ impl Workspace {
     /// 同じリポジトリの 2 回目以降は何もしない — 中身はユーザーの操作（＋ / ×）が正になる。
     /// リポジトリを跨いだら現在の並びを畳み、行き先の並びを戻す（前に閉じたセルは閉じたまま）。
     pub(crate) fn seed_fleet_cells(&mut self, cx: &App) {
+        self.seed_repository_cells(cx);
+        // 選んでいる slot の札は必ず置く。舞台は札のある Task しか並べないので、後からレールに載った slot
+        // （外部の worktree の取り込み・⌘O で開いた linked worktree・退避していた一覧の復元）は、札が無いと
+        // 選んでも中央に何も出なかった（2026-09-29・取り込みを押しても何も出ない）。
+        if let Some(space) = self.active_slot().map(|slot| slot.task_space.id.clone()) {
+            self.ensure_task_cell(&space);
+        }
+    }
+
+    /// 舞台に出す Task の札（`FleetPane::Task`）が無ければ足す。
+    pub(crate) fn ensure_task_cell(&mut self, space: &SpaceId) {
+        let shown = self.chrome.fleet_cells.iter().any(
+            |pane| matches!(pane, FleetPane::Task { space: existing } if existing == space),
+        );
+        if !shown {
+            self.chrome.fleet_cells.push(FleetPane::Task {
+                space: space.clone(),
+            });
+        }
+    }
+
+    /// このリポジトリの札の一覧を用意する（リポジトリを跨いだら前の一覧を退避し、行き先の一覧を戻すか作る）。
+    fn seed_repository_cells(&mut self, cx: &App) {
         let Some(repository) = self.active_repository_key().map(str::to_string) else {
             return;
         };
@@ -228,6 +252,14 @@ impl Workspace {
         cx.notify();
     }
 
+    /// ターミナルの名札（`TerminalDock` の session id）を 1 つ振る。Task の端末・エディタ領域の端末タブ（O24）
+    /// で共有する通番（同じ PTY を二重に指さない）。
+    pub(crate) fn allocate_terminal_id(&mut self) -> u64 {
+        let id = self.chrome.next_terminal_id;
+        self.chrome.next_terminal_id += 1;
+        id
+    }
+
     pub(crate) fn add_terminal_to_selected_task(&mut self, cx: &mut Context<Self>) {
         let Some(space) = self.selected_task_space() else {
             return;
@@ -235,7 +267,7 @@ impl Workspace {
         let Some(index) = self.session_index_for_space(&space) else {
             return;
         };
-        let id = self.chrome.work_layout.allocate();
+        let id = self.allocate_terminal_id();
         self.project_sessions.sessions[index]
             .terminal_dock
             .update(cx, |dock, cx| {
@@ -270,6 +302,7 @@ impl Workspace {
         if let Some(space) = self.selected_task_space() {
             if let Some(index) = self.session_index_for_space(&space) {
                 self.refresh_git_status_for(index, cx);
+                self.activate_review(index, cx);
             }
             self.add_fleet_cell(FleetPane::Diff { space }, cx);
         }
@@ -299,10 +332,13 @@ impl Workspace {
         let Some(branch) = task.branch.clone().or_else(|| task.worktree_branch.clone()) else {
             return;
         };
-        let repository_id = task.task_space.repository_id.clone();
-        let Some(integration) = self.project_sessions.projects.iter().find(|slot| {
-            slot.task_space.repository_id == repository_id && slot.task_space.is_integration()
-        }) else {
+        // 統合先は ＋ Task・Captain・サイドバーと同じ選び方（メインの作業ツリーを優先・O21）。
+        // 最初に見つかった統合先扱いの slot だと、⌘O で開いた linked worktree が先にあると取り違える。
+        let key = task.repository_key().to_string();
+        let Some(integration) = self
+            .integration_slot_for(&key)
+            .and_then(|index| self.project_sessions.projects.get(index))
+        else {
             self.push_toast(
                 i18n::t!("fleet.toast_no_integration_space").into(),
                 self.accent(),
@@ -368,10 +404,9 @@ impl Workspace {
         let Some(branch) = task.branch.clone().or_else(|| task.worktree_branch.clone()) else {
             return;
         };
-        let repository_id = task.task_space.repository_id.clone();
-        let Some(integration_index) = self.project_sessions.projects.iter().position(|slot| {
-            slot.task_space.repository_id == repository_id && slot.task_space.is_integration()
-        }) else {
+        // 統合先の選び方は `review_task_for_merge` と同じ（メインの作業ツリーを優先）。
+        let key = task.repository_key().to_string();
+        let Some(integration_index) = self.integration_slot_for(&key) else {
             return;
         };
         let integration = &self.project_sessions.projects[integration_index];
@@ -391,6 +426,7 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(head_oid) => {
+                    workspace.chrome.task_conflicts.remove(&space);
                     if let Some(slot) = workspace
                         .project_sessions
                         .projects
@@ -421,15 +457,68 @@ impl Workspace {
                         Some(&format!("{error:#}")),
                         cx,
                     );
-                    workspace.push_toast(
-                        SharedString::from(i18n::t!("fleet.toast_integrate_failed", "error" => format!("{error:#}"))),
-                        workspace.accent(),
-                        cx,
-                    );
+                    // 競合なら覚えて、「次へ」を「競合を直させる」にする（O19）。
+                    let text = match error.downcast_ref::<project::MergeConflicts>() {
+                        Some(conflicts) => {
+                            workspace
+                                .chrome
+                                .task_conflicts
+                                .insert(space.clone(), conflicts.paths.clone());
+                            i18n::t!(
+                                "fleet.toast_integrate_conflicts",
+                                "count" => conflicts.paths.len()
+                            )
+                        }
+                        None => i18n::t!("fleet.toast_integrate_failed", "error" => format!("{error:#}")),
+                    };
+                    workspace.push_toast(SharedString::from(text), workspace.accent(), cx);
                 }
             });
         })
         .detach();
+    }
+
+    /// 統合の下見で競合したファイル（O19・覚えている間だけ）。
+    pub(crate) fn task_conflicts(&self, space: &SpaceId) -> Option<&[String]> {
+        self.chrome.task_conflicts.get(space).map(Vec::as_slice)
+    }
+
+    /// 「競合を直させる」（O19）: Task のエージェントに、統合先を自分の worktree へ取り込んで競合を
+    /// 解消し、コミットするよう頼む。いまのスレッドへ人間の発話として送る（作業中なら終わってから流れる）。
+    /// スレッドが無ければ新しく立てる。直った後は、もう一度「統合」を押す（下見からやり直す）。
+    pub(crate) fn ask_task_to_resolve_conflicts(&mut self, space: SpaceId, cx: &mut Context<Self>) {
+        let Some(index) = self.session_index_for_space(&space) else {
+            return;
+        };
+        let Some(paths) = self.chrome.task_conflicts.remove(&space) else {
+            return;
+        };
+        let repository_id = self.project_sessions.projects[index]
+            .task_space
+            .repository_id
+            .clone();
+        let base = self
+            .integration_slot_for(&repository_id)
+            .and_then(|integration| self.project_sessions.projects.get(integration))
+            .and_then(|slot| slot.branch.clone())
+            .unwrap_or_else(|| "main".to_string());
+        let prompt = conflict_prompt(&base, &paths);
+        let panel = self.project_sessions.sessions[index].agent_panel.clone();
+        let sent = panel.update(cx, |panel, cx| {
+            let thread = panel.active_thread();
+            panel.send_user_prompt_to(thread, prompt.clone(), cx)
+        });
+        // 作業中への遷移は、ターンが始まった所で既存の経路（TurnStarted）が付ける。
+        if !sent {
+            self.ipc_spawn_into(index, None, Some(prompt), cx);
+        }
+        let accent = self.accent();
+        self.push_toast(
+            SharedString::from(i18n::t!("fleet.conflicts_sent", "count" => paths.len())),
+            accent,
+            cx,
+        );
+        cx.notify();
     }
 
     pub(crate) fn session_index_for_space(&self, space: &SpaceId) -> Option<usize> {
@@ -466,116 +555,198 @@ impl Workspace {
         self.add_fleet_cell(FleetPane::Agent { space, panel }, cx);
     }
 
-    pub(super) fn create_prompted_task(&mut self, prompt: String, cx: &mut Context<Self>) {
-        let active_repository = self
-            .active_slot()
-            .map(|slot| slot.task_space.repository_id.clone());
-        let integration_index = active_repository
-            .as_ref()
-            .and_then(|repository_id| {
-                self.project_sessions.projects.iter().position(|slot| {
-                    slot.task_space.repository_id == *repository_id
-                        && slot.task_space.is_integration()
-                })
+    /// 作れた Task をレールに開き、台帳に載せ、依頼を送る（準備に失敗していれば控える）。
+    /// 返すのはその TaskSpace（舞台に並べる用）。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn register_created_task(
+        &mut self,
+        host: &Arc<dyn host::Host>,
+        target: PathBuf,
+        branch: String,
+        failure: Option<String>,
+        prompt: &str,
+        task: &FanoutTask,
+        parent: Option<SpaceId>,
+        cx: &mut Context<Self>,
+    ) -> Option<SpaceId> {
+        let auto_branch = super::task_creation::auto_branch_plan(task, &branch);
+        // worktree を space（レール slot）として開く（switch も走る）。
+        self.open_folder_in_rail(host.clone(), target.clone(), Some(branch), cx);
+        let index = self
+            .project_sessions
+            .projects
+            .iter()
+            .position(|slot| slot.worktree.root() == target.as_path())?;
+        // その TaskSpace の AgentPanel に新スレッドを起動 → Task セルを足す。
+        let space_id = self.project_sessions.projects[index].task_space.id.clone();
+        if let Some(auto_branch) = auto_branch {
+            self.chrome
+                .auto_branches
+                .insert(space_id.clone(), auto_branch);
+        }
+        self.chrome.fleet_cells.push(FleetPane::Task {
+            space: space_id.clone(),
+        });
+        if !prompt.trim().is_empty() {
+            // `:rocket:` は絵文字に（O20・A08）。
+            let first_line = ui::emoji::expand_shortcodes(prompt.lines().next().unwrap_or(""));
+            let title = match &task.title_suffix {
+                Some(suffix) => format!("{first_line} · {suffix}"),
+                None => first_line,
+            };
+            self.project_sessions.projects[index].task_space.title = title.into();
+        }
+        // 別の Task のブランチから切った（O21・A07）。台帳に残すと、サイドバーで親の下に出る。親の無い Task
+        // でも親を書く（同じフォルダに前に居た Task の親子を引き継がない）。
+        self.project_sessions.projects[index].task_space.parent = parent;
+        self.persist_new_task_space(index, cx);
+        self.transition_task_space(index, TaskPhase::Planned, "task_created", None, cx);
+        if let Some(error) = failure {
+            // 依頼は送らずに控える（「準備をやり直す」/「飛ばして始める」で送る・O20）。
+            self.chrome
+                .pending_task_prompts
+                .insert(space_id.clone(), prompt.to_string());
+            if let Some(agent) = &task.agent {
+                self.chrome
+                    .pending_task_agents
+                    .insert(space_id.clone(), agent.clone());
+            }
+            self.transition_task_space(index, TaskPhase::Failed, "setup_failed", Some(&error), cx);
+        } else if !prompt.trim().is_empty() {
+            self.ipc_spawn_into(index, task.agent.clone(), Some(prompt.to_string()), cx);
+        }
+        Some(space_id)
+    }
+
+    /// fan-out で切った Task を舞台に並べる（最大 3 枚）。Fleet の外ならトーストで案内する。
+    pub(super) fn show_fanout_on_stage(&mut self, spaces: Vec<SpaceId>, cx: &mut Context<Self>) {
+        let count = spaces.len();
+        self.chrome.stage_pinned = spaces.into_iter().take(3).collect();
+        self.chrome.stage_columns = self.chrome.stage_pinned.len().max(2);
+        self.save_state(cx);
+        let accent = self.accent();
+        let text = if self.chrome.fleet_mode {
+            i18n::t!("fleet.fanout_created", "count" => count)
+        } else {
+            let key = Self::shortcut_label_for("workspace::ToggleFleet").unwrap_or_default();
+            i18n::t!("fleet.fanout_created_outside", "count" => count, "key" => key)
+        };
+        self.push_toast(SharedString::from(text), accent, cx);
+    }
+
+    /// 準備に失敗して依頼を控えている Task か（失敗のカードに「準備をやり直す」を出す）。
+    pub(crate) fn task_waits_for_setup(&self, session_index: usize) -> bool {
+        self.project_sessions
+            .projects
+            .get(session_index)
+            .is_some_and(|slot| {
+                self.chrome
+                    .pending_task_prompts
+                    .contains_key(&slot.task_space.id)
             })
-            .unwrap_or(self.project_sessions.active);
-        let Some(slot) = self.project_sessions.projects.get(integration_index) else {
+    }
+
+    /// 「準備をやり直す」: `.worktreeinclude` と準備スクリプトをもう一度流し、通ったら控えていた依頼を
+    /// 送る。また失敗したら理由を差し替えて Failed のまま（O20）。
+    pub(crate) fn retry_task_setup(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let Some(slot) = self.project_sessions.projects.get(session_index) else {
             return;
         };
-        let worktree = slot.worktree.clone();
-        let root = worktree.root().to_path_buf();
-        let host = worktree.host().clone();
-        let host_for_add = host.clone();
+        let target = slot.worktree.root().to_path_buf();
+        let branch = slot
+            .worktree_branch
+            .clone()
+            .or_else(|| slot.branch.clone())
+            .unwrap_or_default();
+        let space_id = slot.task_space.id.clone();
+        // 読むのは統合先（`.worktreeinclude` と準備スクリプトの置き場）。SSH の host は project の外を
+        // 読めないので、作った時と同じく統合先の host で流す。
+        let Some(integration) = self
+            .integration_slot_for(slot.repository_key())
+            .and_then(|index| self.project_sessions.projects.get(index))
+        else {
+            return;
+        };
+        let main = integration.worktree.root().to_path_buf();
+        let host = integration.worktree.host().clone();
+        self.transition_task_space(session_index, TaskPhase::Planned, "setup_retried", None, cx);
         cx.spawn(async move |workspace, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    // 土台（IntegrationSpace の checked-out branch）を先に upstream へ早送りして、
-                    // Task が古い base から切られるのを防ぐ（Orca の default branch 自動同期を参考・
-                    // 2026-08-30）。オフライン・dirty・diverged では黙って現 HEAD から続行する。
-                    let sync = project::sync_current_branch_on(host_for_add.as_ref(), &root);
-                    let (target, branch, failure) =
-                        project::create_named_task_on(host_for_add.as_ref(), &root, &prompt)?;
-                    Ok::<_, anyhow::Error>((target, branch, sync, prompt, failure))
+                    project::prepare_task_worktree_on(host.as_ref(), &main, &target, &branch, true)
                 })
                 .await;
-            let _ = workspace.update(cx, |workspace, cx| match result {
-                Ok((target, branch, sync, prompt, failure)) => {
-                    // 早送りできた時だけ知らせる（最新から切れた安心情報。スキップは無言＝作成を汚さない）。
-                    if let project::BranchSyncOutcome::FastForwarded {
-                        branch: base,
-                        commits,
-                    } = sync
-                    {
-                        let accent = workspace.accent();
-                        workspace.push_toast(
-                            SharedString::from(i18n::t!(
-                                "fleet.base_synced",
-                                "branch" => &base,
-                                "count" => commits
-                            )),
-                            accent,
-                            cx,
-                        );
-                    }
-                    // worktree を space（レール slot）として開く（switch も走る）。
-                    workspace.open_folder_in_rail(host, target.clone(), Some(branch), cx);
-                    // その TaskSpace の AgentPanel に新スレッドを起動 → Task セルを足す。
-                    if let Some(space) = workspace
+            // Err = 待っている間に窓が閉じた。
+            workspace
+                .update(cx, |workspace, cx| {
+                    let Some(index) = workspace
                         .project_sessions
                         .projects
                         .iter()
-                        .position(|slot| slot.worktree.root() == target.as_path())
-                    {
-                        let space_id = workspace.project_sessions.projects[space]
-                            .task_space
-                            .id
-                            .clone();
-                        workspace
-                            .chrome
-                            .fleet_cells
-                            .push(FleetPane::Task { space: space_id });
-                        if !prompt.trim().is_empty() {
-                            workspace.project_sessions.projects[space].task_space.title =
-                                prompt.lines().next().unwrap_or("").to_string().into();
-                        }
-                        workspace.persist_task_space(space, cx);
-                        workspace.transition_task_space(
-                            space,
-                            TaskPhase::Planned,
-                            "task_created",
-                            None,
+                        .position(|slot| slot.task_space.id == space_id)
+                    else {
+                        return;
+                    };
+                    match result {
+                        Ok(()) => workspace.send_pending_task_prompt(index, cx),
+                        Err(error) => workspace.transition_task_space(
+                            index,
+                            TaskPhase::Failed,
+                            "setup_failed",
+                            Some(&format!("{error:#}")),
                             cx,
-                        );
+                        ),
                     }
-                    if let Some(index) = workspace
-                        .project_sessions
-                        .projects
-                        .iter()
-                        .position(|slot| slot.worktree.root() == target.as_path())
-                    {
-                        if let Some(error) = failure {
-                            workspace.transition_task_space(
-                                index,
-                                TaskPhase::Failed,
-                                "setup_failed",
-                                Some(&error),
-                                cx,
-                            );
-                        } else if !prompt.trim().is_empty() {
-                            workspace.ipc_spawn_into(index, None, Some(prompt), cx);
-                        }
-                    }
-                    workspace.hint_fleet_mode_once(cx);
-                    cx.notify();
-                }
-                Err(error) => {
-                    let accent = workspace.accent();
-                    workspace.push_toast(SharedString::from(format!("{error:#}")), accent, cx);
-                }
-            });
+                })
+                .ok();
         })
         .detach();
+    }
+
+    /// 「準備を飛ばして始める」: 準備を流さずに、控えていた依頼を送る（O20）。
+    pub(crate) fn start_task_without_setup(
+        &mut self,
+        session_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.transition_task_space(session_index, TaskPhase::Planned, "setup_skipped", None, cx);
+        self.send_pending_task_prompt(session_index, cx);
+    }
+
+    /// 控えていた依頼をその Task のスレッドへ送る（無ければ何もしない）。
+    fn send_pending_task_prompt(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let Some(space_id) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.task_space.id.clone())
+        else {
+            return;
+        };
+        let Some(prompt) = self.chrome.pending_task_prompts.remove(&space_id) else {
+            return;
+        };
+        if self.project_sessions.projects[session_index]
+            .task_space
+            .phase
+            == TaskPhase::Failed
+        {
+            self.transition_task_space(
+                session_index,
+                TaskPhase::Planned,
+                "setup_retried",
+                None,
+                cx,
+            );
+        }
+        let agent = self.chrome.pending_task_agents.remove(&space_id);
+        if !prompt.trim().is_empty() {
+            self.ipc_spawn_into(session_index, agent, Some(prompt), cx);
+        }
+        // Captain の分解案の行なら、委任文を渡し終えた（R09）。
+        self.finish_held_proposal_row(&space_id, cx);
+        cx.notify();
     }
 
     /// Fleet の初回導線（FLEET-V2 §3.0-4）: **2 本目の Task が立った瞬間に一度だけ**
@@ -594,7 +765,8 @@ impl Workspace {
         if tasks < 2 {
             return; // 1 本目は「並走」ではない
         }
-        settings::set_user_value(cx, "fleet_hint_seen", serde_json::Value::Bool(true));
+        let result = settings::set_user_value(cx, "fleet_hint_seen", serde_json::Value::Bool(true));
+        self.report_settings_save(result, cx);
         let key = Self::shortcut_label_for("workspace::ToggleFleet").unwrap_or_default();
         let accent = self.accent();
         self.push_toast(
@@ -750,6 +922,22 @@ impl Workspace {
         let running = self
             .fleet_cell_agent(cell)
             .is_some_and(|panel| panel.read(cx).has_running_thread());
+        // 子孫の Task（O21・A07）。休ませる・片付けるは子ごと。
+        let family: Vec<SpaceId> = self
+            .space_of_cell(cell)
+            .map(|space| {
+                let mut family = vec![space.clone()];
+                family.extend(self.task_descendants(&space));
+                family
+            })
+            .unwrap_or_default();
+        let children = family.len().saturating_sub(1);
+        // 休ませられるエージェント（静かで会話を引き継げる・O21 の手動の休眠）。子の Task の分も数える。
+        let sleepable: usize = family
+            .iter()
+            .filter_map(|space| self.session_index_for_space(space))
+            .map(|index| self.stoppable_agents_in(index, cx))
+            .sum();
         // worktree（linked）でなければ削除段は出さない — main を消させない安全側。
         let is_worktree = session_index
             .and_then(|index| self.project_sessions.projects.get(index))
@@ -873,6 +1061,60 @@ impl Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _window, cx| this.stop_fleet_cell_agents(cell, cx)),
+                ),
+            );
+        }
+
+        // 休ませる（O21）: 静かなエージェントを止めてメモリを空ける。会話は残り、次に送ると続きから。
+        if let Some(session_index) = session_index.filter(|_| sleepable > 0) {
+            let subtitle = if children > 0 {
+                i18n::t!(
+                    "fleet.cleanup_sleep_family_sub",
+                    "count" => sleepable,
+                    "children" => children
+                )
+            } else {
+                i18n::t!("fleet.cleanup_sleep_sub", "count" => sleepable)
+            };
+            menu_box = menu_box.child(
+                make_row(
+                    "fleet-menu-sleep",
+                    "☾",
+                    SharedString::from(i18n::t!("fleet.cleanup_sleep")),
+                    SharedString::from(subtitle),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.close_fleet_cell_menu(cx);
+                        this.rest_task_family(session_index, cx);
+                    }),
+                ),
+            );
+        }
+        // 子の Task ごと片付ける（O21・A07）: 片付けの画面を、この Task と子孫に印を付けて開く。
+        if children > 0 {
+            let marked = family.clone();
+            menu_box = menu_box.child(
+                make_row(
+                    "fleet-menu-cleanup-family",
+                    "↳",
+                    SharedString::from(i18n::t!("fleet.cleanup_family")),
+                    SharedString::from(i18n::t!(
+                        "fleet.cleanup_family_sub",
+                        "children" => children
+                    )),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.close_fleet_cell_menu(cx);
+                        this.cleanup_selected_tasks(&marked, window, cx);
+                    }),
                 ),
             );
         }
@@ -1005,20 +1247,17 @@ impl Workspace {
                 self.chrome.fleet_cells.len() - 1
             }
         };
-        self.chrome
-            .stage_tabs
-            .insert(space_id, self.chrome.fleet_cells[index].clone());
+        // 広いカードで開いているサイドペイン（ブリッジの編隊図など）は閉じない — 会話の相手だけ寄せる。
+        if !self.stage_card_is_wide() || self.stage_side(&space_id).is_none() {
+            self.chrome
+                .stage_tabs
+                .insert(space_id, self.chrome.fleet_cells[index].clone());
+        }
         cx.notify();
     }
 
     fn set_graph_view(&mut self, view: GraphView, cx: &mut Context<Self>) {
         self.chrome.graph_view = view;
-        self.chrome.graph_collapsed = false;
-        cx.notify();
-    }
-
-    fn toggle_graph_collapse(&mut self, cx: &mut Context<Self>) {
-        self.chrome.graph_collapsed = !self.chrome.graph_collapsed;
         cx.notify();
     }
 
@@ -1108,7 +1347,6 @@ impl Workspace {
             center = center.child(div().flex_1().min_h_0().child(view));
         } else {
             center = center
-                .child(self.render_stage_toolbar(cx))
                 .child(self.render_lineage_graph(cx))
                 .child(self.render_fleet_grid(cx));
         }
@@ -1141,39 +1379,11 @@ impl Workspace {
 
     // ── 系譜グラフ（M14 #4・最重要ビジュアル・ネイティブ描画） ──
 
-    /// ヘッダ: 「系譜グラフ」 + 4 表示スイッチャー（扇形/リバー/ツリー/カード）+ ⌄ 折り畳み。
+    /// 舞台の上の 1 行: 「系譜」+ 帯（Task 名・クリックで舞台へ）+ 列数トグル + 編隊図（ブリッジ）への入口。
+    /// 編隊図そのもの（ハブ / 扇形 / ツリー / カード）はブリッジのサイドペインに住む — 舞台の上に縦に積むと
+    /// カードが潰れる（2026-09-20）。
     fn render_graph_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let accent = self.accent();
-        let current = self.chrome.graph_view;
-        let collapsed = self.chrome.graph_collapsed;
-        let views = [
-            (GraphView::Fan, i18n::t!("fleet.graph_fan")),
-            (GraphView::Tree, i18n::t!("fleet.graph_tree")),
-            (GraphView::Card, i18n::t!("fleet.graph_card")),
-            (GraphView::Hub, i18n::t!("fleet.graph_hub")),
-        ];
-        let mut switcher = div().flex().items_center().gap(px(2.));
-        for (index, (view, label)) in views.into_iter().enumerate() {
-            let on = view == current;
-            switcher = switcher.child(
-                div()
-                    .id(("graph-view", index))
-                    .px(px(8.))
-                    .py(px(2.))
-                    .rounded(px(5.))
-                    .text_size(px(10.5))
-                    .when(on, |element| element.bg(theme.bg3))
-                    .text_color(if on { theme.fg0 } else { theme.fg2 })
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
-                    .child(SharedString::from(label))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| this.set_graph_view(view, cx)),
-                    ),
-            );
-        }
         div()
             .flex_none()
             .flex()
@@ -1181,6 +1391,8 @@ impl Workspace {
             .gap(px(10.))
             .h(px(30.))
             .px(px(12.))
+            .border_b_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .flex_none()
@@ -1189,37 +1401,88 @@ impl Workspace {
                     .text_color(theme.fg2)
                     .child(i18n::t!("fleet.lineage")),
             )
-            .child(div().flex_1())
-            .child(switcher)
             .child(
                 div()
-                    .id("graph-collapse")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(self.render_lineage_strip(cx)),
+            )
+            .child(self.render_stage_columns(cx))
+            .child(
+                div()
+                    .id("graph-open-formation")
                     .flex_none()
-                    .size(px(20.))
+                    .h(px(20.))
+                    .px(px(7.))
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .gap(px(4.))
                     .rounded(px(5.))
+                    .text_size(px(10.5))
                     .text_color(theme.fg2)
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
-                    .child(SharedString::from(if collapsed { "▸" } else { "⌄" }))
+                    .child("⚑")
+                    .child(SharedString::from(i18n::t!("fleet.formation")))
                     .tooltip(Tooltip::text(
-                        i18n::t!("fleet.graph_collapse"),
+                        i18n::t!("fleet.formation_tip"),
                         theme.clone(),
                     ))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.toggle_graph_collapse(cx)),
+                        cx.listener(|this, _, window, cx| this.toggle_formation(window, cx)),
                     ),
             )
-            // スイッチャーがプロジェクト色に馴染むよう、アクティブ表示だけ僅かに accent 寄せ（下線）。
-            .border_b_1()
-            .border_color(if collapsed {
-                theme.border
-            } else {
-                accent.alpha(0.0)
-            })
+    }
+
+    /// 編隊図の表示切替チップ（ハブ / 扇形 / ツリー / カード）。編隊ペインの見出しに並べる。
+    pub(super) fn render_graph_view_chips(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let theme = self.theme.clone();
+        let current = self.chrome.graph_view;
+        [
+            (GraphView::Hub, i18n::t!("fleet.graph_hub")),
+            (GraphView::Fan, i18n::t!("fleet.graph_fan")),
+            (GraphView::Tree, i18n::t!("fleet.graph_tree")),
+            (GraphView::Card, i18n::t!("fleet.graph_card")),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (view, label))| {
+            let on = view == current;
+            div()
+                .id(("graph-view", index))
+                .flex_none()
+                .px(px(7.))
+                .h(px(18.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .text_size(px(10.))
+                .when(on, |element| element.bg(theme.bg2))
+                .text_color(if on { theme.fg0 } else { theme.fg2 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
+                .child(SharedString::from(label))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| this.set_graph_view(view, cx)),
+                )
+                .into_any_element()
+        })
+        .collect()
+    }
+
+    /// 編隊図の本体（選んでいる表示）。ブリッジのサイドペインが呼ぶ。
+    pub(super) fn render_formation(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let lanes = self.fleet_lanes(cx);
+        match self.chrome.graph_view {
+            GraphView::Card => self.render_graph_cards(&lanes, cx),
+            GraphView::Hub => self.render_graph_hub(&lanes, cx),
+            GraphView::Tree => self.render_graph_scene(self.tree_scene(&lanes), cx),
+            GraphView::Fan => self.render_graph_scene(self.radial_scene(&lanes), cx),
+        }
     }
 
     /// 扇形（系譜）の版面。本流の分岐点から枝が出て、肘で水平化し、コミット bead を経て先端に至る。
@@ -1337,32 +1600,9 @@ impl Workspace {
     /// 系譜グラフ（M14 #4）。ヘッダのスイッチャーで扇形/ツリー/カード/ハブを切替・⌄ で畳む。
     /// 版面ごとに `render_graph_scene`（扇形/ツリー）・`render_graph_cards`・`render_graph_hub` へ委譲する。
     fn render_lineage_graph(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = self.theme.clone();
-        let header = self.render_graph_header(cx);
-        if self.chrome.graph_collapsed {
-            return div()
-                .flex_none()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(header)
-                .child(self.render_lineage_strip(cx))
-                .into_any_element();
-        }
-        let lanes = self.fleet_lanes(cx);
-        let body = match self.chrome.graph_view {
-            GraphView::Card => self.render_graph_cards(&lanes, cx),
-            GraphView::Hub => self.render_graph_hub(&lanes, cx),
-            GraphView::Tree => self.render_graph_scene(self.tree_scene(&lanes), cx),
-            GraphView::Fan => self.render_graph_scene(self.radial_scene(&lanes), cx),
-        };
         div()
             .flex_none()
-            .flex()
-            .flex_col()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(header)
-            .child(body)
+            .child(self.render_graph_header(cx))
             .into_any_element()
     }
 
@@ -1611,6 +1851,14 @@ impl Workspace {
                 )),
                 None => activity_label(branch.activity),
             };
+            // ツリーは先端が横一列に並ぶ。1 本あたりの幅が副ラベル（⎇ branch · 状態）より狭いと隣と重なるので、
+            // 狭いとき（ブリッジのペイン・Task が多いとき）は名前だけにする。状態は先端のグリフが言っている。
+            let lane_width = if self.stage_card_is_wide() {
+                self.stage_card_width() * self.chrome.side_pane_ratio
+            } else {
+                self.stage_card_width()
+            } / count.max(1) as f32;
+            let sub_fits = !scene.labels_below || lane_width >= 170.0;
             if scene.labels_below {
                 // ツリー: ノードの下に中央寄せ（[章 名前] ／ サブ）。クリックで focus。
                 body = body.child(
@@ -1641,13 +1889,15 @@ impl Workspace {
                                         .child(branch.name.clone()),
                                 ),
                         )
-                        .child(
-                            div()
-                                .text_size(px(9.5))
-                                .text_color(theme.fg2)
-                                .whitespace_nowrap()
-                                .child(sub),
-                        )
+                        .when(sub_fits, |label| {
+                            label.child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(theme.fg2)
+                                    .whitespace_nowrap()
+                                    .child(sub.clone()),
+                            )
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, window, cx| {
@@ -1708,11 +1958,19 @@ impl Workspace {
     fn render_graph_hub(&self, lanes: &[FleetLane], cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let accent = self.accent();
-        let body_h = 360.0_f32;
         let count = lanes.len().max(1);
         let center = (0.5_f32, 0.5_f32);
-        // パネルが横長なので楕円（横 rx・縦 ry。ともに body 割合）で配置する。横に伸びすぎないよう抑える。
-        let (rx, ry) = (0.19_f32, 0.38_f32);
+        // ブリッジのサイドペインいっぱいに描く（縦横とも割合座標）。横の半径は「ノードの外側にラベル
+        // （約 190px）が収まる」ところまでに抑える — ペインが狭いほど楕円を縦長にしてラベルの切れを防ぐ。
+        let pane_width = if self.stage_card_is_wide() {
+            self.stage_card_width() * self.chrome.side_pane_ratio
+        } else {
+            self.stage_card_width()
+        };
+        let rx = ((pane_width / 2.0 - 190.0) / pane_width.max(1.0)).clamp(0.10, 0.30);
+        let ry = 0.36_f32;
+        // Captain を任命していれば中心は Captain（采配の要）。未任命ならリポジトリ。
+        let captain = settings::get(cx).captain_agent.clone();
         let repo = self
             .active_worktree()
             .and_then(|worktree| {
@@ -1773,8 +2031,9 @@ impl Workspace {
 
         let mut body = div()
             .relative()
-            .flex_none()
-            .h(px(body_h))
+            .w_full()
+            .h_full()
+            .min_h(px(320.))
             .overflow_hidden()
             .child(edges);
 
@@ -1790,7 +2049,8 @@ impl Workspace {
                     .absolute()
                     .left(relative(nx))
                     .ml(px(-outer / 2.0))
-                    .top(px(ny * body_h - outer / 2.0))
+                    .top(relative(ny))
+                    .mt(px(-outer / 2.0))
                     .cursor_pointer()
                     .child(agent_panel::activity_dot(
                         ("hub-dot", index),
@@ -1830,7 +2090,8 @@ impl Workspace {
                     .absolute()
                     .left(relative(nx))
                     .ml(px(tip_d / 2.0 + 8.0))
-                    .top(px(ny * body_h - 15.0))
+                    .top(relative(ny))
+                    .mt(px(-15.0))
                     .flex()
                     .items_center()
                     .gap(px(7.))
@@ -1844,7 +2105,8 @@ impl Workspace {
                     .left(relative(nx))
                     .ml(px(-(168.0 + tip_d / 2.0 + 8.0)))
                     .w(px(168.))
-                    .top(px(ny * body_h - 15.0))
+                    .top(relative(ny))
+                    .mt(px(-15.0))
                     .flex()
                     .items_center()
                     .justify_end()
@@ -1869,38 +2131,53 @@ impl Workspace {
         }
 
         // 中央ハブ（リポジトリ）。スポークの上に重ねるため最後に child する。枠はプロジェクト色。
-        body =
-            body.child(
-                div()
-                    .absolute()
-                    .left(relative(center.0))
-                    .ml(px(-66.))
-                    .top(px(center.1 * body_h - 28.0))
-                    .w(px(132.))
-                    .h(px(56.))
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .items_center()
-                    .gap(px(2.))
-                    .rounded(px(12.))
-                    .bg(theme.bg2)
-                    .border_1()
-                    .border_color(accent)
-                    .child(
-                        div()
-                            .max_w(px(116.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(12.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg0)
-                            .child(SharedString::from(format!("⎇ {repo}"))),
-                    )
-                    .child(div().text_size(px(9.5)).text_color(theme.fg2).child(
-                        SharedString::from(i18n::t!("fleet.graph_hub_agents", "count" => count)),
-                    )),
-            );
+        body = body.child(
+            div()
+                .absolute()
+                .left(relative(center.0))
+                .ml(px(-78.))
+                .top(relative(center.1))
+                .mt(px(-28.0))
+                .w(px(156.))
+                .h(px(56.))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .items_center()
+                .gap(px(2.))
+                .rounded(px(12.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(accent)
+                .child(
+                    div()
+                        .max_w(px(116.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.fg0)
+                        .child(SharedString::from(match &captain {
+                            Some(_) => format!("⚑ {}", i18n::t!("captain.title")),
+                            None => format!("⎇ {repo}"),
+                        })),
+                )
+                .child(
+                    div()
+                        .max_w(px(142.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(9.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(match &captain {
+                            Some(agent) => format!(
+                                "{agent} · {}",
+                                i18n::t!("fleet.graph_hub_agents", "count" => lanes.len())
+                            ),
+                            None => i18n::t!("fleet.graph_hub_agents", "count" => lanes.len()),
+                        })),
+                ),
+        );
 
         body.into_any_element()
     }
@@ -2177,14 +2454,7 @@ impl Workspace {
             .gap(px(8.))
             .p(px(10.));
         for (index, pane) in self.stage_cards() {
-            let space = pane_space(&pane);
-            if self.chrome.captain_space.as_ref() == Some(space) {
-                if let Some(session) = self.session_index_for_space(space) {
-                    stage = stage.child(self.render_captain_card(session, cx));
-                }
-            } else {
-                stage = stage.child(self.render_fleet_cell(index, pane, cx));
-            }
+            stage = stage.child(self.render_fleet_cell(index, pane, cx));
         }
         stage.into_any_element()
     }
@@ -2278,45 +2548,31 @@ impl Workspace {
                 this.agent_active = agent_surface;
             }));
         }
-        if let Some(session_index) = session_index {
-            cell = cell.child(self.render_task_tabs(session_index, cx));
-        }
-        let pane = self.chrome.stage_tabs.get(space).cloned().unwrap_or(pane);
         let body = session_index
-            .map(|session_index| match pane {
-                FleetPane::Agent { panel, .. } => panel
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
-                FleetPane::Shell { id, .. } => self.project_sessions.sessions[session_index]
-                    .terminal_dock
-                    .read(cx)
-                    .session(id)
-                    .map(|terminal| {
-                        terminal
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().into_any_element()),
-                FleetPane::Task { .. } => self.project_sessions.sessions[session_index]
-                    .fleet_agents[0]
-                    .clone()
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
-                FleetPane::Terminal { .. } => self.project_sessions.sessions[session_index]
-                    .terminal_dock
-                    .clone()
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
-                FleetPane::Editor { .. } => self.render_stage_files(session_index, cx),
-                FleetPane::Diff { .. } => self.project_sessions.sessions[session_index]
-                    .git_panel
-                    .clone()
-                    .into_any_element(),
-                FleetPane::Tests { .. } => self.project_sessions.sessions[session_index]
-                    .tests_dock
-                    .clone()
-                    .cached(StyleRefinement::default().flex().flex_col().size_full())
-                    .into_any_element(),
+            .map(|session_index| {
+                let appointing = self.chrome.captain_appointing
+                    && self.is_bridge(session_index)
+                    && settings::get(cx).captain_agent.is_none();
+                let transcript = if appointing {
+                    self.render_captain_appoint(cx)
+                } else {
+                    self.conversation_panel(session_index)
+                        .cached(StyleRefinement::default().flex().flex_col().size_full())
+                        .into_any_element()
+                };
+                // スレッドタブ行は会話の列の頭（会話の相手を選ぶ行）。サイドペインは自分の見出しを持ち、
+                // 開け閉めは Task 見出しのトグル（FLEET-V2 §3.5）。
+                let conversation = div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_thread_tabs(session_index, cx))
+                    .child(div().flex_1().min_h_0().child(transcript))
+                    .into_any_element();
+                let side = self
+                    .stage_side(space)
+                    .map(|side| self.render_side_pane(session_index, side, cx));
+                self.render_card_body(("task-side-resize", session_index), conversation, side, cx)
             })
             .unwrap_or_else(|| {
                 div()
@@ -2509,10 +2765,34 @@ impl Workspace {
 
     // ── ニュースフィード（mock 下段） ──
 
+    /// ニュースの行を押した: その Task へ（Captain の采配なら Captain へ・O13）。Task が消えていれば何もしない。
+    pub(crate) fn open_news_item(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.notifications.news.get(index) else {
+            return;
+        };
+        match item.space.clone() {
+            Some(space) => {
+                if let Some(session_index) = self.session_index_for_space(&space) {
+                    self.chrome.captain_appointing = false;
+                    self.switch_project(session_index, window, cx);
+                }
+            }
+            None if item.kind == NewsKind::Captain => {
+                self.focus_captain(&FocusCaptain, window, cx);
+            }
+            None => {}
+        }
+    }
+
     /// ニュース常設（管制 P2・mock `fleet-dashboard.html` 下段の書式）。ソースは task_events の鏡
     /// （`NotificationCenter.news`・起動時 backfill + 遷移時 live 追記）。行 = 時刻 + 帰属チップ
     /// （スレッド/Task 色・Captain は丸）+ **太字名** + イベント文。新しいものが上。
-    fn render_newsfeed(&self, _cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_newsfeed(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let mut list = div()
             .id("fleet-news")
@@ -2543,6 +2823,7 @@ impl Workspace {
                         chip.rounded(px(2.))
                     }
                 });
+            let clickable = item.space.is_some() || item.kind == NewsKind::Captain;
             list = list.child(
                 div()
                     .id(("news-row", index))
@@ -2553,6 +2834,17 @@ impl Workspace {
                     .py(px(2.))
                     .text_size(px(10.5))
                     .text_color(theme.fg1)
+                    // 押すとその Task（Captain の采配なら Captain）へ（O13）。
+                    .when(clickable, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme.bg2))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.open_news_item(index, window, cx)
+                                }),
+                            )
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -2591,5 +2883,393 @@ impl Workspace {
         }
         // 高さは下段ドック（`render_fleet_bottom`）が持つ。ここは中身として器を満たすだけ。
         list.into_any_element()
+    }
+}
+
+/// 「競合を直させる」でエージェントへ送る依頼（O19）。競合したファイルを並べ、統合先を取り込んで
+/// 両方の変更の意図を保って解消し、コミットするよう頼む（統合は人が押す＝ここでは統合しない）。
+pub(crate) fn conflict_prompt(base: &str, paths: &[String]) -> String {
+    let files: String = paths.iter().map(|path| format!("- {path}\n")).collect();
+    i18n::t!("fleet.conflict_prompt", "base" => base, "files" => files.trim_end())
+}
+
+/// fan-out で同時に切る Task の上限（O23）。
+pub(crate) const MAX_FANOUT: usize = 6;
+
+/// 1 つの依頼から切る Task の 1 本分（O23）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FanoutTask {
+    /// ブランチ名（`task/<slug>`）の元にする文。
+    pub(crate) slug_source: String,
+    /// 明示したブランチ名（詳細の「ブランチ」に接尾辞を付けた物・空 = slug から）。
+    pub(crate) branch: Option<String>,
+    /// 話すエージェント（表示名・`None` = 既定のエージェント）。
+    pub(crate) agent: Option<String>,
+    /// Task 名に添える印（「Codex」「Claude Code #2」）。1 本だけなら付けない。
+    pub(crate) title_suffix: Option<String>,
+}
+
+/// 依頼・詳細のブランチ名・選んだエージェント・エージェントごとの本数から、切る Task の並びを決める
+/// （純関数）。エージェントを選んでいなければ既定のエージェントで 1 本（今までと同じ）。1 本だけなら
+/// 名前に印を付けない。本数は [`MAX_FANOUT`] で頭打ち。
+pub(crate) fn plan_fanout(
+    prompt: &str,
+    branch: Option<&str>,
+    agents: &[String],
+    per_agent: usize,
+) -> Vec<FanoutTask> {
+    let per_agent = per_agent.max(1);
+    if agents.is_empty() || (agents.len() == 1 && per_agent == 1) {
+        return vec![FanoutTask {
+            slug_source: prompt.to_string(),
+            branch: branch.map(str::to_string),
+            agent: agents.first().cloned(),
+            title_suffix: None,
+        }];
+    }
+    let first_line = prompt.lines().next().unwrap_or("");
+    let mut plan = Vec::new();
+    for agent in agents {
+        for number in 1..=per_agent {
+            let id = if per_agent > 1 {
+                format!("{}-{number}", project::task_slug(agent))
+            } else {
+                project::task_slug(agent)
+            };
+            plan.push(FanoutTask {
+                slug_source: format!("{first_line} {id}"),
+                branch: branch.map(|branch| format!("{branch}-{id}")),
+                agent: Some(agent.clone()),
+                title_suffix: Some(if per_agent > 1 {
+                    format!("{agent} #{number}")
+                } else {
+                    agent.clone()
+                }),
+            });
+        }
+    }
+    plan.truncate(MAX_FANOUT);
+    plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_request_is_one_task_with_the_default_agent() {
+        let plan = plan_fanout("fix login\nmore detail", Some("feature/login"), &[], 1);
+        assert_eq!(
+            plan,
+            vec![FanoutTask {
+                slug_source: "fix login\nmore detail".into(),
+                branch: Some("feature/login".into()),
+                agent: None,
+                title_suffix: None,
+            }]
+        );
+        let one = plan_fanout("fix login", None, &["Codex".to_string()], 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].agent.as_deref(), Some("Codex"), "選んだ 1 体で 1 本");
+        assert_eq!(one[0].title_suffix, None, "1 本なら名前に印を付けない");
+    }
+
+    #[test]
+    fn fanout_names_each_task_after_its_agent() {
+        let agents = vec!["Claude Code".to_string(), "Codex".to_string()];
+        let plan = plan_fanout("fix login\ndetail", Some("login"), &agents, 1);
+        assert_eq!(
+            plan.iter()
+                .map(|task| (
+                    task.slug_source.as_str(),
+                    task.branch.as_deref(),
+                    task.agent.as_deref(),
+                    task.title_suffix.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "fix login claude-code",
+                    Some("login-claude-code"),
+                    Some("Claude Code"),
+                    Some("Claude Code")
+                ),
+                (
+                    "fix login codex",
+                    Some("login-codex"),
+                    Some("Codex"),
+                    Some("Codex")
+                ),
+            ]
+        );
+        let twice = plan_fanout("x", None, &agents, 2);
+        assert_eq!(
+            twice
+                .iter()
+                .filter_map(|task| task.title_suffix.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["Claude Code #1", "Claude Code #2", "Codex #1", "Codex #2"]
+        );
+        let many: Vec<String> = acp_client::AGENT_LABELS
+            .iter()
+            .map(|label| label.to_string())
+            .collect();
+        assert_eq!(plan_fanout("x", None, &many, 3).len(), MAX_FANOUT, "頭打ち");
+    }
+
+    /// O13: ニュースの行は、その Task へ飛べる（台帳の鏡として積む時に Task を覚える）。
+    #[gpui::test]
+    fn a_news_line_jumps_to_its_task(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!("necoder_news_jump_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let first = base.join("main");
+        let second = base.join("task");
+        std::fs::create_dir_all(&first).expect("作れる");
+        std::fs::create_dir_all(&second).expect("作れる");
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(vec![first.clone(), second.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.project_sessions.projects[1].task_space.kind = SpaceKind::Task;
+            workspace.transition_task_space(1, TaskPhase::ReviewReady, "test", Some("直した"), cx);
+            let space = workspace.project_sessions.projects[1].task_space.id.clone();
+            assert_eq!(workspace.notifications.news[0].space.as_ref(), Some(&space));
+
+            workspace.switch_project(0, window, cx);
+            assert_eq!(workspace.project_sessions.active, 0);
+            workspace.open_news_item(0, window, cx);
+            assert_eq!(workspace.project_sessions.active, 1, "ニュースの Task へ");
+        });
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O19: 競合を直させる依頼は、競合したファイルを並べ、統合先を取り込むよう頼む（統合はさせない）。
+    #[test]
+    fn the_conflict_prompt_lists_the_files_and_the_base() {
+        let prompt = conflict_prompt("main", &["a.txt".to_string(), "src/lib.rs".to_string()]);
+        assert!(prompt.contains("- a.txt\n- src/lib.rs"), "{prompt}");
+        assert!(prompt.contains("git merge main"), "{prompt}");
+    }
+
+    /// O19: 統合の下見で競合したら、競合したファイルを覚えて「次へ」を「競合を直させる」にする
+    /// （エージェントには送らない＝ここでは覚えるところまで）。統合先は触らない。
+    #[gpui::test]
+    fn a_conflicting_integration_offers_to_have_the_agent_fix_it(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!("necoder_conflict_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("repo")).expect("作業フォルダを作れる");
+        let base = paths::canonicalize(&base).expect("正規化できる");
+        let repo = base.join("repo");
+        let task = base.join("repo-worktrees").join("conflict");
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "core.autocrlf=false",
+                ])
+                .args(args)
+                .output()
+                .expect("git を起動できる")
+        };
+        if !git(&repo, &["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(repo.join("a.txt"), "base\n").expect("書ける");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let added = git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/conflict",
+                task.to_str().expect("パス"),
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+        std::fs::write(task.join("a.txt"), "task\n").expect("書ける");
+        git(&task, &["commit", "-qam", "task"]);
+        std::fs::write(repo.join("a.txt"), "main\n").expect("書ける");
+        git(&repo, &["commit", "-qam", "main"]);
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(vec![repo.clone(), task.clone()], Theme::dark(), None, cx)
+        });
+        let space = workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            let index = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .position(|slot| slot.worktree.root() == task.as_path())
+                .expect("Task がレールにある");
+            let slot = &mut workspace.project_sessions.projects[index];
+            assert!(
+                !slot.task_space.is_integration(),
+                "task/ の worktree は Task"
+            );
+            slot.task_space.phase = TaskPhase::MergeReady;
+            let space = slot.task_space.id.clone();
+            workspace.integrate_task(space.clone(), cx);
+            space
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            assert_eq!(
+                workspace.task_conflicts(&space),
+                Some(["a.txt".to_string()].as_slice()),
+                "競合したファイルを覚える"
+            );
+            let index = workspace.session_index_for_space(&space).expect("Task");
+            assert_eq!(
+                workspace.project_sessions.projects[index].task_space.phase,
+                TaskPhase::MergeReady,
+                "統合できないまま戻る"
+            );
+        });
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).expect("読める"),
+            "main\n",
+            "統合先は触らない"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O23: 1 つの依頼から Task を 2 本切り、舞台に並べる（依頼は空＝エージェントは起こさない）。
+    #[gpui::test]
+    fn fanout_creates_one_task_per_agent_and_puts_them_on_the_stage(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!("necoder_fanout_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).expect("作業フォルダを作れる");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .expect("git を起動できる")
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(repo.join("a.txt"), "1\n").expect("書ける");
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let repo = paths::canonicalize(&repo).expect("正規化できる");
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![repo.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.fleet_mode = true;
+            let plan = plan_fanout(
+                "",
+                None,
+                &["Claude Code".to_string(), "Codex".to_string()],
+                1,
+            );
+            workspace.create_prompted_tasks(String::new(), project::TaskStart::default(), plan, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            let roots: Vec<PathBuf> = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .map(|slot| slot.worktree.root().to_path_buf())
+                .collect();
+            let worktrees = base.join("repo-worktrees");
+            let worktrees = paths::canonicalize(&worktrees).unwrap_or(worktrees);
+            assert!(
+                roots.contains(&worktrees.join("claude-code"))
+                    && roots.contains(&worktrees.join("codex")),
+                "エージェントごとの worktree: {roots:?}"
+            );
+            assert_eq!(workspace.chrome.stage_pinned.len(), 2, "舞台に並べる");
+            assert_eq!(workspace.chrome.stage_columns, 2);
+        });
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O20: 準備に失敗した Task は依頼を控え、「飛ばして始める」で送って控えを消す。
+    #[gpui::test]
+    fn a_task_whose_setup_failed_keeps_its_prompt_until_started(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_setup_pending_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.project_sessions.projects[0].task_space.kind = SpaceKind::Task;
+            workspace.project_sessions.projects[0].task_space.phase = TaskPhase::Failed;
+            assert!(!workspace.task_waits_for_setup(0));
+            let space = workspace.project_sessions.projects[0].task_space.id.clone();
+            // 実エージェントを起こさないよう、依頼は空にしておく（送る経路はここでは通らない）。
+            workspace
+                .chrome
+                .pending_task_prompts
+                .insert(space, String::new());
+            assert!(
+                workspace.task_waits_for_setup(0),
+                "失敗のカードにやり直し / 飛ばすが出る"
+            );
+
+            workspace.start_task_without_setup(0, cx);
+            assert!(!workspace.task_waits_for_setup(0), "控えは消える");
+            assert_eq!(
+                workspace.project_sessions.projects[0].task_space.phase,
+                TaskPhase::Planned
+            );
+        });
+        std::fs::remove_dir_all(&root).ok();
     }
 }

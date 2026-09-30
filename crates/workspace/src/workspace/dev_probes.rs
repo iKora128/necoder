@@ -16,6 +16,169 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: Agent パネルの composer の `/` 補完を開く（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
+    /// `fake` = 偽のコマンド一覧を流し込む（`NECODER_SLASH_PROBE_FAKE=1`）。
+    #[cfg(debug_assertions)]
+    pub fn debug_slash_probe(
+        &mut self,
+        text: &str,
+        fake: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| {
+            panel.debug_slash_probe(text, fake, window, cx)
+        });
+        cx.notify();
+    }
+
+    /// 開発用: composer の `!`（シェルモード・#37）を offscreen で確かめる（`NECODER_SHELL_PROBE`）。
+    /// 本物の経路で見本のコマンドを走らせ、`!` の行・composer のヒント・添える予定のチップを写す。
+    /// `expanded` = 長い出力を開いておく / `chat` = フォルダの無いチャット（走らせずに理由を出す）/
+    /// `chat-folder` = 見本の会話でフォルダを作ったチャットで走らせる。
+    #[cfg(debug_assertions)]
+    pub fn debug_shell_probe(&mut self, mode: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match mode {
+            "chat" | "chat-folder" => {
+                self.set_chat_mode(true, window, cx);
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| {
+                        if mode == "chat-folder" {
+                            panel.debug_seed_chat(cx);
+                        }
+                        panel.debug_shell_probe(mode, window, cx);
+                    });
+                }
+            }
+            _ => {
+                if !self.chrome.show_right {
+                    self.chrome.show_right = true;
+                }
+                self.agent_panel
+                    .update(cx, |panel, cx| panel.debug_shell_probe(mode, window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 開発用: 使用量（O11）を offscreen で確かめる（`NECODER_USAGE_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `limits` / `near` / `blocked` = いまのスレッドにレート制限を流す（本番と同じ `on_event`）/
+    /// `codex` = Codex の値を置き場へ直接入れる（**codex app-server は起こさない**）/
+    /// `keys` = 同じ Claude Code の別の鍵（SSH 先・別の置き場・認証に関わる env だけが違う物）の値を置く /
+    /// `codex-loading` / `codex-failed` = Codex の読み取りの途中 / 失敗の行 /
+    /// `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ直近 12 日分の使用量を書く（報告の無いターンを含む）/
+    /// `popover` = チップを押したのと同じにポップオーバーを開く（Codex は訊かない）/ `stats` = 統計の画面。
+    #[cfg(debug_assertions)]
+    pub fn debug_usage_probe(
+        &mut self,
+        commands: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for command in commands
+            .split(';')
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+        {
+            match command {
+                "limits" | "near" | "blocked" => {
+                    if !self.chrome.show_right {
+                        self.chrome.show_right = true;
+                    }
+                    self.agent_panel
+                        .update(cx, |panel, cx| panel.debug_seed_rate_limits(command, cx));
+                }
+                "codex" => agent_panel::usage::debug_seed_codex_limits(cx),
+                // 同じ Claude Code の別の鍵（SSH 先・別の置き場・認証に関わる env）の値（R08）。
+                "keys" => agent_panel::usage::debug_seed_other_keys(cx),
+                "codex-loading" => agent_panel::usage::debug_set_codex_read(
+                    agent_panel::usage::CodexRead::Loading,
+                    cx,
+                ),
+                "codex-failed" => agent_panel::usage::debug_set_codex_read(
+                    agent_panel::usage::CodexRead::Failed(SharedString::from(
+                        "codex account authentication required to read rate limits",
+                    )),
+                    cx,
+                ),
+                "seed" => self.debug_seed_usage_rows(),
+                "popover" => {
+                    let anchor = window.viewport_size().width - px(300.);
+                    self.open_usage_popover(anchor, false, window, cx);
+                }
+                "stats" => self.open_usage_stats(&UsageStats, window, cx),
+                other => eprintln!("NECODER_USAGE_PROBE: 未知のコマンド {other}"),
+            }
+        }
+        cx.notify();
+    }
+
+    /// 開発用: 直近 12 日分の使用量を台帳へ書く（`NECODER_USAGE_PROBE=seed`）。本物の DB を汚さないよう、
+    /// `NECODER_HOME` で隔離している時だけ書く。報告の無いターンも混ぜる（R08 の `—` / `≥` の検証）:
+    /// 今日の Claude の最後のターンはトークンなし・2 日前の Claude の最初のターンはコストなし・
+    /// 1 日前の Codex はトークンの報告が 1 つも無い。
+    #[cfg(debug_assertions)]
+    fn debug_seed_usage_rows(&self) {
+        if std::env::var_os("NECODER_HOME").is_none() {
+            eprintln!(
+                "NECODER_USAGE_PROBE=seed: NECODER_HOME が無いので書かない（本物の DB を守る）"
+            );
+            return;
+        }
+        let Some(storage) = self.persistence.storage.as_ref() else {
+            eprintln!("NECODER_USAGE_PROBE=seed: DB が無い");
+            return;
+        };
+        let now = agent_panel::now_unix_ms();
+        const HOUR: i64 = 3_600_000;
+        for day in 0..12_i64 {
+            let turns = [
+                (
+                    "Claude Code",
+                    3 + day % 4,
+                    38_000 + day * 5_300,
+                    Some(0.42 + day as f64 * 0.11),
+                ),
+                ("Codex", (day % 3) + 1, 21_000 + (day % 5) * 9_000, None),
+            ];
+            for (agent, count, tokens, cost) in turns {
+                if agent == "Codex" && day % 4 == 3 {
+                    continue; // Codex を使わなかった日
+                }
+                for turn in 0..count {
+                    let tokens_reported =
+                        !(day == 0 && agent == "Claude Code" && turn == count - 1)
+                            && !(day == 1 && agent == "Codex");
+                    let cost_reported = !(day == 2 && agent == "Claude Code" && turn == 0);
+                    let record = storage::TurnUsageRecord {
+                        thread_id: format!("probe-{agent}"),
+                        agent: agent.to_string(),
+                        ended_at: now - day * 24 * HOUR - turn * HOUR,
+                        tokens: tokens_reported.then(|| storage::TurnTokenCounts {
+                            input: tokens as u64 / 4,
+                            output: tokens as u64 / 4,
+                            cached_read: tokens as u64 / 2,
+                            cached_write: 0,
+                            total: tokens as u64,
+                        }),
+                        cost_usd: cost
+                            .filter(|_| cost_reported)
+                            .map(|cost| cost / count as f64),
+                        session_cost_usd: None,
+                    };
+                    if let Err(error) = storage.record_turn_usage(&record) {
+                        eprintln!("NECODER_USAGE_PROBE=seed: 書けない: {error:#}");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// 開発用: スレッドに各状態を仕込んで開く（タブ/beacon/フッター/レールの状態表示を offscreen で検証・#）。
     #[cfg(debug_assertions)]
     /// 開発用: 擬似 tear-off を直接駆動（枠外ドロップ相当の座標 → 新窓生成まで・M13）。
@@ -58,16 +221,191 @@ impl Workspace {
                     .get(index % statuses.len().max(1))
                     .map(|status| (status.color, status.name.clone()))
                     .unwrap_or((self.theme.fg2, SharedString::from("Task")));
-                self.push_news(kind, color, title, text);
+                self.push_news(kind, color, title, text, None);
             }
         }
         cx.notify();
     }
 
-    /// 開発用: スレッド履歴 Picker を開く（offscreen 検証・#5）。
+    /// 開発用: Fleet を開いて、アクティブなスレッドへ選択肢付きの質問を届ける（O12: 質問待ちが
+    /// 要対応・トースト・statusbar の待ち表示に出るかの撮影。質問は実際の経路を通る）。
     #[cfg(debug_assertions)]
-    pub fn debug_open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_thread_history(&ThreadHistory, window, cx);
+    pub fn debug_question_probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.chrome.fleet_mode {
+            self.toggle_fleet_mode(&ToggleFleet, window, cx);
+        }
+        let panel = self.agent_panel.clone();
+        panel.update(cx, |panel, cx| panel.debug_ask_question(cx));
+    }
+
+    /// 開発用: スレッド履歴（⌘⇧H・O15）を offscreen で検証する（`NECODER_HISTORY_PROBE`・`;` 区切り）。
+    ///
+    /// `open`（`1` も同じ）= 開く / `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ見本のスレッドを書く /
+    /// `query:<語>` = 入力に語を入れる / `select:<n>` = 選べる行の n 番目を選ぶ / `confirm` = ⏎ /
+    /// `close` = 閉じる / `count` = 区分ごとの件数を stderr へ（題は出さない）/
+    /// `handoff` = いまのスレッドを「新しいセッションで続ける」/
+    /// `menu` = いまのスレッドの右クリックメニューを開く。
+    #[cfg(debug_assertions)]
+    pub fn debug_history_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        match name {
+            "open" | "1" => self.open_thread_history(&ThreadHistory, window, cx),
+            "seed" => self.debug_seed_history(),
+            "query" => self.debug_history_query(argument, cx),
+            "select" => match argument.parse::<usize>() {
+                Ok(target) => self.debug_history_select(target, cx),
+                Err(error) => eprintln!("NECODER_HISTORY_PROBE: select の番号が読めない: {error}"),
+            },
+            "confirm" => self.debug_history_confirm(window, cx),
+            "close" => self.close_thread_history(window, cx),
+            "count" => eprintln!(
+                "NECODER_HISTORY_PROBE count: {}",
+                self.debug_history_counts()
+            ),
+            "handoff" => {
+                let panel = self.agent_panel.clone();
+                let continued = panel.update(cx, |panel, cx| {
+                    let index = panel.active_thread();
+                    panel.continue_in_new_session(index, cx)
+                });
+                if !continued {
+                    eprintln!("NECODER_HISTORY_PROBE: handoff できない（会話が無い・実行中）");
+                }
+            }
+            "menu" => {
+                let panel = self.agent_panel.clone();
+                let position = point(window.viewport_size().width - px(380.), px(76.));
+                panel.update(cx, |panel, cx| {
+                    let index = panel.active_thread();
+                    panel.debug_open_thread_menu(index, position, cx)
+                });
+            }
+            other => eprintln!("NECODER_HISTORY_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+
+    /// 開発用（`NECODER_HISTORY_PROBE=seed`）: いまのプロジェクト・Chat・開いていない Task に見本の会話を
+    /// 書く（全文検索が 3 つの場所を横断することを見せる）。本物の DB を汚さないよう `NECODER_HOME` の時だけ。
+    #[cfg(debug_assertions)]
+    fn debug_seed_history(&self) {
+        if std::env::var_os("NECODER_HOME").is_none() {
+            eprintln!(
+                "NECODER_HISTORY_PROBE=seed: NECODER_HOME が無いので書かない（本物の DB を守る）"
+            );
+            return;
+        }
+        let Some(storage) = self.persistence.storage.as_ref() else {
+            eprintln!("NECODER_HISTORY_PROBE=seed: DB が無い");
+            return;
+        };
+        let Some(scope) = self
+            .active_slot()
+            .map(|slot| slot.task_space.id.as_str().to_string())
+        else {
+            eprintln!("NECODER_HISTORY_PROBE=seed: プロジェクトが無い");
+            return;
+        };
+        let task_scope = "space-probe-rope-index".to_string();
+        let now = agent_panel::now_unix_ms();
+        let task = storage::TaskSpaceRecord {
+            id: task_scope.clone(),
+            repository_id: "probe".into(),
+            root: PathBuf::from("/nonexistent/necoder-probe/rope-index"),
+            branch: Some("task/rope-index".into()),
+            title: "rope index".into(),
+            kind: storage::SpaceKind::Task,
+            phase: storage::TaskPhase::Working,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            parent: None,
+            created_at: now,
+            updated_at: now,
+        };
+        if let Err(error) = storage.upsert_task_space(&task) {
+            eprintln!("NECODER_HISTORY_PROBE=seed: TaskSpace を書けない: {error:#}");
+        }
+        let threads: [(&str, &str, i64, &str, &[(&str, &str)]); 4] = [
+            (
+                "probe-history-rope",
+                "rope の境界バグ",
+                2,
+                scope.as_str(),
+                &[
+                    ("user", "rope の境界で落ちるバグを直して"),
+                    ("step", "Edit src/rope.rs"),
+                    (
+                        "agent",
+                        "境界値の扱いを直しました。rope の分割で末尾を 1 つ取りこぼしていました。",
+                    ),
+                ],
+            ),
+            (
+                "probe-history-readme",
+                "README の更新",
+                5,
+                scope.as_str(),
+                &[
+                    ("user", "README にインストール手順を足して"),
+                    ("agent", "Homebrew と手動の 2 通りを書きました。"),
+                ],
+            ),
+            (
+                "probe-history-chat",
+                "京都旅行の相談",
+                8,
+                chat_core::STORAGE_SCOPE,
+                &[
+                    ("user", "京都で rope ウェイに乗れる所は？"),
+                    (
+                        "agent",
+                        "叡山ケーブルとロープウェイが比叡山へ続いています。",
+                    ),
+                ],
+            ),
+            (
+                "probe-history-task",
+                "索引の実装",
+                1,
+                task_scope.as_str(),
+                &[
+                    ("user", "Rope に行の索引を足して"),
+                    ("agent", "Rope の行索引を B 木で持つようにしました。"),
+                ],
+            ),
+        ];
+        for (id, name, color, project, turns) in threads {
+            if let Err(error) = storage.upsert_thread(
+                id,
+                name,
+                color,
+                project,
+                None,
+                Some("Claude Code"),
+                None,
+                12_400,
+                200_000,
+            ) {
+                eprintln!("NECODER_HISTORY_PROBE=seed: スレッドを書けない: {error:#}");
+                return;
+            }
+            for (role, content) in turns {
+                if let Err(error) = storage.insert_turn(id, role, content) {
+                    eprintln!("NECODER_HISTORY_PROBE=seed: 発話を書けない: {error:#}");
+                    return;
+                }
+            }
+        }
+        if let Err(error) = storage.archive_thread("probe-history-readme") {
+            eprintln!("NECODER_HISTORY_PROBE=seed: 閉じた印を書けない: {error:#}");
+        }
     }
 
     /// 開発用: プロジェクト切替フラッシュを表示する（`NECODER_FLASH_PROBE` の描画検証）。
@@ -122,6 +460,7 @@ impl Workspace {
                 explorer: ExplorerProject::default(),
                 open_files: Vec::new(),
                 active_file: 0,
+                pinned_files: Vec::new(),
                 icon: None,
                 icon_image: None,
                 worktree_branch: Some(branch.to_string()),
@@ -159,6 +498,7 @@ impl Workspace {
                     news_color,
                     SharedString::from(title.to_string()),
                     text,
+                    None,
                 );
             }
         }
@@ -199,6 +539,10 @@ impl Workspace {
     /// 開発用: 編隊の片付け UI を offscreen で検証する（2026-07-27）。
     /// `menu` = セル 0 の ⋯ メニューを開く / `terminal` = 下段をターミナルタブへ /
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
+    /// 画面の組み立て（`;` 区切り）: `graph` / `formation` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
+    /// `side:<diff|terminal|files>`（その Task カードのサイドペイン。diff = 変更レビュー）/ `columns:<n>` / `pin` / `captain` /
+    /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `interrupted`（R09 の中断した行）/
+    /// `compare:<n>`（O23）/ `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -207,11 +551,256 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `;` 区切りで順に実行する（`graph;task:1;side:diff` のように 1 回の起動で画面を組み立てる）。
+        if command.contains(';') {
+            for part in command.split(';').filter(|part| !part.is_empty()) {
+                self.debug_fleet_probe(part, window, cx);
+            }
+            return;
+        }
+        let (command, argument) = command.split_once(':').unwrap_or((command, ""));
         match command {
+            // ブリッジの編隊図を開く / 閉じる（`NECODER_GRAPH=hub|tree|card` で表示を選ぶ）。
+            "formation" => self.toggle_formation(window, cx),
+            // n 本目の Task（統合先を除く・1 始まり）を舞台の選択にする。
+            "task" => {
+                let wanted = argument.parse::<usize>().unwrap_or(1).max(1);
+                let target = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| !slot.task_space.is_integration())
+                    .nth(wanted - 1)
+                    .map(|(index, _)| index);
+                if let Some(index) = target {
+                    self.switch_project(index, window, cx);
+                }
+            }
+            // 選択中の Task のサイドペインを開く（diff / terminal / files・それ以外は閉じる）。
+            "side" => {
+                let index = self.project_sessions.active;
+                let space = self.project_sessions.projects[index].task_space.id.clone();
+                match argument {
+                    "diff" => {
+                        self.refresh_git_status_for(index, cx);
+                        self.set_stage_side(index, Some(FleetPane::Diff { space }), cx);
+                    }
+                    "files" => self.set_stage_side(index, Some(FleetPane::Editor { space }), cx),
+                    "terminal" => self.add_terminal_to_selected_task(cx),
+                    _ => self.set_stage_side(index, None, cx),
+                }
+            }
+            "columns" => {
+                self.chrome.stage_columns = argument.parse::<usize>().unwrap_or(1).clamp(1, 3);
+                cx.notify();
+            }
+            "pin" => {
+                let index = self.project_sessions.active;
+                let space = self.project_sessions.projects[index].task_space.id.clone();
+                self.toggle_stage_pin(space, cx);
+            }
+            "captain" => self.focus_captain(&FocusCaptain, window, cx),
+            // Captain の会話に見本（人の発話・台帳の知らせの灰色のカード・采配の本文）とトークンを仕込む
+            // （FLEET-V2 §3.6 のカードと §5.6 の Captain バーのトークンの見た目・エージェントには送らない）。
+            // 任命済みの時だけ（`"captain_agent"` を settings.json に書いて撮る）。
+            "captain-transcript" => {
+                let Some(integration) = self
+                    .fleet_repository_key()
+                    .and_then(|key| self.captain_integration_index(&key))
+                else {
+                    eprintln!("FLEET_PROBE: 統合先が開いていない");
+                    return;
+                };
+                let Some((panel, thread)) = self.ensure_captain_thread(integration, cx) else {
+                    eprintln!("FLEET_PROBE: Captain が未任命（settings.json の captain_agent）");
+                    return;
+                };
+                let source = i18n::t!("captain.ledger_source");
+                panel.update(cx, |panel, cx| {
+                    panel.debug_seed_auto_prompts(thread, &source, cx)
+                });
+            }
+            // Captain の分解案を 1 件、要対応に仕込む（FLEET-V2 §5.5 のカードの見た目・DB には書かない）。
+            // `proposal:<n>` で行数（既定 2・2 行目は印を外した状態）。
+            "proposal" => {
+                let rows = argument
+                    .parse::<usize>()
+                    .unwrap_or(2)
+                    .clamp(1, MAX_PROPOSED_TASKS);
+                let Some(integration) = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| slot.task_space.is_integration())
+                else {
+                    return;
+                };
+                let samples = [
+                    (
+                        "rope に置き換える",
+                        "buffer を rope に置き換え、undo を Transaction 単位にする",
+                        "cargo test -p editor_core が通る",
+                        Some("crates/editor_core"),
+                        Some("Claude Code"),
+                    ),
+                    (
+                        "README の誤字",
+                        "Calcurator を Calculator に直す",
+                        "grep で Calcurator が 0 件",
+                        Some("README.md"),
+                        Some("Codex"),
+                    ),
+                    (
+                        "割り算を足す",
+                        "calc.py に divide を足す（0 で割ったら ValueError）",
+                        "pytest が通る",
+                        None,
+                        None,
+                    ),
+                ];
+                let tasks: Vec<ProposedTask> = samples
+                    .iter()
+                    .cycle()
+                    .take(rows)
+                    .map(|(title, goal, done_when, scope, agent)| ProposedTask {
+                        title: title.to_string(),
+                        goal: goal.to_string(),
+                        done_when: done_when.to_string(),
+                        scope: scope.map(str::to_string),
+                        agent: agent.map(str::to_string),
+                    })
+                    .collect();
+                let mut selected = vec![true; tasks.len()];
+                if let Some(second) = selected.get_mut(1) {
+                    *second = false;
+                }
+                let slot = &self.project_sessions.projects[integration];
+                let record = storage::CaptainProposalRecord {
+                    id: new_proposal_id(),
+                    repository_id: slot.repository_key().to_string(),
+                    root: slot.worktree.root().to_path_buf(),
+                    note: Some(
+                        "実装とテストは 1 本に束ねた。README は触る範囲が重ならないので別立て。"
+                            .to_string(),
+                    ),
+                    tasks: serde_json::to_string(&tasks).unwrap_or_default(),
+                    status: storage::ProposalStatus::Pending,
+                    outcome: None,
+                    created_at: 0,
+                    resolved_at: None,
+                };
+                self.add_captain_proposal(
+                    super::captain_proposals::CaptainProposal {
+                        record,
+                        tasks,
+                        selected,
+                    },
+                    cx,
+                );
+            }
+            // 承認待ちの最初の Task に Captain の推薦を仕込む（FLEET-V2 §5.5 の要対応カードの ✳ 行・DB には書かない）。
+            // `recommend:allow|deny|ask_human`（既定 deny = CONTROL_PROBE の `cargo publish` に合う見立て）。
+            "recommend" => self.debug_seed_captain_recommendation(argument, cx),
+            // 1 本目の Task に ⚑ 帰属を付ける（分解案の承認で作られた Task の行の見た目）。
+            "origin" => {
+                if let Some(slot) = self
+                    .project_sessions
+                    .projects
+                    .iter_mut()
+                    .find(|slot| !slot.task_space.is_integration())
+                {
+                    slot.task_space.captain_origin = true;
+                    cx.notify();
+                }
+            }
+            // Fleet から Editor へ戻る（titlebar の `Editor` と同じ道）。戻った後の左カラムを撮る用。
+            "editor" => {
+                if self.chrome.fleet_mode {
+                    self.toggle_fleet_mode(&ToggleFleet, window, cx);
+                }
+            }
+            // レールの「AI スレッド一覧」を押す（左カラムの herd ⇄ エクスプローラ）。
+            "threads" => self.toggle_herd_sidebar(cx),
+            // Fleet サイドバーの絞り込み欄に語を入れる（O21・欄は Task が 6 本以上か語がある時だけ出る）。
+            "filter" => {
+                let query = argument.to_string();
+                self.chrome
+                    .fleet_filter
+                    .update(cx, |filter, cx| filter.set_plain_text(&query, cx));
+            }
+            // n 本目の Task（統合先を除く・1 始まり）を複数選択に足す（⌘ クリックと同じ・O21）。
+            // `select:1;select:3` で選択の帯が出る。
+            "select" => {
+                let wanted = argument.parse::<usize>().unwrap_or(1).max(1);
+                let space = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .filter(|slot| !slot.task_space.is_integration())
+                    .nth(wanted - 1)
+                    .map(|slot| slot.task_space.id.clone());
+                if let Some(space) = space {
+                    self.toggle_fleet_selection(space, cx);
+                }
+            }
+            // 外部の worktree（O21）の先頭を、サイドバーの「取り込む」と同じ入口（`adopt_worktree`）で取り込む。
+            // サイドバーの一覧は背景で読むので、ここでは git に直接聞く。
+            "adopt" => {
+                let Some(key) = self.fleet_repository_key() else {
+                    return;
+                };
+                let Some(index) = self.integration_slot_for(&key) else {
+                    return;
+                };
+                let canonical =
+                    |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                let slot = &self.project_sessions.projects[index];
+                let host = slot.worktree.host().clone();
+                let root = slot.worktree.root().to_path_buf();
+                let rail: Vec<PathBuf> = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .map(|slot| canonical(slot.worktree.root()))
+                    .collect();
+                let external = project::git_worktrees_on(host.as_ref(), &root)
+                    .into_iter()
+                    .skip(1)
+                    .find(|worktree| !rail.contains(&canonical(&worktree.path)));
+                if let Some(worktree) = external {
+                    self.adopt_worktree(worktree.path, worktree.branch, None, cx);
+                }
+            }
+            // ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない）。
+            "creating" => self.debug_seed_task_creations(cx),
+            // Captain の分解案の中断した行（前の起動で途中のまま終わった）を段ごとに仕込む（R09・DB には書かない）。
+            "interrupted" => self.debug_seed_interrupted_rows(cx),
+            // 並べて比べる（O23）: 先頭から n 本（2〜3）の Task を舞台に並べ、各カードの「変更」を開く
+            // （fan-out が作り終えた時と同じ `show_fanout_on_stage`）。
+            "compare" => {
+                let count = argument.parse::<usize>().unwrap_or(2).clamp(2, 3);
+                let targets: Vec<(usize, SpaceId)> = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| !slot.task_space.is_integration())
+                    .take(count)
+                    .map(|(index, slot)| (index, slot.task_space.id.clone()))
+                    .collect();
+                self.seed_fleet_cells(cx);
+                self.show_fanout_on_stage(
+                    targets.iter().map(|(_, space)| space.clone()).collect(),
+                    cx,
+                );
+                for (index, space) in targets {
+                    self.set_stage_side(index, Some(FleetPane::Diff { space }), cx);
+                }
+            }
             "menu" => self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx),
             // セル 0 を拡大してヘッダのタイトルを改名開始（Cell site で入力欄が出る／herd と二重描画しない）。
             "rename" => {
-                self.chrome.fleet_center_view = FleetCenterView::Graph;
                 self.seed_fleet_cells(cx);
                 if let Some(index) = self
                     .project_sessions
@@ -226,17 +815,13 @@ impl Workspace {
             // 中央をグリッド（系譜グラフ面）にして Task セルを seed する。CONTROL_PROBE の 5 slot が
             // セルヘッダで並ぶ（改名ダブルクリック・🗑 削除の描画検証用）。herd も左に出す。
             "graph" => {
-                self.chrome.fleet_center_view = FleetCenterView::Graph;
                 self.chrome.show_left = true;
                 self.chrome.show_herd = true;
                 self.seed_fleet_cells(cx);
-                // 系譜グラフを畳んでグリッドを主に（各セルヘッダの改名/🗑 を大きく撮る）。
-                self.chrome.graph_collapsed = true;
                 cx.notify();
             }
             // セルを 1 枚拡大（セルヘッダを最大サイズで撮る＝改名ダブルクリック/🗑 の確認）。
             "maximize" => {
-                self.chrome.fleet_center_view = FleetCenterView::Graph;
                 self.seed_fleet_cells(cx);
                 self.chrome.stage_columns = 1;
                 cx.notify();
@@ -256,15 +841,325 @@ impl Workspace {
                     self.chrome.fleet_cells.len()
                 );
             }
+            // Task の変更から diff を開いたのと同じ入口（`TaskSpace::diff_base` を渡す）。
+            // `task-diff:<root 相対パス>@<rev>` の rev は擬似 Task の base を上書きする
+            // （CONTROL_PROBE の擬似 Task は開いた時点の HEAD を base に持つので、コミット済みの
+            // 変更を撮るには Task を切った時点の commit に戻す）。
+            other if other.starts_with("task-diff:") => {
+                let spec = &other["task-diff:".len()..];
+                let (relative, rev) = match spec.split_once('@') {
+                    Some((relative, rev)) => (relative, Some(rev)),
+                    None => (spec, None),
+                };
+                let Some(index) = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| !slot.task_space.is_integration())
+                else {
+                    eprintln!("FLEET_PROBE: Task が無い（NECODER_CONTROL_PROBE=1 と一緒に使う）");
+                    return;
+                };
+                let slot = &mut self.project_sessions.projects[index];
+                if let Some(rev) = rev {
+                    slot.task_space.base_oid = Some(rev.to_string());
+                }
+                let path = slot.worktree.root().join(relative);
+                let base = slot.task_space.diff_base();
+                self.switch_project(index, window, cx);
+                self.open_diff_tab_for(path, None, base, window, cx);
+            }
             other => eprintln!("FLEET_PROBE: 未知のコマンド {other}"),
         }
+    }
+
+    /// 開発用: ソース管理パネルを offscreen で検証する（`NECODER_GIT_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open` = パネルを開く / `row:<n>` = 変更（unstaged）の n 行目を押したのと同じ入口で diff を開く /
+    /// `type:<文>` = メッセージ欄へ文字を入れる（貼り付けの後半と同じ `insert_text`。本物の
+    /// クリップボードは触らない — ⌘V の経路は gpui テストが受け持つ）/ `commit` = ⌘⏎ と同じ入口 /
+    /// `details` = 最後のトーストの「全文 ›」を押したのと同じ入口。
+    #[cfg(debug_assertions)]
+    pub fn debug_git_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        match name {
+            "open" => {
+                if !self.git_panel_open(cx) {
+                    self.toggle_git_panel(&ToggleGitPanel, window, cx);
+                }
+            }
+            "row" => {
+                let index = argument.parse::<usize>().unwrap_or(0);
+                let path = self
+                    .git_panel
+                    .read(cx)
+                    .snapshot()
+                    .changes
+                    .iter()
+                    .filter(|change| change.unstaged.is_some())
+                    .nth(index)
+                    .map(|change| change.path.clone());
+                match path {
+                    Some(path) => self.request_git_diff(path, cx),
+                    None => eprintln!("GIT_PROBE: 変更の行 {index} が無い"),
+                }
+            }
+            "type" => {
+                self.focus_git_input(window, cx);
+                let editor = self.git_panel.read(cx).message.clone();
+                editor.update(cx, |editor, cx| editor.insert_text(argument, cx));
+            }
+            "commit" => self.submit_git_input(window, cx),
+            "details" => self.debug_open_last_toast_details(window, cx),
+            other => eprintln!("GIT_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+
+    /// 開発用: 変更レビューを offscreen で検証する（`NECODER_REVIEW_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open` = パレット「Git: 変更をレビュー」と同じ入口 / `expand` = 最初の畳みを 1 段開く /
+    /// `menu` = 比較の基準のメニューを開く /
+    /// `head` = 基準を HEAD に / `branch:<名前>` / `commit:<rev>` / `ws` = 空白を無視の切替 /
+    /// `reload` = 読み直す（↻）/ `close` = 変更レビューのタブを × と同じ入口で閉じ、閉じた瞬間の様子を
+    /// 出す（R02・読み込みの取り消し）/ `state` = 基準・ファイル数・読み込みの状態・全文を読み終えた
+    /// ファイル数を出す（読み込みは始めない＝閉じた後の様子をそのまま見る）。対象はアクティブな session の
+    /// 変更レビュー（Fleet でも同じ）。
+    #[cfg(debug_assertions)]
+    pub fn debug_review_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        let index = self.project_sessions.active;
+        match name {
+            "open" => {
+                self.open_review_tab(&OpenReview, window, cx);
+                return;
+            }
+            "close" => {
+                match self.tabs.iter().position(EditorTab::is_review) {
+                    Some(tab) => self.close_tab_at(tab, window, cx),
+                    None => eprintln!("REVIEW_PROBE: 変更レビューのタブが無い"),
+                }
+                // 閉じた瞬間の様子（この後の `state` がこれから動かなければ、読み込みは止まっている）。
+                self.debug_print_review_state(index, "closed", cx);
+                return;
+            }
+            "state" => {
+                self.debug_print_review_state(index, "state", cx);
+                return;
+            }
+            _ => {}
+        }
+        let Some(review) = self.activate_review(index, cx) else {
+            eprintln!("REVIEW_PROBE: 変更レビューが無い session");
+            return;
+        };
+        // 注記: `select:<path>:<新の行>` / `select-old:<path>:<旧の行>` / `extend(-old):<path>:<行>` /
+        // `comment`（入力欄を開く）/ `type:<本文>` / `save` / `tray`（一覧）/ `send`（宛先のメニュー）。
+        let line_argument = || {
+            let (path, line) = argument.rsplit_once(':')?;
+            Some((path.to_string(), line.parse::<u32>().ok()?))
+        };
+        match name {
+            "select" | "select-old" | "extend" | "extend-old" => {
+                let Some((path, line)) = line_argument() else {
+                    eprintln!("REVIEW_PROBE: {command} は <path>:<行> で");
+                    return;
+                };
+                let side = if name.ends_with("-old") {
+                    review_view::NoteSide::Old
+                } else {
+                    review_view::NoteSide::New
+                };
+                let found = review.update(cx, |review, cx| {
+                    review.select_line(&path, side, line, name.starts_with("extend"), cx)
+                });
+                if !found {
+                    eprintln!("REVIEW_PROBE: 行が見つからない {argument}");
+                }
+                return;
+            }
+            "comment" => {
+                review.update(cx, |review, cx| review.open_draft(window, cx));
+                return;
+            }
+            "save" => {
+                review.update(cx, |review, cx| review.save_draft(window, cx));
+                return;
+            }
+            _ => {}
+        }
+        review.update(cx, |review, cx| match name {
+            "type" => review.set_draft_text(argument, cx),
+            "tray" => review.toggle_tray(cx),
+            "send" => review.request_send(false, cx),
+            "expand" => review.expand_first_fold(cx),
+            "menu" => review.toggle_base_menu(cx),
+            "head" => review.select_base(project::review::ReviewBase::Head, cx),
+            "branch" => review.select_base(
+                project::review::ReviewBase::Branch(argument.to_string()),
+                cx,
+            ),
+            "commit" => review.select_base(
+                project::review::ReviewBase::Commit(argument.to_string()),
+                cx,
+            ),
+            "ws" => {
+                let ignore = !review.ignores_whitespace();
+                review.set_ignore_whitespace(ignore, cx);
+            }
+            "reload" => review.reload(cx),
+            other => eprintln!("REVIEW_PROBE: 未知のコマンド {other}"),
+        });
+    }
+
+    /// 変更レビューの基準・ファイル数・読み込みの状態・全文を読み終えたファイル数を出す（REVIEW_PROBE の
+    /// `state` / `close`。読み込みは始めない）。
+    #[cfg(debug_assertions)]
+    fn debug_print_review_state(&self, index: usize, label: &str, cx: &App) {
+        let Some(review) = self
+            .project_sessions
+            .sessions
+            .get(index)
+            .and_then(|session| session.review.as_ref())
+        else {
+            eprintln!("REVIEW_PROBE: 変更レビューが無い session");
+            return;
+        };
+        let review = review.read(cx);
+        let (load, highlighted, files) = review.load_progress();
+        println!(
+            "review({label}): base={:?} oid={:?} files={} load={load} syntax={highlighted}/{files}",
+            review.base(),
+            review.base_oid(),
+            review.file_count()
+        );
+    }
+
+    /// 開発用: エクスプローラと検索の所作を offscreen で検証する（`NECODER_EXPLORER_PROBE`・
+    /// `;` 区切りで順に実行・パスはプロジェクト相対）。
+    ///
+    /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）/
+    /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
+    /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当 /
+    /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認 /
+    /// `search:<dir>:<クエリ>` = フォルダ内を検索 / `open:<path>` / `finder` = ⌘P /
+    /// `finder_query:<語>` / `finder_confirm` = ⌘P の ⏎。
+    #[cfg(debug_assertions)]
+    pub fn debug_explorer_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        let (argument, value) = argument.split_once(':').unwrap_or((argument, ""));
+        let Some(root) = self
+            .active_worktree()
+            .map(|worktree| worktree.root().to_path_buf())
+        else {
+            return;
+        };
+        let target = if argument.is_empty() {
+            root.clone()
+        } else {
+            root.join(argument)
+        };
+        match name {
+            "expand" => {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
+                    slot.explorer.expanded.insert(target);
+                }
+                self.refresh_active_explorer(cx);
+            }
+            "scroll" => {
+                let index = argument.parse::<usize>().unwrap_or(0);
+                self.chrome
+                    .explorer_scroll
+                    .scroll_to_item(index, gpui::ScrollStrategy::Top);
+            }
+            "rename" | "newfile" => {
+                let kind = if name == "rename" {
+                    NamingKind::Rename
+                } else {
+                    NamingKind::NewFile
+                };
+                self.start_naming(kind, target, name == "newfile", window, cx);
+                let value = value.to_string();
+                self.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value = value, cx)
+                });
+                self.confirm_naming(window, cx);
+            }
+            // 右クリックメニューを行の位置に出す（スクロールしていないツリー前提の見た目確認用）。
+            "menu" => {
+                let is_dir = target.is_dir();
+                let row = self
+                    .active_slot()
+                    .and_then(|slot| slot.explorer.rows.iter().position(|row| row.path == target))
+                    .unwrap_or(0);
+                let position = gpui::point(
+                    px(RAIL_WIDTH + 140.),
+                    px(TITLEBAR_HEIGHT + 28. + (row as f32 + 1.) * ROW_HEIGHT),
+                );
+                self.show_context_menu(target, is_dir, position, cx);
+            }
+            "discard" => {
+                let status = self
+                    .repository
+                    .status
+                    .get(&target)
+                    .copied()
+                    .unwrap_or(StatusKind::Modified);
+                self.ask_discard(target, status, cx);
+            }
+            // 確認の「破棄する」を押す（未追跡なら**本物のゴミ箱へ入る**。後に `undo` を続けること）。
+            "confirm_discard" => self.confirm_discard(window, cx),
+            // フォルダ内を検索（`search:<dir>:<クエリ>`・クエリ省略可）。
+            "search" => {
+                self.open_folder_search(target, window, cx);
+                if let (Some(panel), false) = (self.search_panel.clone(), value.is_empty()) {
+                    let query = value.to_string();
+                    panel.update(cx, |panel, cx| panel.set_query(query, cx));
+                }
+            }
+            "open" => self.open_file(target, window, cx),
+            // ⌘P（`finder` → 列挙を待って `finder_query:<語>` → `finder_confirm` = ⏎）。
+            "finder" => self.open_file_finder(&FileFinder, window, cx),
+            "finder_query" | "finder_confirm" => {
+                if let Some(picker) = self.overlays.picker.clone() {
+                    let query = argument.to_string();
+                    picker.update(cx, |picker, cx| {
+                        if name == "finder_query" {
+                            picker.set_query(query, cx);
+                        } else {
+                            picker.confirm_selected(cx);
+                        }
+                    });
+                }
+            }
+            "duplicate" => self.duplicate_entry(target, cx),
+            "trash" => self.trash_entry(target, window, cx),
+            "undo" => {
+                self.focus_explorer(window, cx);
+                self.undo_file_operation(&UndoFileOperation, window, cx);
+            }
+            other => eprintln!("EXPLORER_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
     }
 
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
     /// チャットの行 / `edit:<文字>` = 成果物を書き換える（本番と同じ合図を出す）/ `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
-    /// `settings:<page>` / `find:<語>` / `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
+    /// `settings:<page>` / `settings-add:<語>` = 設定の「エージェントを追加」/ `find:<語>` /
+    /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (name, argument) = command.split_once(':').unwrap_or((command, ""));
@@ -358,10 +1253,22 @@ impl Workspace {
                     .chat_panel()
                     .and_then(|panel| panel.read(cx).active_chat_id());
             }
+            // 設定の「エージェントを追加」を開いて検索語を入れる（H2 の見た目を撮る・空なら全件）。
+            "settings-add" => {
+                self.set_chat_mode(false, window, cx);
+                self.chrome.show_settings = true;
+                self.refresh_settings_view(cx);
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| {
+                    view.debug_open_add_agent(argument, window, cx)
+                });
+            }
             // 設定画面をページ指定で開く（Chat の設定・MCP のコネクタの見た目を撮る）。
             "settings" => {
                 self.set_chat_mode(false, window, cx);
                 self.chrome.show_settings = true;
+                // ⌘, と同じ読み直し（Skills 節の一覧にアクティブなプロジェクトを含める）。
+                self.refresh_settings_view(cx);
                 let view = self.chrome.settings_view.clone();
                 view.update(cx, |view, cx| view.debug_select_page(argument, cx));
             }
@@ -443,6 +1350,31 @@ impl Workspace {
         self.toggle_terminal(&ToggleTerminal, window, cx);
         self.terminal_dock
             .update(cx, |dock, cx| dock.emit_open_path(path, line, cx));
+    }
+
+    /// 開発用: 下ドックの端末を offscreen で駆動する（`NECODER_TERMINAL_PROBE`・`;` 区切り）。
+    /// `open` = 下ドックの端末を開いてフォーカス。それ以外は端末へ渡す
+    /// （[`terminal_view::TerminalView::debug_probe`]: `type:` / `select:` / `find:` など）。
+    #[cfg(debug_assertions)]
+    pub fn debug_terminal_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        if name == "open" {
+            self.chrome.show_bottom = true;
+            self.focus_active_terminal(window, cx);
+        } else {
+            let terminal = self
+                .terminal_dock
+                .update(cx, |dock, cx| dock.ensure_active(cx));
+            terminal.update(cx, |terminal, cx| {
+                terminal.debug_probe(name, argument, window, cx)
+            });
+        }
+        cx.notify();
     }
 
     /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。

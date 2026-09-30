@@ -1,0 +1,100 @@
+A04	\blinear\.app|\bjira\b|atlassian|gitlab|glab\b|gh issue|issue_url|branch_name_override
+A07	parent_task|parent_worktree|parent_workspace|descendant|子 ?Task|親 ?Task
+A08	shortcode|:rocket:|emoji_short
+A11	multi_select|multiselect|selected_tasks|bulk_|一括|複数選択
+A16	resource.?manager|cleanup_workspaces|disk_usage|dir_size|du -s|ディスク使用
+A18	project.?group|multi.?repo|folder.?workspace|複数リポ
+A20	gh issue|issue_number|issue_url|\bjira\b|linear\.app
+A22	kanban|カンバン
+A23	rename_branch|RenameBranch|"branch", "-m"|branch -m
+A24	sparse.?checkout|sparse-checkout|--sparse
+A26	shift-backspace|copy_task_name|copy_branch_name|CopyBranch|copy_name
+B12	subagent|sub_agent|parent_tool|parentToolUse|サブエージェント|子エージェント
+B13	teammate|agent.?team
+B14	account_switch|switch_account|hot.?swap|CODEX_HOME|CLAUDE_CONFIG_DIR|アカウント切替
+B15	rate.?limit|five_hour|seven_day|resets_at|utilization|レート制限|使用率
+B16	pricing|cost_usd|estimated_cost|推定コスト|日別
+B25	Event::Title|TitleChanged|ResetTitle|statusline|UserPromptSubmit
+B27	thread/goal|goal_mode|"/goal"
+C02	split_down|SplitDown|split_terminal|SplitTerminal|下に分割
+C05	setsid|reattach|warm.?attach|pty.?daemon|nohup|tmux
+C06	scrollback
+C07	RegexSearch|search_next|TerminalSearch|term_search|terminal_search
+C08	ClipboardStore|osc.?52
+C09	hyperlink|osc.?8\b|link_popover|リンクをコピー
+C10	copy_context|Copy Context|コンテキストをコピー
+C12	kitty|CSI.?u\b|DISAMBIGUATE|KeyboardModes|yen|¥|₩
+C14	quick.?command|saved.?command|tasks\.json|定型コマンド
+C15	sixel|iterm2|inline.?image|addon.?image|ImageProtocol
+C17	on_drop|ExternalPaths|DraggedFile
+C20	osc.?133|shell.?integration|prompt_mark|FinalTerm|シェル統合
+C21	confirm_quit|quit_confirm|still_running|終了しますか
+C22	default_shell|shell_args|terminal_shell|login_shell
+C24	terminal_font|terminal_font_size|scrollback_lines|cursor_shape|cursor_style
+D01	auto_?save|autosave|save_on_blur|自動保存
+D02	preview_tab|is_preview|provisional_tab|仮タブ|プレビュータブ
+D04	review_note|AddReviewNote|レビュー注記
+D05	mermaid|\.mmd\b
+D08	\bcsv\b|\btsv\b|CsvView
+D09	ipynb|jupyter|nbformat
+D11	minimap|mini_map|ミニマップ
+D18	find_in_folder|search_in_folder|FindInFolder|フォルダ内
+D20	omnibox|tab_switcher|TabSwitcher
+D22	settings_search|search_settings|設定を検索
+E05	three.?way|conflict_marker|resolve_conflict|<<<<<<<|MERGE_HEAD
+E06	review_comment|ReviewComment|line_comment|diff_comment|DiffComment|行コメント
+E07	review_notes|send_notes|SendNotes|まとめて送
+E08	resolve_comment|unresolved_comment|comment_thread
+E12	fix_with_ai|Fix with AI|FixWithAi
+E13	force-with-lease|force_with_lease|force_push|ForcePush
+E14	amend
+E15	resolve_with_ai|Resolve with AI|ResolveWithAi
+E16	action_recipe|prompt_template|commit_prompt_template
+E18	stacked|gh pr create --base
+E19	gh pr checks|pr_checks|pull_request_view|reaction
+E20	auto.?merge|merge_queue|gh pr merge
+E21	gh run|check_runs|statusCheckRollup|actions/runs
+E22	gitlab|glab\b|bitbucket|azure devops|dev\.azure|gitea
+E24	gh issue|IssueDrawer|issue_list
+E25	projectV2|gh project|github projects
+E26	linear\.app|LINEAR_API|linear_api|LinearIssue
+E27	\bjira\b|atlassian
+E28	issue_url|github\.com/[^ ]*/issues
+E29	X-RateLimit|rate_limit|api_budget
+E30	gh auth|gh_account|gh_host|GH_HOST
+E34	gpgsign|gpg\.sign|commit\.sign|GIT_EDITOR|core\.editor
+F01	address.?bar|url_bar|UrlBar|load_url|go_back|アドレスバー
+F03	cookie|passkey|webauthn|incognito
+F04	user_agent|with_user_agent|device_profile|emulate|エミュレーション
+F05	download_started|with_download|DownloadShelf
+F06	design.?mode|getComputedStyle|computed.?style|element.?picker|outerHTML|with_ipc_handler|with_initialization_script
+F07	page_annotation|annotate_page|ページ注釈
+F08	link_routing|system_browser|SystemBrowser
+F09	browser_goto|browser_click|browser_fill|"goto"|"fill"
+F10	LocalForward|DynamicForward|socks
+F11	share_artifact|publish_artifact|public.?link|公開リンク
+F12	AXUIElement|CGEvent|computer_use|computer-use|list_apps|UIAutomation
+F13	simctl|simulator|emulator|\badb\b|xcrun
+F15	search_engine|google\.com/search|duckduckgo|検索エンジン
+F16	zoom_factor|set_zoom|page_zoom|with_zoom
+G08	LocalForward|port.?forward|/proc/net/tcp|ポート転送|ポートフォワード
+G09	sftp|\bscp\b|upload|アップロード
+G13	devcontainer|orca\.yaml|vm_recipe|vercel|fly\.io|docker
+G18	rate_limit|usage_limit|create_workspace|edit_host
+G24	\bcron\b|rrule|automation|定期実行|予約実行
+G25	SKILL\.md|npx skills|\.claude/skills|skills install
+G27	account add|add_account|login_account
+H03	dock_badge|badge_label|NSDockTile|dockTile|set_badge|request_user_attention
+H06	NSStatusItem|NSStatusBar|status_item|system_tray|\btray\b
+H07	dictation|speech|whisper|parakeet|microphone|音声入力|マイク
+H08	settings_search|search_settings|設定を検索
+H11	set_app_icon|applicationIconImage|alternate_icon|app_icon
+H15	telemetry|posthog
+H19	plugin|marketplace|extension_host|プラグイン
+H23	discord|star_nag|github_star
+H24	gpu_specs|GpuSpecs|gpu_info
+H25	statusbar_items|status_bar_items|show_statusbar
+H26	mission.?control|shortcut_conflict
+H27	FullDiskAccess|full.?disk|x-apple\.systempreferences|\bTCC\b
+X1	lsof|/proc/net/tcp|port_scan|listening_port|ポート
+X2	review_thread|pr_comment|coderabbit

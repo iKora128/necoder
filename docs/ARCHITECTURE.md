@@ -8,7 +8,7 @@
 ```
 [shell]      necoder(bin) ─ 結線・起動・メニュー
 [shell]      workspace ─ レール / chrome / active ProjectSession の合成・event routing
-[view]       editor_view / webview_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
+[view]       editor_view / webview_view / explorer / git_ui / review_view / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
 [model]      editor_core / project / acp_client / search / lang / storage
 [foundation] ui(部品+Registry) / theme_core / settings_core / keymap_core / i18n
 [外部]       gpui(git rev固定) / agent-client-protocol(crates.io) / ropey / alacritty_terminal
@@ -38,8 +38,9 @@
 | `project` / `explorer` / `search` | FS・worktree・Git・各ビュー | Rust 標準 API、`notify`、Git CLI、`imara-diff`、ripgrep 上の独立実装 | M3-M6 |
 | `acp_client` / `agent_panel` | ACP セッション・transcript・composer | crates.io `agent-client-protocol` と necoder 固有 UI の独立実装 | M4 |
 | `lang` | tree-sitter ハイライト・LSP クライアント | 公開 LSP 仕様と tree-sitter crates 上の独立実装 | M7 |
-| `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
-| `webview_view` | ローカル HTML プレビュー | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱） | M14 |
+| `git_ui` / `terminal_view` | gutter diff / 統合ターミナル（⌘F バーの入力欄は `editor_view` の 1 行入力を借りる。`editor_view` は端末を知らない） | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
+| `review_view` | 変更レビュー（worktree の全変更を 1 画面で・可変高リスト・ツリー・畳み）。構造化 diff は `project::review`（git CLI の unified diff を解析・読み込みは `ReviewCancel` で取り消せる）。`editor_view` は構文色の写像だけ借りる（コアは変更レビューを知らない） | GPUI の公開 API・Git CLI 上の独立実装（Orca の機能比較のみ） | parity O6 |
+| `webview_view` | ローカル HTML プレビュー / artifact の隔離表示 / localhost の Web タブ | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱）。Web タブの移動判定を最上位だけに掛けるため、macOS は wry の navigation delegate を包む（`main_frame.rs`・objc2）。Design モードのピッカー（`design_picker.js`・初期化スクリプト）と IPC は Web タブの WebView にだけ付け、受けた知らせは `design.rs` が送り手・nonce・形・大きさで検め秘密を伏せる。要素の切り抜きは `snapshot.rs`（macOS=`takeSnapshotWithConfiguration` / Windows=`CapturePreview` + 切り抜き）。Web Inspector（Web タブの `</>`・右クリック）は macOS では WebView の中に付けない: WebKit が付けると WKWebView を窓全体の幅に広げて GPUI の UI を覆うので、WKWebView の `NSViewFrameDidChangeNotification` で付いたことを知り、wry が既に使う私的 `_inspector` の `detach` で別の窓へ出して枠を戻す（`inspector.rs`）。開閉の状態は `WebViewView` が持つ（WebView2 は閉じる口が無いので開くだけ）。HTML ファイルを Web タブで開く**内蔵の配信**は `static_server.rs`（std の `TcpListener` だけ・`127.0.0.1`・token 付きの URL・Host 検査・使う Web タブがある間だけ動く） | M14 |
 | `graph_view` | worktree×commit の DAG・custom Element | Git CLI の出力を使う独立実装 | M14 |
 
 Zed のソースは GPUI API の利用例や設計比較のために閲覧しているため、本プロジェクトを厳密な意味での
@@ -83,8 +84,10 @@ impl Buffer {
   具体型 `EditorTab { path, editor: Entity<EditorView>, _observation }` の `Vec` + `active_tab: usize` で始める
   （ペインは当面「主ペイン = 複数タブ」+「右分割 = 単一比較ビュー」）。多態化（画像/diff/設定 UI を同格に）が
   必要になった時点で `enum PaneItem { Editor(..), Diff(..), .. }` → `trait TabItem` へ育てる（multibuffer 本体は later）。
-  **現在地（2026-09-11）**: `enum TabContent { Editor, Image, Pdf }` の 3 具体型。Image / Pdf は「編集も保存も
+  **現在地（2026-09-26）**: `enum TabContent { Editor, Image, Pdf, Web }` の 4 具体型。Image / Pdf / Web は「編集も保存も
   LSP もしない表示専用タブ」で、trait 化はこの性質を持たない Item（diff / 設定 UI）が要求した時点で再検討する。
+  Web（localhost の開発サーバ・`web_preview_view`）は鍵（`EditorTab.path`）に URL をそのまま入れる — ファイルの鍵は
+  絶対パスなので衝突せず、窓セッションの `open_files` の形も変えずに永続化できる（`web_tab_url` が見分ける）。
   Pdf は自前レンダラを持たず、`webview_view`（HTML プレビュー用のネイティブ子ビュー層）に `file://` を渡して
   OS のビューア（macOS = WKWebView の PDFKit / Windows = WebView2）に描かせる。ネイティブ子ビューは GPUI の
   描画木を外れても OS 側に残るため、`Workspace::sync_native_view_visibility` が毎 render で可視性と
@@ -172,10 +175,11 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **ファイルが真実（DB に入れない）**: settings.json（user/project）・`.necoder/todos.md`（M12 Todo ボード — ファイルであること自体が要件）・keymap.json・テーマ JSON。git が真実のもの（status/diff/blame）も入れない。検索索引も持たない（regex 走査が正 — DECISIONS §8）
 - **ローカル DB（`~/Library/Application Support/necoder/necoder.db`）**: [Turso](https://github.com/tursodatabase/turso)（SQLite の pure-Rust 再実装・MIT・async ネイティブ）を採用。用途は
   ①**hot exit**（dirty バッファ全文 + path/version/カーソル。WAL で kill -9 耐性）
-  ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）
-  ③**トークン台帳**（turns の集計ビューでほぼ無料）
+  ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）。追記の例外は composer の `!` で走らせたシェルの行（role `shell`・JSON 1 つ・#37）: 待機中なら走り出した時点で追記し、終わったら同じ行を `update_turn` で書き換える（途中で終了した行は復元で「中断」と読める）
+  ③**使用量**（`turn_usage`・O11・2026-09-26: エージェントがターンの終わりに報告したトークンと、会話の累計コストの差分＝推定 USD を 1 ターン 1 行。Stats の日別集計と、再起動後に引き継いだ会話のコスト差分の基準に使う。旧「トークン台帳」`token_ledger` は `threads.tokens_used`＝文脈窓の使用量を並べるだけで累計ではなかったため削除。レート制限は保存しない＝エージェントが知らせた最後の値をメモリに持つだけ）
   ④**checkpoint のメタデータ**（turn→file→blob hash。blob 本体は content-addressed ファイル or DB — M12 着手時に比較）
 - **隔離**: DB アクセスは薄い `storage` crate に閉じ込める（SQL を UI 層に漏らさない）。Turso はまだ若いので、問題が出たら rusqlite へ 1 crate の差し替えで退避できる面を保つ。書き込みは全て background executor（async API がそのまま「UI スレッドで塞がない」規律に合う）
+- ⑥**変更レビューの注記**（`review_notes`・parity O7）: 1 注記 = 1 行（scope = TaskSpace id / 対象は JSON 1 列 + `target_kind` / 本文 / 状態 unsent・sent・resolved / sent_at）。対象を列に展開しないのは、Design Mode のページ要素など種類が増えても表を変えないため
 - ⑤**窓セッション**（`window_sessions`・2026-09-03）: 1 窓 = 1 行（window_id / payload JSON = プロジェクト列 + 各プロジェクトの開タブ列 + アクティブ / closed_at）。各窓は自分の行だけを `WindowSessionWriter`（background の合流書き・順序保証）で更新し、起動時は生存中の全行を窓として復元（無ければ最後に閉じた 1 行）。ユーザーが窓を閉じたら `closed_at`（⌘Q では付けない）。⌘Q 直前は最新 payload を同期保存して background 書き込みの取りこぼしを防ぐ。旧 `state.json` は**廃止・互換読み込みも無し**
 - **キャッシュ（捨ててよい・真実ではない）**: `external_agents/registry/registry.json` = ACP 公開レジストリの写し（`paths::acp_registry_cache`）。消えても組み込みカタログで動く
 
@@ -193,6 +197,77 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **組み込みカタログ** = `const AGENTS`。necoder が検証した既定値で、オフライン・未登録時の土台
 - npm 指定は**完全一致ピンにしない**（`pkg@0.0.0 - X` の上限範囲）。npm の `min-release-age` 環境で
   公開直後の版が入らなくなるため。詳細と Zed 比較の境界は `docs/research/acp-agent-registry-notes.md`
+
+**npm の ACP アダプタの管理導入（`acp_client::install`・2026-09-19）**: 組み込みのエージェントの ACP アダプタが npm の
+固定版（`name@x.y.z`・レジストリの npx 配布で引数なし、無ければカタログの `package`）なら、最初の起動（送信）の時に
+`<data>/external_agents/npm/<name@x.y.z>/` へ `npm install --save-exact` で置き（背景の blocking・180 秒で諦める）、
+manifest の名前・版・`bin` を確かめてから rename で公開し、以後は `node <entry>` で直接起こす（`npm exec` の親を
+持たない）。新しい版を置いたら同じパッケージの古い版を消す（1 版 260MB 級）。置けなければ従来の `npx -y` で起こす
+（上の範囲指定のまま）。手元だけ — SSH・Windows・設定のコマンド・範囲指定の版は従来の経路。
+
+**置き方の分担（parity 統合・2026-09-27）**: 起動の解決は 1 本（`acp_client::Agent::resolve_command_on`）で、置き場を
+持つのは 2 つ。組み込みの npm アダプタ = `install`（`external_agents/npm/`・送信時に `run_session_on` が導入）、足した
+エージェントの binary = `deploy`（`external_agents/binary/`・下の H2-b・送信時に背景で）。足したエージェントの npx / uvx は
+置き場を持たず、その道具をそのまま起こす。置き場は別のフォルダで、片方の掃除がもう片方に触れない
+（`install` の古い版の掃除は `npm/` の同じパッケージだけ、`deploy::remove_deployed` は `binary/<id>` の中だけ）。
+
+**組み込みの 7 件の外のエージェント（H1・issue #38・2026-09-27）**: `agent_servers` のキーが組み込みの id
+（`claude` / `codex` …）でなければ、上書きではなく**新しいエージェント**として一覧に並ぶ。
+`{"name": "DeepSeek Harness", "command": "dsh-acp", "args": [], "env": {}}`（`type` は省略可・`command` が
+あれば `custom`）。`name` が無ければ id を出す。組み込みの id では今までどおり上書きで、`name` は読まない。
+
+- **一覧は設定の写し**: `settings::SettingsGlobal` が store を差し替えるたびに `acp_client::AgentCatalog` を
+  作り直す（`settings::agent_catalog(cx)`）。acp_client は設定のスキーマを知らないので、写すのは settings
+  （`custom_agent_specs`）。プロセス全体の可変な置き場は作らない（窓・テストごとの App が自分の一覧を持つ）
+- **スレッドは相手を表示名で覚える**（DB の `threads.agent`）ので、表示名は組み込み・他の足した物と
+  重ならないようにずらす（`名前 (id)`）。引く時は表示名 → id の順（名前を後から変えても前のスレッドが
+  相手を見失わない）。`disabled_agents` / `agent_config_defaults` は id で引く
+- 組み込みと足した物を 1 つの型で扱う入口は `acp_client::Agent`（`Builtin(&AgentKind)` / `Custom`）。
+  oneshot（題名づけ）・再ログインの案内・レジストリの版の解決・ログインの確かめは組み込みだけ
+- 起動は書いたコマンドをそのまま組む（PATH で探し、無ければ書いたまま渡す＝起動の失敗として原因が見える）。
+  リモートは探索をリモートに任せる
+
+**レジストリの全件から足す（H2・2026-09-27）**: 設定の「エージェントを追加」がレジストリの全件（キャッシュの写し）を
+並べ、選ぶと `agent_servers.<レジストリの id>` に `{"type": "registry", "name": "<レジストリの名前>"}` を書く
+（**新しいキーは作らない** — `type: registry` の意味は「起動はレジストリ・env だけ足す」のままで、キーが
+組み込みでなければそのレジストリの項目を足す、になるだけ）。`name` を書いておくのは、スレッドが表示名で
+相手を覚えるので、レジストリのキャッシュの有無で名前が変わらないようにするため。
+
+- 起動の配布は **binary（このマシンの `<os>-<arch>` に完全一致）→ npx → uvx** の順で選ぶ
+  （`RegistryAgent::launch_for`）。リモートは binary を使わない（手元の配布の形なので）。npx は `npx -y
+  <pkg@0.0.0 - 版> <args>`、uvx は `uvx <package> <args>`（uv がある機械だけ。無ければ `LaunchError::NeedsUv`
+  で「uv が要る」と案内し、**necoder は uv を入れない**）、binary は下の配備
+- 組み込みのエージェントのレジストリの項目（`claude-acp` 等）は足させない（同じエージェントが別の起動で
+  二重に並ぶ）。組み込みの起動（PATH / npx の版の解決）は変えない — binary / uvx の配備は足した物だけ
+- 起動できない理由は `acp_client::LaunchError`（レジストリに無い・このマシンの配布が無い・node が要る…）で
+  型のまま UI へ渡し、設定の行と transcript の失敗の文で言葉にする（acp_client は i18n を持たない）
+- 設定の画面・追加の画面は**キャッシュを読むだけ**。取りに行くのは人が「取得する」「取り直す」を押した時と、
+  既存の起動 12 秒後の背景の後追い（1 時間スロットル）だけ
+
+**binary の配備（H2-b・`acp_client::deploy`）— 外から落とした実行ファイルを走らせるので、ここを固定する**:
+
+- **落とす元**: レジストリの JSON の `distribution.binary.<os>-<arch>.archive` の URL **だけ**。necoder は URL を
+  組み立てない・書き換えない。`curl --proto =https --proto-redir =https`（リダイレクト先も https だけ）。
+  https でない URL は落とさない。止まった転送（1 KB/s 未満が 60 秒）は諦める
+- **置き場**: `<data>/external_agents/binary/<id>/<version>/<os>-<arch>/`（`deploy::binary_root`）。id・版・キーは
+  英数字と `._-+` だけ（置き場の外を指す名前を通さない）。版ごとに別のフォルダ＝更新で走っている版を書き換えない。
+  同じ版が置いてあれば落とし直さない（キャッシュ）。新しい版を置いたら 1 つ前の版だけ残して古い版を消す
+- **検証**: レジストリに `sha256` があれば、落とした書庫の sha256（`sha2` crate・64 KB ずつ読む）と照合し、
+  違えば展開せずに捨てる（代わりの版も使わない）。無い物は照合できない — 追加の画面・設定の行に「検証の値が
+  ありません」、起動時に transcript へ 1 行、完了の印（`.necoder-deployed.json` の `verified`）に残す
+- **展開**: 置き場の隣の一時フォルダ（`.staging-<pid>-<時刻>`）に落として、先に中身の名前を確かめる（絶対パス・
+  ドライブ名・`..` を含む書庫は展開しない）→ OS の `tar`（macOS / Windows の bsdtar は zip も）、Linux の zip だけ
+  `unzip` → 起動する `cmd` が置き場の中にあるか確かめて実行の権限を付ける → 印を書いて rename で公開。
+  印の無いフォルダは「置いていない」。書庫でない実行ファイル（拡張子なし・`.exe`）は `cmd` の名前で置く
+- **いつ落とすか**: 最初の起動（送信）の時に**背景で**（`Agent::needs_deploy` → `Agent::deploy_command`）。UI
+  スレッドの解決では落とさない。先張りはしない（見ただけのタブで黙って落とさない）。落としている間は
+  transcript に 1 行。新しい版を**落とせなかった**時だけ手元の一番新しい別の版で起こし、そう知らせる
+- **外す**（設定の「外す」・2026-09-27）: `external_agents/binary/<id>` の中の **necoder が置いた物だけ**を消す
+  （`deploy::remove_deployed`: 完了の印のある `<version>/<os>-<arch>` と途中の `.staging-*` / `.download-*`。
+  `<id>` 自体が symlink なら何もしない・中の symlink はリンクだけ消えて先は触らない・知らないファイルは残す）。
+  消す直前に settings.json（user と project の層）を読み直し、同じ id がまだ書かれていれば消さない
+- 同じアプリの中で同時に初回が起きても落とすのは 1 回（プロセスの中の lock）。別のプロセスが先に同じ版を
+  置いたら、その完成品を使う
 
 ### 7.2 MCP サーバはクライアントが渡す（2026-09-10）
 
@@ -246,33 +321,39 @@ composer 下のピルは最初の送信まで空で押せない（0.1.14 の実�
 - **定期ポーリングはしない**。一覧の変化はセッション中に `ConfigOptionUpdate` で push される
 - `settings.agent_prewarm`（既定 on）で off にできる＝ idle メモリを優先する選択肢を残す
 
-### 7.4 作業面（Fleet の机）は「配置」しか持たない（2026-09-11）
+**起動してすぐ落ちたエージェントの理由（2026-09-27）**: `host::HostProcess` は長寿命の子（ACP エージェント・
+言語サーバ）の stderr を**末尾だけ**メモリに持つ（`host::StderrTail`・最後の 40 行・1 行 1000 バイト・読む側は
+最後まで読み続けて古い行から捨てる＝子は詰まらない）。以前は `Stdio::null()` で捨てていたので、すぐ落ちた
+エージェントは「ACP セッションが異常終了 … Broken pipe」としか分からなかった。`run_session_on` はセッションを
+開く前に失敗し、子が終わっていたら（最長 1.5 秒待つ）`acp_client::AgentExited`（終了コード・stderr の末尾）で
+戻り、同じ物を `AgentEvent::ExitedAtStartup` で流す。
 
-Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs`・UI-SPEC §6.1）は、リポジトリ 1 つを
-机として開き、その worktree を列で並べる面。**2026-09-11 に既定から降格**し（実機で従来のグリッドより
-取り回しが悪かった・ROADMAP 参照）、**2026-09-16（FLEET-V2 F3）で中央タブ帯ごと描画経路から外れた**。
-コードは F7 で削除する（`work_layout.allocate()` が Task 内ターミナルの ID 割当に使われているので、
-それを移してから消す）。Fleet の描画は `fleet_view.rs`（枠・系譜・下段）+ `fleet_stage.rs`（舞台 / Task
-カード / Task タブ / 系譜の帯）+ `fleet_sidebar.rs`（Task 一覧・要対応・Captain バー）+ `new_task_dialog.rs`
-（＋Task）+ `captain.rs`（Captain カード・wake）の 5 枚。以下は削除までの間の境界:
+- **stderr は画面だけ**: stderr には秘密が混ざり得る。`AgentExited` の `Display`（ログ・保存される transcript に
+  載る側）には stderr を入れず、UI は composer の上のカードにだけ出す（`Thread.startup_exit`・永続化しない）。
+  カードに出す前に、エージェントへ渡した env のうち秘密らしい名前の値と、よく知られた鍵の形を `••••` に伏せる
+  （`acp_client::mask_secrets`。取りこぼし得るので「画面だけ」と組にしている）
+- 手元のエージェントには「SSH 切断など」と言わない（セッション断のバナーと transcript の 1 行を host で出し分ける）
 
-**`work_layout` は「どこに何を置いたか」しか持たない。** 会話・PTY・バッファの寿命は既存の
-`ProjectSession`（`agent_panel` / `terminal_dock` / `tabs`）が所有し続ける。
+### 7.4 Fleet の描画の持ち場（作業面は 2026-09-20 に削除）
 
-- 型は `work_layout.rs` に閉じる（`WorkLayoutState` → repository → `RepositoryLayout` → `WorkColumn`
-  → `WorkPane` → `WorkSurface`）。**全部 serde 可能な値**で、Entity も `SpaceId` 以外の参照も持たない。
-  だから窓セッション（`PersistedState::work_layout`）へそのまま載る
-- `WorkSurface::Terminal { id }` の `id` は **necoder が採番した端末の名札**で、PTY そのものではない。
-  `TerminalDock` が `detached: BTreeMap<u64, Entity<TerminalView>>` で名札 → 実体を持ち、作業面は
-  名札しか書かない。だから**配置の復元でシェルは起動しない**（停止中は「シェルを起動」を出す）し、
-  下ドック ⇄ 作業面の往復（`detach_active` / `attach_session`）で**同じ Entity が動く**＝走っている
-  プロセスも履歴も失われない
-- 列を閉じる = `hidden` へ退避（捨てない）。同じ worktree をまた開いたらタブ配置ごと戻る
-- **同じ Entity を 1 フレームに 2 回描かない**のが配置側の責任。`reveal` は既に居る面を探してから
-  足し、`sanitize` は 1 列の中で面の重複を落とす。だから Agent 面は 1 列に 1 つで、
-  「どのスレッドを映すか」は `AgentPanel` 側の active（作業ツリーが `focus_thread` で動かす）
-- 復元時に repository ID がまだ解決していない場合があるので、`ensure_work_layout` が
-  Space ID で作った仮の机を引き継ぐ（キーの張り替え 1 箇所に閉じ込める）
+Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs` / `work_layout.rs`）は 2026-09-11 に既定から降格、
+2026-09-16（FLEET-V2 F3）で描画経路から外れ、**2026-09-20（F7）でコードごと削除した**。残したのは 2 点だけ:
+
+- **端末の名札**: Task 内ターミナル（`FleetPane::Shell { id }`）の `id` は necoder が採番する名札で、PTY そのものではない。
+  `TerminalDock` が `detached: BTreeMap<u64, Entity<TerminalView>>` で名札 → 実体を持つ。採番は
+  `chrome.next_terminal_id`（プロセス内で単調増加・閉じた番号を使い回さない）。PTY は再起動を越えないので保存しない。
+- **窓の状態の復元**: `Workspace::restore_window_state`（`persisted_state` の対）。Fleet / Chat のどちらで閉じたか・
+  左ドック幅だけを戻す。保存形式から `work_layout` / `fleet_view` は外した（旧 payload の余分なキーは serde が無視する）。
+
+Fleet の描画は `fleet_view.rs`（枠・系譜ヘッダ・編隊図の 4 表示・下段）+ `fleet_stage.rs`（舞台 / Task カード /
+スレッドタブ行 / 見出しのトグル / サイドペイン / ブリッジ）+ `fleet_sidebar.rs`（Task 一覧・要対応・Captain バー）+ `new_task_dialog.rs`
+（＋Task）+ `captain.rs`（wake・任命の面・采配ログ）の 5 枚。**同じ Entity を 1 フレームに 2 回描かない**のは舞台側の責任
+（1 Task = 1 カード・会話ペインは 1 枚・`AgentPanel` の自前タブ行は `sync_embedded_panels` が Fleet 中だけ畳む）。
+周りに parity の部品（2026-09-26〜27）: `task_creation.rs`（作成中の行・取り消し・やり直し・O20。＋Task・fan-out・
+Captain の分解案の承認が同じ流れを通る）・`captain_proposals.rs`（分解案のカードと承認・FLEET-V2 §5.5）・
+`task_details.rs`（詳細…・O21）・`cleanup.rs`（片付けの画面・O22）・`review_controller.rs`（変更レビュー・O6）。
+「変更」のサイドペインは session に 1 枚の `review_view::ReviewView` をそのまま描く（Editor のタブにも同じ Entity を
+出すが、Fleet と Editor は同じフレームに描かない）。
 
 ### 7.5 1 worktree に ACP は何本でも（Fleet グリッドの既定・2026-09-11）
 
@@ -283,7 +364,7 @@ Fleet 中央の既定（系譜グラフ＋セルのグリッド・UI-SPEC §6.1�
 `fleet_agents: Vec<Entity<AgentPanel>>` が全パネル（先頭 = その worktree を開いたときの初期パネル）を
 持ち、`agent_panel` は**いま操作している 1 枚**を指すだけの別名。`FleetPane::Agent { space, panel }` /
 `Shell { space, id }` はセル側の見え方で、**セルを閉じても実体は消えない**（会話も PTY も走り続け、
-herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さない。端末は §7.4 と同じ名札方式
+herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さない。端末は §7.4 の名札方式
 （`TerminalDock` が `id` → Entity を持つ）。
 
 **② 横断で読むときは `ProjectSession::agent_statuses` を通す。**
@@ -343,7 +424,16 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   「再接続」チップを出す。**SSH セッションに乗るプロセス（ACP/LSP/PTY）は自動再接続の外**: ssh の子が
   落ちると stdout が EOF になり、そのプロセスは消える。ACP は `acp_client` が EOF（`is_incoming_transport_closed` /
   待機中は `incoming_closed`）を見てセッションを畳み（`AgentEvent::SessionLost`）、次の送信で立ち上げ直す。
+  待機中（ターンとターンの間）も `session/update` を読み、ターン中と同じ `handle_session_message` で捌く
+  （コマンド一覧は `session/new` 直後、会話名はターン終了の数秒後に届く。読まずにいると次の prompt まで
+  UI に出ない・O2）。`session/load` の再生は本文を捨て、状態（コマンド一覧・会話名・目標）だけ流す。
   会話は `session/load`（エージェントが `loadSession` を広告するとき・id は `storage.thread_sessions`）で引き継ぐ。
+  例外はエージェント側の過去の会話を開いた時（O15・`SessionPreferences::replay_history`）で、再生を
+  `acp_client::history::ReplayLog` が発話・本文・ツールへ畳み、load 成功後に `AgentEvent::HistoryReplayed` で 1 回だけ
+  渡す（live のイベントとしては流さない＝二重に載らない）。一覧（`session/list`）は `history::list_sessions_on` が
+  **一覧のためだけにエージェントを 1 本**起こして読む（`session/new` も prompt もしない）。どちらも `Host` 越しなので、
+  SSH のプロジェクトではリモートのエージェント（＝リモートのアカウントの会話）に訊く。「新しいセッションで続ける」で
+  忘れた会話 id・引き継げずに替わった id は `storage.thread_past_sessions` に残し、履歴の重複除けに使う。
   LSP/PTY の同種の再 spawn は未着手（ROADMAP M9 残件）。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
   GUI 起動の ssh には TTY が無いので、パスワード / passphrase / host key 確認だけは
@@ -353,6 +443,17 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
 - server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
 - wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、
   stream/event/cancel は watch・PTY の protocol 化と同時に追加する。
+- 途中で用が無くなる読み取り専用の command（変更レビューの `git diff` 等・`--no-optional-locks`）は
+  `Host::run_command_cancellable(spec, cancel)`（2026-09-27・R02）: local は子の出力を待つ間に印を見て、
+  立ったら子を止める。remote は 1 往復の途中で止める口が無いので、既定の実装が最後まで走らせてから結果を
+  捨てる（呼ぶ側は次の区切りで止まる。stream/cancel の protocol 化と一緒に直す）。
+- 人が打ったシェルコマンド（エージェントパネルの `!`・#37）は `Host::run_user_command(spec, cancel, output_limit)`
+  （2026-09-27）: `run_command_cancellable` と違い**副作用のある command 用**で、止めるのは人の操作だけ。出力は
+  stream ごとに頭と尻を上限まで持ち、間は読み捨てる（子は止めない）。local は子を自分のプロセスグループで起こし、
+  止める時はグループごと SIGTERM → 2 秒で SIGKILL。`pre_exec` で**シグナルのマスクと無視を既定へ戻す** —
+  背景の executor のスレッド（macOS は GCD）は非同期のシグナルをブロックしていて、std の `Command` はマスクを
+  子へ継ぐ（戻さないと子に SIGTERM が届かず、止めるたびに SIGKILL の猶予を待つ）。remote は既定の実装
+  （1 往復で最後まで走らせて丸める・`can_stop_user_command` = false＝呼ぶ側は待たずに「中断」として畳む）。
 - local implementation を先に `Host` へ移し、既存機能の回帰 test 後に SSH implementation を挿す。
 - security/performance/reliability の受入条件は
   [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) を正とする。

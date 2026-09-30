@@ -5,6 +5,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let Some(slot) = self.active_slot() else {
             return div()
+                .id("explorer-dock")
                 .w(px(DOCK_WIDTH))
                 .h_full()
                 .flex_none()
@@ -19,6 +20,13 @@ impl Workspace {
             ExplorerView::Icons => self.render_icons(slot, cx),
         };
         div()
+            .id("explorer-dock")
+            // エクスプローラを本物のキーの宛先にする（⌘Z = ファイル操作の取り消し・H30）。
+            // keymap の `Explorer` コンテキストはここにフォーカスがある時だけ効くので、
+            // エディタの ⌘Z（editor::Undo）とはぶつからない。
+            .key_context("Explorer")
+            .track_focus(&self.chrome.explorer_focus)
+            .on_key_down(cx.listener(Self::on_explorer_key_down))
             .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
@@ -32,6 +40,17 @@ impl Workspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, _cx| this.agent_active = false),
+            )
+            // クリックしたらフォーカスもエクスプローラへ。押した瞬間ではなく click（離した時）で
+            // 取るのは、行を composer へドラッグした時にフォーカスを奪わないため（ドラッグが成立すると
+            // gpui は click を捨てる）。ファイルを開く click は行の側で止める（フォーカスはエディタへ）。
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.focus_explorer(window, cx)),
+            )
+            // 右クリックも同じ（メニューから「ゴミ箱に入れる」→ ⌘Z で戻せるように）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| this.focus_explorer(window, cx)),
             )
             .child(self.render_explorer_header(slot, cx))
             .child(body)
@@ -64,15 +83,12 @@ impl Workspace {
             )
     }
 
-    /// ツリー表示（縦。従来）。行 = chevron + アイコン + 名前。
-    /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。
-    pub(crate) fn render_naming_row(
-        &self,
-        depth: usize,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。見た目だけを持ち、
+    /// キーの受け口（`naming.focus`）はツリーの外枠が持つ（[`Self::render_tree`]）。行は見えている
+    /// 範囲でしか描かれないので、行に持たせるとスクロールで入力行が外れた瞬間にフォーカスを失う。
+    pub(crate) fn render_naming_row(&self, depth: usize, cx: &App) -> gpui::AnyElement {
         let Some(naming) = self.explorer_naming(cx) else {
-            return div().into_any_element();
+            return div().h(ui::row_height(cx, ROW_HEIGHT)).into_any_element();
         };
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -81,16 +97,13 @@ impl Workspace {
             _ => " ",
         };
         let display: SharedString = SharedString::from(naming.value.clone());
-        let focus = naming.focus.clone();
         div()
             .flex()
             .items_center()
             .gap(px(4.))
-            .h(px(ROW_HEIGHT))
+            .h(ui::row_height(cx, ROW_HEIGHT))
             .pl(px(8. + depth as f32 * INDENT))
             .pr(px(8.))
-            .track_focus(&focus)
-            .on_key_down(cx.listener(Self::on_naming_key_down))
             .child(
                 div()
                     .flex_none()
@@ -121,20 +134,29 @@ impl Workspace {
 
     /// D&D の受け面を付ける（エクスプローラ内の移動 = [`DraggedFile`] / Finder からの追加 =
     /// [`ExternalPaths`]・**コピー**）。どちらも同じ `target_dir` に落ちる。`strong` = フォルダ
-    /// 行/セルの面（識別色 16%）・false = 余白（6%）。ファイル操作は local のみ（M10）なので
-    /// 呼び出し側で local をゲートする。
+    /// 行/セルの面（識別色 16%）・false = 余白（6%）。ファイル操作は local のみ（M10）なので、
+    /// 接続先（`is_local` = false）では Finder からの追加だけを受けて**アップロード**にする（O37）。
     fn drop_into<E: InteractiveElement>(
         element: E,
         target_dir: PathBuf,
         color: Hsla,
         strong: bool,
+        is_local: bool,
         cx: &mut Context<Self>,
     ) -> E {
         let alpha = if strong { 0.16 } else { 0.06 };
+        let element =
+            element.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(color.alpha(alpha)));
+        if !is_local {
+            return element.on_drop(cx.listener(
+                move |this, dropped: &ExternalPaths, _window, cx| {
+                    this.upload_paths(dropped.paths().to_vec(), target_dir.clone(), cx);
+                },
+            ));
+        }
         let move_target = target_dir.clone();
         element
             .drag_over::<DraggedFile>(move |style, _, _, _| style.bg(color.alpha(alpha)))
-            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(color.alpha(alpha)))
             .on_drop(cx.listener(move |this, dragged: &DraggedFile, window, cx| {
                 this.move_entry_by_drop(dragged.source.clone(), move_target.clone(), window, cx);
             }))
@@ -145,62 +167,95 @@ impl Workspace {
             )
     }
 
+    /// ツリー表示（縦）。行 = chevron + アイコン + 名前。
+    ///
+    /// **行は仮想化する**（D25・`uniform_list`）: 見えている範囲の行だけを組み立てるので、
+    /// 何万行のフォルダを開いても 1 フレームの仕事は画面の行数ぶんで済む。行の並び
+    /// （命名の入力行を差し込んだ後）だけを先に数え、中身は描く瞬間に組む。
     pub(crate) fn render_tree(
         &self,
         slot: &ProjectSlot,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let color = slot.color;
+        let root = slot.worktree.root().to_path_buf();
+        // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
+        // （親がルートなら先頭）に入力行を挿す。
+        let naming = self.explorer_naming(cx);
+        let display_rows = explorer::tree_display_rows(
+            &slot.explorer.rows,
+            naming.as_ref().map(ExplorerNaming::placement),
+            &root,
+        );
+        let widest_row = explorer::widest_display_row(&slot.explorer.rows, &display_rows);
+        let row_count = display_rows.len();
+        let list = gpui::uniform_list(
+            "explorer-tree",
+            row_count,
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
+                this.render_tree_range(&display_rows, range, cx)
+            }),
+        )
+        // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
+        // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
+        // 幅は見えていない行も含めて最も長くなりそうな行で測る（`widest_display_row`）。
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest_row)
+        .track_scroll(&self.chrome.explorer_scroll)
+        .size_full();
+        let is_local = !slot.worktree.is_remote();
+        div()
+            // min_h_0 は flex_col 親の中で縦スクロールを成立させるため（あふれ許可）。
+            .id("explorer-tree-area")
+            .flex_1()
+            .min_h_0()
+            // 命名の入力のキーはここで受ける（入力行がスクロールで描かれなくなっても外れない）。
+            .when_some(naming.map(|naming| naming.focus), |element, focus| {
+                element
+                    .track_focus(&focus)
+                    .on_key_down(cx.listener(Self::on_naming_key_down))
+            })
+            // D&D の受け（Finder 風・M10 / 接続先はアップロード・O37）: 行の外（余白）へ落とす =
+            // ルート直下へ。行側のドロップが先に消費する（gpui の on_drop は最内から bubble・消費で停止）。
+            .map(|element| Self::drop_into(element, root.clone(), color, false, is_local, cx))
+            .child(list)
+            .into_any_element()
+    }
+
+    /// 仮想化したツリーの見えている範囲の行（`uniform_list` が描く直前に呼ぶ）。
+    /// 返す要素の数は `range` と必ず揃える（ずれると後ろの行が 1 つずつ上へ詰まって見える）。
+    fn render_tree_range(
+        &self,
+        display_rows: &[explorer::TreeDisplayRow],
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(slot) = self.active_slot() else {
+            return range.map(|_| div().into_any_element()).collect();
+        };
         let theme = self.theme.clone();
         let color = slot.color;
         let selected = slot.explorer.selected.clone();
         let git_status = &self.repository.status;
         let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
-                                                       // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
-                                                       // （親がルートなら先頭）に入力行を挿す。
-        let naming = self.explorer_naming(cx);
-        let naming_kind = naming.as_ref().map(|naming| naming.kind);
-        let naming_parent = naming.as_ref().map(|naming| naming.parent.clone());
-        let naming_target = naming.as_ref().and_then(|naming| naming.target.clone());
-        let naming_at_root = naming_kind.is_some()
-            && naming_kind != Some(NamingKind::Rename)
-            && naming_parent.as_deref() == Some(root.as_path());
-        let mut elements: Vec<gpui::AnyElement> = Vec::new();
-        if naming_at_root {
-            elements.push(self.render_naming_row(0, cx));
-        }
-        for (index, row) in slot.explorer.rows.iter().enumerate() {
-            if naming_kind == Some(NamingKind::Rename) && naming_target.as_ref() == Some(&row.path)
-            {
-                elements.push(self.render_naming_row(row.depth, cx));
-                continue;
-            }
-            elements.push(self.render_tree_row(
-                slot, index, row, &theme, color, &selected, git_status, &root, cx,
-            ));
-            if naming_kind.is_some()
-                && naming_kind != Some(NamingKind::Rename)
-                && row.is_dir
-                && naming_parent.as_ref() == Some(&row.path)
-            {
-                elements.push(self.render_naming_row(row.depth + 1, cx));
-            }
-        }
-        let is_local = !slot.worktree.is_remote();
-        div()
-            // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
-            // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
-            // min_h_0 は flex_col 親の中で縦スクロールを成立させるため（あふれ許可）。
-            .id("explorer-tree")
-            .flex_1()
-            .min_h_0()
-            .overflow_scroll()
-            // D&D の受け（Finder 風・M10 local のみ）: 行の外（余白）へ落とす = ルート直下へ。
-            // 行側のドロップが先に消費する（gpui の on_drop は最内から bubble・消費で停止）。
-            .when(is_local, |element| {
-                Self::drop_into(element, root.clone(), color, false, cx)
+        range
+            .map(|display_index| match display_rows.get(display_index) {
+                Some(explorer::TreeDisplayRow::Entry(index)) => slot
+                    .explorer
+                    .rows
+                    .get(*index)
+                    .map(|row| {
+                        self.render_tree_row(
+                            slot, *index, row, &theme, color, &selected, git_status, &root, cx,
+                        )
+                    })
+                    .unwrap_or_else(|| div().h(ui::row_height(cx, ROW_HEIGHT)).into_any_element()),
+                Some(explorer::TreeDisplayRow::Naming { depth }) => {
+                    self.render_naming_row(*depth, cx)
+                }
+                None => div().h(ui::row_height(cx, ROW_HEIGHT)).into_any_element(),
             })
-            .children(elements)
-            .into_any_element()
+            .collect()
     }
 
     /// ツリーの 1 行（従来 render_tree のクロージャ本体を関数化・M10 ファイル操作で入力行と共存させるため）。
@@ -220,6 +275,7 @@ impl Workspace {
         let theme = theme.clone();
         let selected = selected.clone();
         let root = root.to_path_buf();
+        let is_local = !slot.worktree.is_remote();
         {
             let path = row.path.clone();
             let is_dir = row.is_dir;
@@ -256,7 +312,7 @@ impl Workspace {
                 .min_w_full()
                 .items_center()
                 .gap(px(4.))
-                .h(px(ROW_HEIGHT))
+                .h(ui::row_height(cx, ROW_HEIGHT))
                 .pr_2()
                 .pl(px(6.0 + row.depth as f32 * INDENT))
                 .text_size(px(12.5))
@@ -283,9 +339,9 @@ impl Workspace {
                     },
                     |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
                 )
-                // D&D の受け（local のみ）: フォルダ行 = その中へ（濃い面）・ファイル行 =
-                // 同じフォルダへ（Finder のリスト表示と同じ・淡い面）。
-                .when(!slot.worktree.is_remote(), |element| {
+                // D&D の受け（接続先はアップロードだけ・O37）: フォルダ行 = その中へ（濃い面）・
+                // ファイル行 = 同じフォルダへ（Finder のリスト表示と同じ・淡い面）。
+                .map(|element| {
                     let drop_dir = if is_dir {
                         row.path.clone()
                     } else {
@@ -294,7 +350,7 @@ impl Workspace {
                             .map(Path::to_path_buf)
                             .unwrap_or_else(|| root.clone())
                     };
-                    Self::drop_into(element, drop_dir, color, is_dir, cx)
+                    Self::drop_into(element, drop_dir, color, is_dir, is_local, cx)
                 })
                 .child(
                     div()
@@ -346,11 +402,18 @@ impl Workspace {
                 // click（押して離す）で開く/開閉。on_mouse_down だと D&D の**つかんだ瞬間**にも
                 // 発火してしまう（Finder 風移動の癖になる）。gpui はドラッグが成立（2px）すると
                 // クリック合成を破棄するので、on_click ならドラッグ時に誤発火しない。
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     if is_dir {
                         this.toggle_dir(path.clone(), cx);
                     } else {
-                        this.open_file(path.clone(), window, cx);
+                        // 1 回クリック = プレビュータブ・ダブルクリック = 普通のタブ（O26）。
+                        if event.click_count() >= 2 {
+                            this.open_file(path.clone(), window, cx);
+                        } else {
+                            this.open_file_preview(path.clone(), window, cx);
+                        }
+                        // フォーカスはエディタへ（エクスプローラ枠の click で取り返さない）。
+                        cx.stop_propagation();
                     }
                 }))
                 .on_mouse_down(
@@ -392,10 +455,8 @@ impl Workspace {
             .content_start()
             .gap(px(2.))
             .p(px(6.))
-            // D&D の受け（Finder 風・local のみ）: セルの外（余白）へ落とす = 現在フォルダへ。
-            .when(is_local, |element| {
-                Self::drop_into(element, dir.clone(), color, false, cx)
-            })
+            // D&D の受け（Finder 風・接続先はアップロード）: セルの外（余白）へ落とす = 現在フォルダへ。
+            .map(|element| Self::drop_into(element, dir.clone(), color, false, is_local, cx))
             .children(entries.into_iter().enumerate().map(|(index, entry)| {
                 let is_dir = entry.is_dir;
                 let is_ignored = entry.ignored;
@@ -419,8 +480,8 @@ impl Workspace {
                         |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
                     )
                     // フォルダセル = その中へ（濃い面）。ファイルセルは背景（現在フォルダ）に任せる。
-                    .when(is_dir && is_local, |element| {
-                        Self::drop_into(element, entry.path.clone(), color, true, cx)
+                    .when(is_dir, |element| {
+                        Self::drop_into(element, entry.path.clone(), color, true, is_local, cx)
                     })
                     .w(px(84.))
                     .flex()
@@ -453,11 +514,15 @@ impl Workspace {
                             .child(SharedString::from(entry.name.clone())),
                     )
                     // click で開く/中に入る（on_click = ドラッグ成立時は発火しない・ツリーと同じ理由）。
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if is_dir {
                             this.enter_dir(path.clone(), cx);
-                        } else {
+                        } else if event.click_count() >= 2 {
                             this.open_file(path.clone(), window, cx);
+                            cx.stop_propagation(); // フォーカスはエディタへ
+                        } else {
+                            this.open_file_preview(path.clone(), window, cx);
+                            cx.stop_propagation(); // フォーカスはエディタへ
                         }
                     }))
                     .on_mouse_down(
@@ -526,9 +591,9 @@ impl Workspace {
                             .overflow_hidden()
                             .border_r_1()
                             .border_color(theme.border)
-                            // D&D の受け（Finder 風・local のみ）: 行の外（カラム余白）へ落とす = この段のフォルダへ。
-                            .when(is_local, |element| {
-                                Self::drop_into(element, dir.clone(), color, false, cx)
+                            // D&D の受け（Finder 風・接続先はアップロード）: 行の外（カラム余白）へ落とす = この段のフォルダへ。
+                            .map(|element| {
+                                Self::drop_into(element, dir.clone(), color, false, is_local, cx)
                             })
                             .children(entries.into_iter().enumerate().map(|(row_index, entry)| {
                                 let is_dir = entry.is_dir;
@@ -553,19 +618,20 @@ impl Workspace {
                                         |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
                                     )
                                     // フォルダ行 = その中へ（濃い面）。ファイル行はカラム背景（この段）に任せる。
-                                    .when(is_dir && is_local, |element| {
+                                    .when(is_dir, |element| {
                                         Self::drop_into(
                                             element,
                                             entry.path.clone(),
                                             color,
                                             true,
+                                            is_local,
                                             cx,
                                         )
                                     })
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
-                                    .h(px(ROW_HEIGHT))
+                                    .h(ui::row_height(cx, ROW_HEIGHT))
                                     .px(px(7.))
                                     .text_size(px(12.))
                                     .text_color(if on_path { theme.fg0 } else { theme.fg1 })
@@ -598,11 +664,15 @@ impl Workspace {
                                     })
                                     // click で開く/中に入る（on_click = ドラッグ成立時は発火しない・ツリーと同じ理由）。
                                     .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
+                                        move |this, event: &ClickEvent, window, cx| {
                                             if is_dir {
                                                 this.enter_dir(path.clone(), cx);
-                                            } else {
+                                            } else if event.click_count() >= 2 {
                                                 this.open_file(path.clone(), window, cx);
+                                                cx.stop_propagation(); // フォーカスはエディタへ
+                                            } else {
+                                                this.open_file_preview(path.clone(), window, cx);
+                                                cx.stop_propagation(); // フォーカスはエディタへ
                                             }
                                         },
                                     ))
@@ -971,6 +1041,23 @@ impl Workspace {
                     }),
                 ),
             );
+            // フォルダ内を検索（D18）: プロジェクトの中のフォルダだけ（検索は root 配下を走る。
+            // root の外へ辿った「フォルダブラウズ」では出さない）。
+            let in_project = self
+                .active_worktree()
+                .is_some_and(|worktree| path.starts_with(worktree.root()));
+            if in_project {
+                let search_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-search-folder", i18n::t!("explorer.ctx_search_folder"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_folder_search(search_path.clone(), window, cx)
+                            }),
+                        ),
+                );
+            }
         } else {
             let open_path = path.clone();
             menu_box = menu_box.child(
@@ -982,6 +1069,58 @@ impl Workspace {
                     }),
                 ),
             );
+            // HTML は内蔵の配信で Web タブにも開ける（Design Mode が使える・手元のファイルだけ）。
+            if is_local
+                && !self.chat_mode()
+                && lang::language_for_path(&path) == Some(lang::LanguageId::Html)
+            {
+                let web_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-open-web-tab", i18n::t!("explorer.ctx_open_web_tab")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.hide_context_menu(cx);
+                            this.open_static_web_tab(web_path.clone(), window, cx);
+                        }),
+                    ),
+                );
+            }
+        }
+        // ── git（D16）: 変更のあるファイルだけ。ステージは remote でも効く（git は host 側で動く）。
+        // 破棄は取り消せないので確認を挟む。未追跡・add しただけのファイルは git に戻す先が無く
+        // ゴミ箱へ入れる（local のみ）ので、remote では HEAD へ戻せるもの（変更・削除）だけに出す。
+        // 競合中のファイルは破棄を出さない（どちらを残すかは人が決める・ステージ = 解決済みの印）。
+        let change = if is_dir {
+            None
+        } else {
+            self.repository.status.get(&path).copied()
+        };
+        if let Some(status) = change {
+            let stage_path = path.clone();
+            menu_box = menu_box.child(
+                item("ctx-stage", i18n::t!("explorer.ctx_stage")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.stage_from_explorer(stage_path.clone(), cx)
+                    }),
+                ),
+            );
+            let discardable = match status {
+                StatusKind::Conflicted => false,
+                StatusKind::Modified | StatusKind::Deleted => true,
+                StatusKind::Added | StatusKind::Untracked => is_local,
+            };
+            if discardable {
+                let discard_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-discard", i18n::t!("explorer.ctx_discard")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.ask_discard(discard_path.clone(), status, cx)
+                        }),
+                    ),
+                );
+            }
         }
         // ── 既定アプリで開く / Finder で表示（ローカルのみ・シングルクリックで代替できない操作） ──
         if is_local {
@@ -1003,6 +1142,35 @@ impl Workspace {
                     }),
                 ),
             );
+        }
+        // ── 接続先とのファイルの受け渡し（O37・remote のみ）: 手元へ保存 / 手元から送る。
+        // 送る先はフォルダならその中・ファイルなら同じフォルダ（ルート直下へはファイルの行から）。
+        if !is_local {
+            let download_path = path.clone();
+            menu_box = menu_box.child(
+                item("ctx-download", i18n::t!("explorer.ctx_download")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.download_entry(download_path.clone(), cx)
+                    }),
+                ),
+            );
+            let (upload_dir, label) = if is_dir {
+                (Some(path.clone()), i18n::t!("explorer.ctx_upload_into"))
+            } else {
+                (
+                    path.parent().map(Path::to_path_buf),
+                    i18n::t!("explorer.ctx_upload_beside"),
+                )
+            };
+            if let Some(upload_dir) = upload_dir {
+                menu_box = menu_box.child(item("ctx-upload", label).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.upload_via_dialog(upload_dir.clone(), cx)
+                    }),
+                ));
+            }
         }
         // ── ファイル操作（M10・local のみ） ──
         if is_local {
@@ -1074,6 +1242,133 @@ impl Workspace {
                     cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
                 )
                 .child(menu_box)
+                .into_any_element(),
+        )
+    }
+
+    /// 「変更を破棄」の確認（D16）。取り消せない操作なので押した後に一度だけ聞く。
+    /// 既定の強調は安全側（キャンセル）に置く＝勢いで押しても消えない。
+    pub(crate) fn render_explorer_discard_confirm(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let confirm = self.explorer.read(cx).discard_confirm()?;
+        let theme = self.theme.clone();
+        let name = confirm
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| confirm.path.display().to_string());
+        let relative = self
+            .active_worktree()
+            .and_then(|worktree| confirm.path.strip_prefix(worktree.root()).ok())
+            .map(|relative| relative.display().to_string())
+            .unwrap_or_else(|| confirm.path.display().to_string());
+        let body = match confirm.status {
+            StatusKind::Untracked | StatusKind::Added => {
+                i18n::t!("explorer.discard_body_untracked")
+            }
+            _ => i18n::t!("explorer.discard_body"),
+        };
+        let button = |element_id: &'static str, label: String, primary: bool| {
+            div()
+                .id(element_id)
+                .px(px(12.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(if primary { theme.fg2 } else { theme.border })
+                .when(primary, |element| element.bg(theme.bg3))
+                .text_size(px(12.))
+                .text_color(if primary { theme.fg0 } else { theme.fg1 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(label)
+        };
+        let dialog = div()
+            .w(px(440.))
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(10.))
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(12.),
+                gpui::hsla(0., 0., 0., 0.5),
+            )
+            .blur_radius(px(32.))])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(
+                        i18n::t!("explorer.discard_title", "name" => name),
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(body)),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_family(ui::code_font(cx))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(relative)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.))
+                    .pt(px(4.))
+                    .child(
+                        button(
+                            "explorer-discard-confirm",
+                            i18n::t!("explorer.discard_confirm"),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
+                        ),
+                    )
+                    .child(
+                        button(
+                            "explorer-discard-cancel",
+                            i18n::t!("explorer.discard_cancel"),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.cancel_discard(cx)),
+                        ),
+                    ),
+            );
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(140.))
+                .bg(gpui::hsla(0., 0., 0., 0.4))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.cancel_discard(cx)),
+                )
+                .child(dialog)
                 .into_any_element(),
         )
     }

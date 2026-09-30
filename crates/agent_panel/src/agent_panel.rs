@@ -24,14 +24,23 @@ use acp_client::{
     AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
     PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
+mod auto_prompt;
 mod chat;
+mod history;
 mod idle;
+mod recipes;
 mod remote;
 mod search;
+mod seat;
 mod shell;
 pub mod sound;
+pub mod usage;
 
-pub use chat::ChatRow;
+pub use chat::{snippet_around, ChatRow};
+pub use history::fresh_agent_sessions;
+pub use seat::{seat_permission_mode, SeatPolicy};
+// 履歴ビュー（O15）が一覧の会話を扱うための再輸出（workspace は acp_client の型を直接持たない）。
+pub use acp_client::history::{AgentSessionSummary, SessionListing};
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
 
@@ -146,11 +155,13 @@ struct SelectorChoice {
 }
 
 /// transcript の 1 エントリ（VSCode Claude Code 拡張のトランスクリプトを踏襲）。
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Entry {
     /// ユーザー発話（bg2 箱・左縁スレッド色）。
     User(SharedString),
-    /// 台帳から受け取ったイベント。人間の発話とは別に保存・描画する。
-    LedgerEvent(SharedString),
+    /// necoder の知らせ（人ではなく necoder が書いて送った発話・`auto_prompt.rs`）。エージェントには
+    /// user ターンとして届くが、人の発話とは別に保存し、灰色のカードで描く。
+    AutoPrompt(auto_prompt::AutoPrompt),
     /// 思考（常時展開・斜体）。
     Thinking(SharedString),
     /// ステップ（⏺ ツール名 + 引数 → ⎿ 結果）。Edit は before/after 差分、Bash 等は出力を持てる。
@@ -165,22 +176,62 @@ enum Entry {
         result_lines: usize,
         /// ファイル編集の before/after（Edit 系。空なら差分表示なし）。
         diffs: Vec<PermissionDiff>,
-    },
-    /// composer の `!` で実行したシェルコマンド（エージェントを介さない・#37）。
-    Shell {
-        /// 停止ボタンの宛先（実行中だけ Some。終わったもの・復元したものは None）。
-        run: Option<u64>,
-        command: SharedString,
-        /// 丸めた出力（`cap_output`。実行中は None）。
-        output: Option<SharedString>,
-        /// 丸める前の行数（Step の `result_lines` と同じ意味）。
-        output_lines: usize,
-        status: shell::ShellStatus,
+        /// サブエージェントの手順なら、親（Task / Agent ツール）の Step の `id`（O17）。
+        /// transcript には親の下に畳んで出す（それ自体の行は描かない）。親が transcript に居る時だけ
+        /// 付ける（居なければ普通の手順として出す）。復元した Step は id が無いので付かない。
+        parent: Option<SharedString>,
     },
     /// エージェントの本文（結論など）。
     Agent(SharedString),
     /// checkpoint（この時点へ戻せる・M12-2）。承認直前の変更前内容が blob に入っている。
     Checkpoint { id: i64, label: SharedString },
+    /// 会話の区切りの知らせ（O15）: 「以前の N 件は省略」（再生した履歴の頭）・「新しいセッションで
+    /// 続けています」。会話の本文ではない＝全文検索・引き継ぎの前置き・digest に入れない。
+    Notice(SharedString),
+    /// composer の先頭の `!` で人が走らせたシェルコマンド（`! <コマンド>` → `⎿ 出力`・#37・`shell.rs`）。
+    /// モデルのターンではない。結果は次のプロンプトに添える。
+    Shell(Box<shell::ShellRun>),
+}
+
+/// message rail（O17）に印を出すのは、ユーザーの発話がこの数以上ある時だけ（少なければ一覧で足りる）。
+const MESSAGE_RAIL_MIN_PROMPTS: usize = 3;
+
+/// message rail の印 1 つ（ユーザーの発話 1 つ）。
+#[derive(Debug, Clone, PartialEq)]
+struct RailMark {
+    /// transcript のエントリの添字（押すとここへ動く）。
+    entry: usize,
+    /// rail の上端からの位置（0..=1・エントリの並びで割る。高さは測らない＝近似）。
+    position: f32,
+    /// いま読んでいる指示（ビューポートの先頭にかかっている・直前の発話）。
+    current: bool,
+}
+
+/// message rail の印（O17）。ユーザーの発話が [`MESSAGE_RAIL_MIN_PROMPTS`] 未満なら空。
+fn message_rail_marks(entries: &[Entry], top_item: usize) -> Vec<RailMark> {
+    let prompts: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry, Entry::User(_)))
+        .map(|(index, _)| index)
+        .collect();
+    if prompts.len() < MESSAGE_RAIL_MIN_PROMPTS {
+        return Vec::new();
+    }
+    let last = entries.len().saturating_sub(1).max(1) as f32;
+    let current = prompts
+        .iter()
+        .rev()
+        .find(|entry| **entry <= top_item)
+        .copied();
+    prompts
+        .into_iter()
+        .map(|entry| RailMark {
+            entry,
+            position: entry as f32 / last,
+            current: Some(entry) == current,
+        })
+        .collect()
 }
 
 /// 現在ビューポートの先頭より前にある、もっとも近いユーザー発話を返す。
@@ -356,6 +407,10 @@ fn content_cache_key(text: &str) -> ContentCacheKey {
     }
 }
 
+// 各描画キャッシュは件数に加えて入力本文の合計も制限する。解析木・レイアウトの
+// ヒープ実測値ではないが、ストリームの長い接頭辞を数百世代抱える増幅を防ぐ。
+const TRANSCRIPT_CACHE_SOURCE_BYTES: usize = 512 * 1024;
+
 /// CommonMark の解析結果を本文 hash で再利用する小さな LRU。ストリーム途中の断片も上限で
 /// 古いものから捨てるため、長いターンでもキャッシュが無制限に増えない。
 #[derive(Default)]
@@ -375,7 +430,13 @@ impl MarkdownBlockCache {
             }
         }
         let blocks = Arc::new(markdown::parse(text));
-        while self.order.len() >= Self::CAPACITY {
+        if text.len() > TRANSCRIPT_CACHE_SOURCE_BYTES {
+            return blocks;
+        }
+        while self.order.len() >= Self::CAPACITY
+            || self.order.iter().map(|key| key.len).sum::<usize>() + text.len()
+                > TRANSCRIPT_CACHE_SOURCE_BYTES
+        {
             if let Some(expired) = self.order.pop_front() {
                 self.blocks.remove(&expired);
             }
@@ -566,7 +627,20 @@ impl SyntaxHighlightCache {
             .get_mut(&language)
             .map(|highlighter| highlighter.highlight(text))
             .unwrap_or_default();
-        while self.order.len() >= Self::CAPACITY {
+        let span_bytes = spans.capacity() * std::mem::size_of::<lang::HighlightSpan>();
+        const SPAN_BYTES: usize = 2 * 1024 * 1024;
+        if span_bytes > SPAN_BYTES {
+            return spans;
+        }
+        while self.order.len() >= Self::CAPACITY
+            || self
+                .spans
+                .values()
+                .map(|spans| spans.capacity() * std::mem::size_of::<lang::HighlightSpan>())
+                .sum::<usize>()
+                + span_bytes
+                > SPAN_BYTES
+        {
             if let Some(expired) = self.order.pop_front() {
                 self.spans.remove(&expired);
             }
@@ -651,14 +725,111 @@ struct PendingElicitation {
     /// 選択式フィールド群（acp_client が非対応フォームを弾いた後のもの）。
     fields: Vec<ElicitationField>,
     /// 各フィールドの現在の選択（field.name → 選んだ値の並び）。単一選択は要素 1 つ、複数選択は
-    /// 押すたびに増減する。**全フィールドが 1 つ以上選ばれる**と「これで回答」が有効になる。
+    /// 押すたびに増減する。**全フィールドが答え済み**（選んだ・または自由入力に書いた）になると
+    /// 「これで回答」が有効になる。
     selections: std::collections::BTreeMap<String, Vec<String>>,
+    /// 自由入力欄（O17）: field.name → 入力欄。Other 欄の付いた質問だけ持つ。
+    custom_inputs: std::collections::BTreeMap<String, Entity<EditorView>>,
+    /// 自由入力の写し（field.name → 今の文字）。描画と「答えたか」の判定はこちらを読む。
+    custom_texts: std::collections::BTreeMap<String, String>,
     /// 回答チャネル。`Some(選択群)`=Accept / `None`=Decline。drop でも Decline。
     respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+    /// 質問が来た時刻（要対応の並び = 待ちの長い順・O12）。
+    since: std::time::Instant,
+    /// 自由入力欄の購読（写しと Enter での確定）。質問と一緒に消える。
+    _subscriptions: Vec<gpui::Subscription>,
+}
+
+impl PendingElicitation {
+    /// 質問カードの状態を作る。Other 欄の付いた質問には自由入力欄（O17）を用意し、入力の写しと
+    /// Enter での確定を購読する。`thread_id` は購読から質問のスレッドを引き直す鍵（添字はずれる）。
+    fn new(
+        thread_id: &str,
+        message: String,
+        fields: Vec<ElicitationField>,
+        respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+        theme: &Theme,
+        color: Hsla,
+        cx: &mut Context<AgentPanel>,
+    ) -> Self {
+        let mut custom_inputs = std::collections::BTreeMap::new();
+        let mut subscriptions = Vec::new();
+        for field in fields.iter().filter(|field| field.custom_answer.is_some()) {
+            // Enter で確定（IME の変換確定の Enter では Submit を出さない）。
+            let input = cx.new(|cx| EditorView::plain(theme.clone(), color, true, cx));
+            let (thread, name) = (thread_id.to_string(), field.name.clone());
+            subscriptions.push(cx.observe(&input, move |panel, input, cx| {
+                let text = input.read(cx).plain_text();
+                panel.note_custom_answer(&thread, &name, text, cx);
+            }));
+            let thread = thread_id.to_string();
+            subscriptions.push(cx.subscribe(
+                &input,
+                move |panel, _input, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Submit) {
+                        panel.submit_elicitation_from_input(&thread, cx);
+                    }
+                },
+            ));
+            custom_inputs.insert(field.name.clone(), input);
+        }
+        Self {
+            remote_id: new_thread_id(),
+            message: SharedString::from(message),
+            fields,
+            selections: std::collections::BTreeMap::new(),
+            custom_inputs,
+            custom_texts: std::collections::BTreeMap::new(),
+            respond,
+            since: std::time::Instant::now(),
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// 自由入力の今の文字（前後の空白を除く・書いていなければ空）。
+    fn custom_text(&self, field_name: &str) -> &str {
+        self.custom_texts
+            .get(field_name)
+            .map(|text| text.trim())
+            .unwrap_or("")
+    }
+
+    /// 質問に答えたか: 選んだ、または自由入力に書いた（O17）。
+    fn answered(&self, field: &ElicitationField) -> bool {
+        let picked = self
+            .selections
+            .get(&field.name)
+            .is_some_and(|values| !values.is_empty());
+        picked || (field.custom_answer.is_some() && !self.custom_text(&field.name).is_empty())
+    }
+
+    /// 返す答え。全フィールドが答え済みの時だけ `Some`。選択は選んだ質問だけ、自由入力は書いた
+    /// 質問だけ Other 欄の名前で入れる（両方あれば両方。どう読むかはエージェント側が決める）。
+    fn answers(&self) -> Option<Vec<(String, Vec<String>)>> {
+        if !self.fields.iter().all(|field| self.answered(field)) {
+            return None;
+        }
+        let mut answers = Vec::new();
+        for field in &self.fields {
+            if let Some(values) = self
+                .selections
+                .get(&field.name)
+                .filter(|values| !values.is_empty())
+            {
+                answers.push((field.name.clone(), values.clone()));
+            }
+            let text = self.custom_text(&field.name);
+            if let Some(custom_name) = field.custom_answer.as_ref().filter(|_| !text.is_empty()) {
+                answers.push((custom_name.clone(), vec![text.to_string()]));
+            }
+        }
+        Some(answers)
+    }
 }
 
 struct PendingPermission {
-    /// リモート応答の相関キー。添字を再利用した別の承認へ応答させない。
+    /// 承認要求 1 件の相関キー（要求ごとに新しい値）。リモート応答と Captain の推薦（workspace）を、
+    /// 添字を再利用した別の承認へ付けない。
     remote_id: String,
     title: SharedString,
     diffs: Vec<PermissionDiff>,
@@ -681,22 +852,34 @@ pub enum PanelEvent {
         thread: SharedString,
         text: String,
     },
+    /// 席のスレッドで決まりの漏れ（許可を求めずに編集された）を見つけ、ターンを止めた（FLEET-V2 §5.8-4）。
+    SeatViolation {
+        thread: SharedString,
+        tool: SharedString,
+    },
     /// prompt を ACP session へ送る直前。Fleet Task lifecycle の `working` 起点。
     TurnStarted {
         thread: SharedString,
         color: Hsla,
     },
     /// ターン完了（summary = 触ったファイル数・経過秒 / digest = 最後の発言の末尾・P1）。
+    /// `thread_id` はスレッドの永続 id（OS 通知の置き換えの鍵と、押した時の行き先・O12）。
     TurnEnded {
         thread: SharedString,
+        thread_id: SharedString,
         color: Hsla,
         summary: SharedString,
         digest: Option<SharedString>,
+        /// 終わり方（O12）。OS 通知・窓の中のトーストの言い方を分け、Captain は `Completed` の時だけ
+        /// 采配を記録して台帳の読んだ位置を進める（FLEET-V2 §5.3・途中で落ちたら同じ出来事をもう一度渡す）。
+        /// 正常 / 中断 / 失敗の意味はこの 1 つに寄せる（完了の真偽を別に持たない）。
+        outcome: TurnOutcome,
         /// エージェント別ミュート中（P2）: workspace はトーストを出さない（ニュースには載せる）。
         muted: bool,
     },
     TurnFailed {
         thread: SharedString,
+        thread_id: SharedString,
         color: Hsla,
         message: SharedString,
         muted: bool,
@@ -705,9 +888,21 @@ pub enum PanelEvent {
     /// `thread_index` = このパネル内でのスレッド添字（右下トーストのクリックで当該タブへ飛ぶのに使う）。
     PermissionWaiting {
         thread: SharedString,
+        thread_id: SharedString,
         thread_index: usize,
         color: Hsla,
         title: SharedString,
+        muted: bool,
+    },
+    /// 選択肢付きの質問（Elicitation）で停止中（O12）。承認待ちと同じ扱いで知らせる
+    /// （以前は音だけで、トースト・statusbar の待ち表示・要対応・バッジのどれにも出なかった）。
+    /// `message` = 質問文。
+    QuestionWaiting {
+        thread: SharedString,
+        thread_id: SharedString,
+        thread_index: usize,
+        color: Hsla,
+        message: SharedString,
         muted: bool,
     },
     /// Tier 2 の ✳ 1 行要約が生成できた（P4）。workspace が task_events へキャッシュし
@@ -754,6 +949,22 @@ pub enum PanelEvent {
     },
     /// チャットの一覧が変わった（Chat モード。workspace の左の列が描き直す）。
     ChatRowsChanged,
+    /// パネルの操作（Enter 送信の切替・ピルの sticky・タブの見せ方）を settings.json へ保存できなかった
+    /// （手編集の途中で読めない等・書き手はファイルに触っていない）。トーストは workspace が出す。
+    SettingsSaveFailed {
+        message: SharedString,
+    },
+}
+
+/// ターンの終わり方（`PanelEvent::TurnEnded`・O12）。OS 通知の言い方を分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// 最後まで走り切った。
+    Completed,
+    /// 拒否・キャンセルで止まった。
+    Interrupted,
+    /// エラーで止まった。
+    Failed,
 }
 
 /// エージェントスレッドの状態（herdr の 5 状態を necoder 流にマップ・#）。**色相は状態に使わない**
@@ -828,6 +1039,12 @@ impl RunningRegistry {
 struct AgentAdvertisement {
     configs: Vec<ConfigOption>,
     modes: Vec<(SharedString, SharedString)>,
+    /// slash コマンド一覧（O2）。セッションがまだ開いていないタブの `/` 補完に使う。
+    /// 同じパネルのスレッドは宛先（cwd）も同じなので、同じ agent なら一覧もほぼ同じ。
+    commands: Vec<acp_client::SlashCommand>,
+    /// この agent は会話名を自分で送ってくる（一度でも `TitleChanged` を受け取った）。
+    /// 立っていれば necoder 自前の命名（`claude -p` 等）を走らせない（O2）。
+    sends_titles: bool,
 }
 
 /// セッション先張り（prewarm）を実行するまでの待ち時間。タブを続けて切り替えた時に、
@@ -877,12 +1094,20 @@ pub struct AgentStatus {
 
 /// 管制の要対応キュー（P3）が承認カードを組むための素材（`permission_card()` が返す）。
 pub struct PermissionCard {
+    /// この承認要求の id（要求ごとに新しい値）。Captain の推薦をこの要求にだけ結ぶ（FLEET-V2 §5.5）。
+    pub id: SharedString,
     pub title: SharedString,
     /// `(respond へ返す添字, 種別, 表示ラベル)`。
     pub options: Vec<(usize, PermissionKind, SharedString)>,
     pub waited_secs: u64,
     /// 添付 diff のファイル数（「N files」表示用）。
     pub diff_files: usize,
+}
+
+/// 要対応（O12）が質問待ちカードを組むための素材（`question_card()` が返す）。
+pub struct QuestionCard {
+    pub message: SharedString,
+    pub waited_secs: u64,
 }
 
 /// 1 スレッド = 1 会話。固有色を持ち、UI 全体へ貫通する。
@@ -913,9 +1138,6 @@ struct Thread {
     agent: SharedString,
     /// 添付コンテキスト（プロジェクト相対パス）。送信時に `@path` として prompt 先頭へ付ける。
     context: Vec<SharedString>,
-    /// composer の `!` で実行したコマンドの出力のうち、まだエージェントへ渡していないもの。
-    /// 次に送る 1 通の先頭へ添えて空にする（CLI の bash モードと同じ・#37）。
-    shell_context: Vec<shell::ShellContext>,
     /// 未送信の composer 本文。タブは独立した作業面なので、切替時にスレッドごとに退避する。
     draft: String,
     entries: Vec<Entry>,
@@ -943,7 +1165,18 @@ struct Thread {
     /// transcript 上部の常設チェックリストに出す。空 = 非表示。
     plan: Vec<PlanItem>,
     /// ユーザーが手動でタブ名を変更したか（true なら AI 自動命名で上書きしない・#4/#6）。
+    /// エージェントが送ってくる会話名（`AgentEvent::TitleChanged`）もこれが立っていれば当てない。
+    /// 手動改名（改名モーダル・名前で固定するスレッド）の分は DB にも印を残す（再起動後も守る）。
     name_is_custom: bool,
+    /// エージェントが使える slash コマンド（`AgentEvent::Commands` の最新の全量・O2）。
+    /// composer の `/` 補完の候補。まだ届いていなければ空（同じ agent の在庫で代用する）。
+    commands: Vec<acp_client::SlashCommand>,
+    /// エージェントが追っている目標（`/goal`・`AgentEvent::GoalChanged`）。composer の上に 1 行で出す。
+    /// 保存しない（エージェント側の状態の写し。再開すれば送り直される）。
+    goal: Option<acp_client::AgentGoal>,
+    /// このエージェントが受ける目標への操作（一時停止 / 再開 / 取り消す・O17）。セッションが開いた
+    /// 直後に届く。空 = 操作できない（目標の行は見せるだけ）。
+    goal_actions: Vec<acp_client::GoalAction>,
     /// 遷移スナップショット（Tier 1・FLEET-CONTROL-PLAN P1）。**状態遷移時のみ**更新する:
     /// PermissionRequest→許可待ちの内容 / TurnEnded→最終発言の末尾 / Failed→エラー文。
     /// Working 中は保存せず `live_digest()` を流す（生成不要・無料）。
@@ -971,6 +1204,10 @@ struct Thread {
     /// 今のセッションへ **1 度でも prompt を送ったか**。先張りしただけで一度も使っていない
     /// セッションは、上限を超えたら畳んでよい（[`AgentPanel::retire_idle_prewarms`]）。
     session_used: bool,
+    /// エージェントが起動してすぐ終わった時の終わり方と stderr の末尾（[`acp_client::AgentExited`]）。
+    /// composer の上にカードで出す。**画面だけ・永続化しない**（stderr には秘密が混ざり得る）。次に
+    /// セッションが開いた時と「閉じる」で消える。
+    startup_exit: Option<acp_client::AgentExited>,
     /// 認証切れ（再ログインで直る失敗）で止まっている。composer 上部に「再ログインが必要」カードを
     /// 出す。**セッション（`command_tx`）は保持する**: claude-agent-acp は認証切れのセッションを
     /// 「sign-out respawn」として覚えており、次の prompt で Claude セッションを `resume` 付きで
@@ -985,9 +1222,41 @@ struct Thread {
     session_resumable: bool,
     /// エージェントが最後に働いた時刻（送信・ターン終了）。自動停止の起点。
     last_active_at_ms: i64,
+    /// ターンのトークンとコストの数え方（O11）。ターンが終わるたびに台帳 `turn_usage` へ書く。
+    usage: usage::CostMeter,
+    /// 今のセッションの使用量の鍵（R08）。セッションを立てた時の宛先と設定（`agent_servers.<id>.env`）で
+    /// 決め、そのセッションのレート制限の知らせはここへ重ねる。後で設定を変えても、動いている
+    /// セッションは前の鍵のまま（アカウントの切り替えは次に立てるセッションから効く・O14）。
+    /// セッションを 1 度も立てていなければ `None`。
+    usage_key: Option<usage::UsageKey>,
+    /// エージェント側の過去の会話を開いたばかりで、`session/load` の再生を待っている（O15）。
+    /// 起動時に `replay_history` を頼み、再生を transcript に積んだら（`SessionStarted` で）下ろす。
+    replay_pending: bool,
+    /// 「新しいセッションで続ける」の前置き（O15）。次の通常の送信（slash コマンドを除く）の頭に
+    /// 1 回だけ付けて、送れたら捨てる。保存しない（再起動したら付かない＝人が言い直せば足りる）。
+    handoff_preamble: Option<String>,
+    /// 席の決まり（Fleet の Captain など・FLEET-V2 §5.8）。`Some` の間は道具と権限を necoder が決める。
+    seat: Option<SeatPolicy>,
+    /// いま握っているセッションを席の決まりで起こしたか。席の有無と食い違ったら次の送信で立て直す
+    /// （会話は `session/load` で引き継ぐ）。
+    session_seated: bool,
+    /// 席のスレッドで走っている道具（id → 種類と題名）。見張りは完了時に編集系かを判定し、
+    /// 題名の無い許可要求（codex-acp の MCP の承認）はここから題名を引く。
+    seat_tools: HashMap<String, seat::SeatToolCall>,
 }
 
 impl Thread {
+    /// `/compact` を送る先の会話があるか（生きたセッション、**または**次の送信で `session/load` が
+    /// 引き継ぐ id）。無いのは一度も起こしていないスレッドだけ＝圧縮する文脈が無い。
+    ///
+    /// **いつでも押せる**のが要件（2026-09-24 本人）。実行中は composer の送信と同じくキューに積んで
+    /// ターン完了後に送り、トークン数では判定しない（使用量を報告しないエージェントでも文脈は溜まる）。
+    /// 生きたセッションだけを条件にしていた頃は、idle の弁（`idle.rs`・既定 15 分）が止めた直後と
+    /// 再起動直後（送信路は初回送信まで無い）に消えていた。
+    pub(crate) fn can_compact(&self) -> bool {
+        self.command_tx.is_some() || self.acp_session_id.is_some()
+    }
+
     /// 現在の状態（herdr の 5 状態マップ・#）。Blocked（承認待ち）は Working（実行中）より優先で、
     /// これまで `running: bool` に埋もれていた「待ち」を分離する。Done は未確認ラッチ。
     fn activity(&self) -> ThreadActivity {
@@ -1022,7 +1291,6 @@ impl Thread {
             effort: SharedString::default(),
             agent: "Claude Code".into(),
             context: Vec::new(),
-            shell_context: Vec::new(),
             draft: String::new(),
             entries: Vec::new(),
             tokens_used: 0,
@@ -1038,12 +1306,16 @@ impl Thread {
             touched_files: Vec::new(),
             plan: Vec::new(),
             name_is_custom: false,
+            commands: Vec::new(),
+            goal: None,
+            goal_actions: Vec::new(),
             digest: None,
             muted: false,
             tier2: None,
             queued_prompts: Vec::new(),
             acp_session_id: None,
             session_lost: false,
+            startup_exit: None,
             session_note: None,
             session_serial: 0,
             session_used: false,
@@ -1051,6 +1323,13 @@ impl Thread {
             chat: None,
             session_resumable: false,
             last_active_at_ms: 0,
+            usage: usage::CostMeter::default(),
+            usage_key: None,
+            replay_pending: false,
+            handoff_preamble: None,
+            seat: None,
+            session_seated: false,
+            seat_tools: HashMap::new(),
         }
     }
 
@@ -1236,6 +1515,65 @@ fn prompt_image_mime(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// 目標の行に出す操作（O17）: エージェントが受けるもののうち、今の状態に合うもの。
+fn goal_actions_for(
+    status: acp_client::GoalStatus,
+    supported: &[acp_client::GoalAction],
+) -> Vec<acp_client::GoalAction> {
+    use acp_client::{GoalAction, GoalStatus};
+    let fitting = match status {
+        GoalStatus::Active | GoalStatus::Blocked => vec![GoalAction::Pause, GoalAction::Clear],
+        GoalStatus::Paused | GoalStatus::Limited => vec![GoalAction::Resume, GoalAction::Clear],
+        GoalStatus::Complete | GoalStatus::Other => vec![GoalAction::Clear],
+    };
+    fitting
+        .into_iter()
+        .filter(|action| supported.contains(action))
+        .collect()
+}
+
+/// `id` の Step が transcript に居るか（サブエージェントの手順の親を探す・O17）。
+fn has_step(entries: &[Entry], id: &str) -> bool {
+    entries
+        .iter()
+        .rev()
+        .any(|entry| matches!(entry, Entry::Step { id: Some(step), .. } if step.as_ref() == id))
+}
+
+/// `parent_index` の Step（`parent_id`）の直下に居るサブエージェントの手順の添字（届いた順）。
+fn subagent_step_indices(entries: &[Entry], parent_index: usize, parent_id: &str) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .skip(parent_index + 1)
+        .filter(|(_, entry)| {
+            matches!(entry, Entry::Step { parent: Some(parent), .. } if parent.as_ref() == parent_id)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// サブエージェントの手順 `entry` の親の添字を近い順に（入れ子なら親の親も）。普通の手順・
+/// 親が見つからない時は空。最後の要素が transcript の行として描かれている Step。
+fn subagent_ancestry(entries: &[Entry], entry: usize) -> Vec<usize> {
+    let mut ancestors = Vec::new();
+    let mut current = entry;
+    while let Some(Entry::Step {
+        parent: Some(parent),
+        ..
+    }) = entries.get(current)
+    {
+        let Some(parent_index) = entries[..current].iter().rposition(
+            |candidate| matches!(candidate, Entry::Step { id: Some(id), .. } if id == parent),
+        ) else {
+            break;
+        };
+        ancestors.push(parent_index);
+        current = parent_index;
+    }
+    ancestors
+}
+
 /// `ToolCallInfo`（開始）から Step エントリを組む。args=主なパス / result=出力 / diffs=差分。
 fn build_step_entry(info: ToolCallInfo) -> Entry {
     let mut tool = info.title.unwrap_or_default();
@@ -1253,6 +1591,7 @@ fn build_step_entry(info: ToolCallInfo) -> Entry {
         result: capped.map(|(text, _)| SharedString::from(text)),
         result_lines,
         diffs: info.diffs,
+        parent: info.parent.map(SharedString::from),
     }
 }
 
@@ -1539,23 +1878,18 @@ fn cap_output(text: &str) -> (String, usize) {
 
 fn entry_plain_text(entry: &Entry) -> String {
     match entry {
-        Entry::User(text)
-        | Entry::LedgerEvent(text)
-        | Entry::Thinking(text)
-        | Entry::Agent(text) => text.to_string(),
+        Entry::User(text) | Entry::Thinking(text) | Entry::Agent(text) | Entry::Notice(text) => {
+            text.to_string()
+        }
+        Entry::AutoPrompt(auto) => auto.text.to_string(),
         Entry::Step {
             tool, args, result, ..
         } => match result {
             Some(result) => format!("{tool} {args}\n{result}"),
             None => format!("{tool} {args}"),
         },
-        Entry::Shell {
-            command, output, ..
-        } => match output {
-            Some(output) => format!("! {command}\n{output}"),
-            None => format!("! {command}"),
-        },
         Entry::Checkpoint { label, .. } => format!("checkpoint — {label}"),
+        Entry::Shell(run) => run.plain_text(),
     }
 }
 
@@ -1600,6 +1934,121 @@ fn is_placeholder_name(name: &str) -> bool {
     })
 }
 
+/// エージェントが付けた会話名（`AgentEvent::TitleChanged`）をタブに載せる形へ。空白・改行は 1 つの
+/// 空白に畳み、長すぎれば末尾を `…` で切る。空なら `None`（名前として使わない）。
+/// Claude は題名を生成できない時に最初の依頼文をそのまま（最大 256 文字）名前にして送ってくる。
+fn agent_title_for_tab(title: &str) -> Option<SharedString> {
+    const MAX_CHARS: usize = 80;
+    let flat = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    if flat.chars().count() <= MAX_CHARS {
+        return Some(flat.into());
+    }
+    let mut cut: String = flat.chars().take(MAX_CHARS - 1).collect();
+    cut.push('…');
+    Some(cut.into())
+}
+
+/// エージェント自身の命名を待つ時間（O2）。Claude は最初のターンの終了後に小さなモデルで題名を
+/// 作って送ってくる（数秒）。その間に necoder 自前の命名（`claude -p` 等）を走らせると、課金が
+/// 二重になり名前も 2 回変わる。待っても来なければ自前で付ける。
+const AGENT_TITLE_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// prompt がエージェントの slash コマンドか（`/name` で始まり、name に `/` を含まない）。
+/// `/Users/me/a.rs を見て` のようにパスで始まる依頼は slash ではない（添付・context を付けて送る）。
+fn is_slash_command(prompt: &str) -> bool {
+    let Some(rest) = prompt.strip_prefix('/') else {
+        return false;
+    };
+    let name = rest.split_whitespace().next().unwrap_or("");
+    !name.is_empty() && !name.contains('/')
+}
+
+/// composer の `/` 補完の局面（O2）。composer の本文が変わるたびに [`slash_input`] で読み直す。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum SlashInput {
+    /// 補完の対象外（行頭が `/` でない・複数行・IME 変換中）。
+    #[default]
+    Inactive,
+    /// コマンド名を打っている途中（`/` の後ろ・空白の前）。値は絞り込み語。
+    Query(String),
+    /// `/name ` まで打って引数がまだ空。値はコマンド名（引数のヒントを出す）。
+    AwaitingArgs(String),
+}
+
+/// composer の `/` 補完の状態。候補そのものは描画のたびにスレッドの一覧から絞る（持たない）。
+#[derive(Default)]
+struct SlashCompletion {
+    input: SlashInput,
+    /// 選んでいる候補（絞り込み後の並びの添字）。絞り込み語が変わると先頭へ戻す。
+    selected: usize,
+    /// Esc で閉じた。行頭の `/` が消えるまで開き直さない。
+    dismissed: bool,
+}
+
+/// `/` 補完が開いている間に先取りするキー（composer の Editor アクションから写す）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlashKey {
+    Up,
+    Down,
+    /// Enter / Tab: 選んでいる候補を入れる。
+    Accept,
+    /// Esc: 閉じる。
+    Dismiss,
+}
+
+/// `/` 補完に出す候補の最大行数（超えた分は選択に合わせて窓をずらす）。
+const SLASH_POPUP_ROWS: usize = 8;
+
+/// composer の 1 行目から `/` 補完の局面を読む。`single_line` = 本文が 1 行だけ、
+/// `composing` = IME 変換中（変換中は開かない＝Enter を奪わない）。
+fn slash_input(first_line: &str, single_line: bool, composing: bool) -> SlashInput {
+    if composing || !single_line {
+        return SlashInput::Inactive;
+    }
+    let Some(rest) = first_line.strip_prefix('/') else {
+        return SlashInput::Inactive;
+    };
+    match rest.find(char::is_whitespace) {
+        None => SlashInput::Query(rest.to_string()),
+        Some(end) => {
+            let (name, args) = rest.split_at(end);
+            if !name.is_empty() && args.trim().is_empty() {
+                SlashInput::AwaitingArgs(name.to_string())
+            } else {
+                SlashInput::Inactive
+            }
+        }
+    }
+}
+
+/// `/` 補完の候補を絞って並べる（`commands` の添字を返す）。名前へのあいまい一致
+/// （`ui::fuzzy_score`＝⌘P と同じ採点）の高い順、同点はエージェントが広告した順。
+fn slash_matches(commands: &[acp_client::SlashCommand], query: &str) -> Vec<usize> {
+    let mut scored: Vec<(usize, i32)> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| {
+            ui::fuzzy_score(query, &command.name).map(|score| (index, score))
+        })
+        .collect();
+    // 安定ソート＝同点は元の並びのまま。
+    scored.sort_by(|left, right| right.1.cmp(&left.1));
+    scored.into_iter().map(|(index, _)| index).collect()
+}
+
+/// 候補を選んだ時に composer へ入れる文字列。引数を続けて打てるよう末尾に空白を付ける。
+/// Codex の skill（`$name`）は本文中の `$name` で呼ぶので `/` を付けない。
+fn slash_insertion(name: &str) -> String {
+    if name.starts_with('$') {
+        format!("{name} ")
+    } else {
+        format!("/{name} ")
+    }
+}
+
 /// 現在時刻（unix ms）。スレッドの開始/最終入力時刻の記録に使う。
 pub fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1639,19 +2088,86 @@ fn new_thread_id() -> String {
     )
 }
 
+/// 閉じた会話の全文は匿名の一時領域へ退避する。DB の turn はツール出力や差分を
+/// 省略するため、⌘⇧T 用には Entry をそのまま保存する。書けなければメモリに残す。
+/// TempPath はファイル記述子を保持せず、復元時・パネル破棄時に自動削除される。
+struct ClosedThread {
+    thread: Thread,
+    transcript: Option<tempfile::TempPath>,
+}
+
+impl ClosedThread {
+    fn new(thread: Thread) -> Self {
+        let mut closed = Self {
+            thread,
+            transcript: None,
+        };
+        if let Err(error) = closed.spill_entries() {
+            eprintln!("閉じた会話の退避に失敗（メモリで保持）: {error:#}");
+        }
+        closed
+    }
+
+    fn spill_entries(&mut self) -> anyhow::Result<()> {
+        use std::io::Write;
+        if self.thread.entries.is_empty() {
+            return Ok(());
+        }
+        // `!` のコマンドが止まり切っていない（手元は止める印を立てて終わりを待つ）間は退避しない。
+        // 終わりの結果は閉じたスレッドの本文へ届く（`finish_shell_run`）。
+        if self
+            .thread
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Shell(run) if run.is_running()))
+        {
+            return Ok(());
+        }
+        // tempfile は排他的に作成し、Unix では本人だけが読める権限にする。
+        let mut file = tempfile::NamedTempFile::new()?;
+        {
+            let mut writer = std::io::BufWriter::new(file.as_file_mut());
+            serde_json::to_writer(&mut writer, &self.thread.entries)?;
+            writer.flush()?;
+        }
+        self.transcript = Some(file.into_temp_path());
+        self.thread.entries = Vec::new();
+        self.thread.last_prompt = None;
+        Ok(())
+    }
+
+    fn restore_entries(&mut self) -> anyhow::Result<()> {
+        if let Some(path) = self.transcript.as_ref() {
+            let file = std::fs::File::open(path)?;
+            let entries: Vec<Entry> = serde_json::from_reader(std::io::BufReader::new(file))?;
+            self.thread.last_prompt = last_prompt_from_entries(&entries);
+            self.thread.entries = entries;
+            self.transcript = None;
+        }
+        Ok(())
+    }
+}
+
 /// エージェントパネル本体（右ドックまるごとを描く）。
 pub struct AgentPanel {
     threads: Vec<Thread>,
     active: usize,
     // ⌘W で閉じたスレッド（⌘⇧T で復元。会話履歴ごと戻す。新しいものが末尾）。
-    closed_threads: Vec<Thread>,
+    closed_threads: Vec<ClosedThread>,
     theme: Theme,
     /// 宛先（アクティブプロジェクトのコンテキスト）。workspace が [`Self::set_destination`] で更新する。
     dest_project: SharedString,
     dest_branch: Option<SharedString>,
     /// ACP エージェントの起動 cwd（アクティブプロジェクトのルート）。無ければ送信できない。
     dest_cwd: Option<PathBuf>,
+    /// 宛先のレシピ（`.necoder/recipes/*.md`・O16）。`/` 補完に `necoder:<名前>` で出す。
+    recipes: Vec<recipes::Recipe>,
+    /// 最後にレシピを読みに行った時（`/` を打つたびに fs を読まない）。
+    recipes_read_at: Option<std::time::Instant>,
     dest_host: Arc<dyn Host>,
+    /// 宛先ホストの使用量の鍵の「場所」（手元は空・SSH 先は表示名・R08）。描画は Host を呼ばない規律
+    /// なので、宛先が変わった時に控えておく。
+    dest_host_label: SharedString,
     composer: Entity<EditorView>,
     /// 固定レイアウトのマスコット。フレーム時計と paint invalidation を親 transcript から分離する。
     mascot: Entity<MascotView>,
@@ -1715,18 +2231,17 @@ pub struct AgentPanel {
     pressed_link: Option<(RegionId, Range<usize>)>,
     /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。
     open_menu: Option<Selector>,
+    /// スレッドタブ（一覧の行）の右クリックメニュー（O15。None = 閉）。
+    thread_menu: Option<history::ThreadMenu>,
     /// Add context の候補（プロジェクトのファイル相対パス。workspace が渡す）と開閉。
     context_files: Vec<SharedString>,
     context_menu_open: bool,
     /// ＋context の fuzzy 絞り込みクエリ（M12-7・Picker 化）。
     context_query: String,
     context_focus: Option<FocusHandle>,
-    /// composer の本文が `!` で始まっている（シェルモード・#37）。composer の通知ごとに見直す。
-    composer_shell: bool,
-    /// 実行中の `!` コマンドの停止フラグ（実行 id → フラグ）。終わったら外す。
-    shell_stops: HashMap<u64, shell::ShellRun>,
-    /// 次に振る `!` 実行の id（パネル内で一意であればよい）。
-    next_shell_run: u64,
+    /// 添付チップに出す名前の上書き（添付のパス → 名前）。Design Mode の要素の切り抜きに
+    /// 「◎ button#start」のような名前を付ける。無ければ `context_chip_label` の名前。
+    context_labels: HashMap<SharedString, SharedString>,
     /// Enter 送信の現在値（送信ヒント表示 + トグルの状態。composer にも反映する）。
     submit_on_enter: bool,
     /// トークン表示のカウントアップ補間タスクが稼働中か（多重起動防止。追いついたら false に戻す＝idle 0%）。
@@ -1753,6 +2268,8 @@ pub struct AgentPanel {
     /// 展開したツール引数（⏺ の引数行）。既定は折り畳み＝長い/複数行コマンドで transcript が
     /// 流れないように（`expanded_steps` と同じ `(thread.id, entry index)` 鍵）。
     expanded_args: std::collections::HashSet<(String, usize)>,
+    /// 開いたサブエージェントの手順（親の Step・O17）。既定は畳む＝親の行に「N 手順・最新の手順」だけ。
+    expanded_subagents: std::collections::HashSet<(String, usize)>,
     /// 展開したユーザー入力（長い User エントリ）。既定は折り畳み（[`user_entry_foldable`]）。
     /// 同じく `(thread.id, entry index)` 鍵で Entry 自体は軽量に保つ。
     expanded_inputs: std::collections::HashSet<(String, usize)>,
@@ -1791,6 +2308,16 @@ pub struct AgentPanel {
     transcript_search: Option<search::TranscriptSearch>,
     /// `▣ プレビュー` チップを出してよいか（パス → 実在）の控え。描画のたびに stat しない。
     preview_exists: RefCell<HashMap<String, bool>>,
+    /// 自前の命名（[`Self::maybe_auto_name`]）を待っている/走らせているスレッド id。
+    /// ターンが続けて終わっても同じスレッドに命名の子プロセスを重ねない。
+    auto_naming: std::collections::HashSet<String>,
+    /// composer の `/` 補完（O2）。composer の変化を observe して局面を読み直す。
+    slash: SlashCompletion,
+    /// composer の本文が `!` のコマンド（シェルモード・#37）。立っている間 composer の下にヒントを出す。
+    /// `/` 補完と同じく composer の変化で読み直す。
+    shell_input: bool,
+    /// 終了する時に `!` のコマンドを止める購読（パネルと一緒に外れる）。
+    _stop_shell_on_quit: gpui::Subscription,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -1814,7 +2341,12 @@ impl AgentPanel {
     /// ミュート中のスレッドは鳴らさない。
     fn ring_done(&self, thread_index: usize, cx: &App) {
         if self.wants_done_sound(thread_index) {
-            sound::play(sound::Cue::Done, &settings::get(cx).sound_done);
+            let settings = settings::get(cx);
+            sound::play(
+                sound::Cue::Done,
+                &settings.sound_done,
+                settings.sound_volume,
+            );
         }
     }
 
@@ -1835,7 +2367,12 @@ impl AgentPanel {
     /// ミュート中のスレッドは鳴らさない。auto-allow で素通りした要求はブロックしないので対象外。
     fn ring_waiting(&self, thread_index: usize, cx: &App) {
         if self.wants_waiting_sound(thread_index) {
-            sound::play(sound::Cue::Waiting, &settings::get(cx).sound_waiting);
+            let settings = settings::get(cx);
+            sound::play(
+                sound::Cue::Waiting,
+                &settings.sound_waiting,
+                settings.sound_volume,
+            );
         }
     }
 
@@ -1851,12 +2388,29 @@ impl AgentPanel {
 
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
         let panel_id = cx.entity_id();
-        cx.on_release(move |_, cx| {
+        cx.on_release(move |panel, cx| {
+            // `!` で走らせたコマンドを残さない（窓を閉じた・パネルが無くなった）。
+            panel.stop_all_shell_runs();
             let registry = cx.default_global::<RunningRegistry>();
             registry.1.remove(&panel_id);
             registry.rebuild();
         })
         .detach();
+        // 終了する時も `!` のコマンドを止める（子は自分のプロセスグループで動くので、necoder が
+        // 終わっても残る）。止める印を立て、runner が SIGTERM を送るまで少しだけ待つ。
+        // 購読はパネルが持つ（パネルが無くなれば外れる）。
+        let stop_shell_on_quit = cx.on_app_quit(|panel, cx| {
+            let waiting = panel.stop_all_shell_runs();
+            let timer = waiting.then(|| {
+                cx.background_executor()
+                    .timer(shell::SHELL_STOP_ON_QUIT_WAIT)
+            });
+            async move {
+                if let Some(timer) = timer {
+                    timer.await;
+                }
+            }
+        });
         // 設定は global（settings.json が真実）から取る。live-reload / CLI / MCP 変更に observe で追従。
         let submit_on_enter = settings::get(cx).submit_on_enter;
         let composer =
@@ -1871,18 +2425,19 @@ impl AgentPanel {
             ComposerEvent::ContentHeightChanged => cx.notify(),
         })
         .detach();
-        // パネルが消える時は走っている `!` を止める（裏で子プロセスを走らせ続けない）。
-        cx.on_release(|panel, _cx| panel.stop_all_shells()).detach();
-        // 先頭 `!`（シェルモード・#37）の見た目は composer の本文で決まる。打つたびに見直す。
+        // 本文・IME の状態が変わるたびに `/` 補完の局面を読み直す（O2）。打鍵・Backspace・貼り付け・
+        // undo・タブ切替の下書き差し替えのどれでも composer は notify するので、ここ 1 箇所で拾える。
+        // 点滅の notify でも呼ばれるが、局面が変わらなければ何もしない（再描画を増やさない）。
         cx.observe(&composer, |panel, _composer, cx| {
-            panel.sync_composer_shell(cx)
+            panel.refresh_slash_state(cx)
         })
         .detach();
         // 画像の貼り付け（スクリーンショット）→ 添付にして、次の 1 通に image ブロックで添える。
         cx.subscribe(
             &composer,
             |panel, _composer, image: &editor_view::PastedImage, cx| {
-                panel.attach_pasted_image(image, cx)
+                // 添付になったパスは貼り付けでは使わない（保存できなかった時の報告は中で出す）。
+                panel.attach_pasted_image(image, cx);
             },
         )
         .detach();
@@ -1898,6 +2453,31 @@ impl AgentPanel {
             }
         })
         .detach();
+        // 開発用: NECODER_AGENT_START_PROBE=<エージェントの名前> で、いまのスレッドをそのエージェントにして
+        // セッションだけを立てる（**プロンプトは送らない**・initialize → session/new まで）。足したエージェントの
+        // 起動（binary の配備を含む）を offscreen で確かめる。最初のパネル 1 枚だけが拾う。
+        #[cfg(debug_assertions)]
+        {
+            static START_PROBE_CLAIMED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if let Ok(agent) = std::env::var("NECODER_AGENT_START_PROBE") {
+                if !agent.trim().is_empty()
+                    && !START_PROBE_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    cx.spawn(async move |panel, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(800))
+                            .await;
+                        let started = panel
+                            .update(cx, |panel, cx| panel.debug_start_session(agent.trim(), cx));
+                        if let Err(error) = started {
+                            eprintln!("NECODER_AGENT_START_PROBE: パネルが無い: {error:#}");
+                        }
+                    })
+                    .detach();
+                }
+            }
+        }
         // 開発用: NECODER_ACP_PROBE があれば、少し待って空スレッドへ自動送信（実機ストリーミングの自己検証）。
         // **最初に生成されたパネル 1 枚だけ**が拾う（レールに複数スロットがあると全パネルで発火し、
         // claude セッションが並走してしまう — 2026-08-27 の LP 素材撮りで実際に 5 本走った）。
@@ -1933,31 +2513,6 @@ impl AgentPanel {
                         .ok();
                 })
                 .detach();
-            }
-        }
-        // 開発用: NECODER_SHELL_PROBE="!コマンド" で `!` を 1 回実行し（`git log --oneline -3`）、
-        // composer に値を入れてシェルモードを出す（#37 の描画検証）。ACP と同じく最初のパネルだけ。
-        #[cfg(debug_assertions)]
-        {
-            static SHELL_PROBE_CLAIMED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if let Ok(probe) = std::env::var("NECODER_SHELL_PROBE") {
-                if !SHELL_PROBE_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    cx.spawn(async move |panel, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1200))
-                            .await;
-                        panel
-                            .update(cx, |panel, cx| {
-                                panel.run_shell("git log --oneline -3".to_string(), cx);
-                                panel
-                                    .composer
-                                    .update(cx, |composer, cx| composer.set_plain_text(&probe, cx));
-                            })
-                            .ok();
-                    })
-                    .detach();
-                }
             }
         }
         // 開発用: NECODER_TRANSCRIPT_SEL_PROBE=1 で transcript 選択を注入（M13 の描画+コピー検証）。
@@ -2030,6 +2585,28 @@ impl AgentPanel {
             })
             .detach();
         }
+        // 開発用: NECODER_GOAL_PROBE=1 で目標（`/goal`）を直接注入する（O2 の composer 上の 1 行の
+        // 描画検証。実エージェント無しで offscreen に写す）。
+        #[cfg(debug_assertions)]
+        if std::env::var("NECODER_GOAL_PROBE").is_ok_and(|value| value == "1") {
+            cx.spawn(async move |panel, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                if let Err(error) = panel.update(cx, |panel, cx| {
+                    let active = panel.active;
+                    let goal = acp_client::AgentGoal {
+                        objective: "cargo test --workspace を全部緑にして、落ちたテストの原因を 1 つずつ直す"
+                            .into(),
+                        status: acp_client::GoalStatus::Active,
+                    };
+                    panel.on_event(active, AgentEvent::GoalChanged(Some(goal)), cx);
+                }) {
+                    eprintln!("NECODER_GOAL_PROBE: パネルが無い: {error:#}");
+                }
+            })
+            .detach();
+        }
         // 通常起動は空スレッド 1 本から始める（デモ transcript を新プロジェクトごとに種付けしない）。
         // offscreen 検証プローブはモック内容・複数タブが前提なので、その時だけ M4 由来の種を使う。
         // 既定エージェント + 前回のモデル/思考量を適用して「そのまま開く」を実現。
@@ -2068,9 +2645,48 @@ PYEOF"#;
                     diffs: Vec::new(),
                     output: None,
                     completed: Some(true),
+                    parent: None,
                 }));
                 if mode == "expanded" {
                     expanded_args.insert((thread.id.clone(), entry_index));
+                }
+            }
+        }
+        // 開発用: サブエージェントの手順（O17）を実経路と同じ組み立てで積み、親の下の畳みを撮る。
+        // `NECODER_SUBAGENT_PROBE=collapsed|expanded`。
+        let mut expanded_subagents = std::collections::HashSet::new();
+        if let Ok(mode) = std::env::var("NECODER_SUBAGENT_PROBE") {
+            if let Some(thread) = threads.first_mut() {
+                let step = |id: &str, title: &str, output: Option<&str>, parent: Option<&str>| {
+                    build_step_entry(ToolCallInfo {
+                        id: id.to_string(),
+                        title: Some(title.to_string()),
+                        kind: None,
+                        locations: Vec::new(),
+                        diffs: Vec::new(),
+                        output: output.map(str::to_string),
+                        completed: Some(true),
+                        parent: parent.map(str::to_string),
+                    })
+                };
+                let parent_index = thread.entries.len();
+                thread.entries.push(step(
+                    "subagent-probe",
+                    "Task バッファの実装を調べる",
+                    Some("ropey の Rope と sum-tree の差を 3 点にまとめた"),
+                    None,
+                ));
+                for (id, title) in [
+                    ("subagent-probe-1", "Read crates/editor_core/src/buffer.rs"),
+                    ("subagent-probe-2", "Grep \"impl Buffer\" crates/"),
+                    ("subagent-probe-3", "Bash cargo test -p editor_core"),
+                ] {
+                    thread
+                        .entries
+                        .push(step(id, title, None, Some("subagent-probe")));
+                }
+                if mode == "expanded" {
+                    expanded_subagents.insert((thread.id.clone(), parent_index));
                 }
             }
         }
@@ -2106,7 +2722,10 @@ PYEOF"#;
             dest_project: "—".into(),
             dest_branch: None,
             dest_cwd: None,
+            recipes: Vec::new(),
+            recipes_read_at: None,
             dest_host: LocalHost::shared(),
+            dest_host_label: SharedString::default(),
             composer,
             mascot,
             composer_spinner,
@@ -2137,13 +2756,12 @@ PYEOF"#;
             hovered_link: None,
             pressed_link: None,
             open_menu: None,
+            thread_menu: None,
             context_files: Vec::new(),
             context_menu_open: false,
             context_query: String::new(),
             context_focus: None,
-            composer_shell: false,
-            shell_stops: HashMap::new(),
-            next_shell_run: 0,
+            context_labels: HashMap::new(),
             submit_on_enter,
             token_ticker: false,
             celebrating: false,
@@ -2155,6 +2773,7 @@ PYEOF"#;
             expanded_code: std::collections::HashSet::new(),
             expanded_args,
             expanded_inputs: std::collections::HashSet::new(),
+            expanded_subagents,
             window_active: true,
             composer_height: COMPOSER_INPUT_DEFAULT,
             resizing_composer: false,
@@ -2171,6 +2790,10 @@ PYEOF"#;
             chat_artifacts: Vec::new(),
             transcript_search: None,
             preview_exists: RefCell::new(HashMap::new()),
+            auto_naming: std::collections::HashSet::new(),
+            slash: SlashCompletion::default(),
+            shell_input: false,
+            _stop_shell_on_quit: stop_shell_on_quit,
         }
     }
 
@@ -2195,7 +2818,18 @@ PYEOF"#;
     /// 実際の反映（composer 更新・再描画）は `observe_global` 経由で起きる（UI / CLI / MCP と同じ経路）。
     fn toggle_submit_on_enter(&mut self, cx: &mut Context<Self>) {
         let value = !self.submit_on_enter;
-        settings::set_user_value(cx, "submit_on_enter", serde_json::Value::Bool(value));
+        let result =
+            settings::set_user_value(cx, "submit_on_enter", serde_json::Value::Bool(value));
+        self.report_settings_save(result, cx);
+    }
+
+    /// 設定の保存結果を見る。失敗は workspace にトーストを頼む（黙って捨てない）。
+    fn report_settings_save(&mut self, result: anyhow::Result<()>, cx: &mut Context<Self>) {
+        if let Err(error) = result {
+            cx.emit(PanelEvent::SettingsSaveFailed {
+                message: settings::save_failure_message(&error),
+            });
+        }
     }
 
     /// 宛先チップに出すプロジェクト名・ブランチ・cwd を設定する（プロジェクト切替時に workspace が呼ぶ）。
@@ -2278,9 +2912,10 @@ PYEOF"#;
                 thread.last_input_at_ms = last_input_at_ms;
                 // 旧 DB 行（agent=NULL）は保存当時の Agent を知り得ないため現在の明示既定へ。
                 // 新しい行は thread 固有の Agent を復元し、Claude Code へ勝手に戻さない。
+                // 足したエージェント（H1）は今の設定の一覧で引く（名前を変えていても id で当たる）。
                 let recorded_agent = agent
-                    .filter(|agent| acp_client::AgentKind::by_label(agent).is_some())
-                    .map(SharedString::from);
+                    .and_then(|agent| settings::agent_by_label(cx, &agent))
+                    .map(|agent| SharedString::from(agent.label().to_string()));
                 thread.agent = recorded_agent
                     .clone()
                     .unwrap_or_else(|| default_agent_name(cx));
@@ -2305,17 +2940,24 @@ PYEOF"#;
                 if tokens_limit > 0 {
                     thread.tokens_max = tokens_limit as u32;
                 }
-                let turns = storage.load_recent_turns(&id, 200).unwrap_or_default();
+                let turns = storage
+                    .load_recent_turns(&id, RESTORED_TURNS)
+                    .unwrap_or_default();
                 thread.entries = turns.into_iter().map(entry_from_turn).collect();
                 thread.persisted_entries = thread.entries.len();
                 threads.push(thread);
             }
             // 前回のエージェント側セッション id。立ち上げ直しで会話を引き継ぐ鍵（無ければ新規）。
             let sessions = storage.load_thread_sessions().unwrap_or_default();
+            // 人が付けた名前の印（エージェントの会話名で上書きしない・O2）。
+            let custom_names = storage.load_custom_named_threads().unwrap_or_default();
+            let muted = muted_thread_ids(&storage);
             for thread in &mut threads {
                 if let Some((_, session_id)) = sessions.iter().find(|(id, _)| *id == thread.id) {
                     thread.acp_session_id = Some(session_id.clone());
                 }
+                thread.name_is_custom = custom_names.contains(&thread.id);
+                thread.muted = muted.contains(&thread.id);
             }
             self.threads = threads;
             self.active = 0;
@@ -2351,45 +2993,51 @@ PYEOF"#;
         let Some(storage) = self.storage.clone() else {
             return;
         };
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        for index in thread.persisted_entries..thread.entries.len() {
+            let (role, content) = match &thread.entries[index] {
+                Entry::User(text) => ("user", text.to_string()),
+                Entry::AutoPrompt(auto) => (auto_prompt::AUTO_PROMPT_ROLE, auto.wire()),
+                Entry::Thinking(text) => ("thinking", text.to_string()),
+                Entry::Step { tool, .. } => ("step", tool.to_string()),
+                Entry::Agent(text) => ("agent", text.to_string()),
+                Entry::Checkpoint { id, label } => ("checkpoint", format!("{id}\t{label}")),
+                Entry::Notice(text) => ("notice", text.to_string()),
+                Entry::Shell(run) => ("shell", run.stored_content()),
+            };
+            match storage.insert_turn(&thread.id, role, &content) {
+                Ok(turn_id) => {
+                    thread.persisted_entries = index + 1;
+                    // 走っている途中で保存した `!` の行は、終わった時にこの行を書き換える。
+                    if let Some(Entry::Shell(run)) = thread.entries.get_mut(index) {
+                        run.note_stored(turn_id);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("turn の永続化に失敗: {error:#}");
+                    return; // ここから先は persisted_entries を進めない = 次回リトライ
+                }
+            }
+        }
+        self.persist_thread_meta(thread_index);
+    }
+
+    /// スレッドのメタ（名前・色・宛先・agent・モデル・トークン累計）だけを upsert する。本文は書かない
+    /// （ターンの途中に呼んでも、生成中の途切れた本文を DB に残さない）。
+    fn persist_thread_meta(&self, thread_index: usize) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
         let project = self
             .storage_scope
             .clone()
             .unwrap_or_else(|| self.dest_project.to_string());
         let branch = self.dest_branch.clone();
-        let Some(thread) = self.threads.get_mut(thread_index) else {
+        let Some(thread) = self.threads.get(thread_index) else {
             return;
         };
-        for entry in thread.entries.iter().skip(thread.persisted_entries) {
-            let (role, content) = match entry {
-                Entry::User(text) => ("user", text.to_string()),
-                Entry::LedgerEvent(text) => ("ledger_event", text.to_string()),
-                Entry::Thinking(text) => ("thinking", text.to_string()),
-                Entry::Step { tool, .. } => ("step", tool.to_string()),
-                Entry::Agent(text) => ("agent", text.to_string()),
-                Entry::Checkpoint { id, label } => ("checkpoint", format!("{id}\t{label}")),
-                // 実行中の `!` はまだ書かない（行は追記しかできない＝途中の状態で固まる）。
-                // ここで止めて、終わった時の `finish_shell` か次のターン終了で続きから書く。
-                Entry::Shell {
-                    status: shell::ShellStatus::Running,
-                    ..
-                } => break,
-                Entry::Shell {
-                    command,
-                    output,
-                    output_lines,
-                    status,
-                    ..
-                } => (
-                    "shell",
-                    shell::encode_turn(command, output.as_deref(), *output_lines, *status),
-                ),
-            };
-            if let Err(error) = storage.insert_turn(&thread.id, role, &content) {
-                eprintln!("turn の永続化に失敗: {error:#}");
-                return; // persisted_entries を進めない = 次回リトライ
-            }
-            thread.persisted_entries += 1;
-        }
         // 色 index は巡回パレットの逆引き（見つからなければ 0）。
         let color = thread.color;
         let color_index = (0..12).find(|i| thread_color(*i) == color).unwrap_or(0) as i64;
@@ -2408,8 +3056,50 @@ PYEOF"#;
         }
     }
 
+    /// ターンの使用量（トークン・コスト）を台帳 `turn_usage` へ 1 行書く（O11・Stats の日別集計の元）。
+    /// エージェントが何も報告しなかったターンは書かない。DB が無い（テスト・一部の検証起動）時は捨てる。
+    fn record_turn_usage(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        let Some(spend) = thread.usage.take_turn() else {
+            return;
+        };
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let record = storage::TurnUsageRecord {
+            thread_id: thread.id.clone(),
+            agent: thread.agent.to_string(),
+            ended_at: now_unix_ms(),
+            // 報告の無いトークンは 0 と書かない（NULL のまま・R08）。
+            tokens: spend.tokens.map(|tokens| storage::TurnTokenCounts {
+                input: tokens.input,
+                output: tokens.output,
+                cached_read: tokens.cached_read,
+                cached_write: tokens.cached_write,
+                total: tokens.total,
+            }),
+            cost_usd: spend.cost_usd,
+            session_cost_usd: spend.session_total_usd,
+        };
+        // 追記するだけなので UI スレッドで DB を待たない（R11・ターンの終わりの応答を止めない）。
+        let storage = storage.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = storage.record_turn_usage(&record) {
+                    eprintln!("ターンの使用量を記録できない: {error:#}");
+                }
+            })
+            .detach();
+    }
+
     /// 最初のターン後、まだ既定名なら会話の冒頭から AI にタイトルを付けてもらう（#6・非同期）。
     /// 手動改名済み or 既に命名済み（＝プレースホルダでない）スレッドは対象外。失敗は静かに既定名のまま。
+    ///
+    /// **エージェントが自分で会話名を送ってくるなら任せる**（O2）: 一度でも `TitleChanged` を送って
+    /// きた agent は即やめ、まだ分からない agent は [`AGENT_TITLE_GRACE`] だけ待ってから、その間に
+    /// 名前が付かなかった時だけ自前の命名（子プロセス）を走らせる。
     fn maybe_auto_name(&mut self, thread_index: usize, cx: &mut Context<Self>) {
         if !settings::get(cx).agent_auto_name {
             return;
@@ -2417,7 +3107,7 @@ PYEOF"#;
         let Some(thread) = self.threads.get(thread_index) else {
             return;
         };
-        if thread.name_is_custom || !is_placeholder_name(&thread.name) {
+        if !self.needs_own_auto_name(thread) || self.auto_naming.contains(&thread.id) {
             return;
         }
         // 会話の冒頭（最初の user 発言 + 最初の agent 応答の先頭）を excerpt に。
@@ -2448,18 +3138,38 @@ PYEOF"#;
             return;
         };
         let thread_id = thread.id.clone();
+        self.auto_naming.insert(thread_id.clone());
         cx.spawn(async move |panel, cx| {
+            // エージェント自身の命名を少し待つ。その間に名前が付いた・人が改名した・この agent が
+            // 名前を送ってくると分かった、のどれかなら自前の命名はしない（子プロセスを立てない）。
+            cx.background_executor().timer(AGENT_TITLE_GRACE).await;
+            let still_needed = panel
+                .update(cx, |panel, _cx| {
+                    let needed = panel
+                        .thread_index_by_id(&thread_id)
+                        .and_then(|index| panel.threads.get(index))
+                        .is_some_and(|thread| panel.needs_own_auto_name(thread));
+                    if !needed {
+                        panel.auto_naming.remove(&thread_id);
+                    }
+                    needed
+                })
+                .unwrap_or(false);
+            if !still_needed {
+                return;
+            }
             let generated = cx
                 .background_executor()
                 .spawn(
                     async move { project::name_thread_on(host.as_ref(), &cwd, &excerpt, oneshot) },
                 )
                 .await;
-            let Ok(name) = generated else {
-                return; // claude 未導入等 → 既定名のまま（静かに諦める）
-            };
             panel
                 .update(cx, |panel, cx| {
+                    panel.auto_naming.remove(&thread_id);
+                    let Ok(name) = generated else {
+                        return; // claude 未導入等 → 既定名のまま（静かに諦める）
+                    };
                     if let Some(index) = panel.thread_index_by_id(&thread_id) {
                         let thread = &mut panel.threads[index];
                         // 生成待ちの間にユーザーが手動改名していたら尊重する。
@@ -2467,7 +3177,8 @@ PYEOF"#;
                             let name = SharedString::from(name);
                             thread.name = name.clone();
                             cx.emit(PanelEvent::ThreadAutoNamed { name });
-                            panel.persist_thread(index);
+                            // メタだけ（生成が長引けば次のターンが走っている＝本文は書かない）。
+                            panel.persist_thread_meta(index);
                             panel.refresh_chat_rows(cx);
                             cx.notify();
                         }
@@ -2476,6 +3187,16 @@ PYEOF"#;
                 .ok();
         })
         .detach();
+    }
+
+    /// necoder 自前の命名（`claude -p` 等）が要るスレッドか: 人が名前を付けていない・まだ既定名・
+    /// その agent が会話名を自分で送ってこない（O2）。
+    fn needs_own_auto_name(&self, thread: &Thread) -> bool {
+        let agent_names_itself = self
+            .catalog
+            .get(&thread.agent)
+            .is_some_and(|advertisement| advertisement.sends_titles);
+        !thread.name_is_custom && is_placeholder_name(&thread.name) && !agent_names_itself
     }
 
     /// このパスを触ったスレッドの色（色リンク・M12-4）。複数スレッドなら最後に触った方。
@@ -2511,6 +3232,7 @@ PYEOF"#;
         let destination_changed = self.dest_host.id() != host.id() || self.dest_cwd != cwd;
         self.dest_project = project;
         self.dest_branch = branch;
+        self.dest_host_label = usage::host_label(host.as_ref());
         self.dest_host = host;
         self.dest_cwd = cwd;
         if destination_changed {
@@ -2520,11 +3242,20 @@ PYEOF"#;
             self.forget_link_resolutions();
             for thread in &mut self.threads {
                 thread.command_tx = None;
+                // slash コマンドはプロジェクトの設定（コマンド・skill・MCP）で変わる。前の宛先の
+                // 一覧は捨て、新しいセッションの広告で埋め直す（在庫も同じ理由で捨てる）。
+                thread.commands.clear();
+            }
+            for advertisement in self.catalog.values_mut() {
+                advertisement.commands.clear();
             }
             // 宛先が変われば cwd も変わる＝別のセッション。先張りの試行履歴も畳んで張り直す。
             self.prewarmed.clear();
             self.prewarm_order.clear();
             self.schedule_prewarm(cx);
+            // レシピも宛先ごと（O16）。
+            self.recipes.clear();
+            self.refresh_recipes(cx);
         }
         self.sync_running_registry(cx);
         cx.notify();
@@ -2568,6 +3299,36 @@ PYEOF"#;
     /// いま選ばれているスレッドの添字（`statuses()` と同じ並び）。
     pub fn active_thread(&self) -> usize {
         self.active
+    }
+
+    /// いま選ばれているスレッドが話すエージェント（ラベル）。statusbar の使用量が読む（O11）。
+    pub fn active_agent(&self) -> Option<SharedString> {
+        self.threads
+            .get(self.active)
+            .map(|thread| thread.agent.clone())
+    }
+
+    /// いまのスレッドの使用量の鍵（エージェント + 動かしている場所 + 認証の環境・R08。statusbar の
+    /// チップとポップオーバーの並び）。セッションが動いていれば立てた時にスレッドへ持たせた鍵、
+    /// 無ければ今の宛先と設定で立てた時に付く鍵。描画から呼ぶので Host は呼ばない（場所は宛先を
+    /// 受け取った時に控えた値）。
+    pub fn active_usage_key(&self, cx: &App) -> Option<usage::UsageKey> {
+        let thread = self.threads.get(self.active)?;
+        Some(match (&thread.command_tx, &thread.usage_key) {
+            (Some(_), Some(key)) => key.clone(),
+            _ => self.prospective_usage_key(self.active, cx),
+        })
+    }
+
+    /// 今の宛先（場所）と設定（`agent_servers.<id>.env`）でこのスレッドのセッションを立てた時に付く
+    /// 鍵（[`Self::start_session`] と同じ作り方）。Host は呼ばない。
+    fn prospective_usage_key(&self, thread_index: usize, cx: &App) -> usage::UsageKey {
+        let agent = self
+            .threads
+            .get(thread_index)
+            .map(|thread| thread.agent.clone())
+            .unwrap_or_else(|| SharedString::from("Claude Code"));
+        usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx)
     }
 
     pub fn contains_thread(&self, id: &str) -> bool {
@@ -2643,12 +3404,19 @@ PYEOF"#;
     }
 
     /// エージェント別ミュートの切替（P2・herd 行の 🔕）。muted 中はこのスレッドの
-    /// トースト/完了音を出さない（ニュースフィードには載る＝見えるが鳴らない）。
+    /// トースト/完了音/OS 通知を出さない（ニュースフィードには載る＝見えるが鳴らない）。
+    /// DB にも残す（O12・以前は再起動で黙って解除されていた）。
     pub fn toggle_thread_mute(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(thread) = self.threads.get_mut(index) {
-            thread.muted = !thread.muted;
-            cx.notify();
+        let Some(thread) = self.threads.get_mut(index) else {
+            return;
+        };
+        thread.muted = !thread.muted;
+        if let Some(storage) = &self.storage {
+            if let Err(error) = storage.set_thread_muted(&thread.id, thread.muted) {
+                eprintln!("スレッドのミュートを保存できない（再起動で戻る）: {error:#}");
+            }
         }
+        cx.notify();
     }
 
     /// 管制の要対応キュー（P3）向け: 承認待ちカードの素材。
@@ -2657,6 +3425,7 @@ PYEOF"#;
         let thread = self.threads.get(thread_index)?;
         let pending = thread.pending_permission.as_ref()?;
         Some(PermissionCard {
+            id: SharedString::from(pending.remote_id.clone()),
             title: pending.title.clone(),
             options: pending
                 .options
@@ -2669,6 +3438,38 @@ PYEOF"#;
             waited_secs: pending.since.elapsed().as_secs(),
             diff_files: pending.diffs.len(),
         })
+    }
+
+    /// 要対応（O12）向け: 質問待ちカードの素材（質問文と待ち時間）。答えはスレッドのカードで選ぶ
+    /// （選択肢が複数フィールドにまたがり得るので、要対応のカードには並べない）。
+    pub fn question_card(&self, thread_index: usize) -> Option<QuestionCard> {
+        let thread = self.threads.get(thread_index)?;
+        let pending = thread.pending_elicitation.as_ref()?;
+        Some(QuestionCard {
+            message: pending.message.clone(),
+            waited_secs: pending.since.elapsed().as_secs(),
+        })
+    }
+
+    /// スレッドの永続 id から今の添字を引く（OS 通知を押した時の行き先・O12）。
+    /// 添字はタブを閉じるとずれるので、通知には id を持たせてここで引き直す。
+    pub fn thread_position(&self, thread_id: &str) -> Option<usize> {
+        self.thread_index_by_id(thread_id)
+    }
+
+    /// 永続 id のスレッドの色（通知の履歴が行の印に使う・O13）。閉じられていれば None。
+    pub fn thread_color_by_id(&self, thread_id: &str) -> Option<Hsla> {
+        self.thread_index_by_id(thread_id)
+            .and_then(|index| self.threads.get(index))
+            .map(|thread| thread.color)
+    }
+
+    /// 今の添字にあるスレッドの永続 id（[`Self::thread_position`] の逆）。宛先を覚えておく側
+    /// （変更レビューの送り先メニュー・R07）は添字でなくこちらを持ち、送る直前に引き直す。
+    pub fn thread_id(&self, thread_index: usize) -> Option<SharedString> {
+        self.threads
+            .get(thread_index)
+            .map(|thread| SharedString::from(thread.id.clone()))
     }
 
     /// 承認待ちへ**任意スレッド**で応答する（管制のインライン許可/拒否・P3）。
@@ -2755,28 +3556,96 @@ PYEOF"#;
         }
     }
 
-    /// Elicitation を確定送信する（全フィールドが 1 つ以上選択済みの時のみ Accept を返す）。
+    /// Elicitation を確定送信する（アクティブスレッド・全フィールドが答え済みの時のみ Accept を返す）。
     fn submit_elicitation(&mut self, cx: &mut Context<Self>) {
-        if let Some(thread) = self.threads.get_mut(self.active) {
-            let all_selected = thread.pending_elicitation.as_ref().is_some_and(|pending| {
-                pending.fields.iter().all(|field| {
-                    pending
-                        .selections
-                        .get(&field.name)
-                        .is_some_and(|values| !values.is_empty())
-                })
-            });
-            if !all_selected {
-                return; // 未選択のフィールドがある＝まだ確定しない
-            }
-            if let Some(pending) = thread.pending_elicitation.take() {
-                let selections: Vec<(String, Vec<String>)> =
-                    pending.selections.into_iter().collect();
-                pending.respond.unbounded_send(Some(selections)).ok();
-            }
+        self.submit_elicitation_at(self.active, cx);
+    }
+
+    /// `thread_index` の質問を確定送信する。答えていない質問が残っていれば何もせず false。
+    fn submit_elicitation_at(&mut self, thread_index: usize, cx: &mut Context<Self>) -> bool {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return false;
+        };
+        let Some(answers) = thread
+            .pending_elicitation
+            .as_ref()
+            .and_then(PendingElicitation::answers)
+        else {
+            return false; // 答えていない質問がある＝まだ確定しない
+        };
+        if let Some(pending) = thread.pending_elicitation.take() {
+            pending.respond.unbounded_send(Some(answers)).ok();
         }
         self.sync_running_registry(cx);
         cx.notify();
+        true
+    }
+
+    /// 自由入力欄の文字が変わった（O17）。写しを更新して描き直す（「これで回答」の有効/無効が変わる）。
+    fn note_custom_answer(
+        &mut self,
+        thread_id: &str,
+        field_name: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self
+            .thread_index_by_id(thread_id)
+            .and_then(|index| self.threads[index].pending_elicitation.as_mut())
+        else {
+            return;
+        };
+        if pending.custom_texts.get(field_name) != Some(&text) {
+            pending.custom_texts.insert(field_name.to_string(), text);
+            cx.notify();
+        }
+    }
+
+    /// 自由入力欄の Enter（O17）: その質問を確定する。確定したら入力欄はカードと一緒に消えるので、
+    /// フォーカスを composer へ戻す（迷子にするとキーが届かない）。
+    fn submit_elicitation_from_input(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.thread_index_by_id(thread_id) else {
+            return;
+        };
+        if !self.submit_elicitation_at(index, cx) {
+            return;
+        }
+        let composer = self.composer.read(cx).focus_handle(cx);
+        if let Some(window) = cx.active_window() {
+            // Err = 窓が閉じた。戻す先も無い。
+            window
+                .update(cx, |_, window, cx| window.focus(&composer, cx))
+                .ok();
+        }
+    }
+
+    /// アクティブスレッドの質問カードの自由入力欄にフォーカスがあるか。
+    fn elicitation_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.threads
+            .get(self.active)
+            .and_then(|thread| thread.pending_elicitation.as_ref())
+            .is_some_and(|pending| {
+                pending
+                    .custom_inputs
+                    .values()
+                    .any(|input| input.read(cx).focus_handle(cx).contains_focused(window, cx))
+            })
+    }
+
+    /// カードを押して質問が片付いた時、自由入力欄に居たフォーカスを composer へ戻す。
+    fn refocus_after_elicitation(
+        &self,
+        input_had_focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let resolved = self
+            .threads
+            .get(self.active)
+            .is_none_or(|thread| thread.pending_elicitation.is_none());
+        if input_had_focus && resolved {
+            self.focus_composer(window, cx);
+        }
     }
 
     /// Elicitation に答えない（Decline）。カードを畳み、エージェントには「回答なし」を返す。
@@ -2824,14 +3693,15 @@ PYEOF"#;
             .map(|entry| {
                 let (bullet, text): (&str, SharedString) = match entry {
                     Entry::User(text) => ("▸", text.clone()),
-                    Entry::LedgerEvent(text) => ("◇", text.clone()),
+                    Entry::AutoPrompt(auto) => ("◇", auto.text.clone()),
                     Entry::Thinking(text) => ("✳", text.clone()),
                     Entry::Step { tool, result, .. } => {
                         ("⏺", result.clone().unwrap_or_else(|| tool.clone()))
                     }
                     Entry::Agent(text) => ("⏺", text.clone()),
-                    Entry::Shell { command, .. } => ("!", command.clone()),
                     Entry::Checkpoint { label, .. } => ("⟲", label.clone()),
+                    Entry::Notice(text) => ("—", text.clone()),
+                    Entry::Shell(run) => ("!", run.command.clone()),
                 };
                 (SharedString::from(bullet), text)
             })
@@ -2908,8 +3778,14 @@ PYEOF"#;
                 selection: None,
                 layout: TextLayout::default(),
             });
+            if text.len() > TRANSCRIPT_CACHE_SOURCE_BYTES {
+                return styled;
+            }
             let mut cache = self.styled_text_cache.borrow_mut();
-            while cache.order.len() >= StyledTextEntityCache::CAPACITY {
+            while cache.order.len() >= StyledTextEntityCache::CAPACITY
+                || cache.order.iter().map(|key| key.content.len).sum::<usize>() + text.len()
+                    > TRANSCRIPT_CACHE_SOURCE_BYTES
+            {
                 if let Some(expired) = cache.order.pop_front() {
                     cache.items.remove(&expired);
                 }
@@ -2999,8 +3875,14 @@ PYEOF"#;
         }
         links.sort_by_key(|link| link.range.start);
         let links = Rc::new(links);
+        if text.len() > TRANSCRIPT_CACHE_SOURCE_BYTES {
+            return links;
+        }
         let mut cache = self.link_cache.borrow_mut();
-        while cache.order.len() >= TranscriptLinkCache::CAPACITY {
+        while cache.order.len() >= TranscriptLinkCache::CAPACITY
+            || cache.order.iter().map(|key| key.len).sum::<usize>() + text.len()
+                > TRANSCRIPT_CACHE_SOURCE_BYTES
+        {
             if let Some(expired) = cache.order.pop_front() {
                 cache.items.remove(&expired);
             }
@@ -3521,6 +4403,11 @@ PYEOF"#;
     ) {
         let keystroke = &event.keystroke;
         if keystroke.key == "escape" {
+            // スレッドのメニューが開いていれば、まずそれを閉じる（ターンは止めない）。
+            if self.close_thread_menu(cx) {
+                cx.stop_propagation();
+                return;
+            }
             // 検索バーが開いていれば、まずそれを閉じる（読むのを邪魔している物から順に畳む）。
             if self.transcript_search_open() {
                 self.close_transcript_search(window, cx);
@@ -3529,6 +4416,12 @@ PYEOF"#;
             // 選択の解除が先（transcript を読んでいる最中の Esc でターンを止めない）。
             if self.transcript_selection.take().is_some() {
                 cx.notify();
+                return;
+            }
+            // `!` で走らせたコマンドがあれば、まずそれを止める（人が自分で起こした物が先。
+            // エージェントのターンはもう一度 Esc で止まる）。
+            if self.stop_shell_runs(self.active, cx) {
+                cx.stop_propagation();
                 return;
             }
             // 実行中なら Esc = 中断（Claude Code / Zed と同じ体感）。
@@ -3629,6 +4522,8 @@ PYEOF"#;
         }
         thread.command_tx = None;
         thread.session_lost = true;
+        // 「再開中…」の一言はもう当たらない（切れた印とカードが代わりに出る）。
+        thread.session_note = None;
         self.tidy_chat_dir(index);
         // 終端イベント無しでターン中に終わった場合の畳み（running=false なら何もしない）。
         self.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
@@ -3646,13 +4541,29 @@ PYEOF"#;
         thread.command_tx = None;
         thread.session_lost = true;
         thread.session_note = None;
-        self.abandon_turn(
-            thread_index,
-            &i18n::t!("agent.err_session_lost_transport"),
-            cx,
-        );
+        let message = self.session_lost_reason();
+        self.abandon_turn(thread_index, &message, cx);
         self.sync_running_registry(cx);
         cx.notify();
+    }
+
+    /// ターンの途中でセッションが切れた時に transcript へ残す 1 行。**手元で動くエージェントには SSH の
+    /// 話をしない**（落ちたのはプロセス）。SSH 先で動かしている時だけ SSH の切断の可能性を言う。
+    fn session_lost_reason(&self) -> String {
+        if self.dest_host.is_remote() {
+            i18n::t!("agent.err_session_lost_transport")
+        } else {
+            i18n::t!("agent.err_session_lost_process")
+        }
+    }
+
+    /// セッションが切れた印（composer の直上のバナー）の文。SSH の話は SSH 先の時だけ（上と同じ）。
+    fn session_lost_banner_text(&self) -> String {
+        if self.dest_host.is_remote() {
+            i18n::t!("agent.session_lost_banner")
+        } else {
+            i18n::t!("agent.session_lost_banner_local")
+        }
     }
 
     /// 「再開」ボタン: 送信を待たずにエージェントを立ち上げ直す。前回の会話は `session/load` で
@@ -3670,16 +4581,18 @@ PYEOF"#;
             return;
         }
         match self.start_session(thread_index, cwd, cx) {
-            Some((command_tx, serial)) => {
+            Ok((command_tx, serial, usage_key)) => {
                 if let Some(thread) = self.threads.get_mut(thread_index) {
                     thread.command_tx = Some(command_tx);
                     thread.session_serial = serial;
+                    thread.usage_key = Some(usage_key);
                     thread.session_lost = false;
+                    thread.session_seated = thread.seat.is_some();
                     thread.session_note =
                         Some(SharedString::from(i18n::t!("agent.session_resuming")));
                 }
             }
-            None => self.fail_turn(thread_index, &i18n::t!("agent.err_no_acp"), cx),
+            Err(message) => self.fail_turn(thread_index, &message, cx),
         }
         cx.notify();
     }
@@ -3742,22 +4655,77 @@ PYEOF"#;
         {
             return; // もう繋がっている（送信が先に立てた等）
         }
+        // 初回に binary を落とすエージェント（H2-b）は先張りしない。見ただけのタブで数十〜数百 MB を
+        // 黙って落とさない（最初の送信で、落としていることを出してから落とす）。
+        if self.needs_binary_deploy(index, cx) {
+            return;
+        }
         if !self.prewarmed.insert(thread_id.to_string()) {
             return;
         }
-        let Some((command_tx, serial)) = self.start_session(index, cwd, cx) else {
+        let Ok((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) else {
             return; // エージェントが導入されていない。ここでは黙る
         };
         if let Some(thread) = self.threads.get_mut(index) {
             thread.command_tx = Some(command_tx);
             thread.session_serial = serial;
+            thread.usage_key = Some(usage_key);
             thread.session_lost = false;
             thread.session_used = false;
+            thread.session_seated = thread.seat.is_some();
         }
         self.prewarm_order.retain(|id| id != thread_id);
         self.prewarm_order.push(thread_id.to_string());
         self.retire_idle_prewarms();
         cx.notify();
+    }
+
+    /// 開発用（`NECODER_AGENT_START_PROBE`）: いまのスレッドを `agent` にしてセッションだけを立てる
+    /// （プロンプトは送らない）。起動できなければ「再開」と同じく失敗の 1 行を出す。
+    #[cfg(debug_assertions)]
+    fn debug_start_session(&mut self, agent: &str, cx: &mut Context<Self>) {
+        let index = self.active;
+        let Some(thread) = self.threads.get_mut(index) else {
+            return;
+        };
+        thread.agent = SharedString::from(agent.to_string());
+        apply_agent_sticky(thread, cx);
+        let Some(cwd) = self.session_cwd(index) else {
+            self.fail_turn(index, &i18n::t!("agent.err_no_project"), cx);
+            return;
+        };
+        match self.start_session(index, cwd, cx) {
+            Ok((command_tx, serial, usage_key)) => {
+                if let Some(thread) = self.threads.get_mut(index) {
+                    thread.command_tx = Some(command_tx);
+                    thread.session_serial = serial;
+                    thread.usage_key = Some(usage_key);
+                    thread.session_lost = false;
+                }
+            }
+            Err(message) => self.fail_turn(index, &message, cx),
+        }
+        cx.notify();
+    }
+
+    /// このスレッドのエージェントが、起こす前に binary を落として置く必要があるか（レジストリから
+    /// 足した binary で、この版をまだ置いていない・手元だけ）。組み込みはレジストリを読まずに `false`。
+    fn needs_binary_deploy(&self, thread_index: usize, cx: &App) -> bool {
+        let Some(agent) = self
+            .threads
+            .get(thread_index)
+            .and_then(|thread| settings::agent_by_label(cx, &thread.agent))
+        else {
+            return false;
+        };
+        let from_registry = agent.custom().is_some_and(|custom| {
+            matches!(custom.launch, acp_client::CustomLaunch::Registry { .. })
+        });
+        from_registry
+            && agent.needs_deploy(
+                self.dest_host.as_ref(),
+                acp_client::registry::load_cached().as_ref(),
+            )
     }
 
     /// 先張りしたまま **1 度も使っていない** セッションが [`MAX_IDLE_PREWARMED_SESSIONS`] を
@@ -3820,13 +4788,19 @@ PYEOF"#;
             thread
                 .entries
                 .push(Entry::Agent(SharedString::from(message.to_string())));
-            Some((thread.name.clone(), thread.color, thread.muted))
+            Some((
+                thread.name.clone(),
+                SharedString::from(thread.id.clone()),
+                thread.color,
+                thread.muted,
+            ))
         } else {
             None
         };
-        if let Some((thread, color, muted)) = abandoned {
+        if let Some((thread, thread_id, color, muted)) = abandoned {
             cx.emit(PanelEvent::TurnFailed {
                 thread,
+                thread_id,
                 color,
                 message: SharedString::from(message.to_string()),
                 muted,
@@ -3934,11 +4908,18 @@ PYEOF"#;
         }
         self.save_active_draft(cx);
         let mut closed = self.threads.remove(index);
-        self.stop_thread_shells(&closed.id); // 閉じたスレッドの `!` は止める
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
         closed.running = false;
         closed.turn_started_at = None;
-        self.closed_threads.push(closed);
+        closed.pending_permission = None;
+        closed.pending_elicitation = None;
+        closed.session_serial = 0;
+        // `!` で走らせているコマンドも止める（閉じたタブの裏で動かし続けない）。
+        self.stop_shell_runs_of(&mut closed, cx);
+        self.closed_threads.push(ClosedThread::new(closed));
+        self.release_transcript_caches();
+        self.sync_running_registry(cx);
+        self.reset_transcript_list(true);
         // active を有効域へ寄せる。空になったら 0（描画は get(active)=None で空状態になる）。
         if self.threads.is_empty() {
             self.active = 0;
@@ -3974,11 +4955,18 @@ PYEOF"#;
 
     /// 直近に閉じたスレッドを復元する（⌘⇧T。会話履歴ごと戻し、末尾へ追加してアクティブに）。
     pub fn restore_closed_thread(&mut self, cx: &mut Context<Self>) {
-        if let Some(thread) = self.closed_threads.pop() {
+        if let Some(mut closed) = self.closed_threads.pop() {
+            if let Err(error) = closed.restore_entries() {
+                eprintln!("閉じたスレッドの復元に失敗（再試行可能）: {error:#}");
+                self.closed_threads.push(closed);
+                return;
+            }
+            let thread = closed.thread;
             self.save_active_draft(cx);
             self.unarchive(&thread.id);
             self.threads.push(thread);
             self.active = self.threads.len() - 1;
+            self.reset_transcript_list(true);
             let color = self.active_color();
             let draft = self.threads[self.active].draft.clone();
             self.composer.update(cx, |composer, cx| {
@@ -4010,6 +4998,29 @@ PYEOF"#;
         last_input_at_ms: Option<i64>,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
+        self.open_stored_thread(
+            id,
+            name,
+            color_index,
+            created_at_ms,
+            last_input_at_ms,
+            RESTORED_TURNS,
+            cx,
+        )
+    }
+
+    /// [`Self::open_thread_from_history`] の本体。`turn_limit` = 復元する直近の turn の数。
+    #[allow(clippy::too_many_arguments)]
+    fn open_stored_thread(
+        &mut self,
+        id: &str,
+        name: &str,
+        color_index: usize,
+        created_at_ms: i64,
+        last_input_at_ms: Option<i64>,
+        turn_limit: i64,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
         if let Some(index) = self.threads.iter().position(|thread| thread.id == id) {
             self.switch_thread(index, cx);
             return Some(index);
@@ -4017,7 +5028,7 @@ PYEOF"#;
         let storage = self.storage.clone()?;
         self.save_active_draft(cx);
         self.unarchive(id);
-        let mut thread = thread_from_storage(&storage, id, name, color_index, cx);
+        let mut thread = thread_from_storage(&storage, id, name, color_index, turn_limit, cx);
         thread.created_at_ms = created_at_ms;
         thread.last_input_at_ms = last_input_at_ms;
         self.threads.push(thread);
@@ -4058,6 +5069,7 @@ PYEOF"#;
                     .focus_handle(cx)
                     .contains_focused(window, cx)
             })
+            || self.elicitation_input_focused(window, cx)
     }
 
     fn save_active_draft(&mut self, cx: &App) {
@@ -4169,15 +5181,39 @@ PYEOF"#;
             return;
         };
         let text = editor.read(cx).plain_text();
-        let name = text.trim();
+        // `:rocket:` は絵文字に（O20・A08・Task 名と同じ）。
+        let name = ui::emoji::expand_shortcodes(text.trim());
         if !name.is_empty() {
+            let mut unseated = None;
             if let Some(thread) = self.threads.get_mut(index) {
-                thread.name = SharedString::from(name.to_string());
+                thread.name = SharedString::from(name);
                 thread.name_is_custom = true; // 以後 AI 自動命名で上書きしない
+                                              // 席は名前ではなく席に付く（FLEET-V2 §5.8-5）。改名 = 席から降りる（前置きも外す）。
+                if thread.seat.take().is_some() {
+                    unseated = Some(thread.id.clone());
+                }
             }
-            self.persist_thread(index);
+            if let Some(id) = unseated {
+                self.prompt_context.remove(&id);
+            }
+            // 名前（メタ）だけ保存する。生成中に改名しても、途中の本文を DB に書かない。
+            self.persist_thread_meta(index);
+            self.persist_custom_name(index);
         }
         cx.notify();
+    }
+
+    /// 「人が名前を付けた」印を DB に残す（再起動後もエージェントの会話名で上書きしない・O2）。
+    fn persist_custom_name(&self, thread_index: usize) {
+        let (Some(storage), Some(thread)) = (self.storage.as_ref(), self.threads.get(thread_index))
+        else {
+            return;
+        };
+        if let Err(error) = storage.set_thread_name_custom(&thread.id, true) {
+            eprintln!(
+                "スレッド名の手動の印を保存できない（再起動後に会話名で上書きされうる）: {error:#}"
+            );
+        }
     }
 
     /// 改名を取り消す（Esc / 別タブへ切替）。入力内容は破棄する。
@@ -4324,6 +5360,89 @@ PYEOF"#;
         )
     }
 
+    /// 開発用: いまのスレッドにレート制限の知らせを流す（`NECODER_USAGE_PROBE`・O11 の offscreen 検証）。
+    /// 本番と同じ `on_event` を通す（置き場への反映・statusbar の再描画まで）。`near` = 上限に近い値 /
+    /// `blocked` = 上限に達して止められた値 / それ以外 = ふだんの値。
+    #[cfg(debug_assertions)]
+    pub fn debug_seed_rate_limits(&mut self, variant: &str, cx: &mut Context<Self>) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, WindowUsage};
+        let now_secs = now_unix_ms() / 1000;
+        let (status, five_hour, weekly, opus) = match variant {
+            "near" => (LimitStatus::Warning, 86.0, 41.0, 83.0),
+            "blocked" => (LimitStatus::Rejected, 100.0, 64.0, 70.0),
+            _ => (LimitStatus::Allowed, 42.0, 18.0, 12.0),
+        };
+        let window = |window: LimitWindow, percent: f64, seconds: i64| WindowUsage {
+            window,
+            used_percent: Some(percent),
+            resets_at: Some(now_secs + seconds),
+        };
+        let active = self.active;
+        self.on_event(
+            active,
+            AgentEvent::RateLimits(RateLimits {
+                status: Some(status),
+                windows: vec![
+                    window(LimitWindow::FiveHour, five_hour, 2 * 3_600 + 13 * 60),
+                    window(LimitWindow::Weekly, weekly, 4 * 86_400 + 3 * 3_600),
+                    window(
+                        LimitWindow::Named("seven_day_opus".into()),
+                        opus,
+                        4 * 86_400 + 3 * 3_600,
+                    ),
+                ],
+            }),
+            cx,
+        );
+    }
+
+    /// 開発用: composer の `/` 補完を開いた状態にする（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
+    /// `text` を composer に入れてフォーカスする。`fake` なら偽のコマンド一覧を先に流し込む
+    /// （実エージェント無しで描画を確かめる。偽でなければ先張りしたセッションの本物の一覧を使う）。
+    #[cfg(debug_assertions)]
+    pub fn debug_slash_probe(
+        &mut self,
+        text: &str,
+        fake: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if fake {
+            let command =
+                |name: &str, description: &str, hint: Option<&str>| acp_client::SlashCommand {
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    hint: hint.map(str::to_string),
+                };
+            let commands = vec![
+                command(
+                    "compact",
+                    "Clear conversation history but keep a summary in context",
+                    Some("<optional custom summarization instructions>"),
+                ),
+                command("context", "Visualize current context usage", None),
+                command("cost", "Show the total cost and duration", None),
+                command(
+                    "review",
+                    "Review a pull request",
+                    Some("optional review instructions"),
+                ),
+                command(
+                    "mcp:github:pr",
+                    "Create a pull request from the current branch (MCP)",
+                    Some("title"),
+                ),
+                command("init", "Initialize a new CLAUDE.md file", None),
+            ];
+            let active = self.active;
+            self.on_event(active, AgentEvent::Commands(commands), cx);
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.set_plain_text(text, cx));
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
     /// 開発用: フォーカス無しで改名モーダルを開く（offscreen スクショ検証・#4）。
     #[cfg(debug_assertions)]
     pub fn debug_start_rename(&mut self, cx: &mut Context<Self>) {
@@ -4367,6 +5486,7 @@ PYEOF"#;
                     result: None,
                     result_lines: 0,
                     diffs: Vec::new(),
+                    parent: None,
                 });
                 thread.plan = vec![
                     PlanItem {
@@ -4450,6 +5570,70 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// 開発用: アクティブスレッドへ選択肢付きの質問を 1 つ届ける（O12: 質問待ちの通知・要対応・
+    /// トーストの撮影・workspace のテスト）。実際の `ElicitationRequest` と同じ `on_event` を通す。
+    /// 答えはどこにも返らない。
+    pub fn debug_ask_question(&mut self, cx: &mut Context<Self>) {
+        let (respond, _answers) = mpsc::unbounded();
+        let choice = |title: &str| acp_client::ElicitationChoice {
+            value: title.to_string(),
+            title: title.to_string(),
+            description: None,
+        };
+        let field = acp_client::ElicitationField {
+            name: "question_0".to_string(),
+            label: "方針".to_string(),
+            options: vec![choice("ropey で進める"), choice("sum-tree で進める")],
+            multi: false,
+            custom_answer: Some("question_0_custom".to_string()),
+        };
+        self.on_event(
+            self.active,
+            AgentEvent::ElicitationRequest {
+                message: "バッファはどちらで実装しますか？".to_string(),
+                fields: vec![field],
+                respond,
+            },
+            cx,
+        );
+    }
+
+    /// 開発用: アクティブスレッドへ「許可 / 拒否」の承認要求を 1 つ届ける（workspace のテスト・Captain の
+    /// 推薦が今の要求にだけ付くことの確認）。実際の `PermissionRequest` と同じ `on_event` を通すので、
+    /// Blocked への遷移と `PanelEvent::PermissionWaiting` まで本物の経路で起きる。返すのは選ばれた添字の受け口。
+    pub fn debug_request_permission(
+        &mut self,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> mpsc::UnboundedReceiver<usize> {
+        let (respond, answers) = mpsc::unbounded();
+        self.on_event(
+            self.active,
+            AgentEvent::PermissionRequest {
+                title: title.to_string(),
+                kind: Some(acp_client::ToolCallKind::Execute),
+                paths: Vec::new(),
+                diffs: Vec::new(),
+                raw_input: None,
+                options: vec![
+                    PermissionChoice {
+                        label: "許可".into(),
+                        kind: PermissionKind::Allow,
+                    },
+                    PermissionChoice {
+                        label: "拒否".into(),
+                        kind: PermissionKind::Reject,
+                    },
+                ],
+                tool_call_id: String::new(),
+                mcp_tool: false,
+                respond,
+            },
+            cx,
+        );
+        answers
+    }
+
     pub fn debug_set_activities(&mut self, cx: &mut Context<Self>) {
         for (index, thread) in self.threads.iter_mut().enumerate() {
             thread.running = false;
@@ -4467,6 +5651,7 @@ PYEOF"#;
                         result: None,
                         result_lines: 0,
                         diffs: Vec::new(),
+                        parent: None,
                     });
                     thread.plan = vec![
                         PlanItem {
@@ -4513,6 +5698,15 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// 閉じた会話の本文・レイアウトをキャッシュ経由で握り続けない。
+    fn release_transcript_caches(&mut self) {
+        *self.markdown_cache.borrow_mut() = MarkdownBlockCache::default();
+        *self.syntax_cache.borrow_mut() = SyntaxHighlightCache::default();
+        *self.styled_text_cache.borrow_mut() = StyledTextEntityCache::default();
+        *self.link_cache.borrow_mut() = TranscriptLinkCache::default();
+        self.transcript_regions.borrow_mut().clear();
+    }
+
     /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。composer にも波及させる。
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
@@ -4525,6 +5719,19 @@ PYEOF"#;
     /// 新規スレッドを作る公開口（workspace の ⌘⇧A から呼ぶ）。
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
         self.add_thread(cx);
+    }
+
+    /// エージェントを決めて新規スレッドを作る（B28・パレット「AI: 新しいスレッド（Codex）」等）。
+    /// 作ってから、エージェント選択と同じ道筋（先張りしたセッションを畳んで張り直す）で差し替える。
+    pub fn new_thread_with_agent(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.add_thread(cx);
+        let current = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.agent.clone());
+        if current.as_deref() != Some(agent) {
+            self.select_option(Selector::Agent, SharedString::from(agent.to_string()), cx);
+        }
     }
 
     /// 新規スレッドを作り、その index を返す（編隊グリッドの ＋Agent＝新エージェント起動・M14）。
@@ -4550,6 +5757,15 @@ PYEOF"#;
                 || aliases.iter().any(|alias| alias == thread.name.as_ref())
         }) {
             self.switch_thread(index, cx);
+            // 名前で引き当てるスレッドの名前は動かしてはいけない（エージェントの会話名で変わると
+            // 次から見つからない）。印の無い行（印を残す前の DB から復元した等）には付け直す。
+            let newly_marked = self
+                .threads
+                .get_mut(index)
+                .is_some_and(|thread| !std::mem::replace(&mut thread.name_is_custom, true));
+            if newly_marked {
+                self.persist_custom_name(index);
+            }
             return index;
         }
         let index = self.acquire_thread(Some(agent.to_string()), cx);
@@ -4557,6 +5773,7 @@ PYEOF"#;
             thread.name = SharedString::from(name.to_string());
             thread.name_is_custom = true;
         }
+        self.persist_custom_name(index);
         index
     }
 
@@ -4621,14 +5838,17 @@ PYEOF"#;
     /// 広告が届く前は空（＝メニューを開かせない・ピルは不活性）。necoder が候補を捏造しないのが要点で、
     /// 捏造した綴りは広告と一致せず「選んだのに次回は戻る」を生む。Zed も同じで、`configOptions` が
     /// 来るまでモデル UI 自体を出さない（necoder は場所を保つためにピルは残し、押せなくする）。
-    fn selector_choices(&self, selector: Selector) -> Vec<SelectorChoice> {
+    ///
+    /// Agent は認証済みのうち**使う**もの（設定の `disabled_agents` で外したものは出さない・O16）。
+    fn selector_choices(&self, selector: Selector, cx: &App) -> Vec<SelectorChoice> {
         if selector == Selector::Agent {
             let current = self.selector_value(Selector::Agent);
-            let mut options: Vec<SelectorChoice> = acp_client::authenticated_agent_labels()
+            // ログイン済みの組み込み + 設定で足したエージェント（H1）。使わないものは除いてある。
+            let mut options: Vec<SelectorChoice> = settings::selectable_agent_labels(cx)
                 .into_iter()
                 .map(|label| SelectorChoice {
-                    value: SharedString::from(label),
-                    label: SharedString::from(label),
+                    value: label.clone(),
+                    label,
                 })
                 .collect();
             // 明示既定/復元値は、起動直後の背景認証確認より強い。現在値を選択肢から消さない。
@@ -4708,9 +5928,9 @@ PYEOF"#;
     /// テスト用の入口。描画側は `render_selector_pill` が選択肢を 1 回だけ作って `label_for` を直接呼ぶ
     /// （毎フレーム 2 度 Vec を作らないため）。規則そのものは `label_for` に一本化してある。
     #[cfg(test)]
-    fn selector_label(&self, selector: Selector) -> SharedString {
+    fn selector_label(&self, selector: Selector, cx: &App) -> SharedString {
         label_for(
-            &self.selector_choices(selector),
+            &self.selector_choices(selector, cx),
             &self.selector_value(selector),
         )
     }
@@ -4725,6 +5945,18 @@ PYEOF"#;
     /// その agent の次スレッドがそれで開く。agent を跨いでも語彙が混ざらない。
     /// 既定を「動かさない」（§8＝default_agent）ことと「覚える」（per-agent sticky）の線をここで引いている。
     fn select_option(&mut self, selector: Selector, value: SharedString, cx: &mut Context<Self>) {
+        // 席のスレッドの権限モードとエージェントは necoder が決める（FLEET-V2 §5.8-2）。選ぶと決まりが
+        // 外れるので受けない。ユーザーの既定（sticky）にも書かない。
+        if matches!(selector, Selector::Mode | Selector::Agent)
+            && self
+                .threads
+                .get(self.active)
+                .is_some_and(|thread| thread.seat.is_some())
+        {
+            self.open_menu = None;
+            cx.notify();
+            return;
+        }
         if selector == Selector::Agent && self.agent_selector_locked() {
             self.open_menu = None;
             cx.notify();
@@ -4737,10 +5969,11 @@ PYEOF"#;
         let active_agent_id = self
             .threads
             .get(self.active)
-            .and_then(|thread| acp_client::AgentKind::by_label(thread.agent.as_ref()))
-            .map(|kind| kind.id);
+            .and_then(|thread| settings::agent_by_label(cx, thread.agent.as_ref()))
+            .map(|agent| agent.id().to_string());
         if let (Some(agent_id), Some(config_id)) = (active_agent_id, selector.config_id()) {
-            settings::set_agent_config_default(cx, agent_id, config_id, &value);
+            let result = settings::set_agent_config_default(cx, &agent_id, config_id, &value);
+            self.report_settings_save(result, cx);
         }
         if let Some(thread) = self.threads.get_mut(self.active) {
             match selector {
@@ -4758,6 +5991,9 @@ PYEOF"#;
                     thread.acp_session_id = None;
                     thread.available_modes.clear();
                     thread.configs.clear();
+                    // slash コマンドと目標も前の agent の物（新しい agent の在庫か広告で埋まる）。
+                    thread.commands.clear();
+                    thread.goal = None;
                     thread.session_lost = false;
                     thread.session_note = None;
                     agent_changed = Some(thread.id.clone());
@@ -4775,7 +6011,7 @@ PYEOF"#;
                     // `set_mode` はターン中 deferred（acp_client）で今のターンには効かないため、
                     // ここで畳まないと「bypass にしたのに止まったまま」になる。checkpoint は
                     // リクエスト受信時に記録済み＝手動 Allow と同じ一本道。
-                    if value.to_lowercase().contains("bypass") {
+                    if is_bypass_mode(&value) {
                         if let Some(pending) = thread.pending_permission.take() {
                             let choice = pending
                                 .options
@@ -4852,7 +6088,8 @@ PYEOF"#;
     fn remove_context(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(thread) = self.threads.get_mut(self.active) {
             if index < thread.context.len() {
-                thread.context.remove(index);
+                let removed = thread.context.remove(index);
+                self.context_labels.remove(&removed);
             }
         }
         self.persist_chat_state(self.active);
@@ -4861,25 +6098,96 @@ PYEOF"#;
 
     /// composer に貼り付けられた画像（スクリーンショットなど）を添付にする。実体はキャッシュへ置く —
     /// ユーザーの成果物ではないので、チャットのフォルダにもプロジェクトにも置かない。
-    fn attach_pasted_image(&mut self, image: &editor_view::PastedImage, cx: &mut Context<Self>) {
+    /// アクティブなスレッドの添付に積み、送信時に ACP の image ブロックで送る（送信経路は従来どおり）。
+    /// 戻り値は添付になったパス（送れない形式・保存できなかった時は `None`）。
+    pub fn attach_pasted_image(
+        &mut self,
+        image: &editor_view::PastedImage,
+        cx: &mut Context<Self>,
+    ) -> Option<SharedString> {
+        let directory = paths::cache_dir().map(|cache| cache.join("chat-paste"))?;
+        self.attach_image_in(image, &directory, cx)
+    }
+
+    /// 画像を `directory` に書いて添付にする（[`Self::attach_pasted_image`] の本体・テストは一時フォルダ）。
+    fn attach_image_in(
+        &mut self,
+        image: &editor_view::PastedImage,
+        directory: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<SharedString> {
         let extension = match image.format {
             gpui::ImageFormat::Png => "png",
             gpui::ImageFormat::Jpeg => "jpg",
             gpui::ImageFormat::Webp => "webp",
             gpui::ImageFormat::Gif => "gif",
             // SVG・BMP・TIFF は image ブロックで送れる形式ではない。
-            _ => return,
-        };
-        let Some(directory) = paths::cache_dir().map(|cache| cache.join("chat-paste")) else {
-            return;
+            _ => return None,
         };
         let path = directory.join(format!("paste-{}.{extension}", new_thread_id()));
         let written =
-            std::fs::create_dir_all(&directory).and_then(|()| std::fs::write(&path, &image.bytes));
+            std::fs::create_dir_all(directory).and_then(|()| std::fs::write(&path, &image.bytes));
         match written {
-            Ok(()) => self.add_context(SharedString::from(path.display().to_string()), cx),
-            Err(error) => eprintln!("貼り付けた画像を保存できない: {error}"),
+            Ok(()) => {
+                let path = SharedString::from(path.display().to_string());
+                self.add_context(path.clone(), cx);
+                Some(path)
+            }
+            Err(error) => {
+                eprintln!("貼り付けた画像を保存できない: {error}");
+                None
+            }
         }
+    }
+
+    /// 画像を添付にして、添付チップに `label` を出す（Design Mode の要素の切り抜き）。
+    /// 添付にできなかったら `false`。
+    pub fn attach_labeled_image(
+        &mut self,
+        image: &editor_view::PastedImage,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(path) = self.attach_pasted_image(image, cx) else {
+            return false;
+        };
+        self.context_labels.insert(path, label);
+        cx.notify();
+        true
+    }
+
+    /// composer の本文（送信前の下書き）。
+    pub fn composer_text(&self, cx: &App) -> String {
+        self.composer.read(cx).plain_text()
+    }
+
+    /// composer の本文の末尾へ文章を足す（Design Mode の要素の説明など）。**送信はしない** —
+    /// 人が確かめて送る。本文が既にあれば空行を挟み、何度でも足せる（複数の要素を 1 通で送れる）。
+    pub fn append_to_composer(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.trim_end();
+        if text.is_empty() {
+            return;
+        }
+        let current = self.composer.read(cx).plain_text();
+        let current = current.trim_end();
+        let next = if current.is_empty() {
+            text.to_string()
+        } else {
+            format!("{current}\n\n{text}")
+        };
+        self.composer
+            .update(cx, |composer, cx| composer.set_plain_text(&next, cx));
+        cx.notify();
+    }
+
+    /// composer の末尾へ引用（選んだ行の場所と抜粋・O29）を足し、その下の空の行にキャレットを置く
+    /// （改行を打たずに注記を書き始められる＝Enter 送信の設定で、改行のつもりの Enter で引用だけを
+    /// 送ってしまわない）。**送信はしない**。
+    pub fn append_quote_to_composer(&mut self, quote: &str, cx: &mut Context<Self>) {
+        self.append_to_composer(quote, cx);
+        let text = format!("{}\n", self.composer.read(cx).plain_text());
+        self.composer
+            .update(cx, |composer, cx| composer.set_plain_text(&text, cx));
     }
 
     /// ドロップされたファイルパスを @メンションに加える（プロジェクト root 配下なら相対、外なら絶対）。
@@ -4900,7 +6208,7 @@ PYEOF"#;
     fn render_selector_pill(&self, selector: Selector, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         // 選択肢は 1 回だけ作り、ラベルと不活性判定の両方をここから導く（描画のたびに 2 度作らない）。
-        let choices = self.selector_choices(selector);
+        let choices = self.selector_choices(selector, cx);
         let current = self.selector_value(selector);
         let value = label_for(&choices, &current);
         let is_open = self.open_menu == Some(selector);
@@ -4975,7 +6283,7 @@ PYEOF"#;
         let theme = self.theme.clone();
         let current = self.selector_value(selector);
         // エージェントが広告した実選択肢だけ。necoder は候補を捏造しない。
-        let options = self.selector_choices(selector);
+        let options = self.selector_choices(selector, cx);
         let align_right = matches!(selector, Selector::Model | Selector::Effort);
         div()
             .absolute()
@@ -5063,23 +6371,19 @@ PYEOF"#;
 
     /// composer の内容をアクティブスレッドへ積み、**常駐 ACP セッション**へ prompt を送る（空なら無視）。
     /// 応答は `run_session` からのイベントを [`Self::on_event`] で**逐次** transcript に反映する（ストリーミング）。
+    ///
+    /// 先頭が `!` の本文はシェルのコマンドとして走らせ、エージェントには送らない（`shell.rs`・#37）。
+    /// **`!` を解釈するのはここ（人が composer から送った時）だけ** — ほかの入口（スマホ・`ne` / MCP・
+    /// Captain・Fleet の注記・キュー・steer）は `send_prompt_*` を通り、`!` は文のまま届く。
+    /// エージェントの生成中でも待たずに走らせる（キューに積むと、後で文として送られてしまう）。
     fn submit(&mut self, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).plain_text();
-        let prompt = text.trim().to_string();
-        if prompt.is_empty() {
+        if let Some(command) = shell::shell_command_input(&text) {
+            self.run_shell_command(self.active, command, cx);
             return;
         }
-        // 先頭 `!` = シェルで実行する（エージェントへは送らない・#37）。生成中でも列に積まず即実行。
-        if let Some(command) = shell::shell_input(&prompt) {
-            if command.is_empty() {
-                return; // `!` だけ＝何もしない（本文も消さない）
-            }
-            let command = command.to_string();
-            self.composer.update(cx, |composer, cx| composer.clear(cx));
-            if let Some(thread) = self.threads.get_mut(self.active) {
-                thread.draft.clear();
-            }
-            self.run_shell(command, cx);
+        let prompt = text.trim().to_string();
+        if prompt.is_empty() {
             return;
         }
         if let Some(thread) = self.threads.get(self.active) {
@@ -5108,13 +6412,19 @@ PYEOF"#;
         self.send_prompt_text(prompt, cx);
     }
 
+    /// アクティブスレッドのキューを流す（スレッド切替時に呼ぶ）。
+    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
+        self.flush_queued_prompt_at(self.active, cx);
+    }
+
     /// キューに積んだ prompt があれば先頭を送る（ターン完了時・スレッド切替時に呼ぶ）。
-    /// **アクティブスレッドが idle の時だけ**流す（`send_prompt_text` は active 宛のため）。
+    /// **そのスレッドが idle の時だけ**流す。送信は指定のスレッド宛てなので表示中のタブは変えない
+    /// （外から積まれた送信待ち＝変更レビューの注記などが、裏のタブでもターン完了で届く）。
     ///
     /// 認証切れで止まっている間は流さない（再ログイン前に送っても同じ失敗を重ねるだけ。
     /// 再接続で直近の指示を送り直した後、そのターン完了で改めてキューが流れる）。
-    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
-        let next = self.threads.get_mut(self.active).and_then(|thread| {
+    fn flush_queued_prompt_at(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let next = self.threads.get_mut(thread_index).and_then(|thread| {
             if thread.running || thread.auth_required || thread.queued_prompts.is_empty() {
                 None
             } else {
@@ -5122,7 +6432,7 @@ PYEOF"#;
             }
         });
         if let Some(prompt) = next {
-            self.send_prompt_text(prompt, cx);
+            self.send_prompt_entry(thread_index, prompt, None, cx);
         }
     }
 
@@ -5167,22 +6477,150 @@ PYEOF"#;
         }
     }
 
+    /// composer の本文から `/` 補完の局面を読み直す（composer の notify ごと・O2）。
+    /// `!` のコマンド（シェルモード・#37）かどうかもここで読み直す（composer の下のヒント）。
+    fn refresh_slash_state(&mut self, cx: &mut Context<Self>) {
+        let composer = self.composer.read(cx);
+        let first_line = composer.first_line_text();
+        // 全文を複製するのは先頭が `!` の時だけ（点滅の notify ごとに本文を写さない）。
+        let shell_input = first_line.starts_with('!')
+            && shell::shell_command_input(&composer.plain_text()).is_some();
+        let single_line = composer.buffer().len_bytes() == first_line.len();
+        let input = slash_input(&first_line, single_line, composer.has_marked_text());
+        // シェルモードの間はキャレットを syn-mac に（スレッド切替などがスレッド色へ塗り直しても戻す）。
+        let accent = if shell_input {
+            self.theme.syntax.macro_
+        } else {
+            self.active_color()
+        };
+        if composer.accent() != accent {
+            self.composer
+                .update(cx, |composer, cx| composer.set_accent(accent, cx));
+        }
+        if shell_input != self.shell_input {
+            self.shell_input = shell_input;
+            cx.notify();
+        }
+        if input == self.slash.input {
+            return;
+        }
+        if input == SlashInput::Inactive {
+            self.slash.dismissed = false; // 行頭の `/` が消えた＝次に `/` を打てばまた開く
+        } else if self.slash.input == SlashInput::Inactive {
+            // `/` を打ち始めた: レシピを足した直後でも出るよう、古ければ読み直す（O16）。
+            self.refresh_recipes_if_stale(cx);
+        }
+        self.slash.selected = 0;
+        self.slash.input = input;
+        cx.notify();
+    }
+
+    /// アクティブスレッドの `/` 補完の候補。まだ届いていなければ同じ agent の在庫で代用する
+    /// （Chat は除く＝チャットごとにフォルダが違い、一覧も違いうる）。後ろにレシピ（O16）を足す。
+    fn slash_commands(&self) -> Vec<acp_client::SlashCommand> {
+        let Some(thread) = self.threads.get(self.active) else {
+            return Vec::new();
+        };
+        let agent_commands: &[acp_client::SlashCommand] =
+            if !thread.commands.is_empty() || self.chat_mode {
+                &thread.commands
+            } else {
+                self.catalog
+                    .get(&thread.agent)
+                    .map(|advertisement| advertisement.commands.as_slice())
+                    .unwrap_or(&[])
+            };
+        agent_commands
+            .iter()
+            .cloned()
+            .chain(self.recipe_commands())
+            .collect()
+    }
+
+    /// いま `/` 補完に出す候補（[`Self::slash_commands`] の添字・並び順）。出さない時は空
+    /// （コマンド名を打っていない・Esc で閉じた・1 件も当たらない）。
+    fn slash_popup_items(&self) -> Vec<usize> {
+        let SlashInput::Query(query) = &self.slash.input else {
+            return Vec::new();
+        };
+        if self.slash.dismissed {
+            return Vec::new();
+        }
+        slash_matches(&self.slash_commands(), query)
+    }
+
+    /// `/` 補完が開いている間の ↑↓ / Enter・Tab / Esc。composer の Editor アクション（MoveUp /
+    /// MoveDown / Newline / TabIndent / Cancel）を capture で先取りする。開いていない時・IME 変換中は
+    /// 何もしない＝アクションはそのまま composer へ流れる（変換確定の Enter を奪わない）。
+    fn on_slash_key(&mut self, key: SlashKey, cx: &mut Context<Self>) {
+        if self.composer.read(cx).has_marked_text() {
+            return;
+        }
+        let items = self.slash_popup_items();
+        if items.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        let selected = self.slash.selected.min(items.len() - 1);
+        match key {
+            SlashKey::Up => self.slash.selected = (selected + items.len() - 1) % items.len(),
+            SlashKey::Down => self.slash.selected = (selected + 1) % items.len(),
+            SlashKey::Accept => self.accept_slash_command(items[selected], cx),
+            SlashKey::Dismiss => self.slash.dismissed = true,
+        }
+        cx.notify();
+    }
+
+    /// 候補を composer へ入れる（`/name ` に置き換え・キャレットは末尾＝引数を続けて打てる）。
+    fn accept_slash_command(&mut self, command_index: usize, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .slash_commands()
+            .get(command_index)
+            .map(|command| command.name.clone())
+        else {
+            return;
+        };
+        // レシピ（O16）は本文をそのまま入れる（送らない・人が確かめて ⌘⏎）。
+        let text = self
+            .recipe_body(&name)
+            .unwrap_or_else(|| slash_insertion(&name));
+        // 1 回の編集で置き換える＝⌘Z で打っていた `/co` に戻せる。
+        self.composer
+            .update(cx, |composer, cx| composer.replace_all_text(&text, cx));
+        self.slash.selected = 0;
+    }
+
     /// 文脈の圧縮（`/compact`）をエージェントへ依頼する（Claude Code の slash コマンドを turn として送る）。
-    /// 実行中は無視（ターンの最中には送らない）。トークンメーター横のボタンから呼ぶ。
+    /// 実行中はキューの末尾へ積み、ターン完了後に送る（composer の送信と同じ作法・二重には積まない）。
+    /// トークンメーター横のボタンから呼ぶ。
     fn compact_context(&mut self, cx: &mut Context<Self>) {
-        let running = self
-            .threads
-            .get(self.active)
-            .map(|thread| thread.running)
-            .unwrap_or(false);
-        if running {
+        let queued = {
+            let Some(thread) = self.threads.get_mut(self.active) else {
+                return;
+            };
+            if !thread.can_compact() {
+                return;
+            }
+            if !thread.running {
+                false
+            } else {
+                if !thread
+                    .queued_prompts
+                    .iter()
+                    .any(|prompt| prompt == "/compact")
+                {
+                    thread.queued_prompts.push("/compact".to_string());
+                }
+                true
+            }
+        };
+        if queued {
+            cx.notify();
             return;
         }
         self.send_prompt_text("/compact".to_string(), cx);
     }
 
-    /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
-    /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     /// 名前でスレッドの位置を引く（作らない・アクティブ化しない）。
     pub fn thread_index_named(&self, name: &str) -> Option<usize> {
         self.threads
@@ -5190,33 +6628,76 @@ PYEOF"#;
             .position(|thread| thread.name.as_ref() == name)
     }
 
+    /// スレッドの前置き（Captain の役割・現況表など）。人の発話にも necoder の知らせにも毎回付けて送り
+    /// （slash コマンドには付けない）、transcript には出さない。送る本文では `<necoder-context>` で囲む
+    /// （再生された会話から外せるように・`auto_prompt.rs`）。
     pub fn set_prompt_context(&mut self, thread: usize, context: String) {
         if let Some(thread) = self.threads.get(thread) {
             self.prompt_context.insert(thread.id.to_string(), context);
         }
     }
 
-    pub fn send_ledger_event(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(prompt, true, cx);
-    }
-
+    /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
+    /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     pub fn send_prompt_text(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(prompt, false, cx);
+        self.send_prompt_entry(self.active, prompt, None, cx);
     }
 
-    fn send_prompt_entry(&mut self, prompt: String, ledger: bool, cx: &mut Context<Self>) {
-        let thread_index = self.active;
+    /// 表示中のタブを切り替えずに、指定のスレッドへ**人間の発話として**送る（変更レビューの注記など）。
+    /// composer の送信（[`Self::submit`]）と同じく `HumanSend` を出し、transcript には User として残る。
+    /// 生成中（Working / Blocked）ならそのスレッドの送信待ちに積み、ターン完了で流す。
+    /// スレッドが無ければ `false`。
+    pub fn send_user_prompt_to(
+        &mut self,
+        thread_index: usize,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return false;
+        };
+        cx.emit(PanelEvent::HumanSend {
+            thread: thread.name.clone(),
+            text: prompt.clone(),
+        });
+        if thread.running {
+            thread.queued_prompts.push(prompt);
+            cx.notify();
+            return true;
+        }
+        self.send_prompt_entry(thread_index, prompt, None, cx);
+        true
+    }
+
+    /// `auto_source` = necoder の知らせの出所（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
+    fn send_prompt_entry(
+        &mut self,
+        thread_index: usize,
+        prompt: String,
+        auto_source: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let auto = auto_source.map(|source| auto_prompt::AutoPrompt::now(source, prompt.clone()));
+        // slash コマンド（`/clear` `/compact` 等）は**本文 1 ブロックだけ**で送る。エージェントに
+        // よってコマンドとして読むブロックが違い（Claude は末尾・Codex は先頭）、添付や画像を
+        // 1 つでも足すとどちらかで効かない（`acp_client::prompt_blocks` の説明）。スレッドの
+        // context（Captain の役割・現況表）・`@path` の添付・画像は付けない。添付は外さずに残す＝
+        // 次の通常の送信に付く（毎ターン送る設計はそのまま）。necoder の知らせは印で始まるので
+        // コマンドにはならない。
+        let is_slash_command = auto.is_none() && is_slash_command(&prompt);
         // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
         // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
         let (images, image_paths) = self
             .threads
             .get(thread_index)
+            .filter(|_| !is_slash_command)
             .map(|thread| load_prompt_images(&thread.context, self.dest_cwd.as_deref()))
             .unwrap_or_default();
         // それ以外の添付は prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
         let mut context_prefix: String = self
             .threads
             .get(thread_index)
+            .filter(|_| !is_slash_command)
             .map(|thread| {
                 thread
                     .context
@@ -5226,41 +6707,57 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
-        // slash コマンド（`/clear` `/compact` 等）は先頭が `/` でないとエージェントが認識しない。
-        // スレッドの context（Captain の役割・現況表）は付けずにそのまま送る。
-        let is_slash_command = prompt.starts_with('/');
-        // `!` で実行したコマンドの出力は、人間が次に送る 1 通へ添える（CLI の bash モードと同じ）。
-        // slash コマンドは先頭が `/` でないと効かず、台帳イベントは人間の発話ではないので添えない。
-        if !is_slash_command && !ledger {
-            context_prefix.push_str(&self.take_shell_context(thread_index));
-        }
         if let Some(context) = self
             .threads
             .get(thread_index)
             .filter(|_| !is_slash_command)
             .and_then(|thread| self.prompt_context.get(thread.id.as_str()))
         {
-            context_prefix.push_str(context);
+            context_prefix.push_str(&auto_prompt::wrap_prompt_context(context));
         }
+        // `!` で人が走らせたコマンドの結果（#37）は、次の通常の送信に 1 回だけ添える（本文の直前）。
+        // この会話の持ち主の文脈なので、composer 以外の入口（キュー・Captain の台帳など）から来た
+        // 送信にも添える。slash コマンドには添えない（本文 1 ブロックの約束・次の通常の送信まで残す）。
+        let shell_attachment = self
+            .threads
+            .get(thread_index)
+            .filter(|_| !is_slash_command)
+            .and_then(|thread| shell::pending_shell_attachment(&thread.entries));
+        if let Some((block, _)) = &shell_attachment {
+            context_prefix.push_str(block);
+        }
+        // 「新しいセッションで続ける」の前置き（O15）は、次の通常の送信の頭に 1 回だけ付ける
+        // （表示は人の本文のまま）。送れたら捨てる。
+        let handoff = self
+            .threads
+            .get(thread_index)
+            .filter(|_| !is_slash_command)
+            .and_then(|thread| thread.handoff_preamble.clone());
+        if let Some(preamble) = &handoff {
+            context_prefix.insert_str(0, &format!("{preamble}\n\n"));
+        }
+        // necoder の知らせは印で囲んで送る（再生された会話でも人の発話と見分けられる・`auto_prompt.rs`）。
+        let body = auto
+            .as_ref()
+            .map(auto_prompt::AutoPrompt::wire)
+            .unwrap_or_else(|| prompt.clone());
         let full_prompt = if context_prefix.is_empty() {
-            prompt.clone()
+            body
         } else {
-            format!("{context_prefix}\n{prompt}")
+            format!("{context_prefix}\n{body}")
         };
         if let Some(thread) = self.threads.get_mut(thread_index) {
-            let shown = if images.is_empty() {
-                prompt.clone()
-            } else {
-                let names: Vec<String> = image_paths
-                    .iter()
-                    .map(|path| context_chip_label(path.as_ref()).to_string())
-                    .collect();
-                format!("{prompt}\n\n▦ {}", names.join(" · "))
-            };
-            thread.entries.push(if ledger {
-                Entry::LedgerEvent(shown.into())
-            } else {
-                Entry::User(shown.into())
+            let human = auto.is_none();
+            thread.entries.push(match auto {
+                Some(auto) => Entry::AutoPrompt(auto),
+                None if images.is_empty() => Entry::User(prompt.clone().into()),
+                None => {
+                    let names: Vec<String> = image_paths
+                        .iter()
+                        .map(|path| context_chip_label(path.as_ref()).to_string())
+                        .collect();
+                    Entry::User(format!("{prompt}\n\n▦ {}", names.join(" · ")).into())
+                }
             });
             // 画像は**その 1 通だけ**に添える（パスの添付と違って毎ターン送り直すと重い）。
             thread.context.retain(|path| !image_paths.contains(path));
@@ -5269,11 +6766,14 @@ PYEOF"#;
             thread.done = None; // 新しいターン開始＝直前の「完了・未確認」ラッチは消す
             thread.tier2 = None; // ✳ 要約は前ターンの文＝新ターンでは古い（P4）
             thread.turn_started_at = Some(std::time::Instant::now()); // 経過秒の起点
-            thread.last_input_at_ms = Some(now_unix_ms()); // 「最終いつ入力したか」（M14）
             thread.last_active_at_ms = now_unix_ms();
-            // 「頼んだこと」は**エージェントに渡す原文ではなく人間が書いた本文**を残す
-            // （`@path` の context 接頭辞を混ぜない＝サイドバーで読めるのは自分の言葉だけ）。
-            thread.last_prompt = Some(SharedString::from(prompt.clone()));
+            // 「最終いつ入力したか」（M14）と「頼んだこと」は人の発話だけで決める（necoder の知らせは
+            // 人が頼んだことではない）。頼んだことは**エージェントに渡す原文ではなく人間が書いた本文**を
+            // 残す（`@path` の context 接頭辞を混ぜない＝サイドバーで読めるのは自分の言葉だけ）。
+            if human {
+                thread.last_input_at_ms = Some(now_unix_ms());
+                thread.last_prompt = Some(SharedString::from(prompt.clone()));
+            }
             thread.session_used = true; // 先張りの「畳んでよい」対象から外れる
         }
         self.sync_running_registry(cx); // ⌘O ダッシュボードの「実行中」を即時反映（M12-12）
@@ -5306,6 +6806,14 @@ PYEOF"#;
                 color: thread.color,
             });
         }
+        // 席を付けた / 外した後のセッションは、前の作り方（モード・MCP）のまま。立て直して決まりを
+        // 効かせる（会話は `session/load` で引き継ぐ・FLEET-V2 §5.8-6）。
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            if thread.command_tx.is_some() && thread.seat.is_some() != thread.session_seated {
+                thread.command_tx = None;
+                thread.session_serial = 0;
+            }
+        }
         // セッション未起動なら遅延起動（初回のみプロセスを立てる。以後は常駐＝文脈が続く）。
         let has_session = self
             .threads
@@ -5313,15 +6821,17 @@ PYEOF"#;
             .is_some_and(|thread| thread.command_tx.is_some());
         if !has_session {
             match self.start_session(thread_index, cwd, cx) {
-                Some((command_tx, serial)) => {
+                Ok((command_tx, serial, usage_key)) => {
                     if let Some(thread) = self.threads.get_mut(thread_index) {
                         thread.command_tx = Some(command_tx);
                         thread.session_serial = serial;
+                        thread.usage_key = Some(usage_key);
                         thread.session_lost = false;
+                        thread.session_seated = thread.seat.is_some();
                     }
                 }
-                None => {
-                    self.fail_turn(thread_index, &i18n::t!("agent.err_no_acp"), cx);
+                Err(message) => {
+                    self.fail_turn(thread_index, &message, cx);
                     return;
                 }
             }
@@ -5348,6 +6858,14 @@ PYEOF"#;
                 thread.command_tx = None;
             }
             self.fail_turn(thread_index, &i18n::t!("agent.err_session_lost"), cx);
+        } else if let Some(thread) = self.threads.get_mut(thread_index) {
+            if handoff.is_some() {
+                thread.handoff_preamble = None;
+            }
+            // 添えたシェルの結果は渡し済み（次の送信には添えない）。
+            if let Some((_, delivered)) = &shell_attachment {
+                shell::mark_shell_runs_delivered(&mut thread.entries, delivered);
+            }
         }
     }
 
@@ -5372,14 +6890,15 @@ PYEOF"#;
     }
 
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
-    /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドルを返す。
-    /// claude-agent-acp が見つからなければ `None`。
+    /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドル・通し番号・
+    /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる。
+    /// 起動できなければ理由の文（組み込みは「見つかりません」・足したエージェントは原因）。
     fn start_session(
         &self,
         thread_index: usize,
         cwd: PathBuf,
         cx: &mut Context<Self>,
-    ) -> Option<(mpsc::UnboundedSender<SessionCommand>, u64)> {
+    ) -> Result<(mpsc::UnboundedSender<SessionCommand>, u64, usage::UsageKey), String> {
         // セッションの通し番号。ポンプ終了の後始末（`session_ended`）が「今のセッション」の
         // ものかを照合する。畳んだ直後に立て直した新セッションを、古いポンプが巻き込まないため。
         static SESSION_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -5400,27 +6919,49 @@ PYEOF"#;
             .map(|thread| thread.id.clone())
             .unwrap_or_default();
         let host = self.dest_host.clone();
-        let kind = acp_client::AgentKind::by_label(&agent_label)?;
+        // 組み込み・設定で足したエージェント（H1）のどちらも、今の設定の一覧から引く。
+        let agent = settings::agent_by_label(cx, &agent_label)
+            .ok_or_else(|| i18n::t!("agent.err_no_acp"))?;
         // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
-        let agent_override = agent_server_override(kind.id, cx);
+        let agent_override = agent_server_override(agent.id(), cx);
+        // このセッションの使用量の鍵は、起動に渡すのと同じ宛先と env から今決める（R08。後で設定を
+        // 変えても、このセッションの知らせは立てた時の鍵へ重ねる）。
+        let usage_key = usage::UsageKey::with_override(
+            agent_label.clone(),
+            self.dest_host_label.clone(),
+            agent_override.as_ref(),
+        );
         let registry = acp_client::registry::load_cached();
+        // レジストリから足した binary をまだ置いていなければ、背景で落として検証・展開してから起こす
+        // （H2-b・UI スレッドでダウンロードを待たない）。落としている間は transcript に 1 行出す。
+        let deploying = agent
+            .needs_deploy(host.as_ref(), registry.as_ref())
+            .then(|| {
+                let version = registry
+                    .as_ref()
+                    .and_then(|registry| registry.agent(agent.id()))
+                    .map(|entry| entry.version.clone())
+                    .unwrap_or_default();
+                i18n::t!("agent.deploying", "agent" => agent.label(), "version" => version)
+            });
         // local はここで解決する（PATH 探索だけ・一瞬）。remote は `command -v` を SSH 越しに
         // 流す＝往復なので、下の背景タスクの中で解決する（UI スレッドで再接続を待たない）。
-        let command = if host.is_remote() {
+        let command = if host.is_remote() || deploying.is_some() {
             None
         } else {
-            // local は探索が失敗しない（`Err` は remote だけ）。`Ok(None)` = 導入されていない。
-            Some(
-                kind.resolve_command_on(
-                    host.as_ref(),
-                    cwd.clone(),
-                    agent_override.as_ref(),
-                    registry.as_ref(),
-                )
-                .ok()
-                .flatten()?,
-            )
+            // 組み込みの local は探索が失敗しない（`Ok(None)` = 導入されていない）。足したエージェントは
+            // 起動できない理由（node が要る・レジストリに無い等）を `Err` で返すので、その文を出す。
+            match agent.resolve_command_on(
+                host.as_ref(),
+                cwd.clone(),
+                agent_override.as_ref(),
+                registry.as_ref(),
+            ) {
+                Ok(Some(command)) => Some(command),
+                Ok(None) => return Err(i18n::t!("agent.err_no_acp")),
+                Err(error) => return Err(launch_error_text(&error)),
+            }
         };
         let no_acp = i18n::t!("agent.err_no_acp");
         // スレッドの希望（sticky/前タブのモード・モデル・思考量）を起動時に渡す＝初回 prompt 前に
@@ -5430,17 +6971,28 @@ PYEOF"#;
         // 1 つも見えない** — Codex CLI 等に登録しただけでは necoder のスレッドからは使えない。
         // 設定画面が並べているのと同じ解決結果を渡す（画面と実際が食い違わない）。
         let mcp_servers = settings::mcp_servers(cx);
+        let bypass_by_default = settings::bypass_permissions_by_default(cx);
         let preferences = self
             .threads
             .get(thread_index)
             .map(|thread| acp_client::SessionPreferences {
-                mode: Some(thread.permission_mode.to_string()).filter(|mode| !mode.is_empty()),
+                // 希望の無いスレッドは、権限の既定（O16）が「聞かずに進める」なら、この agent の在庫に
+                // ある「聞かない」モードで始める（在庫が無い初回は広告を受けた時に合わせる）。
+                mode: Some(thread.permission_mode.to_string())
+                    .filter(|mode| !mode.is_empty())
+                    .or_else(|| {
+                        let wanted = bypass_by_default && thread.chat.is_none();
+                        let stock = self.catalog.get(&thread.agent).filter(|_| wanted)?;
+                        bypass_mode_among(&stock.modes).map(|mode| mode.to_string())
+                    }),
                 model: Some(thread.model.to_string()).filter(|model| !model.is_empty()),
                 effort: Some(thread.effort.to_string()).filter(|effort| !effort.is_empty()),
                 // 前回のセッション id。エージェントが loadSession を広告していれば会話を引き継ぐ。
                 resume: thread.acp_session_id.clone(),
                 mcp_servers,
                 preset: acp_client::preset::SessionPreset::default(),
+                // エージェント側の過去の会話を開いた直後だけ、再生された履歴を受け取る（O15）。
+                replay_history: thread.replay_pending,
             })
             .unwrap_or_default();
         // claude.ai のコネクタを読み込まない設定なら、エージェントのプロセスへそう伝える
@@ -5454,15 +7006,34 @@ PYEOF"#;
         }
         // Chat のスレッドはセッションの作り方が違う（プリセット・権限モード固定・MCP なし）。
         let preferences = self.chat_session_preferences(thread_index, preferences, cx);
+        // 席のスレッドは権限モードと MCP を席の決まりで上書きする（FLEET-V2 §5.8）。
+        let preferences = self.seat_session_preferences(thread_index, preferences, cx);
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
 
         cx.background_executor()
             .spawn(async move {
-                let command = match command {
-                    Some(command) => command,
-                    None => match kind.resolve_command_on(
+                let command = match (command, deploying) {
+                    (Some(command), _) => command,
+                    (None, Some(deploying)) => {
+                        error_tx.unbounded_send(AgentEvent::Notice(deploying)).ok();
+                        match agent.deploy_command(cwd, registry.as_ref()) {
+                            Ok((command, outcome)) => {
+                                for note in deploy_notes(&outcome) {
+                                    error_tx.unbounded_send(AgentEvent::Notice(note)).ok();
+                                }
+                                command
+                            }
+                            Err(error) => {
+                                error_tx
+                                    .unbounded_send(AgentEvent::Failed(launch_error_text(&error)))
+                                    .ok();
+                                return;
+                            }
+                        }
+                    }
+                    (None, None) => match agent.resolve_command_on(
                         host.as_ref(),
                         cwd,
                         agent_override.as_ref(),
@@ -5474,13 +7045,11 @@ PYEOF"#;
                             error_tx.unbounded_send(AgentEvent::Failed(no_acp)).ok();
                             return;
                         }
-                        // 探せなかった（SSH 再接続の失敗など）。「見つかりません」と言わず原因を出す。
+                        // 探せなかった（SSH 再接続の失敗など）・足したエージェントを起動できない。
+                        // 「見つかりません」と言わず原因を出す。
                         Err(error) => {
                             error_tx
-                                .unbounded_send(AgentEvent::Failed(i18n::t!(
-                                    "agent.err_agent_lookup",
-                                    "message" => &format!("{error:#}")
-                                )))
+                                .unbounded_send(AgentEvent::Failed(launch_error_text(&error)))
                                 .ok();
                             return;
                         }
@@ -5490,11 +7059,8 @@ PYEOF"#;
                     acp_client::run_session_on(host, command, preferences, prompt_rx, event_tx)
                         .await
                 {
-                    // `{:#}` で anyhow の原因鎖まで出す（例: 「ACP セッションが異常終了: ACP
-                    // initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context
-                    // だけになりハンドシェイクの無言ハングが埋もれるため。
                     error_tx
-                        .unbounded_send(AgentEvent::Failed(format!("{error:#}")))
+                        .unbounded_send(AgentEvent::Failed(session_error_text(&error)))
                         .ok();
                 }
             })
@@ -5523,7 +7089,7 @@ PYEOF"#;
         })
         .detach();
 
-        Some((command_tx, serial))
+        Ok((command_tx, serial, usage_key))
     }
 
     /// `run_session` の [`AgentEvent`] を transcript へ逐次反映する（ストリーミングの心臓部）。
@@ -5540,6 +7106,14 @@ PYEOF"#;
         // `thread` の借用が残っている間は self を触れないので、末尾でまとめて反映する。
         let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
         let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
+        let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
+        // レート制限の知らせ（O11）。鍵ごとの全体の置き場（Global）へ末尾で重ねる。鍵はスレッドが持つ
+        // 「セッションを立てた時の鍵」（R08）。`None` = セッションを立てていない（今の宛先と設定で決める）。
+        let mut rate_limits: Option<(Option<usage::UsageKey>, acp_client::usage::RateLimits)> =
+            None;
+        // 会話名を送ってきた agent（在庫に「自分で名付ける」と控える）と、付け替えた名前。
+        let mut titled_by_agent: Option<SharedString> = None;
+        let mut agent_renamed: Option<SharedString> = None;
         let mut ensure_reveal = false; // アクティブが Agent/Thinking をストリーム → タイプライタ稼働
         let mut reveal_reset = false; // 新しいストリームエントリ開始 → 先頭から打つ
         let mut stream_updated = false;
@@ -5562,10 +7136,21 @@ PYEOF"#;
                 reason: TurnEnd::Completed
             }
         );
+        // 終わり方（OS 通知の言い方・O12）。`turn_finished` の時だけ意味を持つ。
+        let turn_outcome = match &event {
+            AgentEvent::TurnEnded {
+                reason: TurnEnd::Interrupted,
+            } => TurnOutcome::Interrupted,
+            AgentEvent::Failed(_) => TurnOutcome::Failed,
+            _ => TurnOutcome::Completed,
+        };
         let mut permission_waiting = matches!(event, AgentEvent::PermissionRequest { .. });
         let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         let mut session_id_changed = false;
+        let resumed_session = matches!(event, AgentEvent::SessionStarted { resumed: true, .. });
+        let mut history_replayed = false;
+        let mut seat_violation: Option<(SharedString, String)> = None;
         match event {
             AgentEvent::SessionStarted {
                 session_id,
@@ -5573,6 +7158,12 @@ PYEOF"#;
                 resumable,
             } => {
                 thread.session_resumable = resumable;
+                // 開けた＝前に起動してすぐ終わった時のカードはもう要らない。
+                thread.startup_exit = None;
+                // 目標への操作は新しいセッションの広告で決め直す（届かなければ操作なし・O17）。
+                thread.goal_actions.clear();
+                // 再生を頼んだ起動はここで終わり（引き継げなかった時も下ろす＝次の起動では頼まない）。
+                thread.replay_pending = false;
                 // 起こしたばかりのセッション（先張りを含む）を、別スレッドの見回りが巻き込まないように。
                 thread.last_active_at_ms = now_unix_ms();
                 // 引き継げたか/引き継げなかったかの一言。前回 id が無い新規スレッドは黙って始める。
@@ -5581,15 +7172,66 @@ PYEOF"#;
                     Some(SharedString::from(i18n::t!("agent.session_resumed")))
                 } else if had_previous {
                     Some(SharedString::from(i18n::t!("agent.session_fresh")))
+                } else if thread.handoff_preamble.is_some() {
+                    // 「新しいセッションで続ける」の一言は、前置きを送る（次のターン）まで残す（O15）。
+                    thread.session_note.take()
                 } else {
                     None
                 };
                 session_id_changed = thread.acp_session_id.as_deref() != Some(session_id.as_str());
                 thread.acp_session_id = Some(session_id);
                 thread.session_lost = false;
+                // コストの基準（O11）: 新しい会話は 0 から数える。引き継いだ会話は前回の累計が基準で、
+                // 再起動後の最初の再開なら台帳に残る最後の累計を使う。
+                if !resumed {
+                    thread.usage.start_fresh();
+                } else if thread.usage.needs_stored_total() {
+                    let stored = match self
+                        .storage
+                        .as_ref()
+                        .map(|storage| storage.last_session_cost(&thread.id))
+                    {
+                        Some(Ok(total)) => total,
+                        Some(Err(error)) => {
+                            eprintln!("会話の累計コストを読めない: {error:#}");
+                            None
+                        }
+                        None => None,
+                    };
+                    thread.usage.resume_from(stored);
+                }
+                // 目標はエージェント側の会話の状態。新しい会話では消え、引き継いだ会話ならエージェントが
+                // 送り直す（届くまでは前の表示を残す）。
+                if !resumed {
+                    thread.goal = None;
+                }
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
             AgentEvent::SessionLost => {}
+            // 起動してすぐ終わった: 終わり方と stderr の末尾をカードに出す（画面だけ・保存しない）。
+            // transcript に残る失敗の 1 行は、続いて届く `Failed`（stderr を含まない文）が書く。
+            AgentEvent::ExitedAtStartup(exited) => {
+                thread.startup_exit = Some(exited);
+            }
+            // エージェント側の過去の会話の再生（O15）。開いた時点の transcript の**前**に積む
+            // （load を待つ間に送った発話があっても順序を崩さない）。積むのは 1 つのスレッドにつき
+            // 1 回だけ — 頼んでいないのに届いた物・2 回目は捨てる（同じ会話を二重に載せない）。
+            // 再生の本文は acp_client が live のイベントとしては流さないので、ここ以外から入らない。
+            AgentEvent::HistoryReplayed { items, omitted } => {
+                if std::mem::take(&mut thread.replay_pending) {
+                    let mut entries = history::entries_from_replay(items, omitted);
+                    entries.append(&mut thread.entries);
+                    thread.entries = entries;
+                    thread.last_prompt = last_prompt_from_entries(&thread.entries);
+                    if let Some(tail) = thread.entries.iter().rev().find_map(|entry| match entry {
+                        Entry::Agent(text) => digest_tail(text),
+                        _ => None,
+                    }) {
+                        thread.digest = Some(tail);
+                    }
+                    history_replayed = true;
+                }
+            }
             AgentEvent::TurnStarted => {
                 // ACP が実際に prompt を送った＝ここから生成中。楽観 UI が取りこぼした場合
                 // （deferred から走った 2 本目など）でもここで確実に running を立て直す。
@@ -5602,8 +7244,12 @@ PYEOF"#;
             }
             AgentEvent::AgentChunk(text) => {
                 stream_updated = true;
+                // 連結するのは**まだ保存していない**末尾だけ。ターン終了で保存した本文に、待機中に
+                // 届いた増分（エージェントが自分で続けたターン・背景タスクの報告）を足すと、その分は
+                // DB に二度と書かれない。新しいエントリにすれば次の保存で残る。
+                let tail_is_live = thread.entries.len() > thread.persisted_entries;
                 match thread.entries.last_mut() {
-                    Some(Entry::Agent(existing)) => {
+                    Some(Entry::Agent(existing)) if tail_is_live => {
                         let mut combined = existing.to_string();
                         combined.push_str(&text);
                         *existing = combined.into();
@@ -5617,8 +7263,9 @@ PYEOF"#;
             }
             AgentEvent::ThoughtChunk(text) => {
                 stream_updated = true;
+                let tail_is_live = thread.entries.len() > thread.persisted_entries;
                 match thread.entries.last_mut() {
-                    Some(Entry::Thinking(existing)) => {
+                    Some(Entry::Thinking(existing)) if tail_is_live => {
                         let mut combined = existing.to_string();
                         combined.push_str(&text);
                         *existing = combined.into();
@@ -5630,8 +7277,32 @@ PYEOF"#;
                 }
                 ensure_reveal = animate_visible_stream;
             }
-            AgentEvent::ToolStarted(info) => thread.entries.push(build_step_entry(info)),
+            AgentEvent::ToolStarted(mut info) => {
+                Self::seat_note_tool_started(thread, &info);
+                // サブエージェントの手順は親の下に畳む。親が transcript に居ない（先に届いた等）なら
+                // 普通の手順として出す（行が消えて見えなくなるのを避ける）。
+                if info
+                    .parent
+                    .as_deref()
+                    .is_some_and(|parent| !has_step(&thread.entries, parent))
+                {
+                    info.parent = None;
+                }
+                thread.entries.push(build_step_entry(info));
+            }
             AgentEvent::ToolUpdated(info) => {
+                // 席の見張り（FLEET-V2 §5.8-4）: 許可を求めずに編集された＝決まりの漏れ。
+                if let Some(tool) = Self::seat_check_tool_updated(thread, &info) {
+                    seat_violation = Some((thread.name.clone(), tool));
+                }
+                // 更新で初めて親が分かった手順も親の下へ（親が transcript に居る時だけ）。
+                let known_parent = info
+                    .parent
+                    .as_deref()
+                    .filter(|parent| {
+                        *parent != info.id.as_str() && has_step(&thread.entries, parent)
+                    })
+                    .map(SharedString::from);
                 // 同 ID の直近 Step に、後追いの出力・差分・パスを反映する（Bash 出力や完了差分）。
                 for entry in thread.entries.iter_mut().rev() {
                     if let Entry::Step {
@@ -5641,9 +7312,13 @@ PYEOF"#;
                         result,
                         result_lines,
                         diffs,
+                        parent,
                     } = entry
                     {
                         if id.as_ref() == info.id.as_str() {
+                            if parent.is_none() {
+                                *parent = known_parent.clone();
+                            }
                             if let Some(title) = &info.title {
                                 if !title.is_empty() {
                                     if let Some(compact) = compact_shell_heredoc(title) {
@@ -5686,6 +7361,19 @@ PYEOF"#;
                     thread.tokens_shown = thread.tokens_used as f32;
                 }
             }
+            // 会話の累計コスト（O11）。合算できるのは USD だけ（Claude は USD で送る）。
+            AgentEvent::SessionCost { amount, currency } => {
+                if currency.eq_ignore_ascii_case("USD") {
+                    thread.usage.observe_total(amount);
+                }
+            }
+            // レート制限（O11）はアカウント単位＝鍵が同じなら 1 つを共有する（末尾で反映）。鍵は
+            // このセッションを立てた時の宛先と env（R08）。
+            AgentEvent::RateLimits(limits) => {
+                rate_limits = Some((thread.usage_key.clone(), limits));
+            }
+            // ターンに使ったトークン（O11）。TurnEnded でコストと一緒に台帳へ書く。
+            AgentEvent::TurnUsage(tokens) => thread.usage.observe_tokens(tokens),
             AgentEvent::Modes { modes, current } => {
                 thread.available_modes = modes
                     .into_iter()
@@ -5693,6 +7381,16 @@ PYEOF"#;
                     .collect();
                 stocked_modes = Some((thread.agent.clone(), thread.available_modes.clone()));
                 let advertised_current = SharedString::from(current);
+                // 権限の既定が「聞かずに進める」（O16）なら、希望の無いスレッドは広告の中の「聞かない」
+                // モードで始める（無ければエージェントの既定のまま）。Chat は裁定を necoder が持つので対象外。
+                if thread.permission_mode.is_empty()
+                    && thread.chat.is_none()
+                    && settings::bypass_permissions_by_default(cx)
+                {
+                    if let Some(bypass) = bypass_mode_among(&thread.available_modes) {
+                        thread.permission_mode = bypass;
+                    }
+                }
                 // スレッドが望む mode_id（sticky / 前タブ引き継ぎ）を正とし、広告に**その id が在るときだけ**
                 // 合わせに行く。無ければ黙って広告 current を採る。照合は id の完全一致だけ＝
                 // 表示名の綴り違いで外れる余地が無い（Zed の apply_default_config_options と同じ規律）。
@@ -5771,6 +7469,30 @@ PYEOF"#;
                 // プランは毎回全量で届く（ACP 仕様）ので**置換**。常設チェックリストが追従する。
                 thread.plan = items;
             }
+            AgentEvent::Commands(commands) => {
+                // slash コマンドの一覧も毎回全量で届く＝置き換える（O2）。在庫にも控えて、
+                // まだセッションの無い同じ agent のタブの `/` 補完に使う。
+                thread.commands = commands;
+                stocked_commands = Some((thread.agent.clone(), thread.commands.clone()));
+            }
+            AgentEvent::TitleChanged(title) => {
+                // エージェントが会話名を付けた（Claude はターン終了の数秒後・Codex は /rename 等）。
+                // この agent には以後、自前の命名（`claude -p` 等の子プロセス）を走らせない。
+                titled_by_agent = Some(thread.agent.clone());
+                // 人が付けた名前（改名モーダル・固定スレッド）は上書きしない。自動命名を切って
+                // いる人の名前も動かさない（エージェントの命名も「自動命名」のうち）。
+                // null（名前を消した）は何もしない＝今の名前を保つ。既定名へ戻すと付いていた
+                // 名前が消え、自前の命名で付け直すのは余計な課金になるため。
+                let auto_name = settings::get(cx).agent_auto_name;
+                if let Some(title) = title.as_deref().and_then(agent_title_for_tab) {
+                    if auto_name && !thread.name_is_custom && thread.name != title {
+                        thread.name = title.clone();
+                        agent_renamed = Some(title);
+                    }
+                }
+            }
+            AgentEvent::GoalChanged(goal) => thread.goal = goal,
+            AgentEvent::GoalControls(actions) => thread.goal_actions = actions,
             AgentEvent::ElicitationRequest {
                 message,
                 fields,
@@ -5778,13 +7500,15 @@ PYEOF"#;
             } => {
                 // 選択肢付き質問。回答するまで composer 上部にカードを出す（承認カードと同じ Blocked）。
                 thread.digest = digest_tail(&message).or(thread.digest.take());
-                thread.pending_elicitation = Some(PendingElicitation {
-                    remote_id: new_thread_id(),
-                    message: SharedString::from(message),
+                thread.pending_elicitation = Some(PendingElicitation::new(
+                    &thread.id,
+                    message,
                     fields,
-                    selections: std::collections::BTreeMap::new(),
                     respond,
-                });
+                    &self.theme,
+                    thread.color,
+                    cx,
+                ));
             }
             AgentEvent::PermissionRequest {
                 title,
@@ -5793,10 +7517,14 @@ PYEOF"#;
                 diffs,
                 raw_input,
                 mut options,
+                tool_call_id,
+                mcp_tool,
                 respond,
             } => {
                 // Chat は「ファイルを渡す = 触ってよいと伝える」で裁く（`chat.rs`）。それ以外は `None`。
-                let chat_permission = Self::chat_permission(thread, kind, &paths);
+                let chat_permission = Self::chat_permission(thread, kind, &paths).or_else(|| {
+                    Self::seat_permission(thread, kind, &title, &tool_call_id, mcp_tool)
+                });
                 // checkpoint は**書かれる前**にここで切る（M12-2）。手動でも自動 Allow でも一本道。
                 // 変更前内容は**常にディスクから全文を読む**。diff の old_text は Edit ツールだと
                 // **置換ハンクの断片**であり、全文として保存すると restore がファイルを断片へ
@@ -5821,7 +7549,7 @@ PYEOF"#;
                 // `set_mode` 反映にはレースがあり（初回ターン・ターン中切替は次ターンまで既定
                 // モードのまま＝JOURNAL 2026-08-28）、その窓で届いた許可リクエストでユーザーを
                 // 止めない。応答はスナップショット完了後＝checkpoint の一本道は env 自動と共通。
-                let bypass_mode = thread.permission_mode.to_lowercase().contains("bypass");
+                let bypass_mode = is_bypass_mode(&thread.permission_mode);
                 let mut auto_allow =
                     bypass_mode || std::env::var_os("NECODER_AUTO_ALLOW").is_some();
                 let mut auto_choice = options
@@ -6013,11 +7741,36 @@ PYEOF"#;
                 }
             }
         }
-        if session_id_changed {
+        // 引き継げた会話も書く: エージェント側の過去の会話を開いた時（O15）は、load が成功して初めて
+        // この id が necoder の会話になる（失敗したら新しい id だけが残り、元の会話は一覧に残る）。
+        if session_id_changed || resumed_session {
             self.persist_session_id(thread_index);
+        }
+        if history_replayed {
+            // 再生した会話は necoder のスレッドの本文として残す（再起動後も DB から読める・全文検索に
+            // 載る）。ターンの途中なら、途切れた本文を残さないよう終わった時の保存に任せる。
+            if self
+                .threads
+                .get(thread_index)
+                .is_some_and(|thread| !thread.running)
+            {
+                self.persist_thread(thread_index);
+            }
+            if thread_index == active {
+                self.reset_transcript_list(true);
+                self.refresh_transcript_search(cx);
+            }
         }
         if let Some((files, color)) = files_touched {
             cx.emit(PanelEvent::FilesTouched { files, color });
+        }
+        if let Some((thread, tool)) = seat_violation {
+            // ターンを止めてから知らせる（止めないと同じ漏れが続く）。
+            self.cancel_turn(thread_index, cx);
+            cx.emit(PanelEvent::SeatViolation {
+                thread,
+                tool: SharedString::from(tool),
+            });
         }
         if turn_finished {
             // 完了音（設定 on・成功時のみ）。
@@ -6026,25 +7779,37 @@ PYEOF"#;
             }
             self.sync_running_registry(cx); // 実行中 → 完了をダッシュボードへ（M12-12）
             self.persist_thread(thread_index); // turn 確定分を DB へ（M12-1）
+            self.record_turn_usage(thread_index, cx); // トークンとコストを台帳へ（O11）
             self.maybe_auto_name(thread_index, cx); // 初回ターン後、既定名なら AI がタイトルを付ける（#6）
             self.maybe_tier2_summary(thread_index, cx); // ✳ 1 行要約（P4・Done/Failed 遷移のみ）
             if let Some(thread) = self.threads.get(thread_index) {
                 let elapsed = thread
                     .turn_started_at
-                    .map(|at| format!("{:.0}s", at.elapsed().as_secs_f32()))
+                    .map(|at| human_elapsed(at.elapsed().as_secs()))
                     .unwrap_or_default();
-                let summary = if thread.touched_files.is_empty() {
-                    SharedString::from(i18n::t!("agent.done", "elapsed" => elapsed))
-                } else {
-                    SharedString::from(
+                // 窓の中のトーストの文。終わり方で言い分ける（起動に失敗したのに「完了」と出していた。
+                // OS 通知の方は元から `AgentAlert::from_outcome` で分けている）。
+                let summary = match turn_outcome {
+                    TurnOutcome::Failed => {
+                        SharedString::from(i18n::t!("agent.turn_failed", "elapsed" => elapsed))
+                    }
+                    TurnOutcome::Interrupted => {
+                        SharedString::from(i18n::t!("agent.turn_interrupted", "elapsed" => elapsed))
+                    }
+                    TurnOutcome::Completed if thread.touched_files.is_empty() => {
+                        SharedString::from(i18n::t!("agent.done", "elapsed" => elapsed))
+                    }
+                    TurnOutcome::Completed => SharedString::from(
                         i18n::t!("agent.done_touched", "elapsed" => elapsed, "n" => thread.touched_files.len()),
-                    )
+                    ),
                 };
                 cx.emit(PanelEvent::TurnEnded {
                     thread: thread.name.clone(),
+                    thread_id: SharedString::from(thread.id.clone()),
                     color: thread.color,
                     summary,
                     digest: thread.digest.clone(),
+                    outcome: turn_outcome,
                     muted: thread.muted,
                 });
             }
@@ -6064,6 +7829,7 @@ PYEOF"#;
             if let Some(thread) = self.threads.get(thread_index) {
                 cx.emit(PanelEvent::PermissionWaiting {
                     thread: thread.name.clone(),
+                    thread_id: SharedString::from(thread.id.clone()),
                     thread_index,
                     color: thread.color,
                     title: thread
@@ -6078,6 +7844,21 @@ PYEOF"#;
         if elicitation_waiting {
             self.sync_running_registry(cx); // Blocked（回答待ち）をレール/フッター/⌘O へ即時反映
             self.ring_waiting(thread_index, cx);
+            // 承認待ちと同じ網に載せる（トースト・statusbar の待ち表示・要対応・バッジ・OS 通知・O12）。
+            if let Some(thread) = self.threads.get(thread_index) {
+                cx.emit(PanelEvent::QuestionWaiting {
+                    thread: thread.name.clone(),
+                    thread_id: SharedString::from(thread.id.clone()),
+                    thread_index,
+                    color: thread.color,
+                    message: thread
+                        .pending_elicitation
+                        .as_ref()
+                        .map(|pending| pending.message.clone())
+                        .unwrap_or_default(),
+                    muted: thread.muted,
+                });
+            }
         }
         if start_token_ticker {
             self.ensure_token_ticker(cx);
@@ -6093,17 +7874,40 @@ PYEOF"#;
         if turn_started {
             self.sync_running_registry(cx);
         }
-        // ターン完了で、アクティブスレッドに送信待ちがあれば次を自動フラッシュ（キュー→新ターン）。
-        // active 限定なのは `flush_queued_prompt`（＝`send_prompt_text`）が active 宛のため。
-        // 裏スレッドのキューは、そのタブへ切り替えた時に `switch_thread` が流す。
-        if turn_finished && thread_index == active {
-            self.flush_queued_prompt(cx);
+        // ターン完了で、そのスレッドに送信待ちがあれば次を自動フラッシュ（キュー→新ターン）。
+        // 送信はスレッド宛て（表示中のタブを変えない）なので、裏のタブでも完了した時点で流す。
+        if turn_finished {
+            self.flush_queued_prompt_at(thread_index, cx);
         }
         if let Some((agent, configs)) = stocked_configs {
             self.catalog.entry(agent).or_default().configs = configs;
         }
         if let Some((agent, modes)) = stocked_modes {
             self.catalog.entry(agent).or_default().modes = modes;
+        }
+        if let Some((agent, commands)) = stocked_commands {
+            self.catalog.entry(agent).or_default().commands = commands;
+        }
+        if let Some((key, limits)) = rate_limits {
+            // 鍵は「エージェント + 動かしている場所 + 認証の環境」（R08・SSH 先や別の環境の値と混ぜない）。
+            // セッションを立てた時の鍵を使う（今の設定から作り直すと、切り替える前から動いている
+            // セッションの値が新しい鍵に入ってしまう）。
+            let key = key.unwrap_or_else(|| self.prospective_usage_key(thread_index, cx));
+            // `default_global` は観測者（全ウィンドウの statusbar）を起こす＝値が変わった時だけ呼ぶ。
+            cx.default_global::<usage::UsageLimits>()
+                .record(key, limits, now_unix_ms());
+        }
+        if let Some(agent) = titled_by_agent {
+            self.catalog.entry(agent).or_default().sends_titles = true;
+        }
+        if let Some(name) = agent_renamed {
+            // 自動命名と同じ出口（Task 名の引き継ぎ・一覧の更新）。保存はメタだけ — ターンの途中に
+            // 届くこともあり（Codex は最初のターンの終わり際に仮の名前を送る）、本文まで書くと
+            // 生成中の途切れた本文が DB に残る。
+            cx.emit(PanelEvent::ThreadAutoNamed { name });
+            self.persist_thread_meta(thread_index);
+            self.refresh_chat_rows(cx);
+            self.sync_running_registry(cx);
         }
         cx.notify();
     }
@@ -6467,13 +8271,19 @@ PYEOF"#;
                     "message" => message
                 ))));
             thread.running = false;
-            Some((thread.name.clone(), thread.color, thread.muted))
+            Some((
+                thread.name.clone(),
+                SharedString::from(thread.id.clone()),
+                thread.color,
+                thread.muted,
+            ))
         } else {
             None
         };
-        if let Some((thread, color, muted)) = failed {
+        if let Some((thread, thread_id, color, muted)) = failed {
             cx.emit(PanelEvent::TurnFailed {
                 thread,
+                thread_id,
                 color,
                 message: SharedString::from(message.to_string()),
                 muted,
@@ -6614,6 +8424,14 @@ PYEOF"#;
                                     this.focus_composer(window, cx); // ⌘W が Agent に効くようフォーカスを寄せる
                                 }),
                             )
+                            // 右クリック = スレッドのメニュー（名前を変更 / 新しいセッションで続ける / 閉じる・O15）。
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_thread_menu(index, event.position, cx);
+                                }),
+                            )
                             .tooltip(Tooltip::text(
                                 i18n::t!("agent.rename_thread_tip"),
                                 theme.clone(),
@@ -6730,13 +8548,15 @@ PYEOF"#;
                 } else {
                     "bar"
                 };
-                if let Err(error) = settings_core::persist_user_value(
+                let result = settings_core::persist_user_value(
                     &path,
                     "agent_tabs_view",
                     serde_json::Value::String(value.to_string()),
-                ) {
+                );
+                if let Err(error) = &result {
                     eprintln!("タブ表示モードの保存に失敗: {error:#}");
                 }
+                self.report_settings_save(result, cx);
             }
             cx.notify();
         }
@@ -6929,6 +8749,13 @@ PYEOF"#;
                         this.focus_composer(window, cx);
                     }),
                 )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.open_thread_menu(index, event.position, cx);
+                    }),
+                )
         });
         div()
             .flex()
@@ -7117,10 +8944,8 @@ PYEOF"#;
             .map(|thread| (thread.tokens_shown, thread.tokens_max))
             .unwrap_or((0.0, 0));
         let used = shown.round().max(0.0) as u32; // 表示は補間値（カウントアップ演出）
-                                                  // コンパクト（/compact）: セッションがあり文脈が溜まっていて、実行中でない時だけ出す。
-        let has_session = thread
-            .map(|thread| thread.command_tx.is_some())
-            .unwrap_or(false);
+                                                  // コンパクト（/compact）: 常に出す。押せないのは送る先の会話が無い（一度も起こしていない）時だけ。
+        let can_compact = thread.is_some_and(Thread::can_compact);
         let ratio = if max == 0 {
             0.0
         } else {
@@ -7185,8 +9010,8 @@ PYEOF"#;
                     div()
                         .text_size(px(10.5))
                         .text_color(theme.fg2)
-                        .font_family("Guguru Sans Code")
-                        .child(format!("{secs}s")),
+                        .font_family(ui::code_font(cx))
+                        .child(human_elapsed(secs)),
                 )
             });
 
@@ -7239,14 +9064,22 @@ PYEOF"#;
                             .flex_none()
                             .text_size(px(10.5))
                             .text_color(theme.fg2)
-                            .font_family("Guguru Sans Code")
+                            .font_family(ui::code_font(cx))
                             .child(format!("{}/{}", human_tokens(used), human_tokens(max))),
                     )
-                    // コンパクト（/compact）ボタン: トークンの真横。文脈が溜まっていて実行中でない時だけ。
+                    // コンパクト（/compact）ボタン: トークンの真横に**常時**。実行中は押すとキューに積む
+                    // （composer の送信と同じ作法）。会話がまだ無いスレッドでは押せない形（薄く・カーソル無し）。
                     // アイコンではなく文字チップ。縮小アイコン（minimize.svg）は「何が起きるか」が
                     // 読めず不評だったため、送るコマンド名そのものを出す（送信待ちのチップと同じ様式）。
-                    .child(if has_session && !running && used > 0 {
+                    .child({
                         let theme = theme.clone();
+                        let tip = if !can_compact {
+                            i18n::t!("agent.compact_none_tip")
+                        } else if running {
+                            i18n::t!("agent.compact_queued_tip")
+                        } else {
+                            i18n::t!("agent.compact_tip")
+                        };
                         div()
                             .id("compact-context")
                             .flex()
@@ -7259,20 +9092,21 @@ PYEOF"#;
                             .border_1()
                             .border_color(theme.border)
                             .text_size(px(10.5))
-                            .text_color(theme.fg1)
-                            .font_family("Guguru Sans Code")
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                            .text_color(if can_compact { theme.fg1 } else { theme.fg2 })
+                            .font_family(ui::code_font(cx))
                             .child(SharedString::from(i18n::t!("agent.compact")))
-                            .tooltip(Tooltip::text(i18n::t!("agent.compact_tip"), theme.clone()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| this.compact_context(cx)),
-                            )
+                            .tooltip(Tooltip::text(tip, theme.clone()))
+                            .when(can_compact, |chip| {
+                                chip.cursor_pointer()
+                                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| {
+                                            this.compact_context(cx)
+                                        }),
+                                    )
+                            })
                             .into_any_element()
-                    } else {
-                        // 非表示でも同じ幅を占有し、猫とメーターの位置を不変にする。
-                        div().w(px(64.)).h(px(18.)).flex_none().into_any_element()
                     }),
             )
     }
@@ -7409,6 +9243,71 @@ PYEOF"#;
                 )
                 .into_any_element(),
         )
+    }
+
+    /// message rail（O17）: transcript の右端の細い帯に、ユーザーの発話ごとの印を並べる。印を押すと
+    /// その発話へ飛び、乗せると発話の頭が出る。いま読んでいる指示の印だけスレッド色（選択の印）。
+    /// 位置はエントリの並びで割った近似（高さは測らない）。下の浮かぶボタンの上で止める。
+    fn render_message_rail(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let marks = message_rail_marks(&thread.entries, self.transcript_top_item());
+        if marks.is_empty() {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let color = thread.color;
+        let mut rail = div()
+            .absolute()
+            .top(px(10.))
+            .bottom(px(56.))
+            .right(px(2.))
+            .w(px(12.));
+        for mark in marks {
+            let preview = match thread.entries.get(mark.entry) {
+                Some(Entry::User(text)) => flatten_digest_line(text),
+                _ => SharedString::default(),
+            };
+            let entry = mark.entry;
+            rail = rail.child(
+                div()
+                    .id(("message-rail", entry))
+                    .absolute()
+                    .top(relative(mark.position))
+                    .right(px(0.))
+                    .w(px(12.))
+                    .h(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .cursor_pointer()
+                    .group("message-rail-mark")
+                    .child(
+                        div()
+                            .w(px(8.))
+                            .h(px(3.))
+                            .rounded(px(1.))
+                            .bg(if mark.current {
+                                color
+                            } else {
+                                theme.fg2.alpha(0.5)
+                            })
+                            .group_hover("message-rail-mark", |style| style.bg(theme.fg0)),
+                    )
+                    .tooltip(Tooltip::text(preview, theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.transcript_list.scroll_to(ListOffset {
+                                item_ix: entry,
+                                offset_in_item: px(0.),
+                            });
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        Some(rail.into_any_element())
     }
 
     /// 「前の指示へ」ボタン。長いツール出力や回答を、ユーザー発話単位で一気に遡る。
@@ -7578,10 +9477,21 @@ PYEOF"#;
             && thread.running
             && matches!(thread.entries[index], Entry::Agent(_) | Entry::Thinking(_));
         let entry = &thread.entries[index];
+        // サブエージェントの手順は親の Step の中に畳んで描く（O17）。自分の行は高さ 0。
+        if matches!(
+            entry,
+            Entry::Step {
+                parent: Some(_),
+                ..
+            }
+        ) {
+            return div().into_any_element();
+        }
         let rendered_entry = self.render_entry(index, entry, color, live_stream, cx);
         // 長い入力だけ「畳む/開く」を出す（他のエントリ種別はそれぞれ自前のヘッダで畳める）。
         let foldable_input = match entry {
             Entry::User(text) => user_entry_foldable(text),
+            Entry::AutoPrompt(auto) => user_entry_foldable(&auto.text),
             _ => false,
         };
         let input_expanded = self.is_input_expanded(index);
@@ -7689,16 +9599,26 @@ PYEOF"#;
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         match entry {
-            Entry::LedgerEvent(text) => div()
-                .p(px(10.))
-                .rounded(px(6.))
-                .bg(theme.bg2)
-                .text_size(px(11.))
-                .text_color(theme.fg2)
-                .child(SharedString::from(format!(
-                    "◇ {}\n{text}",
-                    i18n::t!("captain.ledger_event")
-                )))
+            // `!` で人が走らせたコマンド（#37・`shell.rs`）。
+            Entry::Shell(run) => self.render_shell_entry(index, run, cx),
+            // necoder の知らせ（`auto_prompt.rs`）: 人の発話と分けた灰色のカード。
+            Entry::AutoPrompt(auto) => self.render_auto_prompt_entry(index, auto, cx),
+            // 会話の区切り（O15）: 細い罫線に挟んだ一言。色は中立（識別色を使わない＝UI-SPEC §1.3）。
+            Entry::Notice(text) => div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .py(px(2.))
+                .child(div().flex_1().h(px(1.)).bg(theme.border))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(px(360.))
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(text.clone()),
+                )
+                .child(div().flex_1().h(px(1.)).bg(theme.border))
                 .into_any_element(),
             // checkpoint 行（⟲ この時点へ戻す・M12-2）。クリックで blob から全ファイルを書き戻す。
             Entry::Checkpoint { id, label } => {
@@ -7761,32 +9681,8 @@ PYEOF"#;
                     .text_color(theme.fg0)
                     .child(self.selectable_text(shown, cx));
                 if foldable && !expanded {
-                    let lines = text.lines().count();
-                    // 畳んでいる間だけ出す**文字チップ**（アイコンだけにしない＝押せると分かる）。
-                    column = column.child(
-                        div()
-                            .id(("user-fold", index))
-                            .mt(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(theme.fg2)
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(theme.fg0))
-                            .child(div().flex_none().text_size(px(8.)).child("▸"))
-                            .child(SharedString::from(
-                                i18n::t!("agent.input_expand", "n" => lines),
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_input(index, cx);
-                                }),
-                            ),
-                    );
+                    column =
+                        column.child(self.render_input_fold_chip(index, text.lines().count(), cx));
                 }
                 div()
                     .flex()
@@ -7891,6 +9787,7 @@ PYEOF"#;
                     .into_any_element()
             }
             Entry::Step {
+                id,
                 tool,
                 args,
                 result,
@@ -7946,7 +9843,7 @@ PYEOF"#;
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .font_family("Guguru Sans Code")
+                                        .font_family(ui::code_font(cx))
                                         .text_size(px(11.))
                                         .text_color(theme.fg2)
                                         .child(self.linked_text(args.clone(), cx)),
@@ -7964,7 +9861,7 @@ PYEOF"#;
                             .items_center()
                             .gap(px(4.))
                             .cursor_pointer()
-                            .font_family("Guguru Sans Code")
+                            .font_family(ui::code_font(cx))
                             .text_size(px(11.))
                             .text_color(theme.fg2)
                             .child(div().flex_none().text_size(px(8.)).child(if expanded {
@@ -7998,7 +9895,7 @@ PYEOF"#;
                             column = column.child(
                                 div()
                                     .min_w_0()
-                                    .font_family("Guguru Sans Code")
+                                    .font_family(ui::code_font(cx))
                                     .text_size(px(11.))
                                     .text_color(theme.fg2)
                                     .child(self.push_selectable(
@@ -8016,7 +9913,7 @@ PYEOF"#;
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .font_family("Guguru Sans Code")
+                                    .font_family(ui::code_font(cx))
                                     .text_size(px(11.))
                                     .text_color(theme.fg2)
                                     .child(self.linked_text(args.clone(), cx)),
@@ -8026,7 +9923,7 @@ PYEOF"#;
                 }
                 // Edit 系: before/after 差分を transcript にインライン表示（権限カードと同じ描画を再利用）。
                 for diff in diffs {
-                    body = body.child(render_diff(diff, &theme));
+                    body = body.child(render_diff(diff, &theme, ui::code_font(cx)));
                 }
                 // 書かれたのが単体でプレビューできる物（HTML / Markdown）なら、1 クリックで
                 // プレビュー表示へ。判定は**構造化されたパス**（差分のパス）+ 実在 + 拡張子で、
@@ -8038,13 +9935,77 @@ PYEOF"#;
                 // 既定で折り畳み、要約行クリックで展開する（コード読み込みの結果で transcript が
                 // 流れないように・Thinking と同じ流儀）。
                 if let Some(result) = result {
-                    body = body.child(self.render_step_result(
-                        index,
-                        result,
-                        *result_lines,
-                        result_language,
-                        cx,
-                    ));
+                    // 要約に出すのは**丸める前**の行数。載せている本文から数え直すと、
+                    // 2000 行の出力が「201 行」に見えて、畳みが実際より小さく嘘をつく。
+                    let shown_lines = result.lines().count().max(1);
+                    let line_count = (*result_lines).max(shown_lines);
+                    let collapsible = shown_lines > STEP_COLLAPSE_MIN_LINES
+                        || result.len() > STEP_COLLAPSE_MIN_BYTES;
+                    let expanded = self.is_step_expanded(index);
+                    // result 全体を 1 region に保ち、複数行コピー時の改行を原文どおりにする。
+                    let mut row = div()
+                        .flex()
+                        .items_start()
+                        .gap(px(4.))
+                        .pt(px(3.))
+                        .font_family(ui::code_font(cx))
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(div().flex_none().child("⎿"));
+                    if collapsible {
+                        let header = div()
+                            .id(("step-result", index))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .cursor_pointer()
+                            .child(div().flex_none().text_size(px(8.)).child(if expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(step_result_summary(result.as_ref(), line_count)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_step(index, cx);
+                                }),
+                            );
+                        let mut column = div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap(px(3.))
+                            .child(header);
+                        if expanded {
+                            column = column.child(div().min_w_0().child(self.push_selectable(
+                                result.clone(),
+                                self.syntax_highlights(result_language, result.as_ref()),
+                                cx,
+                            )));
+                        }
+                        row = row.child(column);
+                    } else {
+                        row = row.child(div().flex_1().min_w_0().child(self.push_selectable(
+                            result.clone(),
+                            self.syntax_highlights(result_language, result.as_ref()),
+                            cx,
+                        )));
+                    }
+                    body = body.child(row);
+                }
+                // Task / Agent ツール: 走らせたサブエージェントの手順をこの下に畳む（O17）。
+                if let Some(step_id) = id {
+                    body = body.children(self.render_subagent_steps(index, step_id, color, cx));
                 }
                 div()
                     .flex()
@@ -8054,7 +10015,6 @@ PYEOF"#;
                     .child(body)
                     .into_any_element()
             }
-            Entry::Shell { .. } => self.render_shell_entry(index, entry, cx),
             // 生成中も完了後も同じ選択可能 Markdown パス（Zed の Markdown.selection 相当の一本化・
             // 2026-08-26）。生成中は reveal 分の接頭辞だけ描き、タイプライタの演出を出す。
             Entry::Agent(text) => {
@@ -8076,84 +10036,79 @@ PYEOF"#;
         }
     }
 
-    /// ステップ / `!` 実行の `⎿ 結果` 行。長い結果は既定で畳み、要約行クリックで展開する
-    /// （`expanded_steps` をエントリ index で引く）。`result_lines` は丸める前の行数。
-    fn render_step_result(
+    /// 親の Step（`index`・`step_id`）の下に畳むサブエージェントの手順（O17）。手順が無ければ None。
+    /// 畳んでいる間は「▸ サブエージェント · N 手順  最新の手順」の 1 行（動いている間の進み具合）。
+    /// 開くと手順を細い縦線の内側に届いた順で並べる（手順の中の結果・差分の畳みはそれぞれの行の物）。
+    fn render_subagent_steps(
         &self,
         index: usize,
-        result: &SharedString,
-        result_lines: usize,
-        result_language: Option<lang::LanguageId>,
+        step_id: &SharedString,
+        color: Hsla,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let children = subagent_step_indices(&thread.entries, index, step_id);
+        let latest = match thread.entries.get(*children.last()?)? {
+            Entry::Step { tool, .. } => flatten_digest_line(tool),
+            _ => SharedString::default(),
+        };
         let theme = &self.theme;
-        // 要約に出すのは**丸める前**の行数。載せている本文から数え直すと、
-        // 2000 行の出力が「201 行」に見えて、畳みが実際より小さく嘘をつく。
-        let shown_lines = result.lines().count().max(1);
-        let line_count = result_lines.max(shown_lines);
-        let collapsible =
-            shown_lines > STEP_COLLAPSE_MIN_LINES || result.len() > STEP_COLLAPSE_MIN_BYTES;
-        let expanded = self.is_step_expanded(index);
-        // result 全体を 1 region に保ち、複数行コピー時の改行を原文どおりにする。
-        let mut row = div()
+        let expanded = self.is_subagent_expanded(index);
+        let header = div()
+            .id(("subagent-steps", index))
             .flex()
-            .items_start()
-            .gap(px(4.))
-            .pt(px(3.))
-            .font_family("Guguru Sans Code")
+            .items_center()
+            .gap(px(5.))
+            .pt(px(2.))
+            .cursor_pointer()
             .text_size(px(11.))
             .text_color(theme.fg2)
-            .child(div().flex_none().child("⎿"));
-        if collapsible {
-            let header = div()
-                .id(("step-result", index))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .cursor_pointer()
-                .child(div().flex_none().text_size(px(8.)).child(if expanded {
-                    "▾"
-                } else {
-                    "▸"
-                }))
-                .child(
+            .hover(|style| style.text_color(theme.fg0))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(8.))
+                    .child(if expanded { "▾" } else { "▸" }),
+            )
+            .child(div().flex_none().child(SharedString::from(i18n::t!(
+                "agent.subagent_steps",
+                "count" => children.len()
+            ))))
+            .when(!expanded, |row| {
+                row.child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .child(step_result_summary(result.as_ref(), line_count)),
+                        .font_family(ui::code_font(cx))
+                        .child(latest),
                 )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _window, cx| {
-                        cx.stop_propagation();
-                        this.toggle_step(index, cx);
-                    }),
-                );
-            let mut column = div()
-                .flex_1()
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_subagent_steps(index, cx);
+                }),
+            );
+        let mut section = div().flex().flex_col().gap(px(6.)).child(header);
+        if expanded {
+            let mut steps = div()
                 .flex()
                 .flex_col()
-                .min_w_0()
-                .gap(px(3.))
-                .child(header);
-            if expanded {
-                column = column.child(div().min_w_0().child(self.push_selectable(
-                    result.clone(),
-                    self.syntax_highlights(result_language, result.as_ref()),
-                    cx,
-                )));
+                .gap(px(8.))
+                .pl(px(10.))
+                .border_l_1()
+                .border_color(theme.border);
+            for child in children {
+                if let Some(entry) = thread.entries.get(child) {
+                    steps = steps.child(self.render_entry(child, entry, color, false, cx));
+                }
             }
-            row = row.child(column);
-        } else {
-            row = row.child(div().flex_1().min_w_0().child(self.push_selectable(
-                result.clone(),
-                self.syntax_highlights(result_language, result.as_ref()),
-                cx,
-            )));
+            section = section.child(steps);
         }
-        row
+        Some(section.into_any_element())
     }
 
     /// markdown の 1 ブロック（本文 + インライン装飾）を、リンク検出つきで積む。
@@ -8238,7 +10193,7 @@ PYEOF"#;
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.bg1)
-                        .font_family("IBM Plex Sans JP")
+                        .font_family(ui::ui_font(cx))
                         .text_size(px(12.5))
                         .text_color(theme.fg2)
                         .cursor_pointer()
@@ -8269,7 +10224,7 @@ PYEOF"#;
                         .border_color(theme.border)
                         .px(px(9.))
                         .py(px(7.))
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .text_size(px(11.5))
                         .text_color(theme.fg0)
                         .child(self.push_selectable(shown_text, highlights, cx))
@@ -8562,6 +10517,40 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// 畳んだ長い入力の下に出す**文字チップ**（`▸ 全 N 行を表示`・アイコンだけにしない＝押せると分かる）。
+    /// 人の発話と necoder の知らせのカードで共用する。
+    fn render_input_fold_chip(
+        &self,
+        index: usize,
+        lines: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        div()
+            .id(("user-fold", index))
+            .mt(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(11.))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(theme.fg2)
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.fg0))
+            .child(div().flex_none().text_size(px(8.)).child("▸"))
+            .child(SharedString::from(
+                i18n::t!("agent.input_expand", "n" => lines),
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_input(index, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     fn is_step_expanded(&self, index: usize) -> bool {
         self.threads
             .get(self.active)
@@ -8580,6 +10569,29 @@ PYEOF"#;
         let key = (id, index);
         if !self.expanded_steps.remove(&key) {
             self.expanded_steps.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn is_subagent_expanded(&self, index: usize) -> bool {
+        self.threads.get(self.active).is_some_and(|thread| {
+            self.expanded_subagents
+                .contains(&(thread.id.clone(), index))
+        })
+    }
+
+    /// サブエージェントの手順（親の Step の下）の折り畳み/展開をトグルする（O17）。
+    fn toggle_subagent_steps(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.id.clone())
+        else {
+            return;
+        };
+        let key = (id, index);
+        if !self.expanded_subagents.remove(&key) {
+            self.expanded_subagents.insert(key);
         }
         cx.notify();
     }
@@ -8785,8 +10797,9 @@ PYEOF"#;
     /// 承認待ちの権限リクエストのカード（composer の直上）。ツール名・編集差分・許可/拒否ボタン。
     /// ターンをブロックしているので、transcript がスクロールしても常に見える位置に置く。
     /// Elicitation（選択肢付き質問）を composer 上部にカードで出す。質問文 + 各フィールドの
-    /// 選択肢ボタン + フッタ（「これで回答」・常に「答えない」）。
-    /// 単一選択フィールドが 1 つだけの質問は押した瞬間に確定送信するので「これで回答」を出さない。
+    /// 選択肢ボタン + 自由入力欄（Other 欄の付いた質問だけ・O17）+ フッタ（「これで回答」・常に「答えない」）。
+    /// 単一選択フィールドが 1 つだけの質問は押した瞬間に確定送信するので「これで回答」を出さない
+    /// （自由入力に書いた時だけ出す。書いた文字は押した案に添えて送る）。
     /// 複数選択（トグル）を含む質問は、選び終わりがこちらから判らないので必ず確定ボタンを出す。
     /// 空なら None。
     fn render_elicitation_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -8797,14 +10810,14 @@ PYEOF"#;
         let message = pending.message.clone();
         let fields = pending.fields.clone();
         let selections = pending.selections.clone();
-        // ラベルと確定ボタンが要るのは「フィールドが複数」か「トグルで選ぶフィールドが在る」時。
-        let needs_submit = fields.len() > 1 || fields.iter().any(|field| field.multi);
-        let labelled = needs_submit;
-        let all_selected = fields.iter().all(|field| {
-            selections
-                .get(&field.name)
-                .is_some_and(|values| !values.is_empty())
-        });
+        // ラベルが要るのは「フィールドが複数」か「トグルで選ぶフィールドが在る」時。
+        let labelled = fields.len() > 1 || fields.iter().any(|field| field.multi);
+        // 確定ボタンはそれに加えて、自由入力に書いた時（選ばずに書いた答えは押して送る・O17）。
+        let wrote_custom = fields
+            .iter()
+            .any(|field| !pending.custom_text(&field.name).is_empty());
+        let needs_submit = labelled || wrote_custom;
+        let all_selected = pending.answers().is_some();
 
         let mut card = div()
             .id("elicitation-card")
@@ -8862,18 +10875,60 @@ PYEOF"#;
                         .child(SharedString::from(option.title.clone()))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
-                            cx.listener(move |panel, _, _window, cx| {
+                            cx.listener(move |panel, _, window, cx| {
                                 cx.stop_propagation();
+                                let input_had_focus = panel.elicitation_input_focused(window, cx);
                                 panel.choose_elicitation_option(
                                     field_name.clone(),
                                     value.clone(),
                                     cx,
                                 );
+                                panel.refocus_after_elicitation(input_had_focus, window, cx);
                             }),
                         ),
                 );
             }
             group = group.child(options_row);
+            // 自由入力欄（O17）: 選ぶ代わりに書く・選んだ案に添える（複数選択なら足す）。
+            if let Some(input) = pending.custom_inputs.get(&field.name) {
+                let blank = pending
+                    .custom_texts
+                    .get(&field.name)
+                    .is_none_or(|text| text.is_empty());
+                let written = !pending.custom_text(&field.name).is_empty();
+                let placeholder = if field.multi {
+                    i18n::t!("agent.elicitation_custom_multi")
+                } else {
+                    i18n::t!("agent.elicitation_custom_single")
+                };
+                group = group.child(
+                    div()
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if written { color } else { theme.border })
+                        .bg(theme.bg1)
+                        .text_size(px(11.5))
+                        .child(
+                            div()
+                                .relative()
+                                // 高さを与えないと 1 行ぶんに潰れて文字が出ない（検索欄と同じ）。
+                                .h(px(18.))
+                                .child(input.clone())
+                                .when(blank, |slot| {
+                                    slot.child(
+                                        div()
+                                            .absolute()
+                                            .top(px(0.))
+                                            .left(px(1.))
+                                            .text_color(theme.fg2)
+                                            .child(SharedString::from(placeholder)),
+                                    )
+                                }),
+                        ),
+                );
+            }
             card = card.child(group);
         }
 
@@ -8895,9 +10950,11 @@ PYEOF"#;
                     .child(SharedString::from(i18n::t!("agent.elicitation_submit")))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|panel, _, _window, cx| {
+                        cx.listener(|panel, _, window, cx| {
                             cx.stop_propagation();
+                            let input_had_focus = panel.elicitation_input_focused(window, cx);
                             panel.submit_elicitation(cx);
+                            panel.refocus_after_elicitation(input_had_focus, window, cx);
                         }),
                     ),
             );
@@ -8912,9 +10969,11 @@ PYEOF"#;
                 .child(SharedString::from(i18n::t!("agent.elicitation_decline")))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(|panel, _, _window, cx| {
+                    cx.listener(|panel, _, window, cx| {
                         cx.stop_propagation();
+                        let input_had_focus = panel.elicitation_input_focused(window, cx);
                         panel.decline_elicitation(cx);
+                        panel.refocus_after_elicitation(input_had_focus, window, cx);
                     }),
                 ),
         );
@@ -8931,7 +10990,12 @@ PYEOF"#;
         let thread = self.threads.get(self.active)?;
         let theme = self.theme.clone();
         if thread.session_lost {
+            // 起動してすぐ終わった時は理由のカード（[`Self::render_exit_card`]）が同じ役をする。
+            if thread.startup_exit.is_some() {
+                return None;
+            }
             let index = self.active;
+            let banner = self.session_lost_banner_text();
             return Some(
                 div()
                     .id("session-lost")
@@ -8952,7 +11016,7 @@ PYEOF"#;
                             .min_w_0()
                             .text_size(px(11.5))
                             .text_color(theme.fg1)
-                            .child(SharedString::from(i18n::t!("agent.session_lost_banner"))),
+                            .child(SharedString::from(banner)),
                     )
                     .child(
                         div()
@@ -8993,6 +11057,110 @@ PYEOF"#;
                 .child(note)
                 .into_any_element(),
         )
+    }
+
+    /// エージェントが追っている目標（`/goal`・O2）を composer の直上に 1 行で常時出す。
+    /// Codex / Claude は `SessionInfoUpdate._meta.goal` で目標と状態を送ってくる。面はセッション断
+    /// バナーと同じ（bg2・枠・角 7）で、**色は中立**（状態は文字で言う・色相を使わない＝§1.3）。
+    /// エージェントが目標への操作を広告していれば（Codex・O17）、状態に合う操作を文字チップで添える:
+    /// 進行中 → 一時停止 / 一時停止中 → 再開 / どちらでも → 取り消す。
+    fn render_goal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let goal = thread.goal.as_ref()?;
+        let theme = self.theme.clone();
+        let actions = goal_actions_for(goal.status, &thread.goal_actions);
+        let status = match goal.status {
+            acp_client::GoalStatus::Active => Some(i18n::t!("agent.goal_status_active")),
+            acp_client::GoalStatus::Paused => Some(i18n::t!("agent.goal_status_paused")),
+            acp_client::GoalStatus::Blocked => Some(i18n::t!("agent.goal_status_blocked")),
+            acp_client::GoalStatus::Complete => Some(i18n::t!("agent.goal_status_complete")),
+            acp_client::GoalStatus::Limited => Some(i18n::t!("agent.goal_status_limited")),
+            acp_client::GoalStatus::Other => None,
+        };
+        let objective = SharedString::from(goal.objective.clone());
+        Some(
+            div()
+                .id("agent-goal")
+                .mx(px(12.))
+                .mb(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(7.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .px(px(9.))
+                .py(px(5.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("agent.goal_label"))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(objective.clone()),
+                )
+                .children(status.map(|status| {
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(status))
+                }))
+                .children(actions.into_iter().map(|action| {
+                    let label = match action {
+                        acp_client::GoalAction::Pause => i18n::t!("agent.goal_pause"),
+                        acp_client::GoalAction::Resume => i18n::t!("agent.goal_resume"),
+                        acp_client::GoalAction::Clear => i18n::t!("agent.goal_clear"),
+                    };
+                    let id = match action {
+                        acp_client::GoalAction::Pause => "goal-pause",
+                        acp_client::GoalAction::Resume => "goal-resume",
+                        acp_client::GoalAction::Clear => "goal-clear",
+                    };
+                    div()
+                        .id(id)
+                        .flex_none()
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(10.5))
+                        .text_color(theme.fg1)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        .child(SharedString::from(label))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |panel, _, _window, cx| {
+                                cx.stop_propagation();
+                                panel.send_goal_action(action, cx);
+                            }),
+                        )
+                }))
+                .tooltip(Tooltip::text(objective, theme.clone()))
+                .into_any_element(),
+        )
+    }
+
+    /// 目標への操作を送る（アクティブスレッド・O17）。結果はエージェントが送り直す目標の状態で映る。
+    fn send_goal_action(&mut self, action: acp_client::GoalAction, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        if let Some(command_tx) = thread.command_tx.as_ref() {
+            command_tx.unbounded_send(SessionCommand::Goal(action)).ok();
+        }
+        cx.notify();
     }
 
     fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -9086,6 +11254,132 @@ PYEOF"#;
     /// 「再ログインが必要」カード（composer の直上・承認カードと同じ流儀）。認証切れは一般のエラーと
     /// 違い**ユーザーがターミナルで 1 行打てば直る**ので、打つべきコマンドと再接続導線をここに置く。
     /// 再接続は直近の指示を同じセッションへ送り直す（会話履歴も、adapter 側の文脈も捨てない）。
+    /// 起動してすぐ終わったエージェントのカード（composer の上）: 見出し「起動してすぐ終了しました」+
+    /// エージェント名、終わり方と「画面だけ・保存しません」の一文、stderr の末尾（等幅・高さの上限の中で
+    /// スクロール）、「再開」「閉じる」。stderr は保存も記録もしない（[`Thread::startup_exit`]）。
+    fn render_exit_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let exited = thread.startup_exit.as_ref()?;
+        let theme = self.theme.clone();
+        let index = self.active;
+        let stderr = if exited.stderr.is_empty() {
+            i18n::t!("agent.exit_no_stderr")
+        } else {
+            exited.stderr.join("\n")
+        };
+        let button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(10.5))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        Some(
+            div()
+                .id("exit-card")
+                .mx(px(12.))
+                .mb(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .rounded(px(9.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .px(px(11.))
+                .py(px(9.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.fg0)
+                                .child(SharedString::from(i18n::t!("agent.exit_title"))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.5))
+                                .text_color(theme.fg1)
+                                .child(thread.agent.clone()),
+                        )
+                        .child(
+                            button("exit-card-resume", i18n::t!("agent.session_resume"))
+                                .tooltip(Tooltip::text(
+                                    i18n::t!("agent.session_resume_tip"),
+                                    theme.clone(),
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |panel, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        panel.resume_session(index, cx);
+                                    }),
+                                ),
+                        )
+                        .child(
+                            button("exit-card-dismiss", i18n::t!("agent.exit_dismiss"))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |panel, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        panel.dismiss_exit_card(index, cx);
+                                    }),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(i18n::t!(
+                            "agent.exit_body",
+                            "status" => exit_status_text(exited)
+                        ))),
+                )
+                .child(
+                    div()
+                        .id("exit-card-stderr")
+                        .max_h(px(160.))
+                        .overflow_y_scroll()
+                        .rounded(px(6.))
+                        .bg(theme.bg1)
+                        .border_1()
+                        .border_color(theme.border)
+                        .px(px(8.))
+                        .py(px(6.))
+                        .font_family(ui::code_font(cx))
+                        .text_size(px(11.))
+                        .text_color(theme.fg0)
+                        .child(SharedString::from(stderr)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 起動してすぐ終わった時のカードを閉じる（理由を読んだ後）。セッションが切れた印は残るので、
+    /// 代わりにいつもの「切れました」のバナーが出る。
+    fn dismiss_exit_card(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            thread.startup_exit = None;
+        }
+        cx.notify();
+    }
+
     fn render_auth_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         if !thread.auth_required {
@@ -9176,7 +11470,7 @@ PYEOF"#;
                         .border_color(theme.border)
                         .px(px(8.))
                         .py(px(6.))
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .text_size(px(11.))
                         .text_color(theme.fg0)
                         .child(SharedString::from(command)),
@@ -9321,7 +11615,7 @@ PYEOF"#;
                 .border_color(theme.border)
                 .px(px(8.))
                 .py(px(6.))
-                .font_family("Guguru Sans Code")
+                .font_family(ui::code_font(cx))
                 .text_size(px(11.))
                 .text_color(theme.fg1);
             for line in raw_input.lines() {
@@ -9332,7 +11626,7 @@ PYEOF"#;
 
         // 編集差分（あれば）を diff レビューとして表示。
         for diff in &pending.diffs {
-            card = card.child(render_diff(diff, &theme));
+            card = card.child(render_diff(diff, &theme, ui::code_font(cx)));
         }
 
         // 許可/拒否ボタン列（選択肢は ACP が広告したもの。添字で応答）。
@@ -9402,9 +11696,181 @@ PYEOF"#;
         cx.notify();
     }
 
-    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// composer の `/` 補完（O2）。composer の真上に重ねる。面は ＋context・選択ピルのメニューと
+    /// 同じ（bg2・枠 1px・角 8・影）で、**色は中立**（選択中の行は bg3・識別色は使わない＝§1.3）。
+    /// コマンド名を打っている間は候補（名前・引数ヒント・説明）を、`/name ` まで入って引数がまだ
+    /// 空の間はそのコマンドの引数ヒントだけを 1 行出す。
+    fn render_slash_popup(
+        &self,
+        composer_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !composer_focused {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let commands = self.slash_commands();
+        let display_name = |name: &str| -> SharedString {
+            if name.starts_with('$') {
+                SharedString::from(name.to_string())
+            } else {
+                SharedString::from(format!("/{name}"))
+            }
+        };
+        let card = || {
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(8.))
+                .p(px(4.))
+                .shadow(vec![gpui::BoxShadow::new(
+                    px(0.),
+                    px(6.),
+                    gpui::hsla(0., 0., 0., 0.4),
+                )
+                .blur_radius(px(16.))])
+                // 下の transcript へクリック・ホイールを通さない。
+                .occlude()
+        };
+        let body = match &self.slash.input {
+            SlashInput::Query(_) => {
+                let items = self.slash_popup_items();
+                if items.is_empty() {
+                    return None;
+                }
+                let selected = self.slash.selected.min(items.len() - 1);
+                // 選んでいる行が必ず見えるように、最大行数の窓をずらす。
+                let start = selected.saturating_sub(SLASH_POPUP_ROWS - 1);
+                let rows = items
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(SLASH_POPUP_ROWS)
+                    .filter_map(|(position, &command_index)| {
+                        let command = commands.get(command_index)?;
+                        let is_selected = position == selected;
+                        Some(
+                            div()
+                                .id(("slash-command", position))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(9.))
+                                .py(px(4.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .when(is_selected, |row| row.bg(theme.bg3))
+                                .hover(|style| style.bg(theme.bg3))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.))
+                                        .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
+                                        .child(display_name(&command.name)),
+                                )
+                                // 引数ヒントは斜体で説明と見分ける（どちらも fg2・色は足さない）。
+                                .children(command.hint.clone().map(|hint| {
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(200.))
+                                        .truncate()
+                                        .italic()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(hint)
+                                }))
+                                // 説明は残りの幅で 1 行に切る（flex 行で縮ませる本文は flex_1 + min_w_0）。
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(command.description.clone()),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.accept_slash_command(command_index, cx);
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                card().children(rows).child(
+                    div()
+                        .mt(px(2.))
+                        .px(px(9.))
+                        .pt(px(4.))
+                        .pb(px(2.))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_size(px(10.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!(
+                            "agent.slash_footer",
+                            "count" => items.len()
+                        ))),
+                )
+            }
+            SlashInput::AwaitingArgs(name) => {
+                let hint = commands
+                    .iter()
+                    .find(|command| command.name == *name)
+                    .and_then(|command| command.hint.clone())?;
+                card().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(9.))
+                        .py(px(4.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(theme.fg1)
+                                .child(display_name(name)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .italic()
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .child(hint),
+                        ),
+                )
+            }
+            SlashInput::Inactive => return None,
+        };
+        Some(
+            div()
+                .absolute()
+                .left(px(12.))
+                .right(px(12.))
+                // composer の上端に付ける（composer は自動で伸びるので px で決めない）。4px 浮かせる。
+                .bottom(relative(1.))
+                .pb(px(4.))
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    fn render_composer(&self, composer_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
+        // 本文が `!` の間は「シェルへ行く」見た目（枠・宛先・実行ボタンを syn-mac に・#37）。
+        let shell_mode = self.shell_input;
+        let shell_color = theme.syntax.macro_;
         let drop_glow = color.alpha(0.14); // ファイル D&D 中のハイライト
         let activity = self
             .threads
@@ -9433,13 +11899,10 @@ PYEOF"#;
             .map(|started| started.elapsed().as_secs());
         let running_tokens = active_thread.map(|thread| thread.tokens_used).unwrap_or(0);
         let running_digest = active_thread.and_then(|thread| thread.live_digest());
-        // 先頭 `!` の間は「シェルへ行く」見た目（枠・宛先・下段・実行ボタンを syn-mac に・#37）。
-        let shell_mode = self.composer_shell;
-        let shell_color = theme.syntax.macro_;
-        let shell_chips = self.render_shell_context_chips(cx);
 
         div()
             .id("composer-drop")
+            .relative() // `/` 補完を composer の真上へ重ねる基準
             .flex_none()
             .w_full()
             .min_w_0()
@@ -9459,6 +11922,7 @@ PYEOF"#;
             .on_drop(cx.listener(|this, dragged: &DraggedFile, _window, cx| {
                 this.add_context(dragged.path.clone(), cx);
             }))
+            .children(self.render_slash_popup(composer_focused, cx))
             .child(
                 div()
                     .flex()
@@ -9520,17 +11984,16 @@ PYEOF"#;
                             })
                             // シェルモード: どこで走るかを出す（リモートへの誤爆防止）。
                             .when(shell_mode, |row| {
-                                row.child(self.render_shell_badge()).child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .font_family("Guguru Sans Code")
-                                        .text_color(theme.fg2)
-                                        .child(SharedString::from(format!(
-                                            "$ {}",
-                                            self.shell_place()
-                                        ))),
+                                row.child(self.render_shell_badge()).children(
+                                    self.shell_place().map(|place| {
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .font_family(ui::code_font(cx))
+                                            .text_color(theme.fg2)
+                                            .child(SharedString::from(format!("$ {place}")))
+                                    }),
                                 )
                             }),
                     )
@@ -9574,6 +12037,11 @@ PYEOF"#;
                                     ),
                             )
                             .children(context.into_iter().enumerate().map(|(index, path)| {
+                                let label = self
+                                    .context_labels
+                                    .get(&path)
+                                    .cloned()
+                                    .unwrap_or_else(|| context_chip_label(&path));
                                 // チップは**短く読める名前**にして、全体はツールチップで見せる
                                 // （貼り付けた画像のキャッシュのパスをそのまま出すと長い上に読めない）。
                                 let theme_for_tip = theme.clone();
@@ -9588,7 +12056,7 @@ PYEOF"#;
                                     .bg(theme.bg3)
                                     .text_size(px(10.5))
                                     .text_color(theme.fg1)
-                                    .child(context_chip_label(&path))
+                                    .child(label)
                                     .tooltip(Tooltip::text(path.to_string(), theme_for_tip))
                                     .child(
                                         div()
@@ -9605,8 +12073,8 @@ PYEOF"#;
                                             ),
                                     )
                             }))
-                            // 次の送信に添える `!` の出力（× で外す）。
-                            .children(shell_chips),
+                            // `!` の結果のうち、次の送信に添える予定の物（#37）。
+                            .children(self.render_shell_chips(cx)),
                     )
                     // composer 本体（平坦 EditorView。Enter=改行 / ⌘Enter=送信 / IME 確定 Enter は送信にしない）
                     // 高さは内容に合わせて自動で伸びる（auto-grow）: 基準高 composer_height
@@ -9631,52 +12099,63 @@ PYEOF"#;
                                     .clamp(base, COMPOSER_INPUT_MAX)
                             }))
                             .overflow_hidden()
+                            // `/` 補完が開いている間だけ ↑↓ / Enter・Tab / Esc を先取りする（O2）。
+                            // composer の Editor アクションより先に capture で受け、閉じている時・
+                            // IME 変換中は何もせず composer へ流す。
+                            .capture_action(cx.listener(|this, _: &editor_view::MoveUp, _, cx| {
+                                this.on_slash_key(SlashKey::Up, cx)
+                            }))
+                            .capture_action(cx.listener(
+                                |this, _: &editor_view::MoveDown, _, cx| {
+                                    this.on_slash_key(SlashKey::Down, cx)
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &editor_view::Newline, _, cx| {
+                                this.on_slash_key(SlashKey::Accept, cx)
+                            }))
+                            .capture_action(cx.listener(
+                                |this, _: &editor_view::TabIndent, _, cx| {
+                                    this.on_slash_key(SlashKey::Accept, cx)
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &editor_view::Cancel, _, cx| {
+                                this.on_slash_key(SlashKey::Dismiss, cx)
+                            }))
                             .child(self.composer.clone()),
                     )
+                    // 本文が `!` で始まる間: シェルで走ること（走らせられない理由）を 1 行（#37）。
+                    .children(self.render_shell_hint(cx))
                     // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
-                    .when(shell_mode, |parent| {
-                        parent.child(
-                            div()
-                                .pt(px(6.))
-                                .text_size(px(10.5))
-                                .text_color(theme.fg2)
-                                .child(SharedString::from(i18n::t!("agent.shell_hint"))),
-                        )
-                    })
-                    .when(!shell_mode, |parent| {
-                        parent.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap(px(6.))
-                                .pt(px(6.))
-                                .when(!self.chat_mode, |row| {
-                                    row.child(self.render_selector_pill(Selector::Agent, cx))
-                                        .child(self.render_selector_pill(Selector::Mode, cx))
-                                })
-                                // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
-                                // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
-                                .when(self.chat_mode, |row| {
-                                    row.child(
-                                        div()
-                                            .id("chat-write-scope")
-                                            .px(px(6.))
-                                            .text_size(px(10.5))
-                                            .text_color(theme.fg2)
-                                            .child(SharedString::from(i18n::t!("chat.write_scope")))
-                                            .tooltip(ui::Tooltip::text(
-                                                SharedString::from(i18n::t!(
-                                                    "chat.write_scope_tip"
-                                                )),
-                                                theme.clone(),
-                                            )),
-                                    )
-                                })
-                                .child(self.render_selector_pill(Selector::Model, cx))
-                                .child(self.render_selector_pill(Selector::Effort, cx)),
-                        )
-                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .pt(px(6.))
+                            .when(!self.chat_mode, |row| {
+                                row.child(self.render_selector_pill(Selector::Agent, cx))
+                                    .child(self.render_selector_pill(Selector::Mode, cx))
+                            })
+                            // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
+                            // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
+                            .when(self.chat_mode, |row| {
+                                row.child(
+                                    div()
+                                        .id("chat-write-scope")
+                                        .px(px(6.))
+                                        .text_size(px(10.5))
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(i18n::t!("chat.write_scope")))
+                                        .tooltip(ui::Tooltip::text(
+                                            SharedString::from(i18n::t!("chat.write_scope_tip")),
+                                            theme.clone(),
+                                        )),
+                                )
+                            })
+                            .child(self.render_selector_pill(Selector::Model, cx))
+                            .child(self.render_selector_pill(Selector::Effort, cx)),
+                    )
                     // 送信行: [Enter 挙動トグル] … [送信ボタン（現ヒント付き）]
                     .child(
                         div()
@@ -9716,7 +12195,7 @@ PYEOF"#;
                             )
                             .child(div().flex_1())
                             .child(if shell_mode {
-                                // シェルモードはエージェントの生成中でも実行できる（列に積まず即実行）。
+                                // シェルモードはエージェントの生成中でも走らせる（列に積まず即実行）。
                                 div()
                                     .id("shell-run-button")
                                     .px(px(12.))
@@ -9738,7 +12217,8 @@ PYEOF"#;
                                         cx.listener(|this, _, _window, cx| this.submit(cx)),
                                     )
                             } else if running {
-                                // 実行中は送信ボタンを**停止**に差し替える（Esc と同じ動作）。
+                                // 実行中は送信ボタンを**停止**に差し替える（Esc と同じくターンを止める。
+                                // `!` のコマンドは行の「止める」か Esc で止まる＝このボタンはターン専用）。
                                 // 中立の警告色ではなく縁取りにして、識別色の意味を汚さない（§1.3）。
                                 div()
                                     .id("stop-button")
@@ -9801,10 +12281,9 @@ PYEOF"#;
                                         .clone()
                                         .cached(StyleRefinement::default().size(px(15.))),
                                 )
-                                .child(SharedString::from(match running_elapsed {
-                                    Some(secs) => format!("{secs}s"),
-                                    None => String::new(),
-                                }))
+                                .child(SharedString::from(
+                                    running_elapsed.map(human_elapsed).unwrap_or_default(),
+                                ))
                                 // トークンは 0 のときは出さない（ターン開始直後の「0」は情報ゼロ）。
                                 // 上部 render_meta には used/max のメーターがあるのでそちらが正。
                                 .children(
@@ -9845,6 +12324,8 @@ impl Render for AgentPanel {
         if self.transcript_top_item_pending() {
             cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
+        // `/` 補完は composer にフォーカスがある時だけ出す（キーの先取りも composer 経由だけ）。
+        let composer_focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let caret_blink_enabled = !self.active_thread_running();
         self.composer.update(cx, |composer, cx| {
             composer.set_caret_blink_enabled(caret_blink_enabled, cx);
@@ -9906,6 +12387,7 @@ impl Render for AgentPanel {
                     .flex_col()
                     .min_h_0()
                     .child(self.render_transcript(cx))
+                    .children(self.render_message_rail(cx))
                     .children(self.render_jump_to_previous_user(cx))
                     .children(self.render_jump_to_latest(cx)),
             )
@@ -9913,16 +12395,22 @@ impl Render for AgentPanel {
             .children(self.render_auth_card(cx))
             .children(self.render_permission_card(cx))
             .children(self.render_elicitation_card(cx))
+            // 起動してすぐ終わったエージェントの理由（stderr の末尾・画面だけ）。
+            .children(self.render_exit_card(cx))
             // セッション断のバナー（再開ボタン）/ 再開の一言。
             .children(self.render_session_banner(cx))
             .children(self.render_queued_prompts(cx))
-            .child(self.render_composer(cx))
+            // エージェントの目標（`/goal`）は composer の直上に常時（O2）。
+            .children(self.render_goal(cx))
+            .child(self.render_composer(composer_focused, cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
             .when(self.context_menu_open, |element| {
                 element.child(self.render_context_menu(window, cx))
             })
             // 狭いタブ行とは独立した入力面を最後に重ね、IME・ボタン・Esc を常に見える状態にする。
             .children(self.render_rename_dialog(cx))
+            // スレッドの右クリックメニュー（窓の座標で最前面に出す・O15）。
+            .children(self.render_thread_menu(cx))
     }
 }
 
@@ -10463,9 +12951,19 @@ pub fn working_spinner(
 /// モノグラム角丸で代替（設定画面と同じ見た目・出所は `AgentKind::brand`）。アイコン＝「どのエージェントか」
 /// の識別で、スレッド色（＝どのスレッドか）とは別軸。svg は親の text_color を継承しないので直接指定する。
 pub fn agent_badge(label: &str, size: f32) -> gpui::AnyElement {
+    // 組み込みでない名前は設定で足したエージェント（H1）: 名前の頭文字と 1 色の地（設定画面と同じ）。
     let (icon, monogram, brand) = AgentKind::by_label(label)
-        .map(|agent| agent.brand())
-        .unwrap_or((None, "✳", 0x88_88_88));
+        .map(|agent| {
+            let (icon, monogram, brand) = agent.brand();
+            (icon, monogram.to_string(), brand)
+        })
+        .unwrap_or_else(|| {
+            (
+                None,
+                acp_client::custom::monogram_for(label),
+                acp_client::custom::CUSTOM_BRAND_COLOR,
+            )
+        });
     match icon {
         Some(path) => svg()
             .path(path)
@@ -10627,7 +13125,7 @@ enum DiffTone {
 }
 
 /// 編集差分 1 件を表示する（ファイルパス + コンパクトな行差分）。mono。
-fn render_diff(diff: &PermissionDiff, theme: &Theme) -> impl IntoElement {
+fn render_diff(diff: &PermissionDiff, theme: &Theme, code_font: SharedString) -> impl IntoElement {
     let lines = compact_line_diff(diff.old_text.as_deref(), &diff.new_text);
     let body = div()
         .flex()
@@ -10643,7 +13141,7 @@ fn render_diff(diff: &PermissionDiff, theme: &Theme) -> impl IntoElement {
                 .py(px(4.))
                 .border_b_1()
                 .border_color(theme.border)
-                .font_family("Guguru Sans Code")
+                .font_family(code_font.clone())
                 .text_size(px(10.5))
                 .text_color(theme.fg1)
                 .child(SharedString::from(diff.path.clone())),
@@ -10653,7 +13151,7 @@ fn render_diff(diff: &PermissionDiff, theme: &Theme) -> impl IntoElement {
         .flex_col()
         .px(px(9.))
         .py(px(5.))
-        .font_family("Guguru Sans Code")
+        .font_family(code_font.clone())
         .text_size(px(11.));
     for (tone, text) in lines {
         let (prefix, tone_color) = match tone {
@@ -10739,15 +13237,105 @@ pub fn human_tokens(count: u32) -> String {
     }
 }
 
+/// 経過秒を時・分付きで（`45` → `45s` / `83` → `1m 23s` / `3723` → `1h 2m 3s`）。
+fn human_elapsed(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = secs % 3600 / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 /// 初期スレッド群。先頭は mock v0.3 の会話例を種として持つ（ACP 配線までのプレースホルダ）。
-/// 設定の既定エージェント（`AGENT_LABELS` にある表示名。無効/未設定なら "Claude Code"）。
+/// 設定の既定エージェント（選べるエージェントの表示名・足したエージェントも可。無効/未設定なら
+/// "Claude Code"）。
 fn default_agent_name(cx: &App) -> SharedString {
     let name = settings::get(cx).default_agent;
-    if acp_client::AGENT_LABELS.contains(&name.as_str()) {
-        SharedString::from(name)
-    } else {
-        SharedString::from("Claude Code")
+    match settings::agent_by_label(cx, &name) {
+        Some(agent) => SharedString::from(agent.label().to_string()),
+        None => SharedString::from("Claude Code"),
     }
+}
+
+/// エージェントを起動できない理由の文。足したエージェントの理由（[`acp_client::LaunchError`]）は
+/// 言葉にし、それ以外（SSH が切れていて探せない等）は「探せません: 原因」にする。
+fn launch_error_text(error: &anyhow::Error) -> String {
+    use acp_client::deploy::DeployError;
+    use acp_client::LaunchError;
+    match error.downcast_ref::<LaunchError>() {
+        Some(LaunchError::NotInRegistry { id }) => {
+            i18n::t!("agent.err_launch_not_in_registry", "id" => id)
+        }
+        Some(LaunchError::NoDistribution { platform }) => i18n::t!(
+            "agent.err_launch_no_distribution",
+            "platform" => platform.as_deref().unwrap_or("?")
+        ),
+        Some(LaunchError::NeedsNode) => i18n::t!("agent.err_launch_needs_node"),
+        Some(LaunchError::NeedsUv) => i18n::t!("agent.err_launch_needs_uv"),
+        Some(LaunchError::BinaryOnRemote) => i18n::t!("agent.err_launch_binary_on_remote"),
+        Some(LaunchError::NotDeployed) => i18n::t!("agent.err_launch_not_deployed"),
+        Some(LaunchError::Deploy(DeployError::Download { url, reason })) => i18n::t!(
+            "agent.err_deploy_download",
+            "url" => url,
+            "reason" => reason
+        ),
+        Some(LaunchError::Deploy(DeployError::ChecksumMismatch { expected, actual })) => i18n::t!(
+            "agent.err_deploy_checksum",
+            "expected" => expected,
+            "actual" => actual
+        ),
+        Some(LaunchError::Deploy(DeployError::UnsafeArchive(entry))) => {
+            i18n::t!("agent.err_deploy_unsafe", "entry" => entry)
+        }
+        Some(LaunchError::Deploy(other)) => {
+            i18n::t!("agent.err_deploy_other", "reason" => other.to_string())
+        }
+        None => i18n::t!("agent.err_agent_lookup", "message" => &format!("{error:#}")),
+    }
+}
+
+/// セッションが失敗した時に transcript へ残す 1 行。起動してすぐ終わった時（[`acp_client::AgentExited`]）
+/// は終わり方だけを書き、**stderr は入れない**（transcript は保存される・stderr は秘密が混ざり得るので
+/// カードで画面にだけ出す）。それ以外は `{:#}` で anyhow の原因鎖まで出す（例: 「ACP セッションが
+/// 異常終了: ACP initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context だけに
+/// なりハンドシェイクの無言ハングが埋もれるため。
+fn session_error_text(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<acp_client::AgentExited>() {
+        Some(exited) => i18n::t!("agent.err_agent_exited", "status" => exit_status_text(exited)),
+        None => format!("{error:#}"),
+    }
+}
+
+/// 終わり方の言葉（終了コード N / シグナル N / 分からない）。
+fn exit_status_text(exited: &acp_client::AgentExited) -> String {
+    match (exited.code, exited.signal) {
+        (Some(code), _) => i18n::t!("agent.exit_code", "code" => code),
+        (None, Some(signal)) => i18n::t!("agent.exit_signal", "signal" => signal),
+        (None, None) => i18n::t!("agent.exit_unknown"),
+    }
+}
+
+/// binary を置いた後に transcript へ出す知らせ（照合した / 検証の値が無かった・手元の古い版で起こした）。
+fn deploy_notes(outcome: &acp_client::DeployOutcome) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(newer) = &outcome.fallback_from {
+        notes.push(i18n::t!(
+            "agent.deploy_fallback",
+            "new" => newer,
+            "version" => &outcome.version
+        ));
+    } else if outcome.verified {
+        notes.push(i18n::t!("agent.deploy_verified"));
+    }
+    if !outcome.verified {
+        notes.push(i18n::t!("agent.deploy_unverified"));
+    }
+    notes
 }
 
 /// `settings.json` の `agent_servers.<id>` を acp_client の言葉へ写す。
@@ -10757,14 +13345,14 @@ fn default_agent_name(cx: &App) -> SharedString {
 fn agent_server_override(agent_id: &str, cx: &App) -> Option<acp_client::AgentOverride> {
     let setting = settings::get(cx).agent_servers.get(agent_id)?.clone();
     Some(match setting {
-        settings_core::AgentServerSetting::Custom { command, args, env } => {
-            acp_client::AgentOverride {
-                command: Some(command),
-                args,
-                env,
-            }
-        }
-        settings_core::AgentServerSetting::Registry { env } => acp_client::AgentOverride {
+        settings_core::AgentServerSetting::Custom {
+            command, args, env, ..
+        } => acp_client::AgentOverride {
+            command: Some(command),
+            args,
+            env,
+        },
+        settings_core::AgentServerSetting::Registry { env, .. } => acp_client::AgentOverride {
             command: None,
             args: Vec::new(),
             env,
@@ -10772,16 +13360,33 @@ fn agent_server_override(agent_id: &str, cx: &App) -> Option<acp_client::AgentOv
     })
 }
 
+/// 「聞かずに進める」権限モードの id か（O16）。Claude Code の `bypassPermissions`（と同じく bypass を
+/// 名に持つもの）、Qwen Code の `yolo`、Codex の `full-access`。この id のスレッドは、エージェントが
+/// それでも許可を聞いてきたら UI でも自動で許可する（モード切替のレースの窓で止めない）。
+fn is_bypass_mode(mode_id: &str) -> bool {
+    let lowered = mode_id.to_lowercase();
+    lowered.contains("bypass") || lowered == "yolo" || lowered == "full-access"
+}
+
+/// 広告されたモードのうち「聞かずに進める」もの（広告の順で最初の 1 つ）。無ければ `None`。
+fn bypass_mode_among(modes: &[(SharedString, SharedString)]) -> Option<SharedString> {
+    modes
+        .iter()
+        .map(|(id, _)| id)
+        .find(|id| is_bypass_mode(id))
+        .cloned()
+}
+
 /// その agent で最後に選んだ value_id を 1 つ引く（`agent_config_defaults[agent_id][config_id]`）。
 /// 未選択なら空。**別 vendor の綴りへフォールバックしない** — 当てずっぽうの綴りは広告と一致せず、
 /// 一致しない値は結局エージェント既定に落ちるので、嘘の候補を挟むだけ無駄で紛らわしい。
 fn agent_sticky_value(agent_label: &str, config_id: &str, cx: &App) -> SharedString {
-    let Some(kind) = acp_client::AgentKind::by_label(agent_label) else {
+    let Some(agent) = settings::agent_by_label(cx, agent_label) else {
         return SharedString::default();
     };
     settings::get(cx)
         .agent_config_defaults
-        .get(kind.id)
+        .get(agent.id())
         .and_then(|defaults| defaults.get(config_id))
         .filter(|value| !value.is_empty())
         .map(|value| SharedString::from(value.clone()))
@@ -10809,12 +13414,13 @@ fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
     apply_agent_sticky(thread, cx);
 }
 
-/// storage の1 turn 行 (role, content) を [`Entry`] へ（復元・#5。set_storage と同じ対応）。
+/// storage の1 turn 行 (role, content) を [`Entry`] へ（起動時の復元と履歴からの復元・#5）。
 fn entry_from_turn((role, content): (String, String)) -> Entry {
     match role.as_str() {
         "user" => Entry::User(content.into()),
-        "ledger_event" => Entry::LedgerEvent(content.into()),
+        auto_prompt::AUTO_PROMPT_ROLE => auto_prompt::stored_auto_prompt(content),
         "thinking" => Entry::Thinking(content.into()),
+        "notice" => Entry::Notice(content.into()),
         "step" => Entry::Step {
             id: None,
             tool: content.into(),
@@ -10822,6 +13428,7 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
             result: None,
             result_lines: 0,
             diffs: Vec::new(),
+            parent: None,
         },
         "checkpoint" => {
             let (id, label) = content.split_once('\t').unwrap_or(("0", "checkpoint"));
@@ -10830,7 +13437,11 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
                 label: label.to_string().into(),
             }
         }
-        "shell" => shell::decode_turn(&content),
+        // `!` の行（走っている途中で保存した物は「中断」として読む）。読めなければ本文のまま出す。
+        "shell" => match shell::ShellRun::from_stored(&content) {
+            Some(run) => Entry::Shell(Box::new(run)),
+            None => Entry::Agent(content.into()),
+        },
         _ => Entry::Agent(content.into()),
     }
 }
@@ -10845,18 +13456,24 @@ fn last_prompt_from_entries(entries: &[Entry]) -> Option<SharedString> {
     })
 }
 
+/// 復元で transcript に積む turn の数（直近から）。全文検索の一致がこれより前にある時だけ広げる。
+const RESTORED_TURNS: i64 = 200;
+
 fn thread_from_storage(
     storage: &storage::Storage,
     id: &str,
     name: &str,
     color_index: usize,
+    turn_limit: i64,
     cx: &App,
 ) -> Thread {
     let mut thread = Thread::empty(name.to_string(), color_index);
     // 復元スレッドも「前回選んだモデル/思考量」で開く（毎回 fable-5/high に戻らない）。
     apply_thread_defaults(&mut thread, cx);
     thread.id = id.to_string();
-    let turns = storage.load_recent_turns(id, 200).unwrap_or_default();
+    let turns = storage
+        .load_recent_turns(id, turn_limit)
+        .unwrap_or_default();
     thread.entries = turns.into_iter().map(entry_from_turn).collect();
     thread.persisted_entries = thread.entries.len();
     // 「頼んだこと」は復元時に turns の最後の user 発話から引き直す（DB に列を足さない）。
@@ -10867,7 +13484,25 @@ fn thread_from_storage(
         .into_iter()
         .find(|(thread_id, _)| thread_id == id)
         .map(|(_, session_id)| session_id);
+    // 人が付けた名前は、履歴から開き直してもエージェントの会話名で上書きしない（O2）。
+    thread.name_is_custom = storage
+        .load_custom_named_threads()
+        .unwrap_or_default()
+        .iter()
+        .any(|thread_id| thread_id == id);
+    thread.muted = muted_thread_ids(storage).iter().any(|muted| muted == id);
     thread
+}
+
+/// ミュート中のスレッド id（O12）。読めなければ「全部鳴る」に倒す（黙って通知を消すよりまし）。
+fn muted_thread_ids(storage: &storage::Storage) -> Vec<String> {
+    match storage.load_muted_threads() {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("スレッドのミュートを読めない（全部鳴る扱い）: {error:#}");
+            Vec::new()
+        }
+    }
 }
 
 /// offscreen 検証プローブはモック transcript（markdown/Step 描画）や複数タブ（ACP_PROBE は添字 1 の
@@ -10891,6 +13526,9 @@ fn seed_threads() -> Vec<Thread> {
         touched_files: Vec::new(),
         plan: Vec::new(),
         name_is_custom: false,
+        commands: Vec::new(),
+        goal: None,
+        goal_actions: Vec::new(),
         name: "rope設計".into(),
         color: thread_color(0),
         running: false,
@@ -10905,7 +13543,6 @@ fn seed_threads() -> Vec<Thread> {
         effort: "high".into(),
         agent: "Claude Code".into(),
         context: Vec::new(),
-        shell_context: Vec::new(),
         draft: String::new(),
         tokens_used: 23_400,
         tokens_max: 200_000,
@@ -10923,6 +13560,7 @@ fn seed_threads() -> Vec<Thread> {
         queued_prompts: Vec::new(),
         acp_session_id: None,
         session_lost: false,
+        startup_exit: None,
         session_note: None,
         session_serial: 0,
         session_used: false,
@@ -10930,6 +13568,13 @@ fn seed_threads() -> Vec<Thread> {
         chat: None,
         session_resumable: false,
         last_active_at_ms: 0,
+        usage: usage::CostMeter::default(),
+        usage_key: None,
+        replay_pending: false,
+        handoff_preamble: None,
+        seat: None,
+        session_seated: false,
+        seat_tools: HashMap::new(),
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
@@ -10944,6 +13589,7 @@ fn seed_threads() -> Vec<Thread> {
                 result: Some("1,842 行 — SumTree<Chunk> / anchor / clock::Global を確認".into()),
                 result_lines: 1,
                 diffs: Vec::new(),
+                parent: None,
             },
             Entry::Step {
                 id: None,
@@ -10952,6 +13598,7 @@ fn seed_threads() -> Vec<Thread> {
                 result: Some("☒ text crate の設計を調査\n☐ Buffer trait の切り方を決める".into()),
                 result_lines: 2,
                 diffs: Vec::new(),
+                parent: None,
             },
             Entry::Agent(
                 r#"## 結論: MVP は **ropey**
@@ -11061,6 +13708,92 @@ mod tests {
             context_chip_label("/var/cache/necoder/chat-paste/paste-123-4.png"),
             i18n::translate("agent.pasted_image").as_str()
         );
+    }
+
+    /// Design Mode の要素は composer の本文に足していくだけで、送らない（人が確かめて送る）。
+    /// 複数の要素を足しても 1 通の下書きにまとまる。
+    #[gpui::test]
+    fn design_elements_are_appended_to_the_composer_without_sending(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "design_append");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel
+                .composer
+                .update(cx, |composer, cx| composer.set_plain_text("このボタンを直して", cx));
+            panel.append_to_composer("### 画面の要素: button#start\n- ページ: http://localhost:5173/", cx);
+            panel.append_to_composer("### 画面の要素: h1\n", cx);
+            assert_eq!(
+                panel.composer_text(cx),
+                "このボタンを直して\n\n### 画面の要素: button#start\n- ページ: http://localhost:5173/\n\n### 画面の要素: h1"
+            );
+            let thread = &panel.threads[panel.active];
+            assert!(thread.entries.is_empty(), "送信していない");
+            assert!(!thread.running);
+        });
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("一時設定を消せない: {error}");
+        }
+    }
+
+    /// composer の本文を丸ごと差し替えたら（下書きの復元・Design の要素）、次の描画で全部の行が出る。
+    /// 差し替え前も後も buffer の version は 0 から始まるので、折り返し表を作り直さないと 1 行目しか出ない。
+    #[gpui::test]
+    fn replaced_composer_text_shows_every_line(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "composer_lines");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        cx.run_until_parked();
+        let one_line = panel.read_with(cx, |panel, cx| panel.composer.read(cx).content_height());
+        panel.update(cx, |panel, cx| panel.append_to_composer("一\n二\n三", cx));
+        cx.run_until_parked();
+        let three_lines = panel.read_with(cx, |panel, cx| panel.composer.read(cx).content_height());
+        assert!(
+            f32::from(three_lines) >= f32::from(one_line) * 2.5,
+            "3 行が出ていない: {three_lines:?}（1 行 = {one_line:?}）"
+        );
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("一時設定を消せない: {error}");
+        }
+    }
+
+    /// Design Mode の切り抜きは画像の添付になり、チップには要素の呼び名が出る。外したら名前も消える。
+    #[gpui::test]
+    fn labeled_images_show_their_label_on_the_chip(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "design_chip");
+        let directory = std::env::temp_dir().join(format!(
+            "necoder_design_chip_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let path = panel
+                .attach_image_in(
+                    &editor_view::PastedImage {
+                        format: gpui::ImageFormat::Png,
+                        bytes: vec![1, 2, 3],
+                    },
+                    &directory,
+                    cx,
+                )
+                .expect("添付になる");
+            panel
+                .context_labels
+                .insert(path.clone(), SharedString::from("◎ button#start"));
+            let thread = &panel.threads[panel.active];
+            assert_eq!(thread.context, vec![path.clone()]);
+            assert_eq!(std::fs::read(path.as_ref()).ok(), Some(vec![1, 2, 3]));
+            panel.remove_context(0, cx);
+            assert!(
+                !panel.context_labels.contains_key(&path),
+                "外したら名前も消える"
+            );
+        });
+        if let Err(error) = std::fs::remove_dir_all(&directory) {
+            eprintln!("一時フォルダを消せない: {error}");
+        }
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("一時設定を消せない: {error}");
+        }
     }
 
     /// 復元した会話でも「頼んだこと」は**最後の**人間の発話（FLEET-V2 §3.2-3 / P1 残の回収）。
@@ -11419,6 +14152,83 @@ PYEOF"#;
     }
 
     #[test]
+    fn human_elapsed_adds_hours_and_minutes() {
+        assert_eq!(human_elapsed(45), "45s");
+        assert_eq!(human_elapsed(60), "1m 0s");
+        assert_eq!(human_elapsed(83), "1m 23s");
+        assert_eq!(human_elapsed(3600), "1h 0m 0s");
+        assert_eq!(human_elapsed(3723), "1h 2m 3s");
+    }
+
+    #[test]
+    fn closed_transcript_releases_entries_and_restores_full_tool_output() {
+        let mut thread = Thread::empty("退避", 0);
+        thread.entries = vec![
+            Entry::User("依頼".into()),
+            Entry::Step {
+                id: Some("call-1".into()),
+                tool: "Edit".into(),
+                args: "引数".into(),
+                result: Some("結果".repeat(100_000).into()),
+                result_lines: 100_000,
+                diffs: vec![PermissionDiff {
+                    path: "a.rs".into(),
+                    old_text: Some("前".into()),
+                    new_text: "後".into(),
+                }],
+                parent: None,
+            },
+        ];
+        let expected = serde_json::to_value(&thread.entries).unwrap();
+        let mut closed = ClosedThread::new(thread);
+        assert!(closed.thread.entries.is_empty());
+        assert_eq!(closed.thread.entries.capacity(), 0);
+        let path = closed.transcript.as_ref().unwrap().to_path_buf();
+        assert!(path.exists());
+        closed.restore_entries().unwrap();
+        assert_eq!(
+            serde_json::to_value(&closed.thread.entries).unwrap(),
+            expected
+        );
+        assert_eq!(closed.thread.last_prompt.as_deref(), Some("依頼"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failed_transcript_restore_keeps_retry_state() {
+        let mut thread = Thread::empty("退避", 0);
+        thread.entries.push(Entry::Agent("本文".into()));
+        let mut closed = ClosedThread::new(thread);
+        let path = closed.transcript.as_ref().unwrap().to_path_buf();
+        let contents = std::fs::read(&path).unwrap();
+        std::fs::write(&path, "broken").unwrap();
+        assert!(closed.restore_entries().is_err());
+        assert!(closed.transcript.is_some());
+        std::fs::write(&path, contents).unwrap();
+        closed.restore_entries().unwrap();
+        assert!(matches!(&closed.thread.entries[0], Entry::Agent(text) if text.as_ref() == "本文"));
+    }
+
+    #[test]
+    fn streaming_markdown_cache_bounds_source_bytes() {
+        let mut cache = MarkdownBlockCache::default();
+        let mut text = "a".repeat(32 * 1024);
+        for _ in 0..100 {
+            text.push('b');
+            cache.parse(&text);
+            assert!(
+                cache.order.iter().map(|key| key.len).sum::<usize>()
+                    <= TRANSCRIPT_CACHE_SOURCE_BYTES
+            );
+        }
+        assert!(cache.blocks.len() < MarkdownBlockCache::CAPACITY);
+        let count = cache.blocks.len();
+        let oversized = "x".repeat(TRANSCRIPT_CACHE_SOURCE_BYTES + 1);
+        assert!(!cache.parse(&oversized).is_empty());
+        assert_eq!(cache.blocks.len(), count);
+    }
+
+    #[test]
     fn tool_location_infers_language_with_line_and_quotes() {
         assert_eq!(
             infer_language_from_tool_argument("src/main.rs:42:7"),
@@ -11487,6 +14297,60 @@ PYEOF"#;
         assert_eq!(previous_user_entry_index(&entries, 2), Some(0));
         assert_eq!(previous_user_entry_index(&entries, 0), None);
         assert_eq!(previous_user_entry_index(&entries, usize::MAX), Some(2));
+    }
+
+    /// message rail（O17）: 発話が 3 つ以上ある時だけ、発話ごとに印。位置はエントリの並びで割り、
+    /// いま読んでいる指示（先頭にかかる直前の発話）だけ current。
+    #[test]
+    fn message_rail_marks_each_prompt() {
+        let short = vec![
+            Entry::User("a".into()),
+            Entry::Agent("b".into()),
+            Entry::User("c".into()),
+        ];
+        assert!(
+            message_rail_marks(&short, 0).is_empty(),
+            "発話 2 つでは出さない"
+        );
+        let entries = vec![
+            Entry::User("first".into()),
+            Entry::Agent("answer".into()),
+            Entry::User("second".into()),
+            Entry::Agent("long answer".into()),
+            Entry::User("third".into()),
+        ];
+        let marks = message_rail_marks(&entries, 3);
+        assert_eq!(
+            marks.iter().map(|mark| mark.entry).collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        assert_eq!(
+            marks.iter().map(|mark| mark.position).collect::<Vec<_>>(),
+            vec![0.0, 0.5, 1.0]
+        );
+        assert_eq!(
+            marks.iter().map(|mark| mark.current).collect::<Vec<_>>(),
+            vec![false, true, false],
+            "先頭が 2 番目の回答にかかっている＝2 番目の指示を読んでいる"
+        );
+    }
+
+    #[gpui::test]
+    fn the_message_rail_appears_with_enough_prompts(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "message-rail");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].entries = vec![
+                Entry::User("a".into()),
+                Entry::Agent("b".into()),
+                Entry::User("c".into()),
+            ];
+            assert!(panel.render_message_rail(cx).is_none());
+            panel.threads[active].entries.push(Entry::User("d".into()));
+            assert!(panel.render_message_rail(cx).is_some());
+        });
+        let _ = std::fs::remove_file(settings_path);
     }
 
     #[gpui::test]
@@ -11734,113 +14598,72 @@ PYEOF"#;
         let _ = std::fs::remove_file(settings_path);
     }
 
-    /// スレッドの context（Captain の役割・現況表）は普通の発話には前置するが、slash コマンドには
-    /// 付けない。前置すると先頭が `/` でなくなり、`/clear` がただの文としてエージェントに届く。
+    /// 外から指定のスレッドへ人間の発話として送る（変更レビューの注記）。表示中のタブを奪わず、
+    /// transcript には User として残る。生成中なら送信待ちに積み、そのスレッドのターン完了で
+    /// （裏のタブのままでも）流れる。
     #[gpui::test]
-    fn prompt_context_is_not_prepended_to_slash_commands(cx: &mut gpui::TestAppContext) {
-        let settings_path = init_test_settings(cx, "prompt_context_slash");
-        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        panel.update(cx, |panel, cx| {
-            let active = panel.active;
-            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
-            panel.threads[active].command_tx = Some(command_tx);
-            panel.dest_cwd = Some(std::env::temp_dir());
-            panel.set_prompt_context(active, "ROLE\n".to_string());
-            let mut sent = |panel: &mut AgentPanel, prompt: &str, cx: &mut Context<AgentPanel>| {
-                panel.send_prompt_text(prompt.to_string(), cx);
-                panel.threads[active].running = false;
-                match command_rx.try_recv() {
-                    Ok(SessionCommand::Prompt(text)) => text,
-                    other => panic!("prompt が送られていない: {other:?}"),
-                }
-            };
-            assert_eq!(sent(panel, "目標", cx), "ROLE\n\n目標");
-            assert_eq!(sent(panel, "/clear", cx), "/clear");
-        });
-        let _ = std::fs::remove_file(settings_path);
-    }
-
-    /// 先頭 `!` はエージェントへ送らずシェルで実行し（生成中でも列に積まない）、出力は次に人間が
-    /// 送る 1 通へ `<bash-input>` で添える。slash コマンドには添えない（#37）。
-    #[cfg(unix)]
-    #[gpui::test]
-    fn bang_prompt_runs_in_shell_and_goes_with_next_prompt(cx: &mut gpui::TestAppContext) {
-        let settings_path = init_test_settings(cx, "bang_shell");
-        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
-        panel.update(cx, |panel, cx| {
-            let active = panel.active;
-            panel.threads[active].command_tx = Some(command_tx);
-            panel.threads[active].running = true; // 生成中でも `!` は待たない
-            panel.dest_cwd = Some(std::env::temp_dir());
-            panel.composer.update(cx, |composer, cx| {
-                composer.set_plain_text("!echo necoder-shell; echo oops 1>&2", cx)
-            });
-            panel.submit(cx);
-            let thread = &panel.threads[active];
-            assert!(thread.queued_prompts.is_empty(), "送信待ちの列に積まない");
-            assert!(matches!(
-                thread.entries.last(),
-                Some(Entry::Shell {
-                    status: shell::ShellStatus::Running,
-                    ..
-                })
-            ));
-            assert!(panel.composer.read(cx).plain_text().is_empty());
-        });
-        assert!(
-            command_rx.try_recv().is_err(),
-            "エージェントへは何も送らない"
-        );
-        // 実行は専用スレッドなので、終わるまで実時間で待つ（テストの時計も進めて live 更新を回す）。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(500));
-            cx.run_until_parked();
-            let running = panel.read_with(cx, |panel, _cx| !panel.shell_stops.is_empty());
-            if !running || std::time::Instant::now() > deadline {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        panel.update(cx, |panel, cx| {
-            let active = panel.active;
-            match panel.threads[active].entries.last() {
-                Some(Entry::Shell { output, status, .. }) => {
-                    assert_eq!(*status, shell::ShellStatus::Exited(Some(0)));
-                    assert_eq!(output.as_deref(), Some("necoder-shell\noops"));
-                }
-                other => panic!(
-                    "`!` の行が無い: {}",
-                    other.map(entry_plain_text).unwrap_or_default()
-                ),
-            }
-            assert_eq!(panel.threads[active].shell_context.len(), 1);
-            panel.threads[active].running = false;
-            panel.send_prompt_text("/clear".to_string(), cx);
-            assert_eq!(
-                panel.threads[active].shell_context.len(),
-                1,
-                "slash コマンドには添えない"
-            );
-            panel.threads[active].running = false;
-            panel.send_prompt_text("この結果を見て".to_string(), cx);
-            assert!(panel.threads[active].shell_context.is_empty());
-        });
-        let mut prompts = Vec::new();
-        while let Ok(SessionCommand::Prompt(text)) = command_rx.try_recv() {
-            prompts.push(text);
-        }
-        assert_eq!(prompts.first().map(String::as_str), Some("/clear"));
-        let with_output = prompts.get(1).expect("2 通目が送られている");
-        assert!(with_output.starts_with(
-            "<bash-input>echo necoder-shell; echo oops 1>&2</bash-input>\n<bash-stdout>necoder-shell\noops</bash-stdout>"
+    fn send_user_prompt_to_reaches_a_background_thread_without_switching(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_send_to_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
         ));
-        assert!(with_output.ends_with("\nこの結果を見て"));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let shown = panel.active;
+            let target = panel.new_thread_index(cx);
+            panel.switch_thread(shown, cx);
+            assert_ne!(shown, target);
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[target].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(std::env::temp_dir());
+
+            assert!(panel.send_user_prompt_to(target, "レビューコメント（1 件）".into(), cx));
+            assert_eq!(panel.active, shown, "表示中のタブを奪わない");
+            assert!(matches!(
+                panel.threads[target].entries.last(),
+                Some(Entry::User(text)) if text.as_ref() == "レビューコメント（1 件）"
+            ));
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "レビューコメント（1 件）"),
+                other => panic!("prompt が送られていない: {other:?}"),
+            }
+
+            // 生成中は送信待ちへ。ターン完了で、裏のタブのまま流れる。
+            assert!(panel.threads[target].running);
+            assert!(panel.send_user_prompt_to(target, "2 通目".into(), cx));
+            assert_eq!(
+                panel.threads[target].queued_prompts,
+                vec!["2 通目".to_string()]
+            );
+            panel.on_event(
+                target,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            assert!(panel.threads[target].queued_prompts.is_empty());
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "2 通目"),
+                other => panic!("送信待ちが流れていない: {other:?}"),
+            }
+            assert_eq!(panel.active, shown);
+            assert!(
+                !panel.send_user_prompt_to(99, "x".into(), cx),
+                "無いスレッドは false"
+            );
+        });
         let _ = std::fs::remove_file(settings_path);
     }
-
     /// ＋context を開くと絞り込み欄がキーを受け、Esc で閉じて composer へフォーカスが戻る（#39）。
     #[gpui::test]
     fn context_menu_takes_keys_and_returns_focus(cx: &mut gpui::TestAppContext) {
@@ -11870,6 +14693,35 @@ PYEOF"#;
                 panel.composer.read(cx).focus_handle(cx).is_focused(window),
                 "composer へ戻る"
             );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// スレッドの context（Captain の役割・現況表）は普通の発話には前置するが、slash コマンドには
+    /// 付けない。前置すると先頭が `/` でなくなり、`/clear` がただの文としてエージェントに届く。
+    #[gpui::test]
+    fn prompt_context_is_not_prepended_to_slash_commands(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "prompt_context_slash");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(std::env::temp_dir());
+            panel.set_prompt_context(active, "ROLE\n".to_string());
+            let mut sent = |panel: &mut AgentPanel, prompt: &str, cx: &mut Context<AgentPanel>| {
+                panel.send_prompt_text(prompt.to_string(), cx);
+                panel.threads[active].running = false;
+                match command_rx.try_recv() {
+                    Ok(SessionCommand::Prompt(text)) => text,
+                    other => panic!("prompt が送られていない: {other:?}"),
+                }
+            };
+            assert_eq!(
+                sent(panel, "目標", cx),
+                "<necoder-context>\nROLE\n</necoder-context>\n\n目標"
+            );
+            assert_eq!(sent(panel, "/clear", cx), "/clear");
         });
         let _ = std::fs::remove_file(settings_path);
     }
@@ -11979,6 +14831,8 @@ PYEOF"#;
                             kind: PermissionKind::Allow,
                         },
                     ],
+                    tool_call_id: String::new(),
+                    mcp_tool: false,
                     respond: respond_tx,
                 },
                 cx,
@@ -11993,6 +14847,347 @@ PYEOF"#;
             Some(1),
             "Allow の添字で即応答する"
         );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    fn test_seat(mcp: Vec<acp_client::mcp::McpServerConfig>) -> SeatPolicy {
+        SeatPolicy {
+            id: "captain",
+            mcp_servers: mcp,
+            allowed_tools: vec!["fleet_list_tasks".into()],
+            denied_notice: "断った:".into(),
+            violation_notice: "漏れた:".into(),
+        }
+    }
+
+    fn two_choice_request(
+        title: &str,
+        kind: Option<acp_client::ToolCallKind>,
+        respond: mpsc::UnboundedSender<usize>,
+    ) -> AgentEvent {
+        mcp_approval(title, kind, "", false, respond)
+    }
+
+    fn mcp_approval(
+        title: &str,
+        kind: Option<acp_client::ToolCallKind>,
+        tool_call_id: &str,
+        mcp_tool: bool,
+        respond: mpsc::UnboundedSender<usize>,
+    ) -> AgentEvent {
+        AgentEvent::PermissionRequest {
+            title: title.into(),
+            kind,
+            paths: Vec::new(),
+            diffs: Vec::new(),
+            raw_input: None,
+            tool_call_id: tool_call_id.into(),
+            mcp_tool,
+            options: vec![
+                PermissionChoice {
+                    label: "拒否".into(),
+                    kind: PermissionKind::Reject,
+                },
+                PermissionChoice {
+                    label: "許可".into(),
+                    kind: PermissionKind::Allow,
+                },
+            ],
+            respond,
+        }
+    }
+
+    /// 席のスレッドの権限の問いは necoder が決まりで答える（FLEET-V2 §5.8-3）。人間には出さない。
+    /// Bypass を選んでいても、席に座れば「聞いてくる」モードに寄り、編集は断られる。
+    #[gpui::test]
+    fn a_seated_thread_answers_permissions_by_its_seat(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_permissions");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond_tx, mut respond_rx) = mpsc::unbounded::<usize>();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].permission_mode = "bypassPermissions".into();
+            panel.assign_seat(active, test_seat(Vec::new()), cx);
+            assert_eq!(panel.threads[active].permission_mode.as_ref(), "default");
+            panel.on_event(
+                active,
+                two_choice_request("Edit src/main.rs", Some(acp_client::ToolCallKind::Edit), respond_tx.clone()),
+                cx,
+            );
+            assert!(panel.threads[active].pending_permission.is_none(), "人間に聞かない");
+            assert!(panel.threads[active].entries.iter().any(
+                |entry| matches!(entry, Entry::Agent(text) if text.starts_with("断った:") && text.contains("Edit src/main.rs"))
+            ));
+            panel.on_event(
+                active,
+                two_choice_request("mcp__necoder__fleet_list_tasks", Some(acp_client::ToolCallKind::Other), respond_tx),
+                cx,
+            );
+            assert!(panel.threads[active].pending_permission.is_none());
+        });
+        assert_eq!(respond_rx.try_recv().ok(), Some(0), "編集は拒否");
+        assert_eq!(
+            respond_rx.try_recv().ok(),
+            Some(1),
+            "席の道具は許可（今回だけ）"
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// Codex（codex-acp）の MCP の承認は、題名なし・種別「実行」・印つきで届き、先に届いた同じ id の
+    /// 呼び出し（`mcp.<server>.<tool>`）と結んで裁く。necoder の道具は許可、他のサーバの道具と shell は拒否。
+    #[gpui::test]
+    fn codex_style_mcp_approvals_are_judged_by_the_call_they_belong_to(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings_path = init_test_settings(cx, "seat_codex");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond_tx, mut respond_rx) = mpsc::unbounded::<usize>();
+        let started = |id: &str, title: &str| {
+            AgentEvent::ToolStarted(acp_client::ToolCallInfo {
+                id: id.into(),
+                title: Some(title.into()),
+                kind: Some(acp_client::ToolCallKind::Execute),
+                locations: Vec::new(),
+                diffs: Vec::new(),
+                output: None,
+                completed: None,
+                parent: None,
+            })
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.assign_seat(active, test_seat(Vec::new()), cx);
+            let execute = Some(acp_client::ToolCallKind::Execute);
+            panel.on_event(
+                active,
+                started("call-1", "mcp.necoder.fleet_list_tasks"),
+                cx,
+            );
+            panel.on_event(
+                active,
+                mcp_approval(
+                    "ツールの実行許可",
+                    execute,
+                    "call-1",
+                    true,
+                    respond_tx.clone(),
+                ),
+                cx,
+            );
+            panel.on_event(active, started("call-2", "mcp.computer-use.click"), cx);
+            panel.on_event(
+                active,
+                mcp_approval(
+                    "ツールの実行許可",
+                    execute,
+                    "call-2",
+                    true,
+                    respond_tx.clone(),
+                ),
+                cx,
+            );
+            panel.on_event(active, started("call-3", "echo fleet_list_tasks"), cx);
+            panel.on_event(
+                active,
+                mcp_approval(
+                    "echo fleet_list_tasks",
+                    execute,
+                    "call-3",
+                    false,
+                    respond_tx,
+                ),
+                cx,
+            );
+            assert!(
+                panel.threads[active].pending_permission.is_none(),
+                "どれも人間に聞かない"
+            );
+        });
+        assert_eq!(respond_rx.try_recv().ok(), Some(1), "necoder の道具は許可");
+        assert_eq!(
+            respond_rx.try_recv().ok(),
+            Some(0),
+            "他の MCP サーバの道具は拒否"
+        );
+        assert_eq!(
+            respond_rx.try_recv().ok(),
+            Some(0),
+            "印の無い実行は shell として拒否"
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 席のセッションは席のモードと MCP だけで作る（ユーザーの Bypass と MCP サーバを持ち込まない）。
+    #[gpui::test]
+    fn seat_sessions_use_the_asking_mode_and_only_the_seat_tools(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_preferences");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let server = |name: &str| acp_client::mcp::McpServerConfig {
+            name: name.to_string(),
+            source: acp_client::mcp::McpSource::Necoder,
+            enabled: true,
+            transport: acp_client::mcp::McpTransport::Stdio {
+                command: "necoder".into(),
+                args: vec!["mcp".into(), "--captain".into()],
+                env: Default::default(),
+            },
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let user_choice = acp_client::SessionPreferences {
+                mode: Some("bypassPermissions".into()),
+                mcp_servers: vec![server("higgsfield")],
+                ..Default::default()
+            };
+            let unchanged = panel.seat_session_preferences(active, user_choice.clone(), cx);
+            assert_eq!(
+                unchanged.mode.as_deref(),
+                Some("bypassPermissions"),
+                "席でなければ触らない"
+            );
+            panel.assign_seat(active, test_seat(vec![server("necoder")]), cx);
+            let seated = panel.seat_session_preferences(active, user_choice, cx);
+            assert_eq!(seated.mode.as_deref(), Some("default"));
+            assert_eq!(seated.mcp_servers, vec![server("necoder")]);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 席は 1 つ（付け替えると前のスレッドは席と前置きを失う）。改名した席のスレッドは普通に戻る（§5.8-5）。
+    #[gpui::test]
+    fn a_seat_follows_the_seat_not_the_name(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_move");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            let second = panel.new_thread_index(cx);
+            panel.assign_seat(first, test_seat(Vec::new()), cx);
+            panel.set_prompt_context(first, "ROLE".into());
+            panel.assign_seat(second, test_seat(Vec::new()), cx);
+            assert!(panel.threads[first].seat.is_none());
+            assert!(
+                !panel.prompt_context.contains_key(&panel.threads[first].id),
+                "前置きも外す"
+            );
+            assert_eq!(panel.seat_thread("captain"), Some(second));
+
+            panel.set_prompt_context(second, "ROLE".into());
+            let theme = panel.theme.clone();
+            let color = panel.threads[second].color;
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::plain(theme, color, true, cx);
+                editor.set_plain_text("相談", cx);
+                editor
+            });
+            panel.renaming = Some((second, editor));
+            panel.confirm_rename(cx);
+            assert!(panel.threads[second].seat.is_none(), "改名 = 席から降りる");
+            assert!(!panel.prompt_context.contains_key(&panel.threads[second].id));
+            assert_eq!(panel.seat_thread("captain"), None);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 会話の交代（FLEET-V2 §5.6）: 送信路と会話 id を捨てて区切りを残す。実行中は交代しない。
+    #[gpui::test]
+    fn rotating_forgets_the_conversation_but_not_while_running(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_rotate");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, _command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.threads[active].acp_session_id = Some("old-session".into());
+            panel.threads[active].tokens_used = 90_000;
+            panel.threads[active].running = true;
+            assert!(!panel.rotate_thread_session(active, "交代".into(), cx));
+            assert!(panel.threads[active].acp_session_id.is_some());
+            panel.threads[active].running = false;
+            assert!(panel.rotate_thread_session(active, "交代".into(), cx));
+            let thread = &panel.threads[active];
+            assert!(thread.command_tx.is_none() && thread.acp_session_id.is_none());
+            assert_eq!(thread.tokens_used, 0);
+            assert!(
+                matches!(thread.entries.last(), Some(Entry::Notice(text)) if text.as_ref() == "交代"),
+                "区切りは会話ではない 1 行（エージェントには送らない）"
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 見張り（FLEET-V2 §5.8-4）: 席で編集の道具が成功して終わったら、transcript に残してターンを止める。
+    /// 断られた編集（失敗で終わる）と、読むだけの道具は見張りに掛からない。
+    #[gpui::test]
+    fn the_seat_watch_catches_an_edit_that_ran_without_asking(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "seat_watch");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let info = |id: &str, kind: Option<acp_client::ToolCallKind>, completed: Option<bool>| {
+            acp_client::ToolCallInfo {
+                id: id.into(),
+                title: Some(format!("tool {id}")),
+                kind,
+                locations: Vec::new(),
+                diffs: Vec::new(),
+                output: None,
+                completed,
+                parent: None,
+            }
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.assign_seat(active, test_seat(Vec::new()), cx);
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.threads[active].running = true;
+            let caught = |panel: &AgentPanel| {
+                panel.threads[active]
+                    .entries
+                    .iter()
+                    .filter(
+                        |entry| matches!(entry, Entry::Agent(text) if text.starts_with("漏れた:")),
+                    )
+                    .count()
+            };
+            // 読むだけ・断られた編集は掛からない。
+            panel.on_event(
+                active,
+                AgentEvent::ToolStarted(info("r", Some(acp_client::ToolCallKind::Read), None)),
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::ToolUpdated(info("r", None, Some(true))),
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::ToolStarted(info("d", Some(acp_client::ToolCallKind::Edit), None)),
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::ToolUpdated(info("d", None, Some(false))),
+                cx,
+            );
+            assert_eq!(caught(panel), 0);
+            // 許可を求めずに成功した編集は掛かり、ターンを止める。
+            panel.on_event(
+                active,
+                AgentEvent::ToolStarted(info("e", Some(acp_client::ToolCallKind::Edit), None)),
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::ToolUpdated(info("e", None, Some(true))),
+                cx,
+            );
+            assert_eq!(caught(panel), 1);
+            assert!(
+                matches!(command_rx.try_recv(), Ok(SessionCommand::Cancel)),
+                "ターンを止める"
+            );
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 
@@ -12224,6 +15419,356 @@ PYEOF"#;
         }
     }
 
+    /// 単一選択の質問 1 つ（`custom` = Other 欄の名前）。
+    fn single_question(name: &str, options: &[&str], custom: Option<&str>) -> ElicitationField {
+        ElicitationField {
+            name: name.to_string(),
+            label: name.to_string(),
+            options: options
+                .iter()
+                .map(|option| elicitation_choice(option))
+                .collect(),
+            multi: false,
+            custom_answer: custom.map(str::to_string),
+        }
+    }
+
+    /// `index` 番のスレッドへ届いた体の質問（実物と同じ組み立て・自由入力欄の購読つき）。
+    fn test_question(
+        panel: &AgentPanel,
+        index: usize,
+        message: &str,
+        fields: Vec<ElicitationField>,
+        respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+        cx: &mut Context<AgentPanel>,
+    ) -> PendingElicitation {
+        let thread = &panel.threads[index];
+        PendingElicitation::new(
+            &thread.id,
+            message.to_string(),
+            fields,
+            respond,
+            &panel.theme,
+            thread.color,
+            cx,
+        )
+    }
+
+    /// サブエージェントの手順（O17）: 親の Task の下に畳む。親が居ない手順は普通の手順のまま、
+    /// 更新で親が分かった手順も親の下へ。⌘F が畳んだ手順に当たったら親を開いて親の行へ動く。
+    #[gpui::test]
+    fn subagent_steps_fold_under_their_parent(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "subagent_steps");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let tool = |id: &str, title: &str, parent: Option<&str>| ToolCallInfo {
+            id: id.to_string(),
+            title: (!title.is_empty()).then(|| title.to_string()),
+            kind: None,
+            locations: Vec::new(),
+            diffs: Vec::new(),
+            output: None,
+            completed: None,
+            parent: parent.map(str::to_string),
+        };
+        let base = panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let base = panel.threads[active].entries.len();
+            for event in [
+                AgentEvent::ToolStarted(tool("task", "Task 調べて", None)),
+                AgentEvent::ToolStarted(tool("read", "Read src/lib.rs", Some("task"))),
+                AgentEvent::ToolStarted(tool("main", "Edit main.rs", None)),
+                AgentEvent::ToolStarted(tool("grep", "Grep needle", Some("task"))),
+                AgentEvent::ToolStarted(tool("orphan", "Read orphan.rs", Some("gone"))),
+                AgentEvent::ToolStarted(tool("late", "Bash ls", None)),
+                AgentEvent::ToolUpdated(tool("late", "", Some("task"))),
+            ] {
+                panel.on_event(active, event, cx);
+            }
+            let entries = &panel.threads[active].entries;
+            let parents: Vec<Option<&str>> = entries[base..]
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Step { parent, .. } => parent.as_deref(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                parents,
+                [None, Some("task"), None, Some("task"), None, Some("task")],
+                "親の居ない手順（gone）は普通の手順・更新で分かった親は付く"
+            );
+            assert_eq!(
+                subagent_step_indices(entries, base, "task"),
+                vec![base + 1, base + 3, base + 5]
+            );
+            let color = panel.active_color();
+            assert!(panel
+                .render_subagent_steps(base, &"task".into(), color, cx)
+                .is_some());
+            assert!(
+                panel
+                    .render_subagent_steps(base + 2, &"main".into(), color, cx)
+                    .is_none(),
+                "子の無い手順には出さない"
+            );
+            assert!(!panel.is_subagent_expanded(base), "既定は畳む");
+            base
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.debug_find_in_transcript("needle", window, cx);
+            panel.step_transcript_match(1, cx);
+            assert!(
+                panel.is_subagent_expanded(base),
+                "畳んだ手順に当たったら親を開く"
+            );
+            assert_eq!(
+                panel.reveal_subagent_step(base + 3),
+                base,
+                "描いている行は親"
+            );
+            assert_eq!(panel.reveal_subagent_step(base + 2), base + 2);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// エージェントを決めた新規スレッド（B28）: 新しいタブがそのエージェントで開く（既定と同じなら
+    /// 差し替えない）。先張りで本物のエージェントを起こさないよう prewarm は切る。
+    #[gpui::test]
+    fn a_new_thread_can_start_on_a_chosen_agent(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_thread_with_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(&path, r#"{"onboarded":true,"agent_prewarm":false}"#).unwrap();
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let before = panel.threads.len();
+            panel.new_thread_with_agent("Codex", cx);
+            assert_eq!(panel.threads.len(), before + 1, "新しいタブ");
+            assert_eq!(panel.threads[panel.active].agent.as_ref(), "Codex");
+            let default_agent = panel.threads[panel.active].agent.clone();
+            panel.new_thread_with_agent(default_agent.as_ref(), cx);
+            assert_eq!(panel.threads.len(), before + 2);
+            assert_eq!(panel.threads[panel.active].agent, default_agent);
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// スマホ（リモート管制）の質問にも書いて答えられる（O17）: Other 欄つきの質問だけ書け、
+    /// 質問ごとに「選ぶ か 書く」のどちらかが要る。書いた文字は Other 欄の名前で返る。
+    #[gpui::test]
+    fn remote_questions_take_written_answers(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        let path = init_test_settings(cx, "remote-question-custom");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let mut pending = test_question(
+                panel,
+                active,
+                "どうする？",
+                vec![
+                    single_question("question_0", &["A", "B"], Some("question_0_custom")),
+                    single_question("question_1", &["X", "Y"], None),
+                ],
+                respond,
+                cx,
+            );
+            pending.remote_id = "q-remote".into();
+            panel.threads[active].pending_elicitation = Some(pending);
+            let id = panel.threads[active].id.clone();
+            let detail = panel.remote_thread(&id).expect("詳細");
+            assert_eq!(detail["question"]["fields"][0]["custom"], true);
+            assert_eq!(detail["question"]["fields"][1]["custom"], false);
+            let answer = |selections: serde_json::Value, custom: serde_json::Value| {
+                json!({ "thread_id": id, "turn_id": detail["turn_id"], "question_id": "q-remote",
+                    "selections": selections, "custom": custom })
+            };
+            let error = |panel: &mut AgentPanel, params, cx: &mut Context<AgentPanel>| {
+                panel
+                    .remote_command("question_response", &params, cx)
+                    .expect_err("受け付けない")
+                    .to_string()
+            };
+            assert!(error(
+                panel,
+                answer(
+                    json!({"question_0": "A", "question_1": "X"}),
+                    json!({"question_1": "Z"})
+                ),
+                cx
+            )
+            .contains("invalid_answer"));
+            assert!(error(
+                panel,
+                answer(
+                    json!({"question_0": "", "question_1": "X"}),
+                    json!({"question_0": "  "})
+                ),
+                cx
+            )
+            .contains("answer_required"));
+            assert!(
+                error(panel, answer(json!({"question_9": "X"}), json!({})), cx)
+                    .contains("invalid_answers")
+            );
+            assert!(panel.threads[active].pending_elicitation.is_some());
+            panel
+                .remote_command(
+                    "question_response",
+                    &answer(
+                        json!({"question_0": "", "question_1": "Y"}),
+                        json!({"question_0": " 自分の案 "}),
+                    ),
+                    cx,
+                )
+                .expect("書いた答えと選んだ答え");
+            assert!(panel.threads[active].pending_elicitation.is_none());
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![
+                (
+                    "question_0_custom".to_string(),
+                    vec!["自分の案".to_string()]
+                ),
+                ("question_1".to_string(), vec!["Y".to_string()]),
+            ])
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 質問カードの自由入力（O17）: 書いた文字は Other 欄の名前で返り、選択と両方あれば両方返る。
+    /// 選ばずに書いた答えは Enter で確定し、フォーカスは composer へ戻る（入力欄はカードと消える）。
+    /// 空白だけは書いたうちに数えない。
+    #[gpui::test]
+    fn question_cards_take_a_written_answer(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "elicit_custom");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        cx.update(|window, _cx| window.activate_window());
+        let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
+        let ask = |fields: Vec<ElicitationField>,
+                   respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+                   cx: &mut gpui::VisualTestContext| {
+            panel.update(cx, |panel, cx| {
+                let index = panel.active;
+                let pending = test_question(panel, index, "どうする？", fields, respond, cx);
+                panel.threads[index].pending_elicitation = Some(pending);
+            });
+        };
+        let input = |field: &str, cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, _| {
+                panel.threads[panel.active]
+                    .pending_elicitation
+                    .as_ref()
+                    .and_then(|pending| pending.custom_inputs.get(field).cloned())
+                    .expect("Other 欄の付いた質問には入力欄がある")
+            })
+        };
+        let write = |field: &str, text: &str, cx: &mut gpui::VisualTestContext| {
+            let editor = input(field, cx);
+            editor.update(cx, |editor, cx| editor.set_plain_text(text, cx));
+            cx.run_until_parked();
+        };
+
+        // ① 選ばずに書いて Enter = 書いた文字が答え。
+        ask(
+            vec![single_question(
+                "question_0",
+                &["A", "B"],
+                Some("question_0_custom"),
+            )],
+            respond.clone(),
+            cx,
+        );
+        let editor = input("question_0", cx);
+        cx.update(|window, cx| {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        write("question_0", "   ", cx);
+        panel.update(cx, |panel, cx| {
+            assert!(
+                !panel.submit_elicitation_at(panel.active, cx),
+                "空白だけでは答えたうちに入らない"
+            );
+        });
+        write("question_0", "  C でいく ", cx);
+        editor.update(cx, |_, cx| cx.emit(ComposerEvent::Submit));
+        cx.run_until_parked();
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![(
+                "question_0_custom".to_string(),
+                vec!["C でいく".to_string()]
+            )])
+        );
+        panel.update_in(cx, |panel, window, cx| {
+            assert!(panel.threads[panel.active].pending_elicitation.is_none());
+            assert!(
+                panel.composer.read(cx).focus_handle(cx).is_focused(window),
+                "確定したら composer へ戻る"
+            );
+        });
+
+        // ② 書いてから案を押す = 案が答え・書いた文字は添えて返す（押した瞬間に確定は従来どおり）。
+        ask(
+            vec![single_question(
+                "question_0",
+                &["A", "B"],
+                Some("question_0_custom"),
+            )],
+            respond.clone(),
+            cx,
+        );
+        write("question_0", "急ぎで", cx);
+        panel.update(cx, |panel, cx| {
+            panel.choose_elicitation_option("question_0".into(), "B".into(), cx);
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![
+                ("question_0".to_string(), vec!["B".to_string()]),
+                ("question_0_custom".to_string(), vec!["急ぎで".to_string()]),
+            ])
+        );
+
+        // ③ 質問が 2 つ: 片方は選び、片方は書くだけでも答えそろう。
+        ask(
+            vec![
+                single_question("question_0", &["A", "B"], Some("question_0_custom")),
+                single_question("question_1", &["X", "Y"], Some("question_1_custom")),
+            ],
+            respond,
+            cx,
+        );
+        panel.update(cx, |panel, cx| {
+            panel.choose_elicitation_option("question_0".into(), "A".into(), cx);
+            assert!(
+                !panel.submit_elicitation_at(panel.active, cx),
+                "2 つ目がまだ"
+            );
+        });
+        write("question_1", "Z にしたい", cx);
+        panel.update(cx, |panel, cx| {
+            assert!(panel.submit_elicitation_at(panel.active, cx));
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![
+                ("question_0".to_string(), vec!["A".to_string()]),
+                (
+                    "question_1_custom".to_string(),
+                    vec!["Z にしたい".to_string()]
+                ),
+            ])
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
     /// 複数選択の質問は **押すたびにトグル**し、確定は「これで回答」でだけ起きること。
     /// 単一選択と同じ「押した瞬間に送る」だと 1 つ目を選んだ時点で答えが確定してしまう。
     #[gpui::test]
@@ -12233,10 +15778,11 @@ PYEOF"#;
         let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
         panel.update(cx, |panel, cx| {
             let index = panel.active;
-            panel.threads[index].pending_elicitation = Some(PendingElicitation {
-                remote_id: "q1".into(),
-                message: "入れる機能は？".into(),
-                fields: vec![ElicitationField {
+            let pending = test_question(
+                panel,
+                index,
+                "入れる機能は？",
+                vec![ElicitationField {
                     name: "question_0".into(),
                     label: "機能".into(),
                     options: vec![
@@ -12245,10 +15791,12 @@ PYEOF"#;
                         elicitation_choice("LSP"),
                     ],
                     multi: true,
+                    custom_answer: None,
                 }],
-                selections: Default::default(),
                 respond,
-            });
+                cx,
+            );
+            panel.threads[index].pending_elicitation = Some(pending);
             assert!(
                 panel.render_elicitation_card(cx).is_some(),
                 "複数選択の質問もカードで出る（以前は acp_client が弾いて出なかった）"
@@ -12292,18 +15840,15 @@ PYEOF"#;
         let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
         panel.update(cx, |panel, cx| {
             let index = panel.active;
-            panel.threads[index].pending_elicitation = Some(PendingElicitation {
-                remote_id: "q2".into(),
-                message: "どちらにする？".into(),
-                fields: vec![ElicitationField {
-                    name: "question_0".into(),
-                    label: "方針".into(),
-                    options: vec![elicitation_choice("A"), elicitation_choice("B")],
-                    multi: false,
-                }],
-                selections: Default::default(),
+            let pending = test_question(
+                panel,
+                index,
+                "どちらにする？",
+                vec![single_question("question_0", &["A", "B"], None)],
                 respond,
-            });
+                cx,
+            );
+            panel.threads[index].pending_elicitation = Some(pending);
             panel.choose_elicitation_option("question_0".into(), "B".into(), cx);
             assert!(panel.threads[index].pending_elicitation.is_none());
         });
@@ -12392,10 +15937,10 @@ PYEOF"#;
             assert_eq!(thread.effort.as_ref(), "xhigh");
             // 表示は広告の表示名へ引き直す（保存はしない）。
             assert_eq!(
-                panel.selector_label(Selector::Model).as_ref(),
+                panel.selector_label(Selector::Model, cx).as_ref(),
                 "Opus (1M context)"
             );
-            assert_eq!(panel.selector_label(Selector::Effort).as_ref(), "Xhigh");
+            assert_eq!(panel.selector_label(Selector::Effort, cx).as_ref(), "Xhigh");
 
             let sent: Vec<String> = std::iter::from_fn(|| command_rx.try_recv().ok())
                 .filter_map(|command| match command {
@@ -12491,11 +16036,63 @@ PYEOF"#;
                 "sticky が無ければ DB の記録を採る（広告前でも空にしない）"
             );
             // 広告がまだ無いので表示名には引けない＝value_id をそのまま出す（捏造しない）。
-            assert_eq!(panel.selector_label(Selector::Model).as_ref(), "opus[1m]");
+            assert_eq!(
+                panel.selector_label(Selector::Model, cx).as_ref(),
+                "opus[1m]"
+            );
             // 新規タブも同じ agent なら直前タブの値で開く（開くたびに「—」へ戻らない）。
             panel.add_thread(cx);
             assert_eq!(panel.threads[panel.active].model.as_ref(), "opus[1m]");
         });
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// スレッドのミュートは再起動をまたいで残る（O12）。以前は DB に置き場が無く、起動のたびに
+    /// 黙って解除されていた（鳴らしたくないスレッドが翌朝また鳴る）。
+    #[gpui::test]
+    fn thread_mute_survives_a_restart(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "mute-restart");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_mute_restart_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        storage
+            .upsert_thread(
+                "muted-1",
+                "うるさいスレッド",
+                0,
+                "",
+                None,
+                Some("Claude Code"),
+                None,
+                0,
+                0,
+            )
+            .expect("スレッド行を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let index = panel.active;
+            assert!(!panel.threads[index].muted);
+            panel.toggle_thread_mute(index, cx);
+            assert!(panel.threads[index].muted);
+        });
+
+        // 再起動 = 同じ DB を別のパネルが読み直す。
+        let restarted = cx.new(|cx| AgentPanel::new(Theme::dark(), cx));
+        restarted.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let index = panel.active;
+            assert_eq!(panel.threads[index].id, "muted-1");
+            assert!(panel.threads[index].muted, "ミュートが再起動で解除された");
+            assert!(panel.statuses()[index].muted, "herd の 🔕 表示にも載る");
+            // 解除も残る。
+            panel.toggle_thread_mute(index, cx);
+        });
+        assert!(storage.load_muted_threads().expect("読める").is_empty());
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
     }
@@ -12634,9 +16231,11 @@ PYEOF"#;
             panel.prewarm_allowed = true;
 
             // 設定で off にできる（idle メモリを優先したい人向け。既定は on）。
-            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(false));
+            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(false))
+                .expect("設定を保存できる");
             assert_eq!(panel.prewarm_target(cx), None);
-            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(true));
+            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(true))
+                .expect("設定を保存できる");
             assert_eq!(
                 panel.prewarm_target(cx).as_deref(),
                 Some(active_id.as_str())
@@ -12726,10 +16325,10 @@ PYEOF"#;
                 panel.threads[fresh].configs.is_empty(),
                 "このタブ自身はまだ広告を受け取っていない"
             );
-            assert_eq!(panel.selector_choices(Selector::Model).len(), 2);
-            assert_eq!(panel.selector_choices(Selector::Mode).len(), 1);
+            assert_eq!(panel.selector_choices(Selector::Model, cx).len(), 2);
+            assert_eq!(panel.selector_choices(Selector::Mode, cx).len(), 1);
             assert_eq!(
-                panel.selector_label(Selector::Model).as_ref(),
+                panel.selector_label(Selector::Model, cx).as_ref(),
                 "Opus (1M context)",
                 "在庫から表示名まで引ける"
             );
@@ -12746,7 +16345,7 @@ PYEOF"#;
             assert!(thread.command_tx.is_none(), "前の agent のセッションは畳む");
             assert!(thread.acp_session_id.is_none());
             assert!(
-                panel.selector_choices(Selector::Model).is_empty(),
+                panel.selector_choices(Selector::Model, cx).is_empty(),
                 "Codex の広告はまだ無い＝捏造しない"
             );
 
@@ -12765,20 +16364,248 @@ PYEOF"#;
         let path = init_test_settings(cx, "no-advertisement");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
-            assert!(panel.selector_choices(Selector::Model).is_empty());
-            assert!(panel.selector_choices(Selector::Effort).is_empty());
-            assert!(panel.selector_choices(Selector::Mode).is_empty());
+            assert!(panel.selector_choices(Selector::Model, cx).is_empty());
+            assert!(panel.selector_choices(Selector::Effort, cx).is_empty());
+            assert!(panel.selector_choices(Selector::Mode, cx).is_empty());
             // 未選択なので記号を出す（古いモデル名を騙って出さない）。
             assert_eq!(
-                panel.selector_label(Selector::Model).as_ref(),
+                panel.selector_label(Selector::Model, cx).as_ref(),
                 SELECTOR_UNSET
             );
             // Agent だけは接続前でも選べる（認証済み一覧から作る）。
-            assert!(!panel.selector_choices(Selector::Agent).is_empty());
+            assert!(!panel.selector_choices(Selector::Agent, cx).is_empty());
             panel.toggle_menu(Selector::Model, cx);
             assert_eq!(panel.open_menu, Some(Selector::Model));
         });
         let _ = std::fs::remove_file(path);
+    }
+
+    /// O16: 使わないと決めたエージェントはエージェントの選択肢に出さない。いまのスレッドの値だけは
+    /// 消さない（選び直すまで持つ）。ログイン済みかは環境しだいなので、全部を外して確かめる。
+    #[gpui::test]
+    fn disabled_agents_leave_the_agent_choices(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "disabled-agents");
+        let every: Vec<&str> = acp_client::AGENTS.iter().map(|agent| agent.id).collect();
+        cx.update(|cx| {
+            settings::set_user_value(cx, "disabled_agents", serde_json::json!(every))
+                .expect("書ける")
+        });
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let current = panel.selector_value(Selector::Agent);
+            let choices = panel.selector_choices(Selector::Agent, cx);
+            assert_eq!(
+                choices
+                    .iter()
+                    .map(|choice| choice.value.clone())
+                    .collect::<Vec<_>>(),
+                vec![current],
+                "外したものは出さず、いまの値だけ残す"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// H1: settings.json で足したエージェントは、ピルの選択肢・既定のエージェント・ピルの記憶（id で）・
+    /// 使用量の鍵（その設定の env で）に、組み込みと同じ道で乗る。起動は書いたコマンドをそのまま組む
+    /// （ACP の initialize → session/new は acp_client の偽エージェントの試験で確かめる）。
+    #[gpui::test]
+    fn a_custom_agent_is_chosen_like_a_builtin(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_custom_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"agent_prewarm":false,"default_agent":"DeepSeek Harness",
+                "agent_config_defaults":{"dsh":{"model":"deepseek-v4"}},
+                "agent_servers":{"dsh":{"name":"DeepSeek Harness","command":"definitely-not-dsh-acp",
+                                        "args":["--stdio"],"env":{"DEEPSEEK_API_KEY":"secret"}}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            assert_eq!(
+                panel.threads[active].agent.as_ref(),
+                "DeepSeek Harness",
+                "足したエージェントも既定にできる"
+            );
+            assert_eq!(
+                panel.threads[active].model.as_ref(),
+                "deepseek-v4",
+                "ピルの記憶は id（dsh）で引く"
+            );
+            assert!(panel
+                .selector_choices(Selector::Agent, cx)
+                .iter()
+                .any(|choice| choice.value.as_ref() == "DeepSeek Harness"));
+            let agent = settings::agent_by_label(cx, "DeepSeek Harness").expect("一覧に在る");
+            let command = agent
+                .resolve_command_on(
+                    host::LocalHost::shared().as_ref(),
+                    std::env::temp_dir(),
+                    agent_server_override(agent.id(), cx).as_ref(),
+                    None,
+                )
+                .expect("手元は探索に失敗しない")
+                .expect("足した物は必ず組める");
+            assert!(command.path.ends_with("definitely-not-dsh-acp"));
+            assert_eq!(command.args, vec!["--stdio".to_string()]);
+            assert_eq!(
+                command.env.get("DEEPSEEK_API_KEY").map(String::as_str),
+                Some("secret")
+            );
+            // 使用量の鍵も同じ設定の env から作る（組み込みと同じく、認証の env が違えば別の鍵）。
+            let key = panel.prospective_usage_key(active, cx);
+            assert_ne!(
+                key,
+                usage::UsageKey::local("DeepSeek Harness"),
+                "設定の env を鍵に含める"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 足したエージェントを起動できない理由は言葉にして出す（型のまま acp_client から届く）。
+    /// それ以外の失敗（SSH が切れて探せない等）は従来どおり「探せません: 原因」。
+    #[test]
+    fn launch_problems_are_put_into_words() {
+        let needs_node = anyhow::Error::new(acp_client::LaunchError::NeedsNode);
+        assert_eq!(
+            launch_error_text(&needs_node),
+            i18n::t!("agent.err_launch_needs_node")
+        );
+        // uv が無い機械では「uv が要る」と案内する（necoder は入れない・H2-c）。
+        let needs_uv = anyhow::Error::new(acp_client::LaunchError::NeedsUv);
+        assert_eq!(
+            launch_error_text(&needs_uv),
+            i18n::t!("agent.err_launch_needs_uv")
+        );
+        let missing = anyhow::Error::new(acp_client::LaunchError::NotInRegistry {
+            id: "pi-acp".to_string(),
+        });
+        assert!(launch_error_text(&missing).contains("pi-acp"));
+        let lookup = anyhow::anyhow!("ssh が切れた");
+        assert!(launch_error_text(&lookup).contains("ssh が切れた"));
+        let mismatch = anyhow::Error::new(acp_client::LaunchError::Deploy(
+            acp_client::deploy::DeployError::ChecksumMismatch {
+                expected: "aa".to_string(),
+                actual: "bb".to_string(),
+            },
+        ));
+        let text = launch_error_text(&mismatch);
+        assert!(text.contains("aa") && text.contains("bb"), "{text}");
+        // 置いた後の知らせ: 手元の古い版で起こした・検証の値が無かった。
+        let notes = deploy_notes(&acp_client::DeployOutcome {
+            version: "0.8.0".to_string(),
+            verified: false,
+            fallback_from: Some("0.9.0".to_string()),
+        });
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("0.9.0") && notes[0].contains("0.8.0"));
+        assert_eq!(
+            deploy_notes(&acp_client::DeployOutcome {
+                version: "0.9.0".to_string(),
+                verified: true,
+                fallback_from: None,
+            }),
+            vec![i18n::t!("agent.deploy_verified")],
+            "照合したことも 1 行出す"
+        );
+    }
+
+    /// 起動してすぐ落ちるエージェント（stderr に理由を書いて exit 1）: 理由（stderr の末尾）は
+    /// カードに出し、transcript（保存される側）には終わり方だけを残して stderr を入れない。渡した鍵は
+    /// 伏せる。手元のエージェントなので SSH とは言わない。本物のプロセスを起こす（プロンプトは送らない）。
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_agent_that_exits_at_startup_shows_why(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_agent_exit_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"agent_auto_name":false,"sound_done":"off",
+                "default_agent":"Broken Agent",
+                "agent_servers":{"broken":{"name":"Broken Agent","command":"/bin/sh",
+                  "args":["-c","echo 'booting the fake agent' >&2; echo \"error: BROKEN_API_KEY=$BROKEN_API_KEY is invalid\" >&2; exit 1"],
+                  "env":{"BROKEN_API_KEY":"secret-0123456789"}}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        // 本物のプロセスの終わりを待つ（背景の I/O は実時間で進む）。
+        cx.executor().allow_parking();
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.dest_cwd = Some(root.clone());
+            let active = panel.active;
+            assert_eq!(panel.threads[active].agent.as_ref(), "Broken Agent");
+            panel.resume_session(active, cx);
+        });
+        let mut settled = false;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            settled = panel.read_with(cx, |panel, _| {
+                let thread = &panel.threads[panel.active];
+                thread.startup_exit.is_some() && thread.session_lost
+            });
+            if settled {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(settled, "起動してすぐ終わったことが画面に届く");
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let thread = &panel.threads[active];
+            let exited = thread.startup_exit.clone().expect("カードに出す");
+            assert_eq!(exited.code, Some(1));
+            assert_eq!(
+                exited.stderr,
+                vec![
+                    "booting the fake agent".to_string(),
+                    "error: BROKEN_API_KEY=•••• is invalid".to_string()
+                ],
+                "渡した鍵は伏せる"
+            );
+            let saved: Vec<String> = thread
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Agent(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+            let failure = saved.last().expect("失敗の 1 行を残す");
+            assert!(
+                failure.contains(&exit_status_text(&exited)),
+                "終わり方を残す: {failure}"
+            );
+            assert!(
+                saved.iter().all(|text| !text.contains("invalid")
+                    && !text.contains("booting")
+                    && !text.contains("secret-0123456789")),
+                "transcript（保存される側）に stderr を入れない: {saved:?}"
+            );
+            assert!(panel.render_exit_card(cx).is_some(), "カードを出す");
+            assert!(
+                panel.render_session_banner(cx).is_none(),
+                "カードが出ている間はバナーを重ねない"
+            );
+            // 手元のエージェントなので SSH とは言わない（閉じた後のバナーも・ターン中に切れた時の 1 行も）。
+            panel.dismiss_exit_card(active, cx);
+            assert!(panel.render_session_banner(cx).is_some());
+            assert!(!panel.session_lost_banner_text().contains("SSH"));
+            assert!(!panel.session_lost_reason().contains("SSH"));
+        });
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Modes も同じ規律で mode_id 一本。新規タブは直前タブの権限モードを引き継ぐ。
@@ -12809,7 +16636,7 @@ PYEOF"#;
             );
             assert_eq!(thread.current_mode_id.as_ref(), "acceptEdits");
             assert_eq!(
-                panel.selector_label(Selector::Mode).as_ref(),
+                panel.selector_label(Selector::Mode, cx).as_ref(),
                 "Accept Edits"
             );
 
@@ -12841,6 +16668,88 @@ PYEOF"#;
                 "提供されないモードは広告 current へフォールバック"
             );
         });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// O16: 権限の既定が「聞かずに進める」なら、ピルの記憶の無いスレッドは広告の中の「聞かない」
+    /// モードで始める（エージェントへも合わせに行く）。記憶があればそちらが勝ち、「聞かない」モードを
+    /// 持たないエージェントはエージェントの既定のまま。
+    #[gpui::test]
+    fn bypass_by_default_starts_in_the_advertised_bypass_mode(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "bypass-default");
+        cx.update(|cx| settings::set_permission_default(cx, "bypass").expect("書ける"));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let claude_modes = || {
+            vec![
+                ("default".to_string(), "Always Ask".to_string()),
+                ("acceptEdits".to_string(), "Accept Edits".to_string()),
+                (
+                    "bypassPermissions".to_string(),
+                    "Bypass Permissions".to_string(),
+                ),
+            ]
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            assert!(
+                panel.threads[active].permission_mode.is_empty(),
+                "ピルの記憶は無い"
+            );
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.on_event(
+                active,
+                AgentEvent::Modes {
+                    modes: claude_modes(),
+                    current: "default".to_string(),
+                },
+                cx,
+            );
+            assert_eq!(
+                panel.threads[active].permission_mode.as_ref(),
+                "bypassPermissions"
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::SetMode(mode)) => assert_eq!(mode, "bypassPermissions"),
+                other => panic!("モードを合わせに行っていない: {other:?}"),
+            }
+
+            // ピルで選んだモード（記憶）が勝つ。
+            panel.add_thread(cx);
+            let remembered = panel.active;
+            panel.threads[remembered].permission_mode = "acceptEdits".into();
+            panel.on_event(
+                remembered,
+                AgentEvent::Modes {
+                    modes: claude_modes(),
+                    current: "default".to_string(),
+                },
+                cx,
+            );
+            assert_eq!(
+                panel.threads[remembered].permission_mode.as_ref(),
+                "acceptEdits"
+            );
+
+            // 「聞かない」モードを持たないエージェントは既定のまま。
+            panel.add_thread(cx);
+            let plain = panel.active;
+            panel.threads[plain].permission_mode = SharedString::default();
+            panel.on_event(
+                plain,
+                AgentEvent::Modes {
+                    modes: vec![
+                        ("build".to_string(), "Build".to_string()),
+                        ("plan".to_string(), "Plan".to_string()),
+                    ],
+                    current: "build".to_string(),
+                },
+                cx,
+            );
+            assert_eq!(panel.threads[plain].permission_mode.as_ref(), "build");
+        });
+        assert!(is_bypass_mode("yolo") && is_bypass_mode("full-access"));
+        assert!(!is_bypass_mode("auto-edit") && !is_bypass_mode("default"));
         let _ = std::fs::remove_file(path);
     }
 
@@ -13023,6 +16932,72 @@ PYEOF"#;
         });
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 窓の中のトースト（`PanelEvent::TurnEnded` の summary）は終わり方で言い分ける。起動に失敗した
+    /// スレッドにも「完了」と出していた（#38 の追加エージェントで目立った）。
+    #[gpui::test]
+    fn the_turn_toast_says_how_the_turn_ended(cx: &mut gpui::TestAppContext) {
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_turn_toast_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        // 終わった後に AI で名前・要約を付けに行かない（テストで本物のエージェントを起こさない）。
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false}"#,
+        )
+        .expect("テスト用の設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let recorder = seen.clone();
+        cx.update(|_window, cx| {
+            cx.subscribe(&panel, move |_panel, event: &PanelEvent, _cx| {
+                if let PanelEvent::TurnEnded {
+                    summary, outcome, ..
+                } = event
+                {
+                    recorder.borrow_mut().push((*outcome, summary.to_string()));
+                }
+            })
+            .detach();
+        });
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            for ending in [
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Interrupted,
+                },
+                AgentEvent::Failed("agent exited right after starting".into()),
+            ] {
+                panel.on_event(active, AgentEvent::TurnStarted, cx);
+                panel.on_event(active, ending, cx);
+            }
+        });
+        cx.run_until_parked();
+        let head = |key: &str| i18n::t!(key, "elapsed" => "").trim().to_string();
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen[0].0, TurnOutcome::Completed);
+        assert!(seen[0].1.starts_with(&head("agent.done")), "{seen:?}");
+        assert_eq!(seen[1].0, TurnOutcome::Interrupted);
+        assert!(
+            seen[1].1.starts_with(&head("agent.turn_interrupted")),
+            "{seen:?}"
+        );
+        assert_eq!(seen[2].0, TurnOutcome::Failed);
+        assert!(
+            seen[2].1.starts_with(&head("agent.turn_failed")),
+            "{seen:?}"
+        );
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("テスト用の設定を消せない: {error}");
+        }
     }
 
     /// クリック → イベント。行/桁は**1 始まりのまま**上へ渡す（0 始まりへの変換は workspace）。
@@ -13213,5 +17188,850 @@ PYEOF"#;
         assert_eq!(preview.chars().count(), 65);
         assert!(preview.starts_with('…'));
         assert_eq!(thought_live_preview("").as_ref(), "");
+    }
+
+    // ── O2: エージェントの会話名 ──
+
+    /// エージェントの会話名は既定名のスレッドに当たり、以後その agent には自前の命名を走らせない。
+    /// 人が改名したスレッドは上書きしない。null（名前を消した）は今の名前を保つ。
+    #[gpui::test]
+    fn agent_title_names_the_thread_unless_a_human_renamed_it(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent_title");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let index = panel.active;
+            assert!(is_placeholder_name(&panel.threads[index].name));
+            assert!(panel.needs_own_auto_name(&panel.threads[index]));
+
+            panel.on_event(
+                index,
+                AgentEvent::TitleChanged(Some("ログイン\n修正".into())),
+                cx,
+            );
+            assert_eq!(panel.threads[index].name.as_ref(), "ログイン 修正");
+            assert!(
+                !panel.needs_own_auto_name(&panel.threads[index]),
+                "名前が付いた＝自前の命名は要らない"
+            );
+            // 同じ agent の別スレッド（まだ既定名）でも、この agent は自分で名付けると分かった。
+            panel.add_thread(cx);
+            let fresh = panel.active;
+            assert!(is_placeholder_name(&panel.threads[fresh].name));
+            assert!(
+                !panel.needs_own_auto_name(&panel.threads[fresh]),
+                "会話名を送ってくる agent には claude -p を走らせない"
+            );
+
+            // null は今の名前を保つ。
+            panel.on_event(index, AgentEvent::TitleChanged(None), cx);
+            assert_eq!(panel.threads[index].name.as_ref(), "ログイン 修正");
+
+            // 人が改名したら、その後に届いた会話名では上書きしない。
+            let theme = panel.theme.clone();
+            let color = panel.threads[index].color;
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::plain(theme, color, true, cx);
+                editor.set_plain_text("自分で付けた名前", cx);
+                editor
+            });
+            panel.renaming = Some((index, editor));
+            panel.confirm_rename(cx);
+            panel.on_event(
+                index,
+                AgentEvent::TitleChanged(Some("エージェントの名前".into())),
+                cx,
+            );
+            assert_eq!(panel.threads[index].name.as_ref(), "自分で付けた名前");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 手動改名の印は DB に残り、再起動（パネルの作り直し + 復元）後も会話名で上書きされない。
+    /// 印の無いスレッドは復元後も会話名を受け取る。
+    #[gpui::test]
+    fn a_human_rename_survives_restart(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent_title_restart");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_title_restart_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        for (id, name) in [("renamed-1", "手で付けた名前"), ("auto-1", "設計の相談")] {
+            storage
+                .upsert_thread(id, name, 0, "", None, Some("Claude Code"), None, 0, 0)
+                .expect("スレッド行を書ける");
+        }
+        storage
+            .set_thread_name_custom("renamed-1", true)
+            .expect("印を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let renamed = panel
+                .thread_index_by_id("renamed-1")
+                .expect("手動改名のスレッドが復元される");
+            let auto = panel
+                .thread_index_by_id("auto-1")
+                .expect("もう 1 本も復元される");
+            assert!(panel.threads[renamed].name_is_custom);
+            assert!(!panel.threads[auto].name_is_custom);
+            for index in [renamed, auto] {
+                panel.on_event(index, AgentEvent::TitleChanged(Some("会話名".into())), cx);
+            }
+            assert_eq!(panel.threads[renamed].name.as_ref(), "手で付けた名前");
+            assert_eq!(panel.threads[auto].name.as_ref(), "会話名");
+        });
+        let names: Vec<(String, String)> = storage
+            .load_threads()
+            .expect("一覧を読める")
+            .into_iter()
+            .map(|row| (row.0, row.1))
+            .collect();
+        assert!(
+            names.contains(&("auto-1".to_string(), "会話名".to_string())),
+            "会話名は保存される: {names:?}"
+        );
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    // ── O2: composer の `/` 補完 ──
+
+    fn slash(name: &str, description: &str, hint: Option<&str>) -> acp_client::SlashCommand {
+        acp_client::SlashCommand {
+            name: name.into(),
+            description: description.into(),
+            hint: hint.map(str::to_string),
+        }
+    }
+
+    /// 行頭の `/` の後ろ・空白の前だけが絞り込み語。`/name ` まで入れば引数待ち。
+    /// 複数行・IME 変換中・行頭でない `/` は対象外。
+    #[test]
+    fn slash_input_reads_the_leading_command_word() {
+        assert_eq!(
+            slash_input("/", true, false),
+            SlashInput::Query(String::new())
+        );
+        assert_eq!(
+            slash_input("/co", true, false),
+            SlashInput::Query("co".into())
+        );
+        assert_eq!(
+            slash_input("/review ", true, false),
+            SlashInput::AwaitingArgs("review".into())
+        );
+        assert_eq!(
+            slash_input("/review 認証", true, false),
+            SlashInput::Inactive
+        );
+        assert_eq!(
+            slash_input("/co", false, false),
+            SlashInput::Inactive,
+            "複数行"
+        );
+        assert_eq!(
+            slash_input("/こ", true, true),
+            SlashInput::Inactive,
+            "IME 変換中"
+        );
+        assert_eq!(slash_input("see /co", true, false), SlashInput::Inactive);
+        assert_eq!(slash_input("", true, false), SlashInput::Inactive);
+    }
+
+    /// あいまい一致（⌘P と同じ採点）の高い順、同点はエージェントの並び。当たらない物は出さない。
+    #[test]
+    fn slash_matches_rank_by_fuzzy_score_then_agent_order() {
+        let commands = vec![
+            slash("review-commit", "Review a commit", Some("commit sha")),
+            slash("compact", "Compact", None),
+            slash("mcp:github:pr", "Open a PR", None),
+            slash("context", "Context usage", None),
+        ];
+        let names = |query: &str| -> Vec<&str> {
+            slash_matches(&commands, query)
+                .into_iter()
+                .map(|index| commands[index].name.as_str())
+                .collect()
+        };
+        assert_eq!(names("co"), vec!["compact", "context", "review-commit"]);
+        assert_eq!(names("pr"), vec!["mcp:github:pr"]);
+        assert_eq!(
+            names(""),
+            vec!["review-commit", "compact", "mcp:github:pr", "context"],
+            "空の絞り込み語は広告された順のまま全部"
+        );
+        assert!(names("zz").is_empty());
+        assert_eq!(slash_insertion("compact"), "/compact ");
+        assert_eq!(
+            slash_insertion("$lint-fix"),
+            "$lint-fix ",
+            "Codex の skill は $ で呼ぶ"
+        );
+    }
+
+    #[test]
+    fn a_leading_path_is_not_a_slash_command() {
+        assert!(is_slash_command("/compact"));
+        assert!(is_slash_command("/review 認証まわり"));
+        assert!(is_slash_command("/mcp:github:pr 12"));
+        assert!(!is_slash_command("/Users/me/a.rs を見て"));
+        assert!(!is_slash_command("/"));
+        assert!(!is_slash_command("compact"));
+    }
+
+    /// O16: `.necoder/recipes/*.md` は `/` 補完に `necoder:<名前>` で出て、選ぶと本文が入る（送らない）。
+    #[gpui::test]
+    fn recipes_show_up_in_slash_completion_and_insert_their_text(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "recipes");
+        let root =
+            std::env::temp_dir().join(format!("necoder_recipe_panel_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join(".necoder/recipes")).expect("作れる");
+        std::fs::write(
+            root.join(".necoder/recipes/review.md"),
+            "# 変更を読んで指摘\n差分を読み、問題を挙げて。",
+        )
+        .expect("書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_destination(
+                "project".into(),
+                None,
+                LocalHost::shared(),
+                Some(root.clone()),
+                cx,
+            );
+            panel.focus_composer(window, cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _window, cx| {
+            panel.composer.update(cx, |composer, cx| {
+                composer.set_plain_text("/necoder:rev", cx)
+            });
+        });
+        cx.run_until_parked();
+        let items = panel.read_with(cx, |panel, _cx| {
+            panel
+                .slash_popup_items()
+                .into_iter()
+                .map(|index| panel.slash_commands()[index].clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].name, "necoder:review");
+        assert_eq!(items[0].description, "変更を読んで指摘");
+        panel.update_in(cx, |panel, _window, cx| {
+            let index = panel.slash_popup_items()[0];
+            panel.accept_slash_command(index, cx);
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.composer.read(cx).plain_text()),
+            "差分を読み、問題を挙げて。"
+        );
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_file(settings_path).ok();
+    }
+
+    /// 実際のキー配送（既定 keymap の Editor 文脈）で: ↑↓ で選び、Enter / Tab で `/name ` を入れる。
+    /// Esc は補完だけを閉じ、走行中のターンは止めない（閉じた後の Esc は従来どおり中断）。
+    /// IME 変換中は開かない。
+    #[gpui::test]
+    fn slash_popup_keys_choose_and_insert_a_command(cx: &mut gpui::TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let settings_path = init_test_settings(cx, "slash-keys");
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let set_text = |cx: &mut gpui::VisualTestContext, text: &'static str| {
+            panel.update_in(cx, |panel, _window, cx| {
+                panel
+                    .composer
+                    .update(cx, |composer, cx| composer.set_plain_text(text, cx));
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let composer_text = |cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, cx| panel.composer.read(cx).plain_text())
+        };
+        panel.update_in(cx, |panel, window, cx| {
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::Commands(vec![
+                    slash("compact", "Compact", None),
+                    slash("context", "Context usage", None),
+                    slash("cost", "Cost", None),
+                    slash("review", "Review", Some("instructions")),
+                ]),
+                cx,
+            );
+            panel.focus_composer(window, cx);
+        });
+        set_text(cx, "/co");
+        let names = |cx: &mut gpui::VisualTestContext| -> Vec<String> {
+            panel.read_with(cx, |panel, _cx| {
+                panel
+                    .slash_popup_items()
+                    .into_iter()
+                    .map(|index| panel.slash_commands()[index].name.clone())
+                    .collect()
+            })
+        };
+        assert_eq!(names(cx), vec!["compact", "context", "cost"]);
+
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("up up");
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.selected),
+            2,
+            "先頭で ↑ は末尾へ回る"
+        );
+        cx.simulate_keystrokes("down down enter");
+        assert_eq!(
+            composer_text(cx),
+            "/context ",
+            "Enter は改行ではなく候補を入れる"
+        );
+        assert!(names(cx).is_empty(), "入れたら閉じる");
+
+        set_text(cx, "/rev");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(composer_text(cx), "/review ");
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.input.clone()),
+            SlashInput::AwaitingArgs("review".into()),
+            "引数ヒントを出す局面"
+        );
+
+        // Esc は補完だけを閉じる（ターンは止めない）。閉じた後の Esc は従来どおり中断。
+        set_text(cx, "/c");
+        panel.update(cx, |panel, _cx| {
+            let active = panel.active;
+            panel.threads[active].running = true;
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(names(cx).is_empty(), "Esc で閉じる");
+        assert!(
+            panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "補完を閉じる Esc でターンを止めない"
+        );
+        cx.simulate_keystrokes("o");
+        assert!(names(cx).is_empty(), "行頭の `/` が消えるまで開き直さない");
+        cx.simulate_keystrokes("escape");
+        assert!(
+            !panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "補完が閉じていれば Esc は中断"
+        );
+
+        // IME 変換中は開かない（Enter は変換の確定＝奪わない）。
+        set_text(cx, "");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.composer.update(cx, |composer, cx| {
+                composer.replace_and_mark_text_in_range(None, "/こ", None, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.input.clone()),
+            SlashInput::Inactive
+        );
+        assert!(names(cx).is_empty());
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// slash コマンドは本文 1 ブロックだけで送る: `@path` の添付も画像も付けない（Claude は末尾、
+    /// Codex は先頭のブロックをコマンドとして読む）。添付は外さずに残り、次の通常の送信に付く。
+    #[gpui::test]
+    fn a_slash_command_is_sent_alone_and_keeps_the_attachments(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "slash-send");
+        let root = std::env::temp_dir().join(format!(
+            "necoder_slash_send_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("一時ディレクトリを作れる");
+        std::fs::write(root.join("shot.png"), [0x89, b'P', b'N', b'G']).expect("画像を置ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(root.clone());
+            panel.set_prompt_context(active, "ROLE\n".to_string());
+            panel.threads[active].context = vec!["src/lib.rs".into(), "shot.png".into()];
+
+            panel.send_prompt_text("/compact".to_string(), cx);
+            panel.threads[active].running = false;
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "/compact"),
+                other => panic!("slash は本文だけの Prompt で送る: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].context,
+                vec![
+                    SharedString::from("src/lib.rs"),
+                    SharedString::from("shot.png")
+                ],
+                "添付は外さない（画像も次の通常の送信まで残す）"
+            );
+
+            // パスで始まる依頼は slash ではない＝添付・画像・context を付けて送る。
+            panel.send_prompt_text("/Users/me/a.rs を見て".to_string(), cx);
+            panel.threads[active].running = false;
+            match command_rx.try_recv() {
+                Ok(SessionCommand::PromptWithImages { text, images }) => {
+                    assert_eq!(
+                        text,
+                        "@src/lib.rs\n<necoder-context>\nROLE\n</necoder-context>\n\n/Users/me/a.rs を見て"
+                    );
+                    assert_eq!(images.len(), 1);
+                }
+                other => panic!("普通の依頼は添付つき: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].context,
+                vec![SharedString::from("src/lib.rs")],
+                "画像は送った 1 通で外れる"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 目標（`/goal`）は届いた物をそのまま出し、null で消える。新しい会話では消え、引き継いだ
+    /// 会話ではエージェントが送り直すまで残す。
+    #[gpui::test]
+    fn the_goal_follows_the_agent_and_resets_with_a_fresh_session(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent-goal");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            assert!(panel.render_goal(cx).is_none());
+            let goal = acp_client::AgentGoal {
+                objective: "テストを緑にする".into(),
+                status: acp_client::GoalStatus::Paused,
+            };
+            panel.on_event(active, AgentEvent::GoalChanged(Some(goal.clone())), cx);
+            assert_eq!(panel.threads[active].goal.as_ref(), Some(&goal));
+            assert!(panel.render_goal(cx).is_some(), "composer の上に出る");
+
+            // 目標への操作（O17）: 広告された物のうち、状態に合う物だけを出し、押すとエージェントへ送る。
+            use acp_client::GoalAction::{Clear, Pause, Resume};
+            assert_eq!(
+                goal_actions_for(acp_client::GoalStatus::Paused, &[]),
+                Vec::new(),
+                "広告が無ければ出さない"
+            );
+            panel.on_event(
+                active,
+                AgentEvent::GoalControls(vec![Pause, Resume, Clear]),
+                cx,
+            );
+            // 新しいセッションは操作を決め直す（広告が来なければ操作なし）。
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "other".into(),
+                    resumed: true,
+                    resumable: true,
+                },
+                cx,
+            );
+            assert!(panel.threads[active].goal_actions.is_empty());
+            panel.on_event(
+                active,
+                AgentEvent::GoalControls(vec![Pause, Resume, Clear]),
+                cx,
+            );
+            assert_eq!(
+                goal_actions_for(goal.status, &panel.threads[active].goal_actions),
+                vec![Resume, Clear],
+                "一時停止中は再開と取り消し"
+            );
+            assert_eq!(
+                goal_actions_for(acp_client::GoalStatus::Active, &[Pause, Clear]),
+                vec![Pause, Clear]
+            );
+            assert_eq!(
+                goal_actions_for(acp_client::GoalStatus::Complete, &[Pause, Resume]),
+                Vec::new()
+            );
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.send_goal_action(Resume, cx);
+            assert!(
+                matches!(command_rx.try_recv(), Ok(SessionCommand::Goal(Resume))),
+                "押した操作がエージェントへ流れる"
+            );
+            panel.threads[active].command_tx = None;
+
+            let started = |resumed: bool| AgentEvent::SessionStarted {
+                session_id: "sess".into(),
+                resumed,
+                resumable: true,
+            };
+            panel.on_event(active, started(true), cx);
+            assert!(
+                panel.threads[active].goal.is_some(),
+                "引き継いだ会話では残す"
+            );
+            panel.on_event(active, started(false), cx);
+            assert!(panel.threads[active].goal.is_none(), "新しい会話では消す");
+
+            panel.on_event(active, AgentEvent::GoalChanged(Some(goal)), cx);
+            panel.on_event(active, AgentEvent::GoalChanged(None), cx);
+            assert!(panel.threads[active].goal.is_none(), "null で消える");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 回帰テスト（O2 で待機中も更新を読むようにした副作用の手当て）: ターン終了で保存した本文に、
+    /// 待機中に届いた増分を連結しない。連結すると増分は DB に二度と書かれない。新しいエントリに
+    /// して、次の保存で残す。ターン中の増分はこれまでどおり 1 つのエントリへ連結する。
+    #[gpui::test]
+    fn chunks_after_a_saved_turn_start_a_new_entry(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "idle-chunks");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_idle_chunks_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let thread_id = panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            panel.on_event(active, AgentEvent::TurnStarted, cx);
+            panel.on_event(active, AgentEvent::AgentChunk("最初の答え".into()), cx);
+            panel.on_event(active, AgentEvent::AgentChunk("の続き".into()), cx);
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            // 待機中に届いた本文（エージェントが自分で続けた・背景タスクの報告）。
+            panel.on_event(active, AgentEvent::AgentChunk("待機中の報告".into()), cx);
+            let texts: Vec<String> = panel.threads[active]
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Agent(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, vec!["最初の答えの続き", "待機中の報告"]);
+            panel.persist_thread(active);
+            panel.threads[active].id.clone()
+        });
+        let saved: Vec<String> = storage
+            .load_recent_turns(&thread_id, 10)
+            .expect("turns を読める")
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect();
+        assert_eq!(saved, vec!["最初の答えの続き", "待機中の報告"]);
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// O11: ターンのトークンとコスト（会話の累計の差分）を台帳へ書き、レート制限はエージェントごとの
+    /// 置き場（Global）へ重ねる。再起動後に引き継いだ会話のコストは、台帳の最後の累計を基準にする
+    /// （過去の分を 1 ターンに載せない）。
+    #[gpui::test]
+    fn turn_usage_is_recorded_and_rate_limits_are_shared(cx: &mut gpui::TestAppContext) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, TurnTokens, WindowUsage};
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false,"sound_done":"off"}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let now_secs = now_unix_ms() / 1000;
+        let turn =
+            |panel: &mut AgentPanel, cost: f64, tokens: u64, cx: &mut Context<AgentPanel>| {
+                let active = panel.active;
+                panel.on_event(active, AgentEvent::TurnStarted, cx);
+                panel.on_event(
+                    active,
+                    AgentEvent::SessionCost {
+                        amount: cost,
+                        currency: "USD".into(),
+                    },
+                    cx,
+                );
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnUsage(TurnTokens {
+                        input: tokens / 2,
+                        output: tokens / 2,
+                        total: tokens,
+                        ..TurnTokens::default()
+                    }),
+                    cx,
+                );
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnEnded {
+                        reason: TurnEnd::Completed,
+                    },
+                    cx,
+                );
+            };
+        let thread_id = panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "session-1".into(),
+                    resumed: false,
+                    resumable: true,
+                },
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::RateLimits(RateLimits {
+                    status: Some(LimitStatus::Warning),
+                    windows: vec![WindowUsage {
+                        window: LimitWindow::FiveHour,
+                        used_percent: Some(85.0),
+                        resets_at: Some(now_secs + 3_600),
+                    }],
+                }),
+                cx,
+            );
+            turn(panel, 0.4, 100, cx);
+            turn(panel, 1.0, 50, cx);
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            let claude = limits.agent("Claude Code").expect("スレッドの agent の値");
+            assert!(claude.near_limit(now_secs), "85% は目立たせる");
+            assert_eq!(panel.active_agent().as_deref(), Some("Claude Code"));
+            panel.threads[active].id.clone()
+        });
+        // 台帳への追記は背景で行う（R11・UI スレッドで DB を待たない）。
+        cx.run_until_parked();
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].agent, "Claude Code");
+        assert_eq!(rows[0].turns, 2);
+        assert_eq!(rows[0].total_tokens, Some(150));
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.0).abs() < 1e-9,
+            "{rows:?}"
+        );
+
+        // 再起動の真似: スレッドの記憶を消し、同じ会話を引き継ぐ。最初の累計（1.3）は過去の 1.0 を含む。
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].usage = usage::CostMeter::default();
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "session-1".into(),
+                    resumed: true,
+                    resumable: true,
+                },
+                cx,
+            );
+            turn(panel, 1.3, 10, cx);
+        });
+        cx.run_until_parked();
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.3).abs() < 1e-9,
+            "引き継いだ会話は差分の 0.3 だけ足す: {rows:?}"
+        );
+        assert_eq!(
+            storage.last_session_cost(&thread_id).expect("読める"),
+            Some(1.3)
+        );
+
+        // コストだけ知らせてトークンを知らせないターン（R08）: トークンは 0 ではなく「無い」まま書き、
+        // 合計には足さない（報告のあったターンの数で分かる）。
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.on_event(active, AgentEvent::TurnStarted, cx);
+            panel.on_event(
+                active,
+                AgentEvent::SessionCost {
+                    amount: 1.5,
+                    currency: "USD".into(),
+                },
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert_eq!(rows[0].turns, 4, "{rows:?}");
+        assert_eq!(
+            rows[0].total_tokens,
+            Some(160),
+            "報告の無いターンは足さない"
+        );
+        assert_eq!(rows[0].token_turns, 3, "トークンを報告したのは 3 ターン");
+        assert_eq!(rows[0].cost_turns, 4, "{rows:?}");
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.5).abs() < 1e-9,
+            "{rows:?}"
+        );
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// R08: 同じ Claude Code でも、認証の環境（設定 `agent_servers.claude.env`）を変えた前後で立てた
+    /// 2 本のセッションの知らせは別々の鍵へ重なり、混ざらない。動いているセッションは後で設定を変えても
+    /// 立てた時の鍵のまま。statusbar のチップ（`active_usage_key`）はいまのスレッドの鍵に従う。
+    /// プロセスは起こさない（鍵は本番の `start_session` と同じく、立てる時の宛先と設定から作る）。
+    #[gpui::test]
+    fn rate_limits_of_two_auth_environments_do_not_mix(cx: &mut gpui::TestAppContext) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, WindowUsage};
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_keys_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false,"sound_done":"off","agent_prewarm":false,
+                "agent_servers":{"claude":{"type":"registry","env":{"CLAUDE_CODE_OAUTH_TOKEN":"token-work"}}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let now_secs = now_unix_ms() / 1000;
+        let limits_at = |percent: f64| {
+            AgentEvent::RateLimits(RateLimits {
+                status: Some(LimitStatus::Allowed),
+                windows: vec![WindowUsage {
+                    window: LimitWindow::FiveHour,
+                    used_percent: Some(percent),
+                    resets_at: Some(now_secs + 3_600),
+                }],
+            })
+        };
+        // セッションを立てたのと同じにする: 送信路と、立てる時の宛先と設定で決まる鍵をスレッドに持たせる。
+        let attach = |panel: &mut AgentPanel,
+                      index: usize,
+                      cx: &mut Context<AgentPanel>|
+         -> (usage::UsageKey, mpsc::UnboundedReceiver<SessionCommand>) {
+            let key = panel.prospective_usage_key(index, cx);
+            let (command_tx, commands) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[index].command_tx = Some(command_tx);
+            panel.threads[index].usage_key = Some(key.clone());
+            (key, commands)
+        };
+
+        // 1 本目: 仕事用のトークンでセッションを立てる。
+        let (first, work, _first_commands) = panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            let (work, commands) = attach(panel, first, cx);
+            (first, work, commands)
+        });
+        // 設定の env を個人用のトークンへ変えてから、2 本目のセッションを立てる。
+        cx.update(|_window, cx| {
+            settings::set_user_value(
+                cx,
+                "agent_servers",
+                serde_json::json!({
+                    "claude": {"type": "registry", "env": {"CLAUDE_CODE_OAUTH_TOKEN": "token-personal"}}
+                }),
+            )
+            .expect("設定を書き換えられる");
+        });
+        let (second, personal, _second_commands) = panel.update(cx, |panel, cx| {
+            let second = panel.new_thread_index(cx);
+            let (personal, commands) = attach(panel, second, cx);
+            (second, personal, commands)
+        });
+        assert_ne!(work, personal, "認証の環境が違えば別の鍵");
+        assert_eq!(
+            work.profile.as_ref(),
+            "",
+            "置き場のパスではなく env の指紋で分かれる"
+        );
+
+        panel.update(cx, |panel, cx| {
+            // 設定は個人用に変わった後でも、1 本目のセッションの知らせは仕事用の鍵へ。
+            panel.on_event(first, limits_at(20.0), cx);
+            panel.on_event(second, limits_at(70.0), cx);
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            assert_eq!(
+                limits.get(&work).map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 20.0)])
+            );
+            assert_eq!(
+                limits
+                    .get(&personal)
+                    .map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 70.0)])
+            );
+            assert!(
+                limits.agent("Claude Code").is_none(),
+                "既定の環境の鍵には何も重ねない"
+            );
+            assert_eq!(limits.agents().count(), 2);
+
+            // チップはいまのスレッドの鍵を見る。
+            assert_eq!(panel.active, second);
+            assert_eq!(panel.active_usage_key(cx), Some(personal.clone()));
+            panel.focus_thread(first, cx);
+            assert_eq!(
+                panel.active_usage_key(cx),
+                Some(work.clone()),
+                "前の設定で立てたセッションのスレッドは、前の鍵の値を出す"
+            );
+            // セッションが畳まれたスレッドは、今の設定で立て直した時の鍵を見る（前の鍵の値を今の値として
+            // 見せない）。
+            panel.threads[first].command_tx = None;
+            assert_eq!(panel.active_usage_key(cx), Some(personal.clone()));
+            // 畳んだ後に遅れて届いた前のセッションの知らせも、そのセッションの鍵へ。
+            panel.on_event(first, limits_at(25.0), cx);
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            assert_eq!(
+                limits.get(&work).map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 25.0)])
+            );
+            assert_eq!(
+                limits
+                    .get(&personal)
+                    .map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 70.0)])
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
     }
 }

@@ -118,6 +118,15 @@ pub fn runtime_socket() -> Option<PathBuf> {
     runtime_socket_on(Platform::current(), &real_var)
 }
 
+/// 検証用の「necoder Dev.app」（`scripts/bundle-mac.sh release dev`・Info.plist の LSEnvironment が
+/// `NECODER_DEV_BUNDLE` を付ける）として動いているか。Dev 版は状態を `NECODER_HOME` に分けて常用の
+/// necoder と並べて動かすので、常用と共有している物には触れない: 自分自身のアップデート（実行中の
+/// .app をリリース版で置き換えると LSEnvironment ごと消え、次の起動から常用のデータを共有してしまう）・
+/// `ne` のシム（/usr/local/bin）・エージェントの skill の置き場。
+pub fn is_dev_bundle() -> bool {
+    real_var("NECODER_DEV_BUNDLE").is_some()
+}
+
 /// ユーザーの**書類フォルダ**（Chat モードの成果物の親・`docs/CHAT.md` §2.2）。
 ///
 /// - macOS: `~/Documents`（Finder の表示名が「書類」。実パスは英語のまま）
@@ -156,7 +165,7 @@ pub fn blobs_dir() -> Option<PathBuf> {
     Some(data_dir()?.join("blobs"))
 }
 
-/// 外部 ACP エージェント関連の置き場（レジストリのキャッシュ・将来の配備先）。
+/// 外部 ACP エージェント関連の置き場（レジストリのキャッシュ・版別 npm アダプタの配備先）。
 pub fn external_agents_dir() -> Option<PathBuf> {
     Some(data_dir()?.join("external_agents"))
 }

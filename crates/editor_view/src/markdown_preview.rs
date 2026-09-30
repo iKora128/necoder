@@ -9,13 +9,33 @@
 //! 足さない。色が付くのは syn-* トークン（コードブロック）・インラインコード/リンクのみ。
 
 use gpui::{
-    div, img, prelude::*, px, relative, AnyElement, FontStyle, FontWeight, HighlightStyle,
-    ImageSource, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
-    UnderlineStyle,
+    div, img, prelude::*, px, relative, AnyElement, App, FontStyle, FontWeight, HighlightStyle,
+    ImageSource, InteractiveText, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle,
+    StyledText, UnderlineStyle, Window,
 };
+use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use theme_core::Theme;
+
+/// リンクが押された時の受け口（行き先は Markdown に書かれたまま）。解釈（URL・ファイル）は
+/// エディタの親が決める — このクレートは Web タブもファイルを開くことも知らない。
+pub(crate) type LinkHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
+/// 1 回の描画でリンクを持つテキストに振る要素 id（`InteractiveText` は id で状態を持つ）。
+struct Links {
+    on_click: LinkHandler,
+    next_id: Cell<usize>,
+}
+
+impl Links {
+    fn next_id(&self) -> usize {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        id
+    }
+}
 
 /// 見出しレベル→文字サイズ（閲覧用に chat より大きめ・階層は size と weight だけで示す）。
 fn heading_size(level: u8) -> f32 {
@@ -31,14 +51,28 @@ fn heading_size(level: u8) -> f32 {
 /// ブロック列を縦スクロールの読み物として組む。`scroll` は呼び出し側（EditorView）が保持する
 /// 別系統のスクロール位置（EditorElement の縦スクロールとは独立）。
 /// `base_dir` は相対パス画像の解決基準（= `.md` の親ディレクトリ。無題バッファは None）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_preview(
     blocks: &[markdown::Block],
+    front_matter: Option<&markdown::FrontMatter>,
     theme: &Theme,
     font_size: f32,
+    code_font: SharedString,
     scroll: &ScrollHandle,
     base_dir: Option<&Path>,
+    on_link: LinkHandler,
 ) -> AnyElement {
+    let links = Links {
+        on_click: on_link,
+        next_id: Cell::new(0),
+    };
     let prose = font_size + 1.0; // 本文は code より僅かに大きく（読み物として）
+                                 // ブロックはスクロールする要素の**直下の子**に並べる（目次から `scroll_to_top_of_item` で飛ぶため）。
+                                 // 行長は子ごとの max_w で抑える（左寄せ・センタリングはしない）。
+    let front_matter = front_matter.filter(|front_matter| !front_matter.entries.is_empty());
+    let first_block = usize::from(front_matter.is_some());
+    let contents = toc_entries(blocks, first_block);
+    let column = |element: AnyElement| div().max_w(px(860.)).child(element);
     div()
         .id("markdown-preview")
         .size_full()
@@ -46,23 +80,142 @@ pub(crate) fn render_preview(
         .track_scroll(scroll)
         .px(px(32.))
         .py(px(22.))
-        .child(
-            // 行長を抑えて可読性を上げる（左寄せ・センタリングはしない）。
-            div()
-                .max_w(px(860.))
-                .flex()
-                .flex_col()
-                .gap(px(11.))
-                .text_size(px(prose))
-                .line_height(px(prose * 1.65))
-                .text_color(theme.fg0)
-                .children(
-                    blocks
-                        .iter()
-                        .cloned()
-                        .map(|block| render_block(block, theme, font_size, base_dir)),
-                ),
+        .flex()
+        .flex_col()
+        .gap(px(11.))
+        .text_size(px(prose))
+        .line_height(px(prose * 1.65))
+        .text_color(theme.fg0)
+        .children(
+            front_matter
+                .map(|front_matter| column(render_front_matter(front_matter, theme, font_size))),
         )
+        .children(blocks.iter().cloned().map(|block| {
+            let element = match &block {
+                markdown::Block::Paragraph { text, .. } if is_toc_marker(text) => {
+                    render_toc(&contents, theme, scroll)
+                }
+                _ => render_block(block, theme, font_size, &code_font, base_dir, &links),
+            };
+            column(element)
+        }))
+        .into_any_element()
+}
+
+/// 目次の印（段落が `[toc]` / `[[toc]]` だけ・大文字小文字は問わない・O29）。Typora や markdown-it の
+/// 書き方に合わせる。
+pub(crate) fn is_toc_marker(text: &str) -> bool {
+    let text = text.trim().to_ascii_lowercase();
+    text == "[toc]" || text == "[[toc]]"
+}
+
+/// 目次の 1 行（`child` = スクロールする要素の中での子の番号）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TocEntry {
+    pub(crate) child: usize,
+    pub(crate) level: u8,
+    pub(crate) text: String,
+}
+
+/// 目次に載せる見出し（h1〜h4）。`first_block` = 最初のブロックの子の番号（front matter の表が
+/// あれば 1）。
+pub(crate) fn toc_entries(blocks: &[markdown::Block], first_block: usize) -> Vec<TocEntry> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            markdown::Block::Heading { level, text, .. } if *level <= 4 => Some(TocEntry {
+                child: first_block + index,
+                level: *level,
+                text: text.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 目次（O29）: 見出しを字下げで並べ、押すとその見出しが上に来るまで流す。色は付けない
+/// （fg1・hover で fg0）。見出しが無ければ「見出しがありません」。
+fn render_toc(entries: &[TocEntry], theme: &Theme, scroll: &ScrollHandle) -> AnyElement {
+    let top = entries.iter().map(|entry| entry.level).min().unwrap_or(1);
+    let (fg0, fg1, fg2) = (theme.fg0, theme.fg1, theme.fg2);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .py(px(4.))
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(fg2)
+                .child(SharedString::from(i18n::t!("editor.toc"))),
+        )
+        .when(entries.is_empty(), |element| {
+            element.child(
+                div()
+                    .text_color(fg2)
+                    .child(SharedString::from(i18n::t!("editor.toc_empty"))),
+            )
+        })
+        .children(entries.iter().map(|entry| {
+            let scroll = scroll.clone();
+            let child = entry.child;
+            div()
+                .id(("toc", entry.child))
+                .pl(px(f32::from(entry.level - top) * 14.))
+                .text_color(fg1)
+                .cursor_pointer()
+                .hover(move |style| style.text_color(fg0))
+                .on_click(move |_, window, _cx| {
+                    scroll.scroll_to_top_of_item(child);
+                    window.refresh();
+                })
+                .child(SharedString::from(entry.text.clone()))
+        }))
+        .into_any_element()
+}
+
+/// front matter の表（O29）: キー（fg2・固定幅）と値（fg1）の 2 列を枠で囲む。本文より一回り小さく、
+/// 色は付けない（識別に集約）。長い値は折り返す。
+fn render_front_matter(
+    front_matter: &markdown::FrontMatter,
+    theme: &Theme,
+    font_size: f32,
+) -> AnyElement {
+    let size = font_size - 0.5;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .px(px(11.))
+        .py(px(8.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(size))
+        .line_height(px(size * 1.5))
+        .children(front_matter.entries.iter().map(|(key, value)| {
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(120.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(key.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(value.clone())),
+                )
+        }))
         .into_any_element()
 }
 
@@ -71,7 +224,9 @@ fn render_block(
     block: markdown::Block,
     theme: &Theme,
     font_size: f32,
+    code_font: &SharedString,
     base_dir: Option<&Path>,
+    links: &Links,
 ) -> AnyElement {
     match block {
         markdown::Block::Heading { level, text, spans } => div()
@@ -83,10 +238,10 @@ fn render_block(
                 FontWeight::SEMIBOLD
             })
             .text_color(theme.fg0)
-            .child(styled_text(text, md_highlights(theme, &spans)))
+            .child(linked_text(text, &spans, theme, links))
             .into_any_element(),
         markdown::Block::Paragraph { text, spans } => div()
-            .child(styled_text(text, md_highlights(theme, &spans)))
+            .child(linked_text(text, &spans, theme, links))
             .into_any_element(),
         markdown::Block::Code { lang, text } => {
             let language = lang.as_deref().and_then(lang::LanguageId::from_name);
@@ -101,7 +256,7 @@ fn render_block(
                 .border_color(theme.border)
                 .px(px(11.))
                 .py(px(9.))
-                .font_family("Guguru Sans Code")
+                .font_family(code_font.clone())
                 .text_size(px(font_size))
                 .line_height(px(font_size * 1.5))
                 .text_color(theme.fg0)
@@ -129,7 +284,7 @@ fn render_block(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(styled_text(text, md_highlights(theme, &spans))),
+                        .child(linked_text(text, &spans, theme, links)),
                 )
                 .into_any_element()
         }
@@ -143,7 +298,7 @@ fn render_block(
             alignments,
             head,
             rows,
-        } => render_table(alignments, head, rows, theme, font_size),
+        } => render_table(alignments, head, rows, theme, font_size, links),
     }
 }
 
@@ -156,6 +311,7 @@ fn render_table(
     rows: Vec<Vec<markdown::TableCell>>,
     theme: &Theme,
     font_size: f32,
+    links: &Links,
 ) -> AnyElement {
     let layout = markdown::table_columns(&head, &rows);
     let columns = layout.len();
@@ -189,7 +345,7 @@ fn render_table(
                     Some(markdown::TableAlign::Right) => element.text_right(),
                     _ => element,
                 };
-                element.child(styled_text(cell.text, md_highlights(theme, &cell.spans)))
+                element.child(linked_text(cell.text, &cell.spans, theme, links))
             }))
     };
     div()
@@ -340,10 +496,74 @@ fn code_highlights(
 /// これを怠ると `with_highlights` の前提（ソート済み非重複）が崩れ layout_line が split_at で abort する。
 /// レンジ端点は [`markdown::parse`] が文字境界を保証済み（unit test）＝ snap 不要。
 fn styled_text(text: String, highlights: Vec<(Range<usize>, HighlightStyle)>) -> AnyElement {
+    build_styled_text(text, highlights).into_any_element()
+}
+
+fn build_styled_text(text: String, highlights: Vec<(Range<usize>, HighlightStyle)>) -> StyledText {
     let highlights = gpui::combine_highlights(highlights, std::iter::empty()).collect::<Vec<_>>();
     let mut styled = StyledText::new(SharedString::from(text));
     if !highlights.is_empty() {
         styled = styled.with_highlights(highlights);
     }
-    styled.into_any_element()
+    styled
+}
+
+/// 本文のテキスト。リンク（`[text](dest)`）を含む時だけ押せる形（[`InteractiveText`]・指カーソル）にし、
+/// 押された行き先を親へ渡す。リンクが無ければ従来どおりの装飾付きテキスト。
+fn linked_text(text: String, spans: &[markdown::Span], theme: &Theme, links: &Links) -> AnyElement {
+    let targets: Vec<(Range<usize>, String)> = spans
+        .iter()
+        .filter_map(|span| match &span.kind {
+            markdown::SpanKind::Link { destination } if !span.range.is_empty() => {
+                Some((span.range.clone(), destination.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let styled = build_styled_text(text, md_highlights(theme, spans));
+    if targets.is_empty() {
+        return styled.into_any_element();
+    }
+    let ranges = targets.iter().map(|(range, _)| range.clone()).collect();
+    let destinations: Vec<String> = targets
+        .into_iter()
+        .map(|(_, destination)| destination)
+        .collect();
+    let on_click = links.on_click.clone();
+    InteractiveText::new(("markdown-link", links.next_id()), styled)
+        .on_click(ranges, move |index, window, cx| {
+            if let Some(destination) = destinations.get(index) {
+                on_click(destination.clone(), window, cx);
+            }
+        })
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod toc_tests {
+    use super::*;
+
+    #[test]
+    fn toc_markers_and_entries() {
+        assert!(is_toc_marker("[toc]"));
+        assert!(is_toc_marker(" [[TOC]] "));
+        assert!(!is_toc_marker("[toc] please"));
+        let blocks = markdown::parse("# A\n\n[toc]\n\n## B\n\ntext\n\n##### deep\n");
+        assert_eq!(
+            toc_entries(&blocks, 1),
+            vec![
+                TocEntry {
+                    child: 1,
+                    level: 1,
+                    text: "A".to_string()
+                },
+                TocEntry {
+                    child: 3,
+                    level: 2,
+                    text: "B".to_string()
+                },
+            ],
+            "h5 は載せない・子の番号は front matter の分ずれる"
+        );
+    }
 }

@@ -90,7 +90,9 @@ b { font-weight: 600; }
 .cap .c2 { min-width: 0; flex: 1; }
 .cap .l1 { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
 .cap .l1 .dim { font-size: 10px; }
-.cap .l1 .k { margin-left: auto; font-size: 9.5px; color: var(--fg2); }
+/* 右端 = Task 行と同じ並び（上 = Captain スレッドのトークン / 下 = キー）。未任命なら出さない（FLEET-V2 §5.6） */
+.cap .meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 10px; color: var(--fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cap .meta .k { font-size: 9.5px; }
 .cap .say { font-size: 10.5px; color: var(--fg1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cap .say::before { content: "✳ "; color: var(--terra); }
 .cap.focus { background: var(--bg2); }
@@ -110,6 +112,19 @@ b { font-weight: 600; }
 .acard .ops span { font-size: 10.5px; padding: 2px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg2); color: var(--fg1); }
 .acard .ops span.pri { color: var(--fg0); border-color: var(--fg2); }
 .acard .ops .key { margin-left: auto; border: none; background: none; color: var(--fg2); padding-right: 0; }
+/* Captain の推薦（FLEET-V2 §5.5）: 承認待ちのカードだけ。✳ だけテラコッタ・見立ては太さで立てる（色相は使わない）・応答はしない */
+.acard .l2.rec { white-space: normal; display: grid; grid-template-columns: auto 1fr; column-gap: 5px; }
+.acard .l2.rec .rv { color: var(--fg0); font-weight: 500; }
+.acard .l2.rec .why { grid-column: 2; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* 分解案カード（FLEET-V2 §5.5）: 承認 / 却下を見出しの直下に置く（要対応は高さに上限があり、下だと隠れる） */
+.acard.prop { border-color: color-mix(in srgb, var(--err) 40%, var(--border)); }
+.acard.prop .ops { margin-top: 5px; margin-bottom: 1px; }
+.acard .prow { display: flex; gap: 7px; align-items: flex-start; margin-top: 5px; }
+.acard .prow > div { min-width: 0; flex: 1; }
+.acard .prow .ck { color: var(--fg2); font-size: 11px; }
+.acard .prow .pt { display: flex; gap: 6px; font-size: 11px; color: var(--fg2); }
+.acard .prow.on .ck, .acard .prow.on .pt { color: var(--fg0); }
+.acard .prow .pt .ag { margin-left: auto; color: var(--fg2); font-size: 9.5px; }
 
 /* リポジトリ見出し */
 .repo-h { display: flex; align-items: center; gap: 7px; padding: 8px 12px 4px; font-size: 11px; color: var(--fg1); }
@@ -156,15 +171,20 @@ b { font-weight: 600; }
 .center { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg1); }
 
 /* 系譜の帯（薄い常設。展開すると従来の 4 表示に） */
-.strip { flex: none; height: 64px; border-bottom: 1px solid var(--border); display: flex; align-items: stretch; background: var(--bg0); }
-.strip .lbl { flex: none; width: 92px; display: flex; flex-direction: column; justify-content: center; padding-left: 12px; font-size: 10px; color: var(--fg2); line-height: 1.35; }
+.strip { flex: none; height: 30px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; padding: 0 12px; background: var(--bg1); }
+.strip .lbl { flex: none; font-size: 10px; color: var(--fg2); }
+.strip .fillx { flex: 1; }
+.strip .tb-btns { display: flex; gap: 2px; font-size: 10px; color: var(--fg2); }
+.strip .tb-btns span { padding: 2px 7px; border-radius: 5px; cursor: pointer; }
+.strip .tb-btns span.on { background: var(--bg3); color: var(--fg0); }
 .strip .lbl b { color: var(--fg1); font-weight: 600; font-size: 10.5px; }
 .strip svg { flex: 1; min-width: 0; height: 100%; }
-.strip .tips { flex: none; display: flex; align-items: center; gap: 14px; padding: 0 14px; font-size: 10.5px; }
-.strip .tips span { display: inline-flex; align-items: center; gap: 5px; color: var(--fg1); cursor: pointer; }
+.strip .tips { flex: none; display: flex; align-items: center; gap: 14px; font-size: 10.5px; }
+.strip .tips > span { display: inline-flex; align-items: center; gap: 5px; color: var(--tc, var(--fg1)); cursor: pointer; }
 .strip .tips span.focus { color: var(--fg0); }
 .strip .tips span.focus .stg { transform: scale(1.25); }
-.strip .exp { flex: none; display: grid; place-items: center; width: 34px; color: var(--fg2); border-left: 1px solid var(--border); font-size: 11px; }
+.strip .exp { flex: none; padding: 2px 7px; border-radius: 5px; color: var(--fg2); font-size: 10.5px; cursor: pointer; white-space: nowrap; }
+.strip .exp:hover { background: var(--bg2); color: var(--fg1); }
 body.strip-hidden .strip { display: none; }
 
 /* 舞台（Task の枚数でレイアウト） */
@@ -172,29 +192,66 @@ body.strip-hidden .strip { display: none; }
 .tcard { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-radius: 8px; border: 1px solid var(--border); background: var(--bg0); overflow: hidden; --tc: var(--th1); }
 .tcard.focus { border-color: color-mix(in srgb, var(--tc) 55%, var(--border)); }
 .tcard .top { flex: none; height: 2px; background: var(--tc); }
-.thead { flex: none; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.thead { flex: none; display: flex; flex-wrap: wrap; row-gap: 4px; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+/* 右側（次へ・トグル・⤢ ⋯）は 1 つの塊。狭いカードで入りきらなければ塊ごと 2 行目の右へ折り返す */
+.thead .acts { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .thead .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tc); }
 .thead .nm { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
 .thead .br { font-family: var(--mono); font-size: 10.5px; color: var(--fg2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thead .phase { white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--fg1); padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg1); }
 .thead .phase i { width: 6px; height: 6px; border-radius: 50%; background: var(--tc); display: block; }
 .thead .phase.rev { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
-.thead .next { margin-left: auto; font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--fg2); background: var(--bg2); color: var(--fg0); cursor: pointer; white-space: nowrap; }
+.thead .next { font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--fg2); background: var(--bg2); color: var(--fg0); cursor: pointer; white-space: nowrap; }
 .thead .next.quiet { border-color: var(--border); color: var(--fg1); }
 .thead .ic { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: var(--fg2); font-size: 12px; }
 .thead .ic:hover { background: var(--bg2); color: var(--fg0); }
 .tcard:not(.focus) .thead .next { display: none; }
 
-/* Task の中のタブ（スレッド / 変更 / ターミナル / ファイル / ＋） */
+/* スレッドタブ行（2026-09-28）: 会話の列の頭。AI との会話（スレッド）+ ＋ だけ。変更 / ターミナル / ファイルは見出しへ */
 .ttabs { flex: none; display: flex; align-items: stretch; height: 30px; border-bottom: 1px solid var(--border); padding: 0 6px; font-size: 11.5px; }
 .ttabs .t { display: flex; align-items: center; gap: 6px; padding: 0 10px; color: var(--fg1); border-top: 2px solid transparent; white-space: nowrap; cursor: pointer; }
 .ttabs .t.on { color: var(--fg0); border-top-color: var(--tc); background: var(--bg1); }
+.ttabs .t .flag { color: var(--pj); font-size: 11px; }
 .ttabs .t .th { width: 7px; height: 7px; border-radius: 50%; background: var(--tc2, var(--tc)); }
+.ttabs .t .x { color: var(--fg2); font-size: 11px; margin-left: 2px; }
+.ttabs .t:not(.on) .x { display: none; }
 .ttabs .t .n { color: var(--fg2); font-size: 10px; font-family: var(--mono); }
 .ttabs .t .n.add { color: var(--ok); } .ttabs .t .n.del { color: var(--err); }
 .ttabs .sepv { width: 1px; background: var(--border); margin: 7px 4px; }
-.ttabs .plus { margin-left: auto; display: flex; align-items: center; gap: 4px; color: var(--fg2); padding: 0 6px; cursor: pointer; }
-.ttabs .plus:hover { color: var(--fg0); }
+/* ＋ は最後のスレッドの隣 = 会話を足す、だけ（何が足されるか迷わない位置） */
+.ttabs .add { display: flex; align-items: center; padding: 0 8px; color: var(--fg2); cursor: pointer; }
+.ttabs .add:hover { color: var(--fg0); }
+/* サイドペインのトグル（Task 見出しの右。タブではない。会話の横に分割で開く = マルチプレクサの split）。
+   変更 / ターミナル / ファイルは Task（worktree）の持ち物なので、会話のタブと同じ段に並べない */
+.thead .views { display: flex; align-items: center; gap: 2px; padding-left: 8px; border-left: 1px solid var(--border); }
+.thead .v { display: flex; align-items: center; gap: 5px; height: 20px; padding: 0 9px; border-radius: 5px; color: var(--fg1); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.thead .v:hover { background: var(--bg2); color: var(--fg0); }
+.thead .v.on { background: var(--bg2); color: var(--fg0); box-shadow: inset 0 0 0 1px var(--border); }
+.thead .v .n { color: var(--fg2); font-size: 10px; font-family: var(--mono); }
+.thead .v .n.add { color: var(--ok); } .thead .v .n.del { color: var(--err); }
+
+/* カード本体 = 会話の列（スレッドタブ行 + 会話）| サイドペイン。幅が足りない（2〜3 列）ときはサイドペインが全面に出る（会話の列ごと隠れる） */
+.tbody { flex: 1; min-height: 0; display: flex; }
+.conv { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.sidep { display: none; flex: 0 0 44%; min-width: 0; min-height: 0; flex-direction: column; border-left: 1px solid var(--border); }
+.sidep.on { display: flex; }
+.sidep .sh { flex: none; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--fg1); }
+.sidep .sh b { color: var(--fg0); font-weight: 600; }
+.sidep .sh .d { color: var(--fg2); font-family: var(--mono); font-size: 10px; }
+.sidep .sh .k { min-width: 18px; height: 18px; padding: 0 5px; display: grid; place-items: center; border-radius: 4px; color: var(--fg2); font-family: var(--mono); font-size: 10px; cursor: pointer; }
+.sidep .sh .k.on { background: var(--bg2); color: var(--fg0); }
+.sidep .sh .x { margin-left: auto; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: var(--fg2); cursor: pointer; }
+.sidep .sh .x:hover { background: var(--bg2); color: var(--fg0); }
+.sidep .sb { flex: 1; min-height: 0; overflow: hidden; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.sidep .frow { display: flex; align-items: center; gap: 8px; height: 22px; padding: 0 6px; border-radius: 4px; font-family: var(--mono); font-size: 11px; color: var(--fg1); }
+.sidep .frow.on { background: var(--bg2); color: var(--fg0); box-shadow: inset 2px 0 0 var(--tc); }
+.sidep .frow .st { color: var(--warn); width: 10px; }
+.sidep .frow .n { margin-left: auto; font-size: 10px; } .sidep .frow .n .a { color: var(--ok); } .sidep .frow .n .r { color: var(--err); }
+.sidep .diff { font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; background: var(--bg1); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+.sidep .diff .h { color: var(--fg2); } .sidep .diff .a { color: var(--ok); } .sidep .diff .d { color: var(--err); }
+.sidep .term { padding: 0; }
+body.l2 .tcard .sidep.on, body.l3 .tcard .sidep.on { flex: 1; border-left: 0; }
+body.l2 .tcard.split .conv, body.l3 .tcard.split .conv { display: none; }
 
 /* transcript */
 .tr { flex: 1; min-height: 0; overflow: hidden; padding: 10px 14px; font-size: 12.5px; line-height: 1.6; display: flex; flex-direction: column; gap: 6px; }
@@ -328,7 +385,6 @@ body.l1 .task.pinned::after { display: none; }
       <span style="--tc:var(--th2)">tab色分け</span>
       <span style="--tc:var(--th3)">gpui起動</span>
     </div>
-    <div class="tb-btns" title="舞台: 1 / 2 / 3 列"><span class="on" id="tb-l1">▭</span><span id="tb-l2">▯▯</span><span id="tb-l3">▯▯▯</span></div>
     <div class="tb-btns"><span class="on">◧</span><span class="on">⬓</span></div>
   </div>
 
@@ -352,16 +408,33 @@ body.l1 .task.pinned::after { display: none; }
       <div class="cap" onclick="focusTask('tc')" title="Captain に話す（⌘0）">
         <div class="face">⚑</div>
         <div class="c2">
-          <div class="l1"><b>Captain</b><span class="dim">Claude Code · ⎇ main</span><span class="k">⌘0</span></div>
+          <div class="l1"><b>Captain</b><span class="dim">Claude Code · ⎇ main</span></div>
           <div class="say">gpui起動 は radar ✓ — 確認だけで統合できます。rope設計 は plan 3/5</div>
         </div>
+        <div class="meta"><span>4.2k</span><span class="k">⌘0</span></div>
       </div>
       <div class="attn">
-        <div class="sec-h">要対応 <span class="cnt">2</span><span class="r">⏎ で先頭へ</span></div>
+        <div class="sec-h">要対応 <span class="cnt">3</span><span class="r">⏎ で先頭へ</span></div>
         <div class="acard next" style="--tc:var(--th2)" onclick="focusTask('t2')">
           <div class="l1"><span class="stg block">◐</span><span class="nm">tab色分け</span><span class="when hot">待ち 45s</span></div>
           <div class="l2"><q>Write settings.rs を許可しますか</q></div>
+          <div class="l2 rec" title="Captain: 許可してよい — Task の worktree 内の settings.rs への書き込みだけ"><span style="color:var(--terra)">✳</span><span class="rv">Captain: 許可してよい</span><span class="why">Task の worktree 内の settings.rs への書き込みだけ</span></div>
           <div class="ops"><span class="pri">許可</span><span>常に許可</span><span>拒否</span><span class="key">次 ⏎</span></div>
+        </div>
+        <div class="acard prop" style="--tc:var(--fg2)">
+          <div class="l1"><span class="stg block">◐</span><span class="nm">⚑ Captain の分解案 · 2 本</span><span class="when">1m</span></div>
+          <div class="ops"><span class="pri">承認（1 本を切る）</span><span>却下</span></div>
+          <div class="l2">実装とテストは 1 本に束ねた。README は触る範囲が重ならないので別立て。</div>
+          <div class="prow on"><span class="ck">☑</span><div>
+            <div class="pt">割り算を足す<span class="ag">Claude Code</span></div>
+            <div class="l2">目的: calc.py に divide を足す（0 で割ったら ValueError）</div>
+            <div class="l2">完了: pytest が通る</div>
+          </div></div>
+          <div class="prow"><span class="ck">☐</span><div>
+            <div class="pt">README の誤字<span class="ag">Codex</span></div>
+            <div class="l2">目的: Calcurator を Calculator に直す</div>
+            <div class="l2">完了: grep で Calcurator が 0 件</div>
+          </div></div>
         </div>
         <div class="acard" style="--tc:var(--th3)" onclick="focusTask('t3')">
           <div class="l1"><span class="stg done">✓</span><span class="nm">gpui起動</span><span class="when">2m</span></div>
@@ -417,53 +490,44 @@ body.l1 .task.pinned::after { display: none; }
 
     <!-- center -->
     <div class="center">
-      <!-- 系譜の帯 -->
+      <!-- 系譜の 1 行: 系譜 + 帯（名前クリックで舞台へ）+ 列数 + ⚑ 編隊図（ブリッジへ）。編隊図そのものはブリッジのサイドペイン -->
       <div class="strip">
-        <div class="lbl"><b>系譜</b>main から 3 本<br>今日 1 件統合</div>
-        <svg viewBox="0 0 600 64" preserveAspectRatio="none">
-          <!-- main -->
-          <line x1="0" y1="32" x2="600" y2="32" stroke="#2b3040" stroke-width="6" stroke-linecap="round"/>
-          <circle cx="60" cy="32" r="3" fill="#646b7a"/><circle cx="110" cy="32" r="3" fill="#646b7a"/><circle cx="160" cy="32" r="3" fill="#646b7a"/>
-          <!-- integrated (dim) -->
-          <path d="M110 32 C150 32 150 54 190 54 L330 54 C370 54 370 32 410 32" fill="none" stroke="#3a3f4c" stroke-width="3"/>
-          <circle cx="410" cy="32" r="4" fill="#646b7a"/>
-          <!-- task/rope -->
-          <path d="M160 32 C200 32 200 12 240 12 L560 12" fill="none" stroke="#61afef" stroke-width="3.5" stroke-linecap="round"/>
-          <circle cx="300" cy="12" r="3" fill="#61afef"/><circle cx="380" cy="12" r="3" fill="#61afef"/><circle cx="460" cy="12" r="3" fill="#61afef"/>
-          <circle cx="560" cy="12" r="6" fill="#1b1e25" stroke="#61afef" stroke-width="2.5"/>
-          <!-- task/tabs -->
-          <path d="M160 32 C200 32 200 24 240 24 L520 24" fill="none" stroke="#e5c07b" stroke-width="3.5" stroke-linecap="round"/>
-          <circle cx="320" cy="24" r="3" fill="#e5c07b"/><circle cx="420" cy="24" r="3" fill="#e5c07b"/>
-          <path d="M514 24 a6 6 0 0 1 12 0 z" fill="#e5c07b"/><circle cx="520" cy="24" r="6" fill="none" stroke="#e5c07b" stroke-width="2"/>
-          <!-- task/gpui -->
-          <path d="M160 32 C200 32 200 44 240 44 L540 44" fill="none" stroke="#c678dd" stroke-width="3.5" stroke-linecap="round"/>
-          <circle cx="290" cy="44" r="3" fill="#c678dd"/><circle cx="360" cy="44" r="3" fill="#c678dd"/><circle cx="440" cy="44" r="3" fill="#c678dd"/>
-          <circle cx="540" cy="44" r="6" fill="#c678dd"/><path d="M536 44 l3 3 l5 -6" fill="none" stroke="#1b1e25" stroke-width="1.6"/>
-        </svg>
+        <div class="lbl"><b>系譜</b></div>
         <div class="tips">
-          <span class="focus" style="--tc:var(--th1)"><span class="stg work">⠿</span>rope設計</span>
-          <span style="--tc:var(--th2)"><span class="stg block">◐</span>tab色分け</span>
-          <span style="--tc:var(--th3)"><span class="stg done">✓</span>gpui起動</span>
+          <span style="--tc:var(--pj)" onclick="focusTask('tc')">━ main</span>
+          <span class="focus" style="--tc:var(--th1)" onclick="focusTask('t1')">┬━ <span class="stg work">⠿</span>rope設計</span>
+          <span style="--tc:var(--th2)" onclick="focusTask('t2')">┬━ <span class="stg block">◐</span>tab色分け</span>
+          <span style="--tc:var(--th3)" onclick="focusTask('t3')">┬━ <span class="stg done">✓</span>gpui起動</span>
         </div>
-        <div class="exp" title="展開: 扇形 / ツリー / カード / ハブ">⌄</div>
+        <div class="fillx"></div>
+        <div class="tb-btns" title="舞台: 1 / 2 / 3 列（⌘⇧1/2/3）"><span class="on" id="tb-l1">▯</span><span id="tb-l2">▯▯</span><span id="tb-l3">▯▯▯</span></div>
+        <div class="exp" title="ブリッジで編隊図を開く / 閉じる（⌘⇧G）" onclick="focusTask('tc')">⚑ 編隊図</div>
       </div>
 
       <!-- 舞台 -->
       <div class="stage" id="stage">
-        <!-- Captain（采配だけ・コードを書かない・main 在住） -->
-        <div class="tcard" data-id="tc" style="--tc:var(--pj)">
+        <!-- ブリッジ = 統合先（main）のカード。Captain は main に住むスレッドなので ⚑ タブとして座る。右は編隊図 -->
+        <div class="tcard split" data-id="tc" style="--tc:var(--pj)">
           <div class="top"></div>
           <div class="thead">
-            <span class="dot"></span><span class="nm">⚑ Captain</span><span class="br">⎇ main · Claude Code</span>
-            <span class="phase"><i></i>次のイベントで起きる · 直近 14:06</span>
-            <span class="next quiet">采配ログ</span>
-            <span class="ic">⤢</span><span class="ic">⋯</span>
+            <span class="dot"></span><span class="nm">necoder</span><span class="br">⎇ main</span>
+            <span class="phase"><i></i>統合先 · 保護</span>
+            <span class="acts">
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v on" data-v="formation">編隊図</span>
+                <span class="v" data-v="log">采配ログ <span class="n">12</span></span>
+                <span class="v" data-v="diff">変更</span>
+                <span class="v" data-v="term">ターミナル</span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic">⤢</span><span class="ic">⋯</span>
+            </span>
           </div>
+          <div class="tbody"><div class="conv">
           <div class="ttabs">
-            <span class="t on"><span class="th"></span>Captain</span>
-            <span class="sepv"></span>
-            <span class="t">采配ログ <span class="n">12</span></span>
-            <span class="t">Task <span class="n">3</span></span>
+            <span class="t on cap-tab"><span class="flag">⚑</span>Captain</span>
+            <span class="t" style="--tc2:#8b90a0"><span class="th"></span>スレッド1</span>
+            <span class="add" title="会話を足す">＋</span>
           </div>
           <div class="tr">
             <div class="u"><span class="who">あなた · 13:40</span>M2 の編集コアを仕上げたい。buffer を rope にして undo を Transaction 単位に、タブの上線をスレッド色に、gpui の起動経路を通す。並走でいい。</div>
@@ -486,25 +550,58 @@ body.l1 .task.pinned::after { display: none; }
               <div class="row"><span class="p">Claude Code</span><span class="p">opus · high</span><span class="p">采配のみ · integrate は人間</span><span class="dim">⌘Enter=送信</span><span class="send">↑</span></div>
             </div>
           </div>
+          </div>
+          <div class="sidep" data-v="log">
+            <div class="sh"><b>采配ログ</b><span class="d">12 · 采配のみ · 統合と承認は人間が操作</span><span class="x">×</span></div>
+            <div class="sb">
+              <div class="frow">14:06 · ✳ gpui起動 は radar ✓ — 確認だけで統合できます</div>
+              <div class="frow">14:05 · ✳ fleet review gpui起動</div>
+              <div class="frow">13:41 · ✳ 3 Task を起動（rope設計 / tab色分け / gpui起動）</div>
+            </div>
+          </div>
+          <div class="sidep on" data-v="formation">
+            <div class="sh"><b>編隊図</b><span class="k on">ハブ</span><span class="k">扇形</span><span class="k">ツリー</span><span class="k">カード</span><span class="d">3 Tasks</span><span class="x">×</span></div>
+            <div class="sb" style="padding:0">
+              <svg viewBox="0 0 560 520" style="width:100%;height:100%" preserveAspectRatio="xMidYMid meet">
+                <line x1="280" y1="260" x2="280" y2="90" stroke="#61afef" stroke-width="2.5"/>
+                <line x1="280" y1="260" x2="400" y2="390" stroke="#e5c07b" stroke-width="2.5"/>
+                <line x1="280" y1="260" x2="160" y2="390" stroke="#c678dd" stroke-width="2.5"/>
+                <rect x="202" y="232" width="156" height="56" rx="12" fill="#1f232c" stroke="#7c8cff" stroke-width="1.2"/>
+                <text x="280" y="256" text-anchor="middle" fill="#e6e8ee" font-size="13" font-weight="600">⚑ Captain</text>
+                <text x="280" y="274" text-anchor="middle" fill="#8b90a0" font-size="10">Claude Code · 3 エージェント</text>
+                <circle cx="280" cy="90" r="8" fill="#1b1e25" stroke="#61afef" stroke-width="2.5"/>
+                <text x="298" y="88" fill="#e6e8ee" font-size="12.5" font-weight="600">rope設計</text><text x="298" y="103" fill="#8b90a0" font-size="10">⎇ task/rope · 実行中 · plan 3/5</text>
+                <circle cx="400" cy="390" r="8" fill="none" stroke="#e5c07b" stroke-width="2.5"/><path d="M392 390 a8 8 0 0 1 16 0 z" fill="#e5c07b"/>
+                <text x="400" y="420" text-anchor="middle" fill="#e6e8ee" font-size="12.5" font-weight="600">tab色分け</text><text x="400" y="435" text-anchor="middle" fill="#8b90a0" font-size="10">⎇ task/tabs · 承認待ち 45s</text>
+                <circle cx="160" cy="390" r="8" fill="#c678dd"/><path d="M155 390 l4 4 l6 -8" fill="none" stroke="#1b1e25" stroke-width="1.8"/>
+                <text x="160" y="420" text-anchor="middle" fill="#e6e8ee" font-size="12.5" font-weight="600">gpui起動</text><text x="160" y="435" text-anchor="middle" fill="#8b90a0" font-size="10">⎇ task/gpui · レビュー待ち · radar ✓</text>
+              </svg>
+            </div>
+          </div>
+          </div>
         </div>
 
         <!-- Task: rope設計 -->
-        <div class="tcard focus" data-id="t1" style="--tc:var(--th1)">
+        <div class="tcard focus split" data-id="t1" style="--tc:var(--th1)">
           <div class="top"></div>
           <div class="thead">
             <span class="dot"></span><span class="nm">rope設計</span><span class="br">⎇ task/rope</span>
             <span class="phase"><i></i>稼働中 · plan 3/5</span>
-            <span class="next quiet">レビューへ</span>
-            <span class="ic" title="拡大">⤢</span><span class="ic" title="片付け">⋯</span>
+            <span class="acts">
+              <span class="next quiet">レビューへ</span>
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v on" data-v="diff">変更 <span class="n add">+214</span> <span class="n del">−87</span></span>
+                <span class="v" data-v="term">ターミナル <span class="n">2</span></span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic" title="拡大">⤢</span><span class="ic" title="片付け">⋯</span>
+            </span>
           </div>
+          <div class="tbody"><div class="conv">
           <div class="ttabs">
-            <span class="t on"><span class="th"></span>rope設計</span>
+            <span class="t on"><span class="th"></span>rope設計<span class="x" title="この会話を閉じる">×</span></span>
             <span class="t" style="--tc2:#56b6c2"><span class="th"></span>レビュー</span>
-            <span class="sepv"></span>
-            <span class="t">変更 <span class="n add">+214</span> <span class="n del">−87</span></span>
-            <span class="t">ターミナル <span class="n">1</span></span>
-            <span class="t">ファイル</span>
-            <span class="plus" title="この Task に足す: スレッド / ターミナル / ファイル">＋ ▾</span>
+            <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
           </div>
           <div class="tr">
             <div class="u"><span class="who">あなた · 14:02</span>buffer を rope に置き換えて、undo を Transaction 単位にして。<code>edit()</code> の呼び出し側は変えない。</div>
@@ -533,6 +630,44 @@ body.l1 .task.pinned::after { display: none; }
               <div class="row"><span class="p">Claude Code</span><span class="p">opus · high</span><span class="p">承認: 毎回</span><span class="dim">Enter=改行 · ⌘Enter=送信</span><span class="send">↑</span></div>
             </div>
           </div>
+          </div>
+          <div class="sidep on" data-v="diff">
+            <div class="sh"><b>変更</b><span class="d">3 files · +214 −87 · main と衝突なし</span><span class="x">×</span></div>
+            <div class="sb">
+              <div class="frow on"><span class="st">M</span>editor_core/src/buffer.rs<span class="n"><span class="a">+148</span> <span class="r">−71</span></span></div>
+              <div class="frow"><span class="st">M</span>editor_core/src/history.rs<span class="n"><span class="a">+52</span> <span class="r">−16</span></span></div>
+              <div class="frow"><span class="st">M</span>editor_core/Cargo.toml<span class="n"><span class="a">+14</span> <span class="r">−0</span></span></div>
+              <div class="diff"><span class="h">@@ -12,7 +12,8 @@ pub struct Buffer {</span>
+<span class="d">-    text: String,</span>
+<span class="a">+    rope: Rope,</span>
+<span class="a">+    history: History,</span>
+<span class="h">@@ -41,6 +41,9 @@ impl Buffer {</span>
+<span class="d">-        self.history.push(self.snapshot());</span>
+<span class="a">+        let transaction = self.history.begin();</span>
+<span class="a">+        transaction.record(self.snapshot());</span>
+         self.rope.remove(range.clone());</div>
+            </div>
+          </div>
+          <div class="sidep" data-v="term">
+            <div class="sh"><b>ターミナル</b><span class="k on">1</span><span class="k">2</span><span class="k" title="ターミナルを足す">＋</span><span class="d">⎇ task/rope</span><span class="x">×</span></div>
+            <div class="sb term"><span class="p">~/necoder-worktrees/rope $ cargo test -p editor_core</span>
+   Compiling editor_core v0.1.0
+    Finished test [unoptimized] in 4.21s
+     Running unittests src/editor_core.rs
+test buffer::tests::edit_is_one_transaction ... ok
+test history::tests::undo_restores_snapshot ... ok
+<span class="p">~/necoder-worktrees/rope $ ▌</span></div>
+          </div>
+          <div class="sidep" data-v="files">
+            <div class="sh"><b>ファイル</b><span class="d">worktree · クリックで Editor に開く</span><span class="x">×</span></div>
+            <div class="sb">
+              <div class="frow">▾ crates</div><div class="frow" style="padding-left:18px">▾ editor_core/src</div>
+              <div class="frow on" style="padding-left:30px"><span class="st">M</span>buffer.rs</div>
+              <div class="frow" style="padding-left:30px"><span class="st">M</span>history.rs</div>
+              <div class="frow" style="padding-left:18px">▸ workspace</div><div class="frow">▸ docs</div>
+            </div>
+          </div>
+          </div>
         </div>
 
         <!-- Task: tab色分け -->
@@ -541,16 +676,20 @@ body.l1 .task.pinned::after { display: none; }
           <div class="thead">
             <span class="dot"></span><span class="nm">tab色分け</span><span class="br">⎇ task/tabs</span>
             <span class="phase"><i></i>承認待ち 45s</span>
-            <span class="next">許可</span>
-            <span class="ic">⤢</span><span class="ic">⋯</span>
+            <span class="acts">
+              <span class="next">許可</span>
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v" data-v="diff">変更 <span class="n add">+38</span> <span class="n del">−6</span></span>
+                <span class="v" data-v="term">ターミナル</span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic">⤢</span><span class="ic">⋯</span>
+            </span>
           </div>
+          <div class="tbody"><div class="conv">
           <div class="ttabs">
             <span class="t on"><span class="th"></span>tab色分け</span>
-            <span class="sepv"></span>
-            <span class="t">変更 <span class="n add">+38</span> <span class="n del">−6</span></span>
-            <span class="t">ターミナル</span>
-            <span class="t">ファイル</span>
-            <span class="plus">＋ ▾</span>
+            <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
           </div>
           <div class="tr">
             <div class="u"><span class="who">あなた · 13:58</span>タブの上線をスレッド色にして。</div>
@@ -563,26 +702,63 @@ body.l1 .task.pinned::after { display: none; }
             <div class="dst"><span class="chip"><i></i>tab色分け <span class="d">／ necoder ⎇ task/tabs</span></span><span class="tok">8.1k / 200k <span class="bar"><i style="width:4%"></i></span></span></div>
             <div class="box"><div class="ph"><span class="caret"></span>…</div><div class="row"><span class="p">Claude Code</span><span class="p">opus · high</span><span class="send">↑</span></div></div>
           </div>
+          </div>
+          <div class="sidep" data-v="term">
+            <div class="sh"><b>ターミナル</b><span class="k on">1</span><span class="k">2</span><span class="k" title="ターミナルを足す">＋</span><span class="d">⎇ task/tabs</span><span class="x">×</span></div>
+            <div class="sb term"><span class="p">~/necoder-worktrees/tabs $ cargo test -p editor_core</span>
+   Compiling editor_core v0.1.0
+    Finished test [unoptimized] in 4.21s
+     Running unittests src/editor_core.rs
+test buffer::tests::edit_is_one_transaction ... ok
+test history::tests::undo_restores_snapshot ... ok
+<span class="p">~/necoder-worktrees/tabs $ ▌</span></div>
+          </div>
+          <div class="sidep" data-v="files">
+            <div class="sh"><b>ファイル</b><span class="d">worktree · クリックで Editor に開く</span><span class="x">×</span></div>
+            <div class="sb">
+              <div class="frow">▾ crates</div><div class="frow" style="padding-left:18px">▾ editor_core/src</div>
+              <div class="frow on" style="padding-left:30px"><span class="st">M</span>buffer.rs</div>
+              <div class="frow" style="padding-left:30px"><span class="st">M</span>history.rs</div>
+              <div class="frow" style="padding-left:18px">▸ workspace</div><div class="frow">▸ docs</div>
+            </div>
+          </div>
+          </div>
         </div>
 
         <!-- Task: gpui起動 -->
-        <div class="tcard" data-id="t3" style="--tc:var(--th3)">
+        <div class="tcard split" data-id="t3" style="--tc:var(--th3)">
           <div class="top"></div>
           <div class="thead">
             <span class="dot"></span><span class="nm">gpui起動</span><span class="br">⎇ task/gpui</span>
             <span class="phase rev"><i></i>レビュー待ち · radar ✓</span>
-            <span class="next">Integrate</span>
-            <span class="ic">⤢</span><span class="ic">⋯</span>
+            <span class="acts">
+              <span class="next">Integrate</span>
+              <span class="views" title="会話の横に開く（Task の持ち物）">
+                <span class="v on" data-v="diff">変更 <span class="n add">+120</span> <span class="n del">−4</span></span>
+                <span class="v" data-v="term">ターミナル</span>
+                <span class="v" data-v="files">ファイル</span>
+              </span>
+              <span class="ic">⤢</span><span class="ic">⋯</span>
+            </span>
           </div>
+          <div class="tbody"><div class="conv">
           <div class="ttabs">
-            <span class="t"><span class="th"></span>gpui起動</span>
-            <span class="sepv"></span>
-            <span class="t on">変更 <span class="n add">+120</span> <span class="n del">−4</span></span>
-            <span class="t">ターミナル</span>
-            <span class="t">ファイル</span>
-            <span class="plus">＋ ▾</span>
+            <span class="t on"><span class="th"></span>gpui起動</span>
+            <span class="add" title="会話を足す（同じ worktree・Task は 1 枚のまま）">＋</span>
           </div>
           <div class="tr">
+            <div class="u"><span class="who">あなた · 13:41</span>gpui の起動経路を通して。window を 1 枚開くところまで。</div>
+            <div class="s"><div>Write <code>crates/necoder/src/main.rs</code></div><div class="r">+42 −0</div></div>
+            <div class="fin">window/app/main の起動経路を通しました。5 files · cargo check 通過。</div>
+          </div>
+            <div class="comp">
+            <div class="dst"><span class="chip"><i></i>gpui起動 <span class="d">／ necoder ⎇ task/gpui</span></span><span class="tok">12.0k / 200k <span class="bar"><i style="width:6%"></i></span></span></div>
+            <div class="box"><div class="ph"><span class="caret"></span>修正を指示…</div><div class="row"><span class="p">Claude Code</span><span class="p">opus · high</span><span class="send">↑</span></div></div>
+          </div>
+          </div>
+          <div class="sidep on" data-v="diff">
+            <div class="sh"><b>変更</b><span class="d">5 files · +120 −4 · main と衝突なし</span><span class="x">×</span></div>
+            <div class="sb">
             <div class="diff"><span class="h">crates/necoder/src/main.rs  +42 −0</span>
 <span class="a">+fn main() {</span>
 <span class="a">+    Application::new().run(|cx| {</span>
@@ -598,10 +774,27 @@ body.l1 .task.pinned::after { display: none; }
 <span class="a">+    chrome: ChromeState,</span>
 <span class="a">+}</span></div>
             <div class="dim" style="font-size:11px">5 files · main と衝突なし（merge-tree） · <b>Integrate</b> で main へ fast-forward</div>
+            </div>
           </div>
-          <div class="comp">
-            <div class="dst"><span class="chip"><i></i>gpui起動 <span class="d">／ necoder ⎇ task/gpui</span></span><span class="tok">12.0k / 200k <span class="bar"><i style="width:6%"></i></span></span></div>
-            <div class="box"><div class="ph"><span class="caret"></span>修正を指示…</div><div class="row"><span class="p">Claude Code</span><span class="p">opus · high</span><span class="send">↑</span></div></div>
+          <div class="sidep" data-v="term">
+            <div class="sh"><b>ターミナル</b><span class="k on">1</span><span class="k">2</span><span class="k" title="ターミナルを足す">＋</span><span class="d">⎇ task/gpui</span><span class="x">×</span></div>
+            <div class="sb term"><span class="p">~/necoder-worktrees/gpui $ cargo test -p editor_core</span>
+   Compiling editor_core v0.1.0
+    Finished test [unoptimized] in 4.21s
+     Running unittests src/editor_core.rs
+test buffer::tests::edit_is_one_transaction ... ok
+test history::tests::undo_restores_snapshot ... ok
+<span class="p">~/necoder-worktrees/gpui $ ▌</span></div>
+          </div>
+          <div class="sidep" data-v="files">
+            <div class="sh"><b>ファイル</b><span class="d">worktree · クリックで Editor に開く</span><span class="x">×</span></div>
+            <div class="sb">
+              <div class="frow">▾ crates</div><div class="frow" style="padding-left:18px">▾ editor_core/src</div>
+              <div class="frow on" style="padding-left:30px"><span class="st">M</span>buffer.rs</div>
+              <div class="frow" style="padding-left:30px"><span class="st">M</span>history.rs</div>
+              <div class="frow" style="padding-left:18px">▸ workspace</div><div class="frow">▸ docs</div>
+            </div>
+          </div>
           </div>
         </div>
       </div>
@@ -623,7 +816,7 @@ body.l1 .task.pinned::after { display: none; }
     <span>⎇ main</span><span>✕ 1 ▲ 0</span><span style="color:var(--ok)">● rust-analyzer</span>
     <span class="fill"></span>
     <span>⠿ 1 稼働 · ◐ 1 承認待ち · ✓ 1 完了</span>
-    <span class="dots"><i class="work" style="background:var(--th1)"></i><i style="background:var(--th2)"></i><i style="background:var(--th3)"></i> Σ 43.5k</span>
+    <span class="dots" title="Fleet のトークン: Task 行（23.4k + 8.1k + 12.0k）と Captain（4.2k）の合計"><i class="work" style="background:var(--th1)"></i><i style="background:var(--th2)"></i><i style="background:var(--th3)"></i> Σ 47.7k</span>
   </div>
 
   <!-- ＋ Task ダイアログ -->
@@ -663,12 +856,22 @@ function focusTask(id) {
   // 1 枚表示なら差し替え、列表示なら先頭へ寄せる
   document.getElementById('stage').prepend(target);
 }
+// サイドペイン: 見出しのトグルをもう一度押すか、ペインの × で閉じる。
+function setSide(card, view) {
+  card.querySelectorAll('.sidep').forEach(p => p.classList.toggle('on', p.dataset.v === view));
+  card.querySelectorAll('.views .v').forEach(v => v.classList.toggle('on', v.dataset.v === view));
+  card.classList.toggle('split', !!view);
+}
+document.querySelectorAll('.tcard').forEach(card => {
+  card.querySelectorAll('.views .v').forEach(v => v.addEventListener('click', () => setSide(card, v.classList.contains('on') ? null : v.dataset.v)));
+  card.querySelectorAll('.sidep .x').forEach(x => x.addEventListener('click', () => setSide(card, null)));
+});
 (function () {
   const h = location.hash.replace('#', '');
   if (h === 'l2' || h === 'l3') setLayout(h);
   if (h === 'nostrip') setStrip(false);
   if (h === 'new') document.body.classList.add('show-new');
-  if (h === 'captain') focusTask('tc');
+  if (h === 'captain' || h === 'bridge') focusTask('tc');
 })();
 </script>
 </body>

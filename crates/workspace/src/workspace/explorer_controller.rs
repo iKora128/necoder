@@ -1,4 +1,5 @@
 use crate::workspace::*;
+use project::file_operations::{FileOperation, UndoError};
 
 impl Workspace {
     pub(crate) fn explorer_mode(&self, cx: &App) -> ExplorerView {
@@ -11,6 +12,129 @@ impl Workspace {
 
     pub(crate) fn explorer_context_menu(&self, cx: &App) -> Option<ExplorerContextMenu> {
         self.explorer.read(cx).context_menu()
+    }
+
+    /// フォーカスをエクスプローラへ（⌘Z をファイル操作の取り消しにする・H30）。命名の入力中は
+    /// 入力欄から奪わない（打ちかけの名前へのキーが消える）。
+    pub(crate) fn focus_explorer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer_naming(cx).is_some() {
+            return;
+        }
+        let handle = self.chrome.explorer_focus.clone();
+        window.focus(&handle, cx);
+    }
+
+    /// エクスプローラにフォーカスがある間のキー。Escape は開いているもの（破棄の確認・右クリック
+    /// メニュー）を先に閉じ、何も無ければ作業面へ戻る（レールと同じ抜け口）。
+    pub(crate) fn on_explorer_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key != "escape" || event.keystroke.modifiers.modified() {
+            return;
+        }
+        if self.explorer_naming(cx).is_some() {
+            return; // 命名は自分の Escape で取り消す（`on_naming_key_down`）
+        }
+        if self.explorer.read(cx).discard_confirm().is_some() {
+            self.cancel_discard(cx);
+        } else if self.explorer_context_menu(cx).is_some() {
+            self.hide_context_menu(cx);
+            cx.notify();
+        } else {
+            self.focus_session_surface(false, false, window, cx);
+        }
+        cx.stop_propagation();
+    }
+
+    /// 1 回のユーザー操作ぶんのファイル操作を、アクティブ project の取り消し履歴へ積む。
+    pub(crate) fn record_file_operations(&mut self, operations: Vec<FileOperation>) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.history.record(operations);
+        }
+    }
+
+    /// ⌘Z（エクスプローラにフォーカスがある時だけ・H30）: 直前のファイル操作を 1 手戻す。
+    /// 戻せない時（ゴミ箱に無い・戻し先に同名がある 等）は理由をトーストで出す。
+    pub(crate) fn undo_file_operation(
+        &mut self,
+        _: &UndoFileOperation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 命名の入力中は何もしない（打ちかけの名前の裏でファイルが動くと驚く）。
+        if self.explorer_naming(cx).is_some() {
+            return;
+        }
+        let active = self.project_sessions.active;
+        let Some(step) = self
+            .project_sessions
+            .slot_mut(active)
+            .and_then(|slot| slot.explorer.history.pop())
+        else {
+            self.push_toast(
+                SharedString::from(i18n::t!("explorer.undo_empty")),
+                self.accent(),
+                cx,
+            );
+            return;
+        };
+        // 戻すと消える・動くパス（作ったもの・動かした先）。開いているタブは先に閉じる
+        // （旧パスへの保存でファイルが復活しないように・名前の変更と同じ流儀）。ただし未保存の
+        // 変更があれば戻さない（取り消し 1 回で打った内容を失わせない）。
+        let vanishing: Vec<PathBuf> = step
+            .iter()
+            .filter_map(|operation| match operation {
+                FileOperation::Created { path } => Some(path.clone()),
+                FileOperation::Moved { to, .. } => Some(to.clone()),
+                FileOperation::Trashed { .. } => None,
+            })
+            .collect();
+        let dirty = self.tabs.iter().find(|tab| {
+            vanishing.iter().any(|path| tab.path.starts_with(path)) && tab.is_dirty(cx)
+        });
+        if let Some(tab) = dirty {
+            let message = i18n::t!("explorer.undo_dirty", "name" => file_label(&tab.path));
+            if let Some(slot) = self.project_sessions.slot_mut(active) {
+                slot.explorer.history.record(step);
+            }
+            self.push_toast(SharedString::from(message), self.accent(), cx);
+            return;
+        }
+        while let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| vanishing.iter().any(|path| tab.path.starts_with(path)))
+        {
+            self.close_tab_at(index, window, cx);
+        }
+        let result = project::file_operations::undo_file_operations_local(&step);
+        let message = match &result {
+            Ok(()) => undo_done_message(&step),
+            Err(error) => {
+                eprintln!("ファイル操作を取り消せない: {error}");
+                undo_error_message(error)
+            }
+        };
+        if result.is_ok() {
+            // 戻った先を選択しておく（ツリーのどこに戻ったかが見える）。
+            let restored = step.first().and_then(|operation| match operation {
+                FileOperation::Moved { from, .. } => Some(from.clone()),
+                FileOperation::Trashed { original, .. } => Some(original.clone()),
+                FileOperation::Created { .. } => None,
+            });
+            if let Some(slot) = self.project_sessions.slot_mut(active) {
+                slot.explorer.selected = restored;
+            }
+        }
+        self.refresh_active_explorer(cx);
+        self.refresh_git_status(cx);
+        self.push_toast(SharedString::from(message), self.accent(), cx);
+        self.focus_explorer(window, cx);
+        cx.notify();
     }
 
     pub(crate) fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -193,8 +317,33 @@ impl Workspace {
                 cx,
             )
         });
+        self.reveal_naming_row(cx);
         self.hide_context_menu(cx);
         cx.notify();
+    }
+
+    /// 命名の入力行をツリーの見える位置へ寄せる。ツリーは見えている行しか描かないので、
+    /// 画面外のフォルダで「新規ファイル」を選ぶと入力行が描かれないまま打つことになる。
+    fn reveal_naming_row(&mut self, cx: &mut Context<Self>) {
+        let Some(naming) = self.explorer_naming(cx) else {
+            return;
+        };
+        let Some(slot) = self.active_slot() else {
+            return;
+        };
+        let display_rows = explorer::tree_display_rows(
+            &slot.explorer.rows,
+            Some(naming.placement()),
+            slot.worktree.root(),
+        );
+        if let Some(index) = display_rows
+            .iter()
+            .position(|row| matches!(row, explorer::TreeDisplayRow::Naming { .. }))
+        {
+            self.chrome
+                .explorer_scroll
+                .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        }
     }
 
     /// インライン命名の確定（Enter）。作成/リネームを実行してツリーを更新する。
@@ -228,8 +377,21 @@ impl Workspace {
         };
         match result {
             Ok(()) => {
+                let operation = match (naming.kind, naming.target) {
+                    (NamingKind::Rename, Some(target)) => FileOperation::Moved {
+                        from: target,
+                        to: destination.clone(),
+                    },
+                    _ => FileOperation::Created {
+                        path: destination.clone(),
+                    },
+                };
+                self.record_file_operations(vec![operation]);
                 if naming.kind == NamingKind::NewFile {
                     self.open_file(destination.clone(), window, cx);
+                } else {
+                    // 名前の変更・新規フォルダの直後に ⌘Z で戻せるよう、フォーカスはツリーに残す。
+                    self.focus_explorer(window, cx);
                 }
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
@@ -340,6 +502,10 @@ impl Workspace {
         }
         match project::rename_local(&source, &destination) {
             Ok(()) => {
+                self.record_file_operations(vec![FileOperation::Moved {
+                    from: source,
+                    to: destination.clone(),
+                }]);
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
                     slot.explorer.selected = Some(destination);
@@ -363,18 +529,25 @@ impl Workspace {
         target_dir: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let mut last_copied = None;
+        let mut copied = Vec::new();
         let mut first_error = None;
         for source in sources {
             if source.parent() == Some(target_dir.as_path()) || target_dir.starts_with(source) {
                 continue;
             }
             match project::copy_into_local(source, &target_dir) {
-                Ok(destination) => last_copied = Some(destination),
+                Ok(destination) => copied.push(destination),
                 Err(error) => first_error = first_error.or(Some(error)),
             }
         }
-        if let Some(destination) = last_copied {
+        // 1 回のドロップ = 1 手（⌘Z でまとめて戻る）。
+        self.record_file_operations(
+            copied
+                .iter()
+                .map(|path| FileOperation::Created { path: path.clone() })
+                .collect(),
+        );
+        if let Some(destination) = copied.pop() {
             let active = self.project_sessions.active;
             if let Some(slot) = self.project_sessions.slot_mut(active) {
                 slot.explorer.selected = Some(destination);
@@ -393,6 +566,7 @@ impl Workspace {
         self.hide_context_menu(cx);
         match project::duplicate_local(&path) {
             Ok(copy) => {
+                self.record_file_operations(vec![FileOperation::Created { path: copy.clone() }]);
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
                     slot.explorer.selected = Some(copy);
@@ -416,8 +590,13 @@ impl Workspace {
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.close_tab_at(index, window, cx);
         }
-        match project::trash_local(&path) {
-            Ok(()) => {
+        match project::move_to_trash_local(&path) {
+            Ok(trashed) => {
+                // ゴミ箱の中の場所を覚えておく（⌘Z で戻す。分からなければ戻せないと出す）。
+                self.record_file_operations(vec![FileOperation::Trashed {
+                    original: path.clone(),
+                    trashed,
+                }]);
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
                     if slot.explorer.selected.as_ref() == Some(&path) {
@@ -429,6 +608,130 @@ impl Workspace {
             }
             Err(error) => eprintln!("ゴミ箱に入れられない: {error:#}"),
         }
+        cx.notify();
+    }
+
+    /// 右クリック「ステージ」（D16）: `git add -- <path>` を背景で。失敗はトーストで出す。
+    pub(crate) fn stage_from_explorer(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.hide_context_menu(cx);
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let host = worktree.host().clone();
+        let root = worktree.root().to_path_buf();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::stage_path_on(host.as_ref(), &root, &path) })
+                .await;
+            let updated = workspace.update(cx, |workspace, cx| {
+                if let Err(error) = result {
+                    workspace.push_toast(
+                        SharedString::from(format!("{error:#}")),
+                        workspace.accent(),
+                        cx,
+                    );
+                }
+                workspace.refresh_git_status(cx);
+                cx.notify();
+            });
+            if let Err(error) = updated {
+                eprintln!("ステージの後始末ができない: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    /// 右クリック「変更を破棄…」: 取り消せない操作なので、確認を出してから行う。
+    pub(crate) fn ask_discard(
+        &mut self,
+        path: PathBuf,
+        status: StatusKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        self.explorer.update(cx, |explorer, cx| {
+            explorer.set_discard_confirm(Some(explorer::DiscardConfirm { path, status }), cx)
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_discard(&mut self, cx: &mut Context<Self>) {
+        self.explorer
+            .update(cx, |explorer, cx| explorer.set_discard_confirm(None, cx));
+        cx.notify();
+    }
+
+    /// 確認の「破棄する」: HEAD の内容へ戻す（`git restore`・背景）。git に戻す先が無いファイル
+    /// （未追跡・add しただけ）はゴミ箱へ入れ、エクスプローラの ⌘Z で戻せる形にしておく。
+    pub(crate) fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirm) = self.explorer.read(cx).discard_confirm() else {
+            return;
+        };
+        self.cancel_discard(cx);
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let host = worktree.host().clone();
+        let root = worktree.root().to_path_buf();
+        let is_local = !worktree.is_remote();
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        let path = confirm.path;
+        cx.spawn(async move |_workspace, cx| {
+            let git_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::discard_path_on(host.as_ref(), &root, &git_path) })
+                .await;
+            let updated = handle.update(cx, |workspace, window, cx| {
+                workspace.finish_discard(path, is_local, result, window, cx)
+            });
+            if let Err(error) = updated {
+                eprintln!("変更の破棄の後始末ができない: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    fn finish_discard(
+        &mut self,
+        path: PathBuf,
+        is_local: bool,
+        result: anyhow::Result<project::DiscardOutcome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(project::DiscardOutcome::Restored) => {}
+            Ok(project::DiscardOutcome::Untracked) if !is_local => self.push_toast(
+                SharedString::from(i18n::t!("explorer.discard_untracked_remote")),
+                self.accent(),
+                cx,
+            ),
+            // add しただけで作業ツリーに無い（消した後）なら片付けるものが無い。
+            Ok(project::DiscardOutcome::Untracked) if path.symlink_metadata().is_err() => {}
+            Ok(project::DiscardOutcome::Untracked) => {
+                while let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+                    self.close_tab_at(index, window, cx);
+                }
+                match project::move_to_trash_local(&path) {
+                    Ok(trashed) => self.record_file_operations(vec![FileOperation::Trashed {
+                        original: path.clone(),
+                        trashed,
+                    }]),
+                    Err(error) => {
+                        self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx)
+                    }
+                }
+            }
+            Err(error) => {
+                self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx)
+            }
+        }
+        self.refresh_active_explorer(cx);
+        self.refresh_git_status(cx);
         cx.notify();
     }
 
@@ -601,13 +904,30 @@ impl Workspace {
 
     /// 開けた worktree をレールの slot にする（`open_folder_in_rail` の後半。host への
     /// 問い合わせは済んでいる前提＝ここは UI スレッドで完結する）。
-    fn add_worktree_to_rail(
+    pub(super) fn add_worktree_to_rail(
         &mut self,
         worktree: Worktree,
-        task_space_preview: TaskSpace,
+        mut task_space_preview: TaskSpace,
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        // Fleet の「取り込む」で開いた worktree は、ブランチ名に関係なく Task にする（O21）。
+        let canonical =
+            |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let root = canonical(worktree.root());
+        let adopted = self
+            .chrome
+            .adopt_as_task
+            .iter()
+            .find(|path| canonical(path) == root)
+            .cloned();
+        if let Some(path) = &adopted {
+            self.chrome.adopt_as_task.remove(path);
+            task_space_preview.kind = SpaceKind::Task;
+            if task_space_preview.base_oid.is_none() {
+                task_space_preview.base_oid = task_space_preview.head_oid.clone();
+            }
+        }
         // リモートの `.necoder` はリモート側にあるので読まない（同名のローカルパスを拾わない）。
         let identity = if worktree.is_remote() {
             ProjectIdentity::default()
@@ -650,6 +970,7 @@ impl Workspace {
             explorer: ExplorerProject::default(),
             open_files: Vec::new(),
             active_file: 0,
+            pinned_files: Vec::new(),
             icon: identity.icon,
             icon_image: identity.icon_image,
             worktree_branch: branch,
@@ -675,6 +996,13 @@ impl Workspace {
         }
         // 決めた色を DB へ焼く（次に開くときも同じ色・並び順に依存しない）。
         self.persist_project_color(index);
+        if adopted.is_some() {
+            // 台帳に Task として残す（再起動してもブランチ名の判定で統合先へ戻らない）。
+            self.make_task_space(index, cx);
+        }
+        // レールの worktree が増えた = Fleet の worktree 一覧を読み直す（O21・作った直後の worktree を
+        // 「消えています」と見間違えない）。
+        self.forget_fleet_worktrees();
         self.update_agent_destination_for(index, cx);
         if is_remote {
             self.refresh_explorer_for(index, cx);
@@ -733,6 +1061,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.overlays.rail_menu = None;
+        // レールの worktree が減った = Fleet の worktree 一覧を読み直す（O21）。
+        self.forget_fleet_worktrees();
         if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
                 SharedString::from(i18n::t!("rail.cannot_remove_last")),
@@ -851,6 +1181,8 @@ impl Workspace {
                                 .id
                                 .clone();
                             workspace.remove_fleet_cells_for(&space);
+                            // その Task の Captain の分解案の行も閉じる（「やり直す」で消した Task を作り直さない・R09）。
+                            workspace.close_proposal_rows_for_task(&space, &target_for_id, cx);
                             workspace.remove_project_slot(index, window, cx);
                         }
                     }
@@ -1024,18 +1356,59 @@ impl Workspace {
         self.hide_context_menu(cx);
     }
 
-    /// ファイルを開く（⌘P・ツリークリック・検索ジャンプ・F12 等の対話経路）。
+    /// 対話でファイルを開いた・選んだことを、アクティブ project の「最近開いた」の先頭へ（⌘P・D19）。
+    pub(crate) fn note_recent_file(&mut self, path: &Path) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.note_opened(path);
+        }
+    }
+
+    /// ファイルを開く（⌘P・ツリーのダブルクリック・検索ジャンプ・F12 等の対話経路）。
     /// **読み込みは背景スレッド**（remote は 30s ブロックしうる — ARCHITECTURE §9）。
+    /// プレビュータブで開いていたら普通のタブにする（開き直した＝そのファイルを使う意思）。
     pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_file_as(path, false, window, cx);
+    }
+
+    /// [`Self::open_file`] の本体。`preview` = プレビュータブで開く（エクスプローラの 1 回クリック・
+    /// `open_file_preview`）。
+    pub(crate) fn open_file_as(
+        &mut self,
+        path: PathBuf,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // 対話でファイルを開いたら設定ホームは退き、AI 全画面も畳む（起動復元の open_file_sync には
         // 入れない＝未オンボーディング時に settings を出しっぱなしにするゲートを壊さないため）。
         // 全画面のままだと中央が Agent なので、開いたタブが画面に出ない。
         self.chrome.show_settings = false;
         self.exit_agent_full_screen(cx);
+        // Web タブの鍵（URL）は Web タブとして開く（⌘⇧T の復元もファイルと同じこの道を通る）。
+        if let Some(url) = web_tab_url(&path) {
+            self.open_web_tab(url, window, cx);
+            return;
+        }
+        // 内蔵の配信で開いていた HTML（鍵は `file://`）も Web タブに戻す。
+        if let Some(file) = static_tab_file(&path) {
+            self.open_static_web_tab(file, window, cx);
+            return;
+        }
+        self.note_recent_file(&path);
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+            if !preview {
+                self.keep_preview_tab(index, cx);
+            }
             self.select_tab(index, window, cx);
             return;
+        }
+        if preview {
+            self.pending_preview_tab = Some(path.clone());
+        } else if self.pending_preview_tab.as_ref() == Some(&path) {
+            // プレビューで読み込み中に普通に開き直された（ダブルクリック）＝普通のタブで開く。
+            self.pending_preview_tab = None;
         }
         let Some(host) = self.active_host() else {
             return;
@@ -1069,6 +1442,15 @@ impl Workspace {
             self.select_tab(index, window, cx);
             return;
         }
+        // 復元するタブ列の中の Web タブ（鍵が URL）。モードは触らずにタブだけ戻す。
+        if let Some(url) = web_tab_url(&path) {
+            self.show_web_tab(url, window, cx);
+            return;
+        }
+        if let Some(file) = static_tab_file(&path) {
+            self.show_static_web_tab(file, window, cx);
+            return;
+        }
         let Some(host) = self.active_host() else {
             return;
         };
@@ -1091,6 +1473,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         apply: impl FnOnce(&mut EditorView, &mut Context<EditorView>) + 'static,
     ) {
+        self.note_recent_file(&path);
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
             if let Some(editor) = self.active_editor() {
@@ -1136,6 +1519,8 @@ impl Workspace {
             path: path.clone(),
             content,
             transient: false,
+            pinned: false,
+            preview: false,
         };
         let handle = tab.focus_handle(cx);
         window.focus(&handle, cx);
@@ -1151,7 +1536,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 読み込み済み内容からタブを開く（open_file / open_file_sync の合流点）。
+    /// 読み込み済み内容からタブを開く（open_file / open_file_sync の合流点）。プレビューで開こうと
+    /// していたファイルなら、新しいタブをプレビューにして前のプレビューを置き換える（O26）。
     pub(crate) fn open_loaded_file(
         &mut self,
         path: PathBuf,
@@ -1159,7 +1545,31 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_work_file(path.clone(), cx);
+        let as_preview = self.pending_preview_tab.as_ref() == Some(&path);
+        if as_preview {
+            self.pending_preview_tab = None;
+        }
+        let tab_count = self.tabs.len();
+        self.open_loaded_tab(path.clone(), content, window, cx);
+        if as_preview && self.tabs.len() == tab_count + 1 {
+            self.settle_preview_tab(&path, window, cx);
+        }
+    }
+
+    /// [`Self::open_loaded_file`] の本体（タブを 1 枚足してアクティブにする）。
+    fn open_loaded_tab(
+        &mut self,
+        path: PathBuf,
+        content: host::FileContent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // ⌘P の「最近開いた」（D19）。対話で開いた分は `open_file` が先頭へ寄せ済みなので、
+        // ここは起動時の復元・プロジェクト切替で開き直した分を古い側へ足すだけ。
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.note_reopened(&path);
+        }
         // 読み込み中に同じファイルが開かれていたら切り替えるだけ。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
@@ -1227,6 +1637,8 @@ impl Workspace {
         let observation = cx.observe(&editor, Self::on_editor_changed);
         let input_subscription = cx.subscribe_in(&editor, window, Self::on_editor_typed);
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
+        let link_subscription = cx.subscribe_in(&editor, window, Self::on_preview_link);
+        let blur_subscription = self.auto_save_on_blur(&editor, window, cx);
         self.tabs.push(EditorTab {
             path: path.clone(),
             content: TabContent::Editor {
@@ -1234,8 +1646,12 @@ impl Workspace {
                 _observation: observation,
                 _input_subscription: input_subscription,
                 _hover_subscription: hover_subscription,
+                _link_subscription: link_subscription,
+                _blur_subscription: blur_subscription,
             },
             transient: false,
+            pinned: false,
+            preview: false,
         });
         self.active_tab = self.tabs.len() - 1;
 
@@ -1328,20 +1744,49 @@ impl Workspace {
                     open_files: slot.open_files.clone(),
                     active_file: slot.active_file,
                     remote_uri: slot.worktree.host().project_uri(slot.worktree.root()),
+                    pinned_files: slot.pinned_files.clone(),
                 })
                 .collect(),
             active: self.project_sessions.active,
-            work_layout: self.chrome.work_layout.clone(),
             fleet_mode: self.chrome.fleet_mode,
             chat_mode: self.chat_mode(),
             chat_active: self.chrome.chat_shown.clone(),
             left_dock_width: self.chrome.explorer_width,
-            fleet_view: match self.chrome.fleet_center_view {
-                FleetCenterView::Work => "work",
-                FleetCenterView::Graph => "graph",
-            }
-            .to_string(),
+            stage_pinned: self
+                .chrome
+                .stage_pinned
+                .iter()
+                .map(|space| space.as_str().to_string())
+                .collect(),
+            stage_columns: self.chrome.stage_columns,
         }
+    }
+
+    /// 窓セッションの payload から「面」の状態（Fleet / Chat・左ドック幅）を戻す。プロジェクト列とタブ列は
+    /// 起動時に別経路（`SavedProject`）で戻すので、ここは [`Self::persisted_state`] の残りの対。
+    pub fn restore_window_state(&mut self, payload: &str, cx: &mut Context<Self>) {
+        let Ok(saved) = serde_json::from_str::<PersistedState>(payload) else {
+            return;
+        };
+        self.chrome.fleet_mode = saved.fleet_mode && !saved.chat_mode;
+        // Chat へ入るには window が要る（フォーカスの付け直し）ので、次の描画で消化する。
+        self.chrome.pending_chat_mode = saved.chat_mode;
+        self.chrome.chat_restore = saved.chat_active;
+        if saved.left_dock_width >= 160.0 {
+            self.chrome.explorer_width = saved.left_dock_width.min(720.0);
+        }
+        self.chrome.show_herd |= saved.fleet_mode;
+        // 舞台のピンと列数（O21）。消えた Task のピンは舞台に出る時に読み飛ばされる。
+        self.chrome.stage_pinned = saved
+            .stage_pinned
+            .into_iter()
+            .take(3)
+            .map(SpaceId)
+            .collect();
+        if (1..=3).contains(&saved.stage_columns) {
+            self.chrome.stage_columns = saved.stage_columns;
+        }
+        cx.notify();
     }
 
     /// 終了直前は background task に任せず、現時点の Workspace 列とタブ列を DB へ同期保存する。
@@ -1358,4 +1803,46 @@ impl Workspace {
     // ── オーバーレイ（Picker） ──
 
     // ⌘P ファイルファインダ。全ファイル列挙は背景（大リポジトリの walk / remote RPC で UI を止めない）。
+}
+
+/// トーストに出す名前（パスの末尾）。
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// 取り消しが済んだ時のトースト（何を戻したか）。
+fn undo_done_message(step: &[FileOperation]) -> String {
+    match step {
+        [FileOperation::Created { path }] => {
+            i18n::t!("explorer.undid_create", "name" => file_label(path))
+        }
+        [FileOperation::Moved { from, .. }] => {
+            i18n::t!("explorer.undid_move", "name" => file_label(from))
+        }
+        [FileOperation::Trashed { original, .. }] => {
+            i18n::t!("explorer.undid_trash", "name" => file_label(original))
+        }
+        _ => i18n::t!("explorer.undid_many", "n" => step.len()),
+    }
+}
+
+/// 取り消せなかった時のトースト（なぜ戻せないか）。
+fn undo_error_message(error: &UndoError) -> String {
+    match error {
+        UndoError::TrashLocationUnknown { original } => {
+            i18n::t!("explorer.undo_trash_unknown", "name" => file_label(original))
+        }
+        UndoError::MissingFromTrash { original } => {
+            i18n::t!("explorer.undo_not_in_trash", "name" => file_label(original))
+        }
+        UndoError::DestinationExists { path } => {
+            i18n::t!("explorer.undo_exists", "name" => file_label(path))
+        }
+        UndoError::SourceMissing { path } => {
+            i18n::t!("explorer.undo_missing", "name" => file_label(path))
+        }
+        UndoError::Io(error) => i18n::t!("explorer.undo_failed", "error" => format!("{error:#}")),
+    }
 }

@@ -9,7 +9,7 @@ fn text(value: &str) -> String {
     value[..floor_char_boundary(value, value.len().min(TEXT_LIMIT))].to_string()
 }
 
-fn turn_id(thread: &Thread) -> String {
+pub(crate) fn turn_id(thread: &Thread) -> String {
     format!("{}:{:?}", thread.session_serial, thread.turn_started_at)
 }
 
@@ -61,7 +61,11 @@ impl AgentPanel {
             .map(|(index, entry)| {
                 let (kind, content) = match entry {
                     Entry::User(v) => ("user", text(v)),
-                    Entry::LedgerEvent(v) => ("ledger_event", text(v)),
+                    // necoder の知らせ（人の発話と分ける）。見出しの時刻と出所を本文の頭に載せる。
+                    Entry::AutoPrompt(auto) => (
+                        "auto_prompt",
+                        text(&format!("{}\n{}", auto.label(), auto.text)),
+                    ),
                     Entry::Agent(v) => ("agent", text(v)),
                     Entry::Thinking(v) => ("thinking", text(v)),
                     Entry::Step {
@@ -73,16 +77,10 @@ impl AgentPanel {
                             result.as_ref().map_or("", |v| v.as_ref())
                         )),
                     ),
-                    Entry::Shell {
-                        command, output, ..
-                    } => (
-                        "tool",
-                        text(&format!(
-                            "! {command}\n\n{}",
-                            output.as_ref().map_or("", |v| v.as_ref())
-                        )),
-                    ),
                     Entry::Checkpoint { label, .. } => ("checkpoint", text(label)),
+                    Entry::Notice(v) => ("notice", text(v)),
+                    // `!` の行（#37）はツールの行と同じ見せ方（PWA に種類を足さない）。
+                    Entry::Shell(run) => ("tool", text(&run.plain_text())),
                 };
                 json!({ "id": index, "kind": kind, "text": content })
             })
@@ -108,6 +106,8 @@ impl AgentPanel {
             "id": q.remote_id, "message": text(&q.message),
             "fields": q.fields.iter().map(|field| json!({
                 "name": field.name, "title": field.label, "multi": field.multi,
+                // 自分で書いて答えられる質問か（Other 欄つき・O17）。
+                "custom": field.custom_answer.is_some(),
                 "choices": field.options.iter().map(|o| json!({"value": o.value, "label": o.title})).collect::<Vec<_>>()
             })).collect::<Vec<_>>()
         }));
@@ -127,7 +127,10 @@ impl AgentPanel {
     ) -> anyhow::Result<Value> {
         if method == "new_thread" {
             let agent = params["agent"].as_str().unwrap_or("Claude Code");
-            anyhow::ensure!(AgentKind::by_label(agent).is_some(), "unknown_agent");
+            anyhow::ensure!(
+                settings::agent_by_label(cx, agent).is_some(),
+                "unknown_agent"
+            );
             anyhow::ensure!(self.threads.len() < 100, "thread_limit");
             let active = self.active;
             let index = self.new_thread_index(cx);
@@ -183,17 +186,28 @@ impl AgentPanel {
                     let selections = params["selections"]
                         .as_object()
                         .ok_or_else(|| anyhow::anyhow!("invalid_answers"))?;
-                    anyhow::ensure!(selections.len() == question.fields.len(), "invalid_answers");
+                    // 自分で書いた答え（O17・Other 欄つきの質問だけ）。無ければ空。
+                    let empty = serde_json::Map::new();
+                    let custom = match &params["custom"] {
+                        Value::Null => &empty,
+                        Value::Object(custom) => custom,
+                        _ => anyhow::bail!("invalid_answers"),
+                    };
+                    let known = |name: &String| question.fields.iter().any(|f| &f.name == name);
+                    anyhow::ensure!(
+                        selections.keys().all(known) && custom.keys().all(known),
+                        "invalid_answers"
+                    );
                     let mut answers = Vec::new();
                     for field in &question.fields {
                         // 複数選択は配列、単一選択は文字列で来る。片方しか受けないと、
                         // スマホ側の 1 フィールド分の型違いで質問ごと答えられなくなる。
-                        let raw = selections
-                            .get(&field.name)
-                            .ok_or_else(|| anyhow::anyhow!("answer_required"))?;
-                        let values: Vec<String> = match raw {
-                            Value::String(value) => vec![value.clone()],
-                            Value::Array(values) => values
+                        // 書いて答える質問は選ばなくてよい（無い・空文字・空の配列）。
+                        let values: Vec<String> = match selections.get(&field.name) {
+                            None => Vec::new(),
+                            Some(Value::String(value)) if value.is_empty() => Vec::new(),
+                            Some(Value::String(value)) => vec![value.clone()],
+                            Some(Value::Array(values)) => values
                                 .iter()
                                 .map(|value| {
                                     value
@@ -202,11 +216,10 @@ impl AgentPanel {
                                         .ok_or_else(|| anyhow::anyhow!("invalid_answer"))
                                 })
                                 .collect::<anyhow::Result<Vec<String>>>()?,
-                            _ => anyhow::bail!("invalid_answer"),
+                            Some(_) => anyhow::bail!("invalid_answer"),
                         };
-                        anyhow::ensure!(!values.is_empty(), "answer_required");
                         anyhow::ensure!(
-                            field.multi || values.len() == 1,
+                            field.multi || values.len() <= 1,
                             "invalid_answer" // 単一選択に複数返させない
                         );
                         for value in &values {
@@ -215,7 +228,28 @@ impl AgentPanel {
                                 "invalid_answer"
                             );
                         }
-                        answers.push((field.name.clone(), values));
+                        let written = match custom.get(&field.name) {
+                            None => "",
+                            Some(Value::String(text)) => text.trim(),
+                            Some(_) => anyhow::bail!("invalid_answer"),
+                        };
+                        anyhow::ensure!(
+                            written.is_empty() || field.custom_answer.is_some(),
+                            "invalid_answer" // Other 欄の無い質問に書かせない
+                        );
+                        anyhow::ensure!(written.chars().count() <= 4_000, "invalid_answer");
+                        anyhow::ensure!(
+                            !values.is_empty() || !written.is_empty(),
+                            "answer_required"
+                        );
+                        if !values.is_empty() {
+                            answers.push((field.name.clone(), values));
+                        }
+                        if let Some(custom_name) =
+                            field.custom_answer.as_ref().filter(|_| !written.is_empty())
+                        {
+                            answers.push((custom_name.clone(), vec![written.to_string()]));
+                        }
                     }
                     Some(answers)
                 };

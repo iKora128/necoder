@@ -43,15 +43,43 @@ impl Workspace {
             return;
         };
         let text = renaming.editor.read(cx).plain_text();
-        let name = text.trim();
+        // `:rocket:` は絵文字に（O20・A08）。
+        let name = ui::emoji::expand_shortcodes(text.trim());
         if !name.is_empty() {
             if let Some(slot) = self.project_sessions.projects.get_mut(renaming.index) {
-                slot.task_space.title = SharedString::from(name.to_string());
-                slot.name = SharedString::from(name.to_string());
+                slot.task_space.title = SharedString::from(name.clone());
+                slot.name = SharedString::from(name);
             }
             self.persist_task_space(renaming.index, cx);
         }
         cx.notify();
+    }
+
+    /// レールの「AI スレッド一覧」アイコン（2026-09-24）。左カラムを herd と切り替える。Editor では全プロジェクトの
+    /// スレッド状態、Fleet では同じ枠が Fleet サイドバーになる（エクスプローラへ切り替えた後の帰り道を兼ねる）。
+    /// Todo / git とは排他で、押し直すとエクスプローラへ戻る（git / Todo のトグルと同じ所作）。
+    pub(crate) fn toggle_herd_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.herd_column_visible(cx) {
+            self.chrome.show_herd = false;
+        } else {
+            self.chrome.show_herd = true;
+            self.chrome.show_left = true;
+            self.todo_panel
+                .update(cx, |panel, cx| panel.set_open(false, cx));
+            self.git_panel
+                .update(cx, |panel, cx| panel.set_open(false, cx));
+            self.ensure_fleet_clock(cx); // 行の相対時刻（開始 / 最終入力）を古びさせない
+        }
+        cx.notify();
+    }
+
+    /// 左カラムにいま herd が出ているか。レールの点灯とトグルが同じ判定を読む。左カラムの優先順は
+    /// Editor（`render`）が herd 先頭、Fleet（`render_fleet_left_column`）が Todo / git 先頭なので分ける。
+    pub(crate) fn herd_column_visible(&self, cx: &App) -> bool {
+        self.chrome.show_left
+            && self.chrome.show_herd
+            && (!self.chrome.fleet_mode
+                || (!self.todo_panel.read(cx).open && !self.git_panel_open(cx)))
     }
 
     /// herd サイドバー本体（M14 #1・herdr の「設定不要の状態一覧」を ACP ネイティブで）。

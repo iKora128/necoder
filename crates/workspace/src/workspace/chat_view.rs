@@ -12,6 +12,7 @@
 //! 「アクティブな session」を相手にしている既存のコード（タブ・プレビュー・ファイルを開く）は
 //! そのまま Chat でも動く。
 
+use super::system_notifications::AgentAlert;
 use crate::workspace::*;
 use chat_core::date::{Date, Recency};
 
@@ -139,10 +140,10 @@ impl Workspace {
     /// 拾うのは「ファイルを開く」「成果物を見せる」「知らせる」だけ。
     pub(crate) fn on_chat_panel_event(
         &mut self,
+        panel: &Entity<AgentPanel>,
         event: &agent_panel::PanelEvent,
         cx: &mut Context<Self>,
     ) {
-        let neutral = self.theme.fg2;
         match event {
             agent_panel::PanelEvent::ChatRowsChanged => {
                 self.chrome.chat_accent = self
@@ -173,15 +174,9 @@ impl Workspace {
                 }
                 cx.notify();
             }
+            // transcript の URL: localhost 系は Chat の右の領域に Web タブ、それ以外は既定のブラウザ。
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
-                if let Err(error) = crate::crash::open_url(url) {
-                    eprintln!("URL を開けない: {error:#}");
-                    self.push_toast(
-                        i18n::t!("link.open_failed", "target" => url.as_ref()).into(),
-                        neutral,
-                        cx,
-                    );
-                }
+                self.open_url(url, cx);
             }
             agent_panel::PanelEvent::OpenDiffRequest {
                 title,
@@ -205,10 +200,12 @@ impl Workspace {
             }
             agent_panel::PanelEvent::TurnEnded {
                 thread,
+                thread_id,
                 color,
                 summary,
+                digest,
+                outcome,
                 muted,
-                ..
             } => {
                 // 見えている会話が終わったことは画面で分かる。別のモードに居る時だけ知らせる。
                 if !self.chat_mode() && !muted {
@@ -218,11 +215,23 @@ impl Workspace {
                         cx,
                     );
                 }
+                let detail = digest.clone().unwrap_or_else(|| summary.clone());
+                self.post_agent_notification(
+                    AgentAlert::from_outcome(*outcome),
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    &detail,
+                    *muted,
+                    cx,
+                );
                 self.on_chat_turn_ended(cx);
                 cx.notify();
             }
             agent_panel::PanelEvent::TurnFailed {
                 thread,
+                thread_id,
                 color,
                 message,
                 muted,
@@ -234,9 +243,20 @@ impl Workspace {
                         cx,
                     );
                 }
+                self.post_agent_notification(
+                    AgentAlert::Failed,
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    message,
+                    *muted,
+                    cx,
+                );
             }
             agent_panel::PanelEvent::PermissionWaiting {
                 thread,
+                thread_id,
                 color,
                 title,
                 muted,
@@ -249,6 +269,45 @@ impl Workspace {
                         cx,
                     );
                 }
+                self.post_agent_notification(
+                    AgentAlert::Permission,
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    title,
+                    *muted,
+                    cx,
+                );
+            }
+            agent_panel::PanelEvent::QuestionWaiting {
+                thread,
+                thread_id,
+                color,
+                message,
+                muted,
+                ..
+            } => {
+                if !self.chat_mode() && !muted {
+                    self.push_toast(
+                        SharedString::from(format!("◐ {thread} — {message}")),
+                        *color,
+                        cx,
+                    );
+                }
+                self.post_agent_notification(
+                    AgentAlert::Question,
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    message,
+                    *muted,
+                    cx,
+                );
+            }
+            agent_panel::PanelEvent::SettingsSaveFailed { message } => {
+                self.push_failure_toast(message.clone(), None, cx);
             }
             _ => {}
         }
@@ -922,6 +981,28 @@ impl Workspace {
                 ),
             );
         }
+        // 新しいセッションで続ける（O15）: 長くなったチャットを、要点を前置きにして新しい会話で続ける。
+        let continue_id = id.clone();
+        menu_box = menu_box.child(
+            item("chat-ctx-continue", i18n::t!("agent.thread_menu_continue")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.close_chat_menu(cx);
+                    let continued = this.chat_panel().is_some_and(|panel| {
+                        panel.update(cx, |panel, cx| {
+                            panel.continue_thread_in_new_session(&continue_id, cx)
+                        })
+                    });
+                    if !continued {
+                        this.push_toast(
+                            SharedString::from(i18n::t!("agent.handoff_unavailable")),
+                            this.theme.fg2,
+                            cx,
+                        );
+                    }
+                }),
+            ),
+        );
         let export_id = id.clone();
         menu_box = menu_box.child(
             item("chat-ctx-export", i18n::t!("chat.export_markdown")).on_mouse_down(
@@ -1035,7 +1116,7 @@ impl Workspace {
                 dialog.child(
                     div()
                         .text_size(px(11.))
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .text_color(theme.fg2)
                         .child(SharedString::from(dir.display().to_string())),
                 )
@@ -1150,7 +1231,7 @@ impl Workspace {
             )
             .child(
                 div()
-                    .font_family("Guguru Sans Code")
+                    .font_family(ui::code_font(cx))
                     .text_color(theme.fg2)
                     .child(SharedString::from(label)),
             )

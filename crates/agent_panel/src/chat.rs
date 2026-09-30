@@ -222,7 +222,8 @@ impl AgentPanel {
             let color_index = (0..12)
                 .find(|index| thread_color(*index) == row.color)
                 .unwrap_or(0);
-            let mut thread = thread_from_storage(&storage, id, &row.name, color_index, cx);
+            let mut thread =
+                thread_from_storage(&storage, id, &row.name, color_index, RESTORED_TURNS, cx);
             thread.agent = "Claude Code".into();
             thread.permission_mode = SharedString::from(chat_core::preset::PERMISSION_MODE);
             thread.last_input_at_ms = Some(row.sort_at_ms);
@@ -327,10 +328,9 @@ impl AgentPanel {
         }
         let dir = self.chat_dir(id);
         if let Some(index) = self.threads.iter().position(|thread| thread.id == id) {
-            if let Some(thread) = self.threads.get_mut(index) {
-                thread.command_tx = None; // エージェントを止める
-            }
-            self.threads.remove(index);
+            let mut removed = self.threads.remove(index);
+            removed.command_tx = None; // エージェントを止める
+            self.stop_shell_runs_of(&mut removed, cx); // `!` で走らせたコマンドも止める
             if self.threads.is_empty() {
                 self.threads
                     .push(new_chat_thread(self.next_chat_color(), cx));
@@ -568,7 +568,8 @@ impl AgentPanel {
                     .find(|row| row.id == id)
                     .map(|row| row.name.to_string())
                     .unwrap_or_default();
-                let entries = thread_from_storage(&storage, id, &name, 0, cx).entries;
+                let entries =
+                    thread_from_storage(&storage, id, &name, 0, RESTORED_TURNS, cx).entries;
                 let markdown = (!entries.is_empty()).then(|| chat_markdown(&name, &entries));
                 (name, markdown)
             }
@@ -589,8 +590,12 @@ fn chat_markdown(name: &str, entries: &[Entry]) -> String {
     let mut markdown = format!("# {name}\n");
     for entry in entries {
         match entry {
-            Entry::User(text) | Entry::LedgerEvent(text) => {
+            Entry::User(text) => {
                 markdown.push_str(&format!("\n## {}\n\n{text}\n", i18n::t!("chat.export_you")));
+            }
+            // necoder の知らせは「あなた」とは書かない（人が書いた文ではない）。
+            Entry::AutoPrompt(auto) => {
+                markdown.push_str(&format!("\n## {}\n\n{}\n", auto.label(), auto.text));
             }
             Entry::Agent(text) => {
                 markdown.push_str(&format!(
@@ -599,8 +604,8 @@ fn chat_markdown(name: &str, entries: &[Entry]) -> String {
                 ));
             }
             Entry::Step { tool, .. } => markdown.push_str(&format!("\n> ⏺ {tool}\n")),
-            Entry::Shell { command, .. } => markdown.push_str(&format!("\n> ! {command}\n")),
-            Entry::Thinking(_) | Entry::Checkpoint { .. } => {}
+            Entry::Shell(run) => markdown.push_str(&format!("\n> ! {}\n", run.command)),
+            Entry::Thinking(_) | Entry::Checkpoint { .. } | Entry::Notice(_) => {}
         }
     }
     markdown
@@ -652,6 +657,7 @@ impl AgentPanel {
                 old_text: old_text.map(str::to_string),
                 new_text: new_text.to_string(),
             }],
+            parent: None,
         };
         let Some(thread) = self.threads.get_mut(active) else {
             return;
@@ -692,9 +698,11 @@ impl AgentPanel {
             });
             cx.emit(PanelEvent::TurnEnded {
                 thread: thread.name.clone(),
+                thread_id: SharedString::from(thread.id.clone()),
                 color: thread.color,
                 summary: SharedString::default(),
                 digest: None,
+                outcome: TurnOutcome::Completed,
                 muted: true,
             });
         }
@@ -790,16 +798,22 @@ impl AgentPanel {
         let Some(thread) = self.threads.get(self.active) else {
             return;
         };
-        let (name, color) = (thread.name.clone(), thread.color);
+        let (name, thread_id, color) = (
+            thread.name.clone(),
+            SharedString::from(thread.id.clone()),
+            thread.color,
+        );
         cx.emit(PanelEvent::FilesTouched {
             files: vec![path],
             color,
         });
         cx.emit(PanelEvent::TurnEnded {
             thread: name,
+            thread_id,
             color,
             summary: SharedString::default(),
             digest: None,
+            outcome: TurnOutcome::Completed,
             muted: true,
         });
         cx.notify();
@@ -895,7 +909,7 @@ fn new_chat_thread(color_index: usize, cx: &App) -> Thread {
 }
 
 /// 一致した語の前後を 1 行に畳んで返す（一覧の行に収まる長さ）。
-fn snippet_around(content: &str, lowercase_query: &str) -> SharedString {
+pub fn snippet_around(content: &str, lowercase_query: &str) -> SharedString {
     let flat: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
     let characters: Vec<char> = flat.chars().collect();
     let lowered: Vec<char> = flat.to_lowercase().chars().collect();
@@ -995,6 +1009,8 @@ mod tests {
             diffs: Vec::new(), // 差分なし＝チェックポイントを挟まない同期応答の経路
             raw_input: None,
             options: choices(),
+            tool_call_id: String::new(),
+            mcp_tool: false,
             respond,
         };
         (event, answers)
@@ -1319,24 +1335,26 @@ mod tests {
     }
 
     /// 貼り付けた画像はキャッシュへ置いて添付にする（チャットのフォルダにもプロジェクトにも置かない）。
+    /// 置き場はフィクスチャの一時フォルダ（`attach_pasted_image` のままだと本物のキャッシュに書く）。
     #[gpui::test]
     fn a_pasted_image_becomes_an_attachment(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "paste");
+        let directory = fixture.root.join("chat-paste");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
-            panel.attach_pasted_image(
+            panel.attach_image_in(
                 &editor_view::PastedImage {
                     format: gpui::ImageFormat::Png,
                     bytes: vec![1, 2, 3],
                 },
+                &directory,
                 cx,
             );
             let thread = &panel.threads[panel.active];
             assert_eq!(thread.context.len(), 1);
             let path = PathBuf::from(thread.context[0].as_ref());
-            assert!(path.to_string_lossy().contains("chat-paste"), "{path:?}");
+            assert!(path.starts_with(&directory), "{path:?}");
             assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3]);
-            let _ = std::fs::remove_file(path);
         });
         drop(fixture);
     }

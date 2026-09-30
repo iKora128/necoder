@@ -3210,10 +3210,135 @@
 - 学び/罠: ①**「人の手番」の線引きを間違えていた**。確かめたいのは OS の所作（ドラッグ・スクリーンショット・WebView の絵）ではなく **necoder の経路**で、そこを切り分ければ offscreen で通せる。ページが結果を `document.title` に書けば、隔離していても（＝外へ送れなくても）necoder 側で読める ②**チェックポイントは書き込みのたびに切られる**（自動で許可した時も）。だから「直前へ戻す」は最後の書き込みだけを取り消す。テストで「元に戻らない」と見えたのは**私の期待が間違っていて**、最初のチェックポイントへ戻したら元どおりだった。仕様を疑う前に、まず自分の期待を疑う ③長い絶対パスをそのままチップに出すと読めない（貼り付けた画像のキャッシュ名は機械の名前）。**offscreen の目視が無ければ気づけなかった** — テストは通っていた
 - 次: 残る人の手番は **OS の所作 3 つ**（実機の D&D・⌘⇧⌃4 → ⌘V・書類フォルダの TCC ダイアログ）と、release ビルドでのメモリ再計測
 
+
+## 2026-09-19 — 閉じた会話のメモリ解放と npm アダプタの管理導入
+- 確認した保持: `closed_threads: Vec<Thread>` が会話全文・ツール出力・差分を無制限に保持していた。閉じると Entry 全体を本人だけが読める一時ファイルへ直列化し、本文 Vec と描画キャッシュを解放する。⌘⇧T は全文を読み戻す。書けない場合はメモリに保持し、読めない場合は復元対象を残して再試行可能にする。既存 DB はツール出力を省略するため、DB の簡略履歴への置換はしない。
+- キャッシュ: Markdown・StyledText・リンクは各入力本文合計 512 KiB、構文強調の span は 2 MiB の上限を件数制限と併用。本文上限は解析木や GPUI レイアウトを含む実ヒープ量ではない。上限より大きい本文も表示するがキャッシュしない。
+- 起動: ローカルの固定版 npm アダプタを `external_agents/npm/` に `npm install --save-exact` で導入し、manifest の名前・版・bin を検証してから版別ディレクトリを公開する。導入は background executor、Node は PATH のものを使う。完成済み JS エントリは Node で直接起動。設定コマンド・SSH・Windows・範囲指定・特殊な npx 引数は従来経路。失敗時も npx にフォールバックする。Claude / Codex の手動 install_cmd に ACP アダプタを追加。
+- 検証: `cargo check -p necoder --offline`、`cargo test -p agent_panel -p acp_client -p necoder --offline`。一時ファイルの全文往復・復元失敗時の再試行・長文ストリームのキャッシュ上限・固定版とパス検証・模擬 npm による正常導入／失敗時の未公開をテスト。実 npm レジストリからの取得・実ベンダーとの通信・長時間稼働時 footprint の削減量は未検証。
+- 測定上の注意: 起動直後の RSS 122 MB と長時間使用後の footprint 1089 MB は直接比較できない。圧縮量だけではリークの所在を特定できない。開いた会話の履歴は引き続きメモリにあり、本修正だけで本体全体の問題を解消したとは扱わない。一時ファイルへの保存／復元は現状タブ操作時に同期実行するため、非常に大きい会話の操作時間も次の実測対象。
+
+## 2026-09-19 — Fleet の Task タブ行を mock に寄せた（`{count} 列` と `ターミナル 66`）
+
+- 発端: ドッグフーディング中の目視で「右上が `{count} 列` のまま」「`ターミナル 66` と出る」「変更・ファイルが
+  スレッドと同じ見た目のタブで並んでいて区別がつかない」。FLEET-V2 §3.5 と `mock/fleet-v2.html` と突き合わせた。
+- 直したもの:
+  - `fleet.stage_columns` の値が `"{count} 列"` だった。差し替えの綴りは `%{count}`。ja/en 両方。
+    parity テストは ja/en のキー集合しか見ないので、値の綴り間違いは素通りしていた。
+  - Task タブ行のターミナル番号が `work_layout.allocate()` の通し番号（Editor 側と共有のグローバル）だった。
+    Task 内の通番（1 から）に変えた。**内部 ID は UI に出さない**。
+  - スレッドタブにスレッド色の `●` を付け、スレッド群と 変更 / ターミナル / ファイル の間に縦の区切りを入れた。
+    選択は下線ではなく **上線 2px**（mock の `.ttabs .t.on` に合わせる）+ `bg1` + fg0。文字は 10px → 11px。
+    `＋ 会話` / `＋ 端末` はタブの並びに混ざらないよう右端へ寄せた（`ml_auto`）。
+- 再発防止: `i18n` に `placeholders_are_written_with_percent` を追加。`%` を落とした `{名前}` を弾く
+  （綴りを戻すと実際に落ちることを確認してから戻した）。
+- 残（FLEET-V2 §3.5 のうち未実装）: `変更 +N −M` の shortstat バッジ・`＋▾` のドロップダウン化。
+- 検証: `cargo check -p workspace` / `cargo test -p workspace -p i18n` green。**実機の目視は本人の手番**
+  （ドッグフーディング中なので窓を上げていない）。
+
+## 2026-09-19 — Task カードをペインバー + サイドペインに作り直した（仕様ごと）
+
+- 発端: 本人の目視で「上のタブの意味がわからない・`＋ 会話 ＋ 端末` が使いづらい・マルチプレクサらしくない」。原因は実装以前に
+  FLEET-V2 §3.5 の仕様で、*誰と話すか*（スレッド）と *何を見るか*（変更 / ターミナル / ファイル）を 1 本のタブに混ぜていた。
+  タブは排他なので、会話を見ながら diff や端末を横に置けなかった。
+- 直し方（文書 → mock → 実装の順）: §3.5 / §3.6 を書き換え、`mock/fleet-v2.html` を headless Chrome で 1 列 / 2 列とも目視。
+  左 = スレッドタブ + `＋`（会話を足すだけ）/ 右 = `◨ 変更 | ターミナル N | ファイル` のトグル。カード幅 900px 以上は
+  「会話 | サイドペイン 44%」の分割、未満は全面（スレッドタブで会話へ戻る）。端末の追加はターミナルペイン見出しの `1 2 ＋`。
+  ターミナルのトグルは 1 本も無ければその場で作る。Captain カードも同じ器にした（采配ログ / Task がサイドペイン）。
+- 実装: `fleet_stage.rs` に `render_pane_bar` / `render_side_pane` / `render_card_body` / `stage_side` / `conversation_panel` /
+  `set_stage_side`。状態は増やさず `stage_tabs` を読み替えた（Agent を指せばサイド無し）。i18n は `fleet.side_tip` /
+  `side_close` / `files_hint` を追加、`tab_add_*` はツールチップ文言に転用。
+- 検証: `cargo check --workspace --all-targets` 警告 0、`cargo test -p i18n -p workspace -p necoder` green
+  （`fleet_panes_keep_their_threads_and_remote_targets` にサイドペインの開閉と幅判定を追加）。**実機の目視は本人の手番**
+  （ドッグフーディング中は別インスタンスを立てない）。
+- 罠: `stage_width` は「viewport − レール − 左カラム」の概算で、カードの実幅ではない。900px の閾値はこの概算に対するもの。
+  AgentPanel の自前タブを畳む `sync_work_chrome` はまだ `workbench.rs` にある（F7 で消す前に移すこと）。
+- 残: `変更 +N −M`（shortstat キャッシュ）・サイドペイン幅のドラッグ・スレッドタブの ×・統合先カードのスレッド非表示。
+
+## 2026-09-19 — Task カードの残りを片付けた（`+N −M`・×・幅ドラッグ・列数トグルの同居）
+
+- `+N −M`: `project::git_shortstat_on`（`git diff --shortstat <base_oid>`・base 無しは HEAD）を `refresh_git_status_for` の
+  background に同乗させ `RepositoryController.shortstat` へ。変更トグル・変更ペイン見出し・サイドバーの Task 行が同じ値を読む
+  （F1 / F2 の両方の「残」を回収）。render 中に git は呼ばない。untracked は数えない（git の diff と同じ）。
+- スレッドタブの ×: 選択中だけ・最後の 1 本には出さない。`close_task_thread` が、空になった panel を一覧から外して会話を残りへ移す
+  （先頭 panel は Task の初期パネルなので残す）。
+- サイドペイン幅: 境をドラッグ（25〜65%・`chrome.side_pane_ratio`・既存の `on_resize_move` に相乗り）。永続化はしていない。
+- 列数トグル: 専用の 30px 行をやめ、系譜ヘッダの右へ（`▯ ▯▯ ▯▯▯`・ラベルはツールチップ）。畳んだ系譜は帯ごと 1 行にまとめ、
+  舞台の上の 3 段（94px）が 1 段（30px）になった。表示切替（扇形/ツリー…）は展開時だけ出す。
+- ファイルペイン: ▸/▾・hover・git の 1 文字と色（エクスプローラと同じ `git_tint` / `git_letter`）。
+- `sync_work_chrome` → `fleet_stage.rs::sync_embedded_panels` に移設（F7 で workbench を消しても二重タブにならない）。
+- 仕様の訂正: 統合先カードのスレッドは隠さない（main の panel は Editor で普段使う会話そのもの）。§3.2 / §3.4 / §3.5 に反映。
+- 検証: `cargo check --workspace --all-targets` 警告 0・`cargo test -p i18n -p project -p workspace -p necoder` green
+  （`shortstat_reads_both_signs_and_empty` を追加）。**実機の目視は本人の手番**。
+- 見送り: F7（workbench / work_layout の削除）は保存済み窓状態の形式と端末 ID の採番に絡むので別の一歩にする。
+
+
 ## 2026-09-19 — レールの ↑/↓ が「タブ復元」に宛先を奪われるのを直した
 - やったこと: `open_slot_files`（＋remote 版の継続）に `restore_rail_focus_after_tabs` を追加。復元前にレールがキーの宛先だったら、復元後にレールへ戻し `release_native_key_focus` も呼ぶ（`crates/workspace/src/workspace/project_session.rs`）。回帰テスト `restoring_a_projects_tabs_does_not_steal_the_rails_keys` を追加（修正前は落ちることを確認済み）。
 - 学び/罠: レール ↑/↓ の連打は「**その session の初回表示**」でだけ止まる。タブ復元は 1 枚ごとに `open_loaded_file` が `window.focus(エディタ)` し、最後の `select_tab` は rendered_html なら OS の first responder まで WebView に渡す。後者まで行くと素の ↑/↓ は WKWebView のスクロールに食われて GPUI に上がって来ない（⌘付きのショートカットだけ効く）ので、GPUI のフォーカスを戻すだけでは足りない。
 - 次: 同じ形（描画/復元がフォーカスを奪う）が Fleet の初回表示側にも無いか、報告が出たら見る。
+
+
+## 2026-09-20 — F7 掃除 + ブリッジ（Captain と編隊図を Fleet の家に戻した）
+
+- 発端 ①: release ビルドの警告 `variants Terminal, DockTerminal, … are never constructed`（`workbench.rs` の `WorkAction`）。
+  構築するのが `#[cfg(debug_assertions)]` のプローブだけなので **release でだけ**出ていた（dev の `--all-targets` は警告 0 のまま）。
+  `#[allow]` で隠さず F7 を完了させた: `workbench.rs` / `work_layout.rs` / `FleetCenterView` / `NECODER_WORKBENCH_PROBE` /
+  `work.*` の死キー 37 個を削除。名前に反して窓全体の復元だった `restore_work_layout` は `restore_window_state` に改名して
+  `persisted_state` の隣へ。保存形式から `work_layout` / `fleet_view` を外した（旧 payload の余分なキーは serde が無視）。
+  端末の名札は `chrome.next_terminal_id`。設定の 3 キーは `settings.pref_tabs_position` ほかへ移した。
+- 発端 ②: 本人「見た目はめっちゃ良くなったが、Captain モードなど Fleet らしさが消えた。どうすればいい？」。隔離 offscreen で
+  実画面を撮って原因が 3 つ分かった: (a) 本人の settings.json に `captain_agent` が無い = **未任命**で、しかも**任命する UI が
+  無かった**（Captain バーの文言が「settings.json の captain_agent」・押すと Captain 節の無い設定ホームへ飛ぶだけ）。
+  (b) Fleet らしい絵（ハブ / 扇形）は実装済みなのに**既定で畳まれ**、展開すると高さ 360px を取って Task カードが潰れる
+  （下段 290px と合わせて会話の面積がほぼ 0）＝実機では常に畳まれ、中央は「ただのチャット」に見えていた。
+  (c) main を選ぶと空の「スレッド1 待機中」が全面に出る。
+- 直し方（FLEET-V2 §3.3 / §3.6 / §5.7 を先に書き換え）: **統合先のカード = ブリッジ**。Captain は「main に住むスレッド」なので
+  ペインバー先頭の `⚑ Captain` タブに座らせ、別実装の Captain カードと `captain_space` / `captain_tab` を消した。
+  右のサイドペインに **編隊図**（既存の 4 表示をペインの中へ・何も選んでいない統合先は既定で開く・既定はハブで、任命済みなら
+  中心が `⚑ Captain`）と **采配ログ**。舞台の上は 1 行（系譜 + 帯 + 列数 + `⚑ 編隊図`）に固定し、縦の展開は廃止。
+  ⌘⇧G = ブリッジで編隊図を開く / 閉じる。未任命の ⌘0 / Captain バー / `⚑ Captain を任命` は会話ペインに**任命の面**
+  （役割の説明 + サインイン済みエージェントのボタン）を出す。交代・解任は 設定 → AI エージェント → 「Captain」
+  （「なし」はキーごと外す = `persist_user_value` は null を書かずに削除する）。
+- 実画面で見つかった既存バグ 2 件: ① **Fleet の「変更」は F2 以来ずっと中身が空だった**（`GitPanel` の Entity は `div()` しか
+  描かない。本体は active session だけを描く `render_git_panel`）。`project::git_diff_files_on`（`--numstat` + `--name-status`
+  を base に対して・untracked は status から足す）→ `RepositoryController.task_files` → `render_stage_changes`
+  （状態の 1 文字 + 名前 + フォルダ + `+N −M`・押すと diff を Editor に開く）に作り直し、昨日入れた shortstat はこの合計に置換。
+  ② サイドバーの Task 行で名前と `+N −M` が重なる → `+N −M` を独立の段にし、名前を縮められるようにした
+  （flex の gap は幅 0 の兄弟にも残るので、区切りはブランチ名の先頭の空白に寄せた）。
+- 罠: **同じ作業ディレクトリで別セッションが並行してコミットしている**（14:34 に `29fb452`）。その直後に `project` の
+  ビルド成果物だけが私の関数を含まない版に入れ替わり、`cannot find function git_shortstat_on` で落ちた（ソースは無傷・
+  mtime も変わらず）。`touch crates/project/src/project.rs` で作り直して解消。cargo の鮮度判定は mtime なので、
+  並行セッションが stash などで一瞬ファイルを戻すとこうなる。**ビルドが「ソースに在るはずの物が無い」と言ったら touch**。
+- 検証: `cargo check --workspace --all-targets` と `--release` の両方で警告 0・`cargo test -p workspace -p project
+  -p settings_core -p settings -p i18n -p necoder` green（`the_bridge_shows_the_formation_and_lets_you_appoint_a_captain` /
+  `numstat_and_name_status_parse_nul_separated_output` / `persist_user_value_with_null_removes_the_key` を追加）。
+  見た目は隔離 offscreen の実画面で確認（手順は FLEET-V2 §10.5・`NECODER_FLEET_PROBE` を `;` 区切りの組み立て命令に拡張）。
+  モック `mock/fleet-v2.html` も同じ形にした（`#bridge`）。
+- 残: 台帳イベントの灰色カード・承認の推薦（✳）・Captain 会話の空状態の案内・UI-SPEC §11 の全面置換・設定キー
+  `work_tabs_position` の改名（未決）・サイドペイン幅の永続化。
+
+## 2026-09-21 — 調査: Herdr / Orca と Captain 型の采配役、ゲームの類推（実装なし）
+
+- 本人の依頼: 「Herdr や ORCA をまず調べ、他のエージェントを統合する采配役（Captain）を研究してほしい。Captain と Fleet を
+  ゲームのアナロジーで分かりやすく見せるのはどうか」。6 本の並行調査（Herdr / Orca / 同種ツールの全体像 / 采配役の製品事例 /
+  マルチエージェント研究 / ゲームの類推と監督制御）→ レポート `docs/research/captain-orchestrators-2026-09.md`
+  （原本 `reports/`・生ノート 6 本は `research_notes/`・出典 74 件）。
+- 結論: ① **Captain の骨格は変えなくてよい**（書かない単一リード・台帳に置く状態・イベント駆動の wake・承認は推薦まで・
+  統合は人間）。Herdr は采配を core に入れないと決め、Orca は実験的な層を持つが **idle の coordinator を PTY 越しに起こせない**
+  問題を 4 か月解けていない。台帳イベントを ACP のターンとして渡せる necoder はこの問題を最初から持たない。
+  ② 直すのは理念と実装のずれ 3 つ（コードで確認済み）: Captain スレッドを同名で再利用し続けるのでコンテキストが単調増加 /
+  `captain_pending` がメモリ上の `HashMap` で再起動すると未配達の wake が消える / 「書かない」がプロンプト頼み。
+  §5.6 の 5 秒デバウンスも未実装。足すのは委任文の型・完了報告の契約・別コンテキストの検証 Task・necoder 側で強制する上限・
+  分解案の事前承認・stall の wake。避けるのは自律マージ・worker 同士の自由な連絡・LLM の見回り。
+  ③ **ゲームの類推は「仕掛けを借りる」なら良く、「衣装を着せる」のは悪い**。⌘⇧U・⌘1..9・要対応・トークン常時表示は
+  すでに RTS の HUD と同型。編隊図は概観として要るが、ハブは星型で所属しか語らない → ノードを 1 Task = 1 タイルの情報タイルに・
+  辺に depend を・Captain の発令キュー（何を出して何を待っているか）を足す、が押す方向。
+- 文書の訂正（Zenn の原文で裏取り済み）: 「herdr の 3 本上限」は herdr の仕様ではなく記事著者の自作 hook の設定値
+  （`MAX_COLUMNS=3` / `MIN_COLS=50`）。FLEET-V2 §3.4 と `fleet-ux-2026-09.md` に訂正注記を入れた（上限 3 の判断は変えない）。
+  herdr の状態は 5 値・ライセンスは 2026-07-22 に Apache-2.0 へ・「GUI 勢は誰もグリッドをやっていない」は言い過ぎ、も同じ注記に。
+- 罠: レポート作成の途中でセッションの利用上限に当たったが、ファイルは書き上がっていた（結論節まで・末尾を確認）。
+- 次: P0 の 3 件（Captain スレッドの交代 / wake の配達位置を台帳の連番に / 書かない規律を ACP クライアント側で強制）から。
 
 
 ## 2026-09-23 — コミュニティ報告の Windows・IME・Linux 配布を修正
@@ -3232,27 +3357,470 @@
 - 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す
 
 - PR #5 取り込み後の補足: 同一フレームに届く askpass 要求は先の要求を維持し、後の要求へ busy を返す（回帰テスト追加）。秘密入力のキー伝播も止める。#7 が指摘した README のテーマ選択キーを直し、#8 の project 設定優先をマニュアルへ追記。
+## 2026-09-24 — コミュニティ PR と作業中の Fleet 改修を統合
+- PR #5 / #7 / #8 / #9 と不具合修正 #10 は全 CI 通過後に main へ取り込んだ。元の未コミット作業は stash に保存してから復元。
+- Fleet のブリッジ内任命画面を維持し、設定の任命・交代・解任は PR #8 の行ボタンに統一。設定セグメントの重複だけを除いた。#9 の Task 入力フォーカス修正も維持。
+- 公開 main の検証: ローカル全テスト529件成功（11件 ignored）、Linux SSH 統合テスト10件成功。macOS / Windows / Linux / 依存監査 / 両 musl ビルドの CI 成功。IME の OS 操作はツールで検証窓を取得できず未確認。署名済み配布物の生成は次回リリース。
+- PR #12（Captain の役割を人間の発話にも前置・道具に `fleet create`・slash コマンド保護）も同じ手順で取り込んだ（stash → ff → pop）。衝突は ja/en の `captain:`（手元の任命 UI キー + PR の `prompt`→`role` 改名。両方残す）と JOURNAL 末尾のみ。`{count} 列` の `%` 落ち修正（b3029c1）も同日 main へ。
+
+## 2026-09-24 — `/compact` はいつでも押せるものにした（消える条件をやめた）
+
+- 本人報告: 「Compact button が今ない。ACP のところに表示されない」→ 直後に「compact はいつでもできるようにしないと」。
+- 消えていた原因: チップの表示条件が `command_tx.is_some()`（生きたセッション）かつ `!running` かつ `tokens > 0` だった。
+  2026-09-19 に入れた idle の弁（`idle.rs`・既定 15 分）が静かなスレッドのエージェントを止めると `command_tx = None` に
+  なり、**戻ってきてまず圧縮したい場面で消える**。再起動直後（送信路は初回送信まで無い）も同じ。どちらも次の送信が
+  `acp_session_id` で `session/load` して同じ会話を引き継ぐ（`start_session` の `resume:`）ので、送る先は在った。
+  条件が弁より古かった（bb91901）。
+- 直し（要件は「いつでも」）: `Thread::can_compact()` = 送る先の会話がある（生きた送信路 **または** 引き継ぐ id）。
+  チップは常に描き、押せないのは一度も起こしていないスレッドだけ（薄く・カーソル無し・「まだ会話がありません」）。
+  **実行中は押すとキューに積んで**ターン完了後に送る（composer の送信と同じ作法・二重には積まない・tooltip で予告）。
+  トークン数では判定しない（使用量を報告しないエージェントでも文脈は溜まる）。i18n: `agent.compact_queued_tip` /
+  `compact_none_tip`。
+- 検証: `cargo check -p agent_panel --all-targets` 警告 0・`cargo test -p agent_panel` green（`idle.rs` に
+  「弁の後 / 使用量なし / 実行中はキューへ 1 つだけ / 未起動は不可」のテスト）。実機は本人の再起動待ち（`./scripts/install-mac.sh`）。
+
+## 2026-09-24 — Remote control CI の WebKit フレーク修正（偽カメラの差し込み先）
+- やったこと: `relay/test/browser/control.spec.mjs` の `installFakeCamera` を `MediaDevices.prototype` 差し替えに変更（`navigator.mediaDevices` インスタンスの own property をやめた）。`expectFakeCamera` の診断に prototype 側の有無を追加。`.github/workflows/remote-control.yml` に失敗時の Playwright trace アップロードを追加。`relay/public/app.mjs` の「カメラ無しの機械では mediaDevices が生えない」コメントを訂正（正しくは secure context 以外や一部 WebView）
+- 学び/罠: **WebKit は `MediaDevices` の JS ラッパーを GC で回収して次のアクセスで作り直す**（IDL に `GenerateIsReachable` が無い。`Navigator` には `ReachableFromDOMWindow` がある）。ラッパーに載せた own property は消えるので、テストの偽 getUserMedia が「差し込み直後の検証は通るのにボタン押下時には本物」になり permission 待ちで固まる。relay 無変更のまま CI の WebKit だけ 1 勝 4 敗（v0.1.17〜v0.1.20 のタグ push・落ちるテストも回ごとに違う）。Chromium はラッパーを保持するので手元では出ない。手元の Playwright WebKit 26（rev 2248）で GC 圧をかけて再現し、prototype 側は残ることを確認。9/14 の「文書確定時に navigator を作り直す」は誤診（init script 版も同じ機構）。もう一つ: **GitHub はタグ push で `paths` フィルタを評価しない**ので、このワークフローは relay を触っていなくてもリリースのたびに走る（リリース時だけ落ちて見えた理由）
+- 次: PR の CI で webkit が緑になるのを確認（Release ワークフローとは独立・配布物には影響しない）
+
+## 2026-09-24 — レールに「AI スレッド一覧」を置いた（Fleet から戻ると左に残っていた一覧）
+- 本人: 「Fleet から戻ると左に全体の AI のタブがある。これを一番左のメニューのアイコンに乗せたい」。
+- 正体: Fleet に入ると `toggle_fleet_mode` が `show_herd = true` にし、戻る時は何も戻さない。Editor の左カラムは herd を最優先で描くので、全プロジェクトのスレッド一覧（`render_herd_sidebar`）が出たままになる。F0.5（2026-09-12）で単独の入口（`ToggleHerdSidebar`）を消していたので、開く道はこれしかなく、エクスプローラへ切り替えると戻れなかった。
+- やったこと: レールの Todo と Fleet の間に **AI スレッド一覧**（`icons/activity.svg`。旧 herd の絵で、同梱のまま使われていなかった）。`herd_view.rs` に `toggle_herd_sidebar` / `herd_column_visible`。Todo / git と排他・押し直すとエクスプローラ・Chat では不活性。Fleet 中は同じ枠が Fleet サイドバーなので名札を「Fleet サイドバー（Task 一覧）」に替え、エクスプローラへ切り替えた後の帰り道を兼ねる（これまでは Fleet を出入りし直すしかなかった）。設定 `rail.threads`（既定 on）・i18n `rail.threads` / `rail.fleet_sidebar`。
+- 変えていないこと: Fleet から戻ると一覧が出たままになる挙動（本人はそこで見つけている）。アイコンが点灯するので、何が出ているかは分かる。
+- 文書: UI-SPEC §2・FLEET-V2 §3.0（単独表示の廃止を撤回）・GLOSSARY（AI スレッド一覧）・§10.5 のプローブ `editor` / `threads`。
+- 検証: `cargo check -p workspace --all-targets` 警告 0・`cargo test -p workspace -p settings -p necoder -p i18n -p settings_core` green（`the_rail_threads_icon_switches_the_left_column` を追加）。隔離 offscreen で `graph;editor`（戻った直後に一覧が出てアイコンが点灯）と `graph;editor;threads`（エクスプローラに切り替わり、点灯もエクスプローラへ移る）を撮って目視。
 
 ## 2026-09-24 — Captain が人間の指示で自分で作業してしまう問題
 - やったこと: `captain.prompt` を `captain.role` / `captain.facts` / `captain.event` に分割。役割 + 現況表（`captain_context`）を Captain スレッドの prompt context に入れ、⌘0 で開いた時・wake の時・人間が Captain に書いた後に差し替える。wake 本文はイベント行 + 溜めたイベントだけ。道具一覧に `fleet create . <title>` を追加。回帰 test `role_prompt_lists_task_creation_in_every_locale`
 - 学び/罠: `PanelEvent::HumanSend` は送信**後**に届く（emit は遅延）ので、その発話の中身は差し替えられない。今のターンは既存の context、HumanSend で次のターン用に現況を更新する形。prompt context はメモリのみ（再起動後は ⌘0 か次の wake まで無い）。規律はプロンプトだけでツール制限は無い（案2 = Captain スレッドの編集系 permission を拒否、は未着手）。prompt context を前置すると slash コマンド（`/clear` `/compact`）の先頭が `/` でなくなり認識されない → `/` 始まりの発話には context を付けない（test `prompt_context_is_not_prepended_to_slash_commands`）
 - 次: 実機で「目標 1 つ → Captain が Task を切る」を確認（F6 の実 e2e）
 
-## 2026-09-30 — 外部 issue #39（＋context のフォーカス）と #37（`!` 実行）
-- やったこと:
-  - **#39**: `toggle_context_menu` が FocusHandle を作るだけで `window.focus` していなかった。開いたら絞り込み欄へ、閉じたら（トグル・Esc・Enter・候補クリック）composer へ返す `close_context_menu` に集約。キャレットはフォーカス時だけ描く。テスト `context_menu_takes_keys_and_returns_focus`
-  - **#37**: `crates/agent_panel/src/shell.rs` を新設。composer 先頭 `!` をシェルで実行（`Host::spawn_process` + 新設 `HostProcess::try_wait`・停止ボタン）。出力は `Entry::Shell`（storage の role `shell`・JSON）で transcript に出し、次の人間の送信に `<bash-input>`/`<bash-stdout>` で添える（slash / 台帳イベントには添えない）。composer は `!` の間 syn-mac の見た目（UI-SPEC §1.3 に行追加・composer 節に仕様）。Step の `⎿ 結果` 描画を `render_step_result` に切り出して共用。開発用 `NECODER_SHELL_PROBE`
+## 2026-09-24 — Captain の席・分解案の承認・台帳の未読・会話の交代（F6 の芯）
+- 発端: 本人「最高のベストな状態にしたい」。PR #12 の後も Captain は Bypass のまま shell を持ち（worktree を git で直接切る・main のブランチを切り替える・ファイルを書く抜け道）、Task を切る道具は確認なしで worktree を作り、未配達の知らせはメモリ上で再起動で消え、会話は膨らむ一方だった。
+- 先に実機で確かめた（`~/.claude/.../memory/captain-lab-harness.md` の手順・/tmp の練習用 repo・`claude -p` + `necoder mcp`・台帳とソケットを隔離・Opus 5）: MCP だけを持たせた Captain は 3 回とも道具だけで Task を切り、編集も shell も試さなかった。Bypass で全道具を持たせても止まった。一方、1 行の誤字にも迷わず worktree を切った ＝ 切る前の承認がいちばん効く gate。
+- やったこと（FLEET-V2 §5 を先に書き換え）:
+  - **Captain 用の MCP**: `necoder mcp --captain` は席の道具 12 個だけを出し（書く / 直接切る / phase / 待つ / integrate を出さない）、名前を知っていても呼べない。新しい道具 `fleet_propose_tasks`（目的・完了条件は必須＝委任文の型・上限 6 行）。GUI が居れば IPC、居なければ DB へ直接置く。
+  - **分解案カード**（`captain_proposals.rs`・DB `captain_proposals`）: 要対応の承認待ちの次に並び、titlebar のバッジにも数える。行ごとの ☑、承認で ＋ Task と同じ `create_task_in`（`create_prompted_task` を一般化）→ `⚑` 帰属（台帳 `captain_task`）。DB で裁きを確定してから切る（二度押し・別窓で二重に切らない）。
+  - **席**（`agent_panel/src/seat.rs`・`SeatPolicy`・Fleet を知らない汎用）: 権限モードを「聞いてくる」モードへ固定（Claude Code `default`・Codex `read-only`＝codex-acp README の `read-only`/`agent`/`agent-full-access`）、MCP は席のものだけ、問いには Chat と同じ作法で necoder が答える（今回だけ許可 / 拒否 + transcript に 1 行）、完了した編集・削除・移動は見張りがターンを止めて `PanelEvent::SeatViolation`。改名で席と前置きが外れる。席の有無とセッションの作り方が食い違ったら次の送信で立て直す（`session/load`）。
+  - **台帳の未読**（`captain_cursors`）: 起こす要求は 2 秒まとめ、読んだ位置より後の出来事（blocked / review_ready / changes_requested / merge_ready / failed / integrated / archived / 作られた Task / human_send / 承認・却下）を 1 通に。位置はターンが**正常に完了した時だけ**進める。起動時に未読があれば 1 回起こす。`captain_pending` は削除。
+  - **会話の交代**: 文脈が上限の 40% か 20 回で `rotate_thread_session`（送信路と会話 id を捨て DB の id も消す・区切りを 1 行）。前置きに直近の采配 5 件（リポジトリ別・メモリ）。Captain のエージェントを替えたら前の Captain を「Captain（前のエージェント・交代前）」に改名して退かせる。
+  - 知らせは表示中のタブを奪わない（`send_ledger_event_to`・`ensure_named_thread_quietly`）。役割文は道具の一覧を持たない（MCP の道具が説明を持つ）。
 - 学び/罠:
-  - **`window.focus` だけではクリックで開くものにフォーカスが移らない**: Workspace root が `track_focus` を持ち、GPUI はクリックを内→外へ流して「最初に当たった track_focus」へ focus する。子の mouse_down で focus しても root が奪い返すので `cx.stop_propagation()` が要る。閉じる面の中の候補クリックも同じ（閉じた面の handle に focus が移ると全キーが死ぬ）
-  - GPUI はキーバインド（アクション）を `on_key_down` より先に処理する。Enter/Esc/Backspace は `Editor` コンテキストにしか束縛が無いので、手書きの入力面に focus があれば届く
-  - `HostProcess` は stderr を捨てる（local も SSH も `Stdio::null`）。シェル側で `exec 2>&1`（cmd.exe は `(…) 2>&1`）して寄せる
-  - `persist_thread` は追記専用の watermark。実行中の `!` を書くと途中の状態で固まるので、Running の手前で止める（1 行ずつ watermark を進める形に変更＝途中失敗で重複行を出さない副次効果もある）
-  - `HostProcess` の drop（kill）は `sh` 本体しか殺さず、`npm run dev` の子が生き残る。スクリプト先頭で `$$` を目印付きで出させ、打ち切り時に同じホストで `pgrep -P` を辿って子から KILL する（リモートでも同じ・Windows ローカルは `taskkill /T`）。`kill_tree` は親を先に STOP して新しい子を産ませない
-- 次: 実機（metal 環境）で `!` の体感確認・Remote SSH 先での `!` 実行確認
+  - **`AgentEvent::Failed` は `PanelEvent::TurnEnded` で通知される**（`TurnFailed` は `fail_turn` / `abandon_turn` だけ）。Captain が失敗したターンで読んだ位置を進めていた → `TurnEnded` に `completed` を足した。
+  - `ensure_named_thread` / `acquire_thread` / `add_thread` は必ず表示を切り替える。wake で使うと人間が見ている会話を奪う（空きタブの使い回しも奪う）。
+  - 実機で Captain が「承認が届いたら担当を起こします」と書いた → 承認で necoder が担当を起こすので二重になる。役割文・道具の返り値・承認の知らせの 3 か所で「起こし直さない」を明示し、2 ターン目で静観を確認。
+  - 要対応の欄は高さ 300px でスクロールする。分解案カードのボタンを行の下に置くと隠れる（隔離 offscreen の実画面で発見）→ 見出しの直下へ。
+  - `agent_servers.<id>` は `"type": "custom"` が要る。無いと設定全体が読めず、テストで Captain が未任命扱いになった。
+  - 席の見張りに shell を入れない: 安全な読み取りコマンドを聞かずに通すエージェントがあり、止めすぎる。shell は権限の問いで断る。
+- 検証: `cargo test -p storage -p agent_panel -p workspace -p necoder -p i18n -p settings -p settings_core -p acp_client` green（新規: 読んだ位置と分解案の往復・席の裁定 / モードと MCP / 付け替えと改名 / 交代 / 見張り・MCP の Captain 版・wake 行の選別・台帳の未読が 1 通で届き表示を奪わず正常完了で位置が進む・承認で印の行だけ本物の worktree + `⚑`）。実機（/tmp・Opus 5）: 3 件の目標 → 2 本に束ねて提案 → 承認待ちで停止 → 承認の知らせで `fleet_digest` を読んで静観。隔離 offscreen（`NECODER_FLEET_PROBE="graph;proposal:2;origin"`）で分解案カードと `⚑` 行を目視。モックにも分解案カード。
+- 次: necoder 本体での実 e2e（本人の目視・小さい練習用 repo で ⌘0 から）。今の「Captain」スレッド（本人との設計相談をしていた会話）は、新しいビルドで席が付くと編集も shell も断られるので、使う前に改名する。残: 承認待ちへの推薦 ✳・台帳イベントの灰色カード・Captain のトークン表示・MCP の `fleet_digest` の台帳フォールバック。
 
-## 2026-09-30 — `!` の自動打ち切りを外し、実行中の出力を流す
-- やったこと: 2 分の自動打ち切りを削除（`ShellStatus::TimedOut` ごと）。人が打ったコマンドで、`cargo build` やテスト全体は数分かかるのが普通。止めるのは停止ボタン + スレッドを閉じた時（`stop_thread_shells`）+ パネル解放時（`on_release` → `stop_all_shells`）。実行中は共有バッファ `Collected` を覗いて末尾 8 行を `!` 行へ流す。実行は GPUI の background executor ではなく専用 `std::thread`（何分も走るコマンドで数本しかない executor を塞がない）。閉じたスレッドの `!` も結果を書き換える（⌘⇧T で戻した時に「実行中…」で固まらない）
+## 2026-09-25 — Codex を Captain にする実験と、Codex の席の直し
+- 発端: 本人「codex でも同じようなことができるか試せる？」。Claude Code で確かめた Captain（MCP の道具だけで分解案を出し、承認待ちで止まる）が Codex でも成り立つかを、CLI と、necoder が実際に使う ACP の両方で確かめた。
+- CLI（`codex exec` 0.144.6・既定のモデル・`--ignore-user-config`・`-s read-only`・necoder の MCP だけ）: 3 件の目標を 2 本に束ねて `fleet_propose_tasks`、承認待ちで停止。承認の知らせ（`codex exec resume`）では Task の様子を読んで静観し、担当を起こし直さなかった。shell も編集も使わなかった。
+- ACP（新しい実機プローブ `cargo run -p acp_client --example probe_captain_seat`・codex-acp 1.13.1 / codex 0.156.1・席のモード `read-only`・席と同じ裁定）: 同じく分解案を出して停止。
+- 見つけて直したもの:
+  - **Codex の MCP の承認を席が断っていた**。codex-acp は MCP の承認を「題名なし・種別 実行・要求全体の `_meta.is_mcp_tool_approval`」で送る（先に `tool_call` を題名 `mcp.necoder.<道具>` で出し、同じ id で問う）。席は種別「実行」を shell として一律に断るので、Codex の Captain は自分の道具を 1 つも使えなかった。→ acp_client の許可要求に `tool_call_id` と `mcp_tool`（`is_mcp_tool_request`）を足し、席は同じ id の呼び出しの題名で裁く。
+  - **Codex 自身の設定の MCP サーバが席に入っていた**。codex-acp は `~/.codex/config.toml` の MCP サーバ（本人の環境では computer-use / node_repl）も立ち上げる。偽のサーバ（起動すると印のファイルを残す）で確認。→ `acp_client::preset::restrict_mcp_to` を足し、Codex は ACP の mcpServers を空にして `CODEX_CONFIG` で necoder の分（approve）と「止める」指定を一緒に渡す。Claude Code は `strictMcpConfig` + `settingSources` 空 + claude.ai のコネクタを止める。席とプローブが同じ関数を使う。塞いだ後: 偽のサーバは起動されず、necoder の道具は使えた。Claude Code の ACP でも ToolSearch に出たのは necoder の道具だけだった。
+  - MCP の `fleet_digest` が GUI 不在で失敗すると、Codex が提案まで諦めた回があった → CLI と同じく台帳だけで答える `fleet::digest` に共通化。空の id は分かる文で断る。
 - 学び/罠:
-  - **GPUI のテストスケジューラは、外のスレッドから GPUI のタスクを起こすと panic する**（`Detected activity on thread … Your test is not deterministic`）。oneshot の `select` で待つと送信側スレッドが waker を叩いて落ちる。終わりは `try_recv` で「見に行く」形にした（間隔 25ms 始まりで 400ms まで倍々＝短いコマンドを待たせない）。テストは `advance_clock` + `run_until_parked` を実時間で回して待つ
-- 次: 実機（metal 環境）で長いコマンド（`!cargo build`）の流れ方を確認
+  - 本人の Codex 設定のモデル `gpt-6-astra` は、手元の CLI 0.144.6 と Zed のキャッシュの codex-acp 1.1.2（codex 0.144.3）では「新しい Codex が要る」で弾かれる。実験は Codex の既定のモデルで回した。
+  - **codex-acp 1.1.2 は MCP の承認が要る呼び出しを、クライアントに聞かずに断る**。necoder は公開レジストリで 1.13.1 を選ぶので本番は問題ないが、プローブで `NECODER_HOME` を丸ごと差し替えるとレジストリが見えず、Zed のキャッシュの古い版を拾う → 隔離は MCP の子プロセスだけ（`PROBE_NECODER_HOME` / `PROBE_GUI_SOCK`）。
+  - `codex exec` は標準入力が開いていると追加の入力を待って止まる（`stdin=DEVNULL`）。`codex exec resume` は `-s` を受けない（`-c sandbox_mode=...`）。MCP の承認は `mcp_servers.<名前>.default_tools_approval_mode = "approve"`。
+  - プローブの最中に necoder をビルドし直すと、MCP サーバの起動を取りこぼして「道具が接続されていない」になる。
+- 検証: `cargo test -p acp_client -p agent_panel -p necoder -p workspace -p storage -p i18n` green（新規: MCP の承認と shell の見分け・Codex 形の承認要求を id で裁く・エージェント別の絞り込み）。実機: 上の CLI 2 ターン、ACP の Codex（偽のサーバあり・塞ぐ前後）、ACP の Claude Code。
+- 次: Codex 以外のエージェント（Gemini / OpenCode ほか）の MCP の承認の形と持ち込みの止め方は未確認（席の決まりと見張りは効くが、持ち込みは止めていない）。
+
+## 2026-09-25 — 調査: Orca（stablyai/orca）との機能差分の全数調査（実装なし）
+
+- **本人の依頼**: 「ORCA にあって necoder に無い機能をあぶり出して。ORCA に負けるのが謎すぎる。普通に全部勝っててほしい」。その後、「証拠を残したうえで docs/ に残して」。
+- **成果物**:
+  - 結論・優先度・Design Mode の実装案・不具合・never とぶつかる項目・全 226 項目の要約表: `docs/research/orca-gap-2026-09.md`
+  - 全項目の証拠（Orca の出典・necoder の `file:line`・「無」の検索と件数・再現手順・不具合のコードの抜粋・引用の検査）: `docs/research/orca-gap-2026-09-evidence.md`
+  - 「無」の 100 項目の検索に使った正規表現: `docs/research/orca-gap-2026-09-searches.tsv`
+  - Orca の参照用クローン: `orca/`（`.gitignore` に `/orca/` を追加・`646e9a5` で固定）
+- **調べ方**:
+  - Orca の公式ドキュメント 55 ページを全部読み、安定版のリリースノート 74 本から `feat` 269 件を拾った。
+  - 8 領域の読み取り専用エージェントで necoder のコードを判定させ、主要な判定は書き手が確かめ直した。
+  - 「無」の検索は全件を流し直し、ヒットは中身まで見た。
+  - 引用 572 件は、存在と行の範囲を機械で検査し、中身も全件照合した。
+- **結論**: 集計は、有 17 / 一部 105 / 無 100 / 方式差 4。
+  - 負けているのはエディタではなく**エージェントの周り**だ。無いものは次の 6 つ。
+    1. diff の行に ＋ でコメントしてまとめて送る
+    2. worktree の差分レビュー画面
+    3. 内蔵ブラウザと Design Mode
+    4. 端末の基本と、閉じても走り続ける PTY
+    5. GitHub / Linear / Jira
+    6. 使用量とレート制限の表示
+  - 勝っているのは LSP・hunk・blame・⌘I、ACP の承認と checkpoint、Conflict Radar と人間の Integrate、軽さ、SSH の作り、テレメトリ無し。
+  - 本人は Design Mode を「確かに付け加えたい」と発言した。Chromium を同梱せず、既存の `webview_view`（wry）の localhost 限定プレビューに、注入スクリプト・IPC・OS のスナップショットを足せば作れる（調査 §2）。
+- **ついでに見つけた不具合（未修正・調査 §3）**:
+  - パネルからのコミットで pre-commit フックが走らない（`run_git` の `core.hooksPath=/dev/null`）。
+  - ソース管理パネルの行を押しても diff が開かない（`GitPanelEvent::OpenDiff` の送る側が無い）。
+  - Fleet の「変更」から開く diff が、エージェントがコミット済みだと空になる。
+  - コミット・push・pull の失敗が画面に出ない。
+  - コミット欄で ⌘V が効かない。
+  - MANUAL の「ファイル操作は取り消せる」と `density` が実装と合わない。
+  - ACP の `AvailableCommandsUpdate` を捨てているので、`/` の補完が作れない。
+- **学び / 罠**:
+  - エージェントの出力を書き写す時、隣の主張と引用を取り違えることがあった（B29 でミュートの根拠に `mark_done_seen` を当てていた）。全件を「主張の文」と「引用先の行」で並べて照合して直した。
+  - Orca の README は「changelog が本当の機能一覧」と書いている。docs に無い機能（message rail・会話の rewind・Agent map の追加と撤去など）は、リリースノートの `feat` 行から拾う。
+  - React 19 は fiber の `_debugSource` を廃止した。そのため、Orca の Design Mode は React 19 のアプリでソース位置が取れない。necoder が作るなら、ビルド時に属性を埋める方式か source map で取る。
+- **次**: 本人の判断待ち。FEATURES の never（ホスティング連携・汎用 webview 等）を見直すか、どこから着手するか。調査の推奨は、①不具合 3 件 → ②注記トレイ + diff の行コメント → ③Design Mode の順。
+
+## 2026-09-26 — worktree横断レビューの記録（実装なし）
+
+- 本人の依頼: ORCAとの差分・UX・Rustの性能/コードをレビューし、全worktreeも確認。その後「気になるところについては docs/ にどんどんと足して」。実装は待つ。
+- [UX・コードレビュー台帳](UX-CODE-REVIEW.md)を新設。15件の懸念にID・優先度・状態・対象版・根拠・影響・改善案・未実施の確認条件を付けた。
+- 初回は全16 worktreeを棚卸し。mainだけの評価を訂正し、別worktreeで実装済みのdiff基準・hooks・Git入力・裏スレッドキュー・Fleet内レビュー等を再実装対象から除外。
+- 重要点: レビュー済み/注記と内容の版、差分の総メモリ予算、非同期保存順序、複数窓のclose、Design Modeの宛先/世代、SSHのlocalhost、Captain承認後の復旧。
+- 初回統合版でproject/review_view/terminal_view/webview_viewのlib test計122件成功、更新後8277d4fで全workspace/all-targetsのcheck成功。実画面・長時間性能・SSH/Windows実機は未検証。
+- main未コミット差分と2c80f83を一時ファイル上で三者比較し、24ファイル重複・11ファイル競合。リポジトリにはマージしていない。
+- 文書化時には統合版6387091、17個目のhistory worktree、Explorer/言語/CLI/Skills/使用量/通知の進展を確認。初回の使用量UI未接続は既に対処されており、台帳で訂正。新しい差分全体は次回レビュー対象とし、以前の検証結果を流用しない。
+- 変更はdocsのみ。元の機能差分調査の冒頭から台帳へリンクし、古い「無」判定を現在の実装状況と混同しないよう注記した。
+
+## 2026-09-26 — クラウドで統合版の上にレビュー修正と O5 / O21 / O26 を積んだ
+
+- やったこと: `parity/integration` + 計画 + UX・コードレビュー台帳を `claude/sleepy-hamilton-gesxiq` に統合し、台帳の R01〜R08・R14 を修正（R11 は一部・R15 は表現）。続けて O5（手元の Ports）・O21 の一部（Fleet サイドバーの外部の worktree・取り込み・統合先の取り違え・消えた worktree）・O26 の一部（`path:行` のコピー・全部閉じる・外部アプリで開く）。記録は `UX-CODE-REVIEW.md` の各項目と `ORCA-PARITY.md` §7.1。
+- 学び/罠:
+  - **非同期の書き込み順は gpui のシードを回すと再現できる**。注記の保存を書き込みごとに別タスクへ投げる旧実装は、`#[gpui::test(iterations = 20)]` の seed 0 で「消した注記が復活」した（R03）。1 本の列に積む実装では全シードで通る。
+  - **描画中に Host を呼ばない規律はテストが守っている**（`local_and_remote_root_render_never_call_host`）。使用量の鍵を作るのに `dest_host.is_remote()` を描画中に呼んでいて捕まった（R08）。宛先が変わった時に控える形へ直した。
+  - git 2.43 の `core.bigFileThreshold` は `git diff` を止めない（大きいファイルもパッチが出る）。レビューのメモリの上限は、事前のサイズ確認（`git ls-tree -l`）とパッチ後のバイト上限で掛けた（R02）。
+  - Linux では `opening_a_pdf_gives_a_native_viewer_tab_not_a_text_buffer` と `localhost_urls_open_one_web_tab_that_steps_aside_for_overlays` が元から落ちる（ネイティブの PDF / WebView が無い）。CI の Linux ジョブはビルドだけなので表に出ていなかった。
+  - `TaskSpace` の統合先を「最後に見つかった物」で選ぶ所と「最初の物」で選ぶ所が混在していた。`task/` でない linked worktree を ⌘O で開くと、サイドバーの ⌂ だけがその worktree を指し得た（O21 で `integration_slot_for` に一本化・メインの作業ツリーを優先）。
+- 次: GitHub の書き込み権限（push が 403）。macOS 実機・隔離 offscreen での画面確認。O15・O18 の Mac の途中の分を push してもらって取り込む。PR へ切り出す。
+
+## 2026-09-26（続き）— O13 / O20 / O22 / O26 をクラウドで積んだ
+
+- やったこと（`claude/sleepy-hamilton-gesxiq`・項目ごとに 1 コミット）: 作業中はスリープさせない（`keep_awake`・mac は `caffeinate -i -w`・Windows は `SetThreadExecutionState`）/ 自動保存（`auto_save`・他へ移った時・手を止めた時）/ タブのピン留め / プレビュータブ（`preview_tabs`・既定 on）/ `.worktreeinclude` / 通知の履歴（titlebar のベル）/ 通知音の大きさ（`sound_volume`）/ リソース（メモリをプロジェクトごと・使っていないエージェントを止める）。記録は `ORCA-PARITY.md` §7。
+- 学び/罠:
+  - **gpui は窓が非アクティブになると、フォーカス中の要素に blur を送る**（描画時のフォーカスの道筋が「窓が非アクティブなら空」になる）。自動保存で「blur で保存」と「窓を離れたら全部保存」を両方掛けると、同じタブを 2 本同時に書き、後の方が読み込み時の revision で書こうとして「外で変わった」と断られた。`EditorView` の保存を 1 本ずつにし、書き込み中に来た保存は終わってからもう一度書くようにした（⌘S の連打も同じ事故だった）。`#[gpui::test(iterations = 10)]` で、仕組みを外すと落ちることを確かめた。
+  - **テストの窓は前に出ていない**ので、フォーカスの出入り（blur）が起きない。`window.activate_window()` してから試す。
+  - `.gitignore` の約束: ディレクトリごと（`secrets/`）に一致させると、中を否定（`!secrets/skip.json`）で戻せない。`.worktreeinclude` も同じ（戻すなら `secrets/*`）。テストの期待を間違えていた。
+  - アイコンを足したら `main.rs` の Assets の表にも載せる（`every_icon_file_is_registered`）。workspace の crate だけテストして通したため 1 コミット遅れて気づいた。アセットを触ったら `cargo test --workspace`。
+  - クラウドの枠（ディスク）が build の成果物で埋まった: turso の静的ライブラリ（1 本 350 MB）が機能の組み合わせごとに 5 版ずつ残っていた。成果物ごとに新しい 2 版だけ残して 7 GB 空いた。`incremental/` も消してよい。
+- 次: 実機（mac）で見た目と挙動を確かめる（ベルの件数・ピン・斜体のプレビュータブ・リソースの数字・caffeinate の着地は `pmset -g assertions`）。push の権限。
+
+
+## 2026-09-26（続き 2）— O13 / O14 / O16 / O17 / O20〜O23 / O27 をクラウドで積んだ
+
+- やったこと（`claude/sleepy-hamilton-gesxiq`・項目ごとに 1 コミット）: 準備スクリプトの skip / 失敗した Task の「準備をやり直す」「準備を飛ばして始める」（O20）/ fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べる・O23）/ アカウント切替（O14）/ ニュースの行から Task へ（O13）/ 片付け（O22）/ repo ごとのレシピ `.necoder/recipes/*.md` を `/` 補完へ（O16）/ **質問カードの自由入力**（Other 欄・PC とスマホ・O17）/ **サブエージェントの手順を親の Task の下に畳む**（O17）/ **設定の検索**（O27）/ **スマホへ完了の push**（relay の host・O13）/ Fleet サイドバーの **Task の絞り込み**・レールの**パス / ブランチ名のコピー**（O21）/ **repo ごとの既定の起点** `task_base`（O20）/ **表示言語をその場で切り替え**（O27）。
+- 学び/罠:
+  - Claude の AskUserQuestion のブリッジ（`@agentclientprotocol/claude-agent-acp` の `elicitation.js`）は、質問ごとに `question_<n>` + `question_<n>_custom` を送り、**何も required にしない**。答えの読み方もブリッジ側が決める: 単一選択は「選ばずに書いた = 答え」「選んで書いた = メモ（`annotations.notes`）」、複数選択は選択に足す。necoder は「Other 欄の名前で書いた文字を返す」だけでよい（`npm pack` で本体を読んで確かめた）。
+  - サブエージェントの手順は、既定の（transcript の拡張を広告しない）クライアントには**ツール呼び出しだけ**が `_meta.claudeCode.parentToolUseId` 付きで来る（本文・思考は来ない）。親の Step が transcript に居ない手順は普通の手順のまま出す（行が消えて見えなくなるのを避ける）。
+  - 入力欄がカードと一緒に消える操作（質問の Enter 確定）は、フォーカスを composer へ戻さないとキーが迷子になる。窓を持たない購読（`cx.subscribe`）からは `cx.active_window()` の `update` で戻せる（効果の flush 中は窓が借りられていない）。
+  - GPUI の `.hidden()`（`display: none`）はレイアウトから外れ、flex の gap も取らない。設定の検索は「当たらない行を hidden にし、当たった数を `Cell` で数えてページごと出し分ける」で、行を組む関数を書き直さずに済んだ。
+  - `git show HEAD:<file> | rustfmt --check` は当てにならない（標準入力だと差があっても通ることがある）。整形の基準はファイルのまま `rustfmt --check <file>` で確かめる。workspace.rs を標準入力で整形したら無関係の行（テスト・`mod` の並び）まで変わったので戻した。
+  - relay の node テストは `npm ci --omit=dev --ignore-scripts` だけで回る（wrangler / sharp を入れない）。`web-push` の `sendNotification` は既定 export のオブジェクトなので、テストで差し替えられる。
+- 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 824 通過・落ちるのは Linux で元から落ちる 2 件だけ（PDF のネイティブビューア・Web タブ）。relay の `node --test` 17 本。実画面・macOS 実機・iPhone の push・SSH は未確認。
+- 次: 実機（mac）で見た目を確かめる（質問カードの入力欄・サブエージェントの見出し `NECODER_SUBAGENT_PROBE=collapsed|expanded`・設定の検索・Fleet の絞り込み・表示言語）。iPhone で完了の push が届くか。push の権限。
+
+## 2026-09-26（続き 3）— O16 / O17 / O21 / O22 / O23 をクラウドで積んだ
+
+- やったこと（項目ごとに 1 コミット）: 舞台のピンと列数を窓セッションに残す（O21）/ Task の ⋯ に「休ませる」（静かなエージェントを止める・O21）/ fan-out のエージェントをログイン済みに絞る（O23）/ 片付けに worktree の大きさと「大きい順」（`project::disk_usage_on`・O22）/ **目標の一時停止・再開・取り消し**（Codex が initialize の `_meta.goal` で広告する `_session/goal`・O17）/ **エージェント別の新規スレッド**（`workspace::NewThreadCodex` 等・パレットと keymap.json・O16 / B28）/ **message rail**（transcript の右端に発話ごとの印・O17 / B20）。
+- 学び/罠:
+  - **偽エージェントのテストは事象の並びを見ている**（`SessionStarted` の次は `TurnStarted`）。目標の操作を広告しないエージェントにも空の `GoalControls` を流したら 2 本落ちた。acp_client を触ったら**絞らずに** `cargo test -p acp_client` を回す（絞ったテストだけ回して 1 コミット遅れて気づいた）。直し方は「広告した時だけ流し、UI は SessionStarted で前の操作を消す」。
+  - Claude / Codex のブリッジは、背景のタスクを止める `_session/async_task/stop` を共通で持つ。ただし `async_task_spawned` などの更新は **JetBrains AIR の拡張**（`_meta.jetbrains.air.capabilities: ["asyncTasks"]`）を名乗ったクライアントにだけ来る。ACP SDK が未知の sessionUpdate をどう扱うか（捨てる / 失敗する）を実機で確かめないまま名乗ると会話ごと壊しうるので、個別停止は見送った。
+  - パレットの行は action 名の文字列で引く（`cx.build_action(name, None)`）。打ち間違いは「押しても何も起きない行」になるので、全部の行が登録済みの action と訳のあるラベルを指すテストを足した（既存の行も全部通った）。
+  - 引数つきの action（`#[derive(Action)]`）は `schemars::JsonSchema` が要る（`no_json` だと keymap から引数を渡せない）。依存を増やさず、エージェントごとの引数なし action を 7 つ並べた。
+  - YAML の値に `: ` を含めるなら引用符で囲む（`並び: 作った順` はマップとして読まれる）。`i18n` の `both_locales_parse` が守っている。
+- 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 833 通過・落ちるのは Linux で元から落ちる 2 件だけ。実画面・macOS 実機・Codex の目標の操作（実エージェント）は未確認。
+- 次: 実機で目標の行のチップ（Codex で `/goal` → 一時停止 → 再開）・message rail の印の位置・片付けの大きさ（node_modules のある Task で du の時間）を確かめる。
+
+## 2026-09-26（続き 4）— #30 の CI を緑にし、O20 / O21 / O25 を積んだ
+
+- やったこと: push の権限が直り、1 本にまとめて **#30**（base `parity/integration`）を作った。CI の赤を順に
+  直した（下の学び）。その上に、＋ Task の**作成中の行**（段の表示・取り消し・やり直し・O20 / A03）・
+  ターミナルの**文字の大きさ / フォント / 遡れる行数 / カーソル**（設定と設定画面・開いている端末にもすぐ効く・O25）・
+  **シェルと引数**（`terminal_shell`・手元の端末だけ・O25）・Fleet サイドバーの**複数選択**（⌘ / ⇧ クリック →
+  まとめて休ませる・舞台に並べる・片付けへ・O21 / A11）・**統合で競合したら Task のエージェントに直させる**
+  （`MergeConflicts`・O19 / E15）・**UI とコードの書体**（`ui_font_family` / `code_font_family`・直書き 30 か所を
+  `ui::ui_font` / `ui::code_font` に・O27）・**CSV / TSV の表**（⌘⇧V・O29）・**Quick Commands**（`quick_commands`・
+  ターミナルの ▶・O25）・**sparse checkout**（`task_sparse`・O20）・**リモートのダウンロード / アップロード**
+  （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）・**SSH が繋がらない理由の案内**
+  （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）・**エディタへのドロップ**
+  （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）・Markdown の **front matter の表と
+  目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
+  **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
+  （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）・**端末タブの改名**（ダブルクリック・O24）・
+  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）・**自動命名ブランチの改名**（`task/task` → 最初のスレッドの名前から `task/<slug>`・O23 / A23）・**キー割り当ての画面**（⌘K ⌘S で押して変える・O27 / D23）・**接続先のポートの転送**（Ports・`-O forward`・O5 / G08）・**端末の横の分割**（⌘\\・O24 / C02）・**接続先の登録**（~/.ssh/config に足す・O37 / G01）・**エージェントの起動の上書きの画面**（O16 / B07）・**名前の絵文字**（`:rocket:` → 🚀・O20 / A08）・**行の間隔**（`density`・O27）・**エディタ領域のターミナル**（ファイルと同じタブ列・下ドックと止めずに行き来・O24 / C03）・**SSH のプロジェクトの localhost のリンクを転送してから開く**（R06 の続き・O5。Ports の転送済みの行の「開く」が SSH 先の localhost と読み違えて開かなかったのも直した）・**OS のショートカットとぶつかるキーの警告**（⌘K ⌘S の ⚠・O27 / H26）・**Task の親子**（別の Task のブランチから切ると子・サイドバーで親の下・休ませる / 片付けは子ごと・`task_parents`・O21 / A07）・**どこからでも呼べるターミナル**（⌃`・浮かべる・ホーム・O24 / C13）・**ヘルプ › ログのフォルダを開く / necoder のマニュアル**（O27 / H29）・**衝突の解決の帯とマージ / リベースの中止**（O19 / E05）・**タブのドラッグで右に並べる**（O24 / C03）・**更新の後の「変更点」**（O45 / H17）・**Ghostty から取り込む**（ターミナルの書体・大きさ・カーソル・配色・初回の画面にも・O45 / H14）・**共有フォルダ**（`task_shared`・統合先の `node_modules` などへのリンクを Task に置く・git が無視しないリンクは `info/exclude` で無視させ、無視できなければ残さない・O20 / A05）・**Fleet サイドバーの ⌘⌫ / Delete**（印を付けた片付けの画面へ・O21 / A26）・**接続先の登録に経由するホスト**（ProxyJump・O37 / G03）・**衝突を並べて見る**（今の側 / 元 / 入ってくる側・O19 / E05）・**シェルの区切り（OSC 133 / 633）を読む**（閉じる前の確認が Windows・SSH 先でも効く・zsh / bash の設定例・O25 / C20）・**衝突の結果の欄**（並べて見る 1 枚の下の普通のエディタ・今の側から始めて手で直し、⌘⏎ で印ごと置き換える・空なら衝突ごと消す・CRLF は CRLF で書く・O19 / E05）・**Warp のテーマの取り込み**（`terminal_colors` の YAML・O25 / C11）・**選んだ行をスレッドで引用**（⌥⌘K・`path:行` と抜粋を Agent の入力欄へ足して、その下に注記を書く・送るのは人・O29 / D04。変更レビューの注記＝保存するトレイとは別の軽い道）。
+- 学び/罠:
+  - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
+    `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
+    走らせないので、**1 つ直すと次の警告が出てくる**ことがある。
+  - **Windows を手元で確かめる**: `rustup target add x86_64-pc-windows-gnu` + `apt install gcc-mingw-w64-x86-64`
+    で `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu`（`RUSTFLAGS=-D warnings`）が通る。
+    turso の build.rs が素の `windres` を呼ぶので、`x86_64-w64-mingw32-windres` を `windres` の名前で PATH に置く。
+    テストは走らせられない（Wine も要る）ので、Windows だけ落ちるテストは CI で見る。
+  - **macOS の temp_dir は /var → /private/var のリンク**。消した後のフォルダはもう正規化できず元の綴りに戻るので、
+    レール（正規化済み）と比べるテストは作業フォルダを**最初に正規化**しておく。手元では `TMPDIR` をシンボリック
+    リンクにすると同じ失敗を再現できる。
+  - Windows のローカルは `has_posix_shell` が false で準備スクリプト（`worktree-setup.sh`）を流さない。流すテストは unix だけ。
+  - **偽エージェント（python）の起動込みで 10 秒の上限を持つテスト**が、統合してテストが増えると Windows のランナーで
+    上限に届いた（元の PR では通っていた）。上限の無い形（セッションが終わるまで待つ）か、条件がそろえばすぐ抜ける形で
+    長め（60 秒）に取る。
+  - relay の WebKit のカメラのテスト（`カメラが使えなければ…`）は main の v0.1.18〜v0.1.20 でも落ちていて、#30 でも
+    落ちたり通ったりする。押した時点で偽の getUserMedia が本物に戻っている（`stillFake:false`）。差し込みと押下を
+    1 回の `page.evaluate` で続けて行う案を #30 のコメントに書いた（この PR には入れていない）。
+  - CLA: クラウドのコミットの著者は `Claude <noreply@anthropic.com>`（GitHub のアカウントに紐付かない）で、
+    `cla.yml` の allowlist に無いので未署名扱いになる。エージェントは署名しない。本人の判断待ち。
+  - ディスク: `target/debug/deps` を成果物ごとに新しい 2 版だけ残して 5 GB、`incremental/` で 4 GB 空く。
+    途中で空きが 0 になり、コマンドの出力（`/tmp` の同じ枠）まで失われた。`cargo test --workspace` 1 回で
+    5〜7 GB 増えるので、全体のテストの前に毎回刈る。
+  - `#[cfg(feature = "…")]` の中の行は、その feature を付けないと型もパスも検査されない（settings の
+    `remote-preview` の中で、依存に無い `ui::` を書いても通ってしまった）。feature 付きの example は
+    `cargo check -p settings --features remote-preview --examples` で確かめる。
+  - 描画を伴うテストは `cx.update(|window, cx| window.draw(cx).clear(cx))` で 1 回描かせると、レイアウトで
+    落ちる類いの誤りを拾える（CSV の表で使った）。
+  - リモートとの受け渡しは Host の `read_file` / `write_file`（`WriteCondition::NotExists`）だけで組める。
+    ファイルを書けば daemon が親フォルダを作るので、作れないのは**空のフォルダだけ**（`mkdir -p` を
+    `run_command` で 1 回・argv 渡しなのでクォート不要）。接続先の SSH 実機が無くても、`is_remote` を
+    偽る wrapper（`workspace::tests::RenderAuditHost`）で手元のフォルダを「接続先」にしてテストできる。
+    gpui の保存ダイアログは `cx.simulate_new_path_selection` で答えられる。
+  - `Path::join("")` は末尾に区切りを足す（`/a/b/`）。空の相対パス = 根そのものは別に扱う。
+  - gpui の `on_drop` の listener は落とした位置を受け取らない。位置が要る時は `window.mouse_position()` を
+    読む（落とした瞬間のポインタ）。エディタの行へ入れるのは `EditorView::insert_dropped_text`（描画と同じ
+    ヒットテスト・本文より上ならキャレット）。
+  - `ScrollHandle::scroll_to_top_of_item(i)` は**スクロールする要素の直下の子**の i 番目にしか効かない。
+    Markdown のプレビューは 1 枚の列の中にブロックを並べていたので、ブロックを直下の子へ平らにした
+    （行長の max_w は子ごとに）。front matter の閉じの `---` は、front matter を切り出さずに読むと直前の行を
+    setext 見出し（h2）にする。
+  - 補完のポップアップの絞り込みは、`Typed` の**最後の 1 文字**だけを足す（1 打鍵 1 文字の前提）。テストで
+    `insert_text("co")` とまとめて打つと `o` だけが足されて閉じる。テストは 1 文字ずつ打つ。
+  - パネルのイベント（`cx.subscribe`）は窓を持たないので、そこで開く入力欄へは `window.focus` できない。
+    `chrome.focus_next_frame` に置いて、既にある `process_pending_shell_effects`（render が `window.defer` で
+    回す後処理・root Render で状態を変えない約束）で渡す（端末タブの改名で使った）。
+  - **`ssh -M -N -f` の stderr はパイプで読めない**: `-f` で背景に回った master がパイプの書き口を握り続け、
+    `output()` が master の終わりまで返らない。理由を読みたい時は `-E <ファイル>` でログへ書かせ、親の終わりを
+    待ってから読む（`-E` は追記なので試行の前に消す）。以前は stderr を継いでいたので、失敗のトーストは
+    `exit status: 255` しか言えなかった。
+  - locales の値に `: ` を含むなら必ず `"…"` で囲む（`test_ssh: SSH: 接続…` は i18n の解析が落ちる・CI で
+    3 本赤になる所だった）。パレットの項目は「領域: 動作」の形なので特に注意。
+  - **Task のブランチの「push 済み」は upstream の有無では決められない**: 起点に `origin/main` のような
+    リモートの追跡ブランチを渡すと、`git worktree add -b` が既定（`branch.autoSetupMerge`）で upstream を
+    付ける。push したかは `branch.<名前>.merge` が自分自身（`refs/heads/<名前>`）か、リモートに同じ名前が
+    あるかで見る。`git branch -m` は追跡の設定ごと運ぶ。
+  - **gpui のキーは、割り当て（keymap）の照合が `on_key_down` より先**。⌘P のような割り当て済みのキーを
+    画面で受けたい時は `cx.intercept_keystrokes`（照合の前に呼ばれる）で受けて `cx.stop_propagation()`。
+    止めた後は最初のノードの capture 相の listener だけが呼ばれ、`on_key_down`（bubble）は呼ばれない。
+    受け口の Subscription はコールバックの中で落としてよい（gpui の `SubscriberSet::retain` が扱う）。
+    テストは `cx.simulate_keystrokes` で受け口の道筋まで通る。
+  - **同じキーの書き方は 1 つではない**: `shift-alt-up` と `alt-shift-up` は gpui では同じキー。
+    重ねる・衝突を見る時は `Keystroke::parse` で読み直してから比べる（`keymap_core::user_keymap::canonical`）。
+    gpui の `unparse` はプラットフォームの修飾キーを Linux で `super-`・Windows で `win-` と書くので、
+    keymap の表示（`⌘` / `Win`）と合わない。necoder の書き方（`cmd-` …）は自前で組む。
+  - **keymap の読み直しは「全部捨てて張り直す」**（`cx.clear_key_bindings()` → 既定 → ユーザー）。上から
+    bind するだけでは、ファイルから消した束が残る（gpui は後から足した束が勝つだけで、前の束は消えない）。
+  - **`cx.observe_global` は張った effect の終わりから効く**（gpui は activate を defer する）。同じ
+    `cx.update` の中で監視を張ってから global を変えても呼ばれない。テストは張る update と変える update を
+    分ける（アプリは起動時に張るので困らない）。
+  - **rustfmt は edition 2021 で見る**（crate は 2021・CI に fmt の段は無い）。`--edition 2024` だと style edition
+    が変わり、`.shadow(vec![…])` などの折り方が違って、整っているファイルにも差分が出る。crate の根に
+    `rustfmt --check` をかけると子のモジュールも見るので、変える前（`git stash`）と後で「Diff in」の数を
+    ファイルごとに比べ、増えた所だけ直す。
+  - **端末のキーは「受けなければ次の束縛へ落ちる」**: gpui は同じキーに束縛が複数あれば、action を受ける
+    ハンドラが居なかった時に次の束縛を試す。Terminal コンテキストの ⌘W（`terminal::CloseTab`）をドックの外
+    （エディタ領域）で受けないと、全域の ⌘W（AI のスレッドを閉じる等）に化ける。端末を置く面ごとに受け口を
+    置く（エディタ領域は主ペインの `on_action`）。
+  - **PTY の持ち主は 1 つに**: エディタ領域の端末タブは、Fleet の Task に置いた端末と同じくドックの
+    `detached`（id → Entity）に入れた。テーマ・プロジェクト色・リンク・⌘Q の確認（`busy_terminal_count`）が
+    何も足さずに効く。タブを閉じる時は id を外す（Entity を最後に持つのがタブになり、落ちると止まる）。
+    下ドックへ戻す時は先に `attach_session` で `detached` から抜くので、タブを閉じても止まらない。
+  - **既定の keymap に OS とぶつかるキーがある**（H26 の表で見つけた・既定は変えていない・本人の判断待ち）:
+    mac の ⌃Space（補完）は入力ソースの切り替え（日本語の入力を足した mac では既定で有効）、⌘⇧3（ステージ 3）は
+    スクリーンショット。Linux の Ctrl+Alt+↑↓（複数カーソル・VS Code の Windows と同じ）と Ctrl+Alt+←→
+    （スレッド送り）は GNOME のワークスペースの切替。`os_shortcuts` のテストが既定の衝突の一覧を持っていて、
+    増えたら落ちる。
+  - **台帳に項目を足す時は「知らない書き手が消さない」形に**: Task の親子は `task_deps` と同じく別テーブル
+    （`task_parents`・無 migration）にし、upsert は `parent` が `Some` の時だけ書く。CLI の `fleet create` や
+    GUI の復元時の補完のように親を知らないまま upsert する経路があるので、`None` で消すと親子が黙って外れる。
+    外すのは `set_task_parent(id, None)` だけ。
+  - **⌃` は空いていた**: UI-SPEC の statusbar と Fleet の段に「⌃` = 下のターミナルの開閉」と書いてあったが、
+    keymap に束は無かった（下のターミナルは ⌘J）。どこからでも呼べる端末に使い、古い記述は ⌘J に直した。
+    VS Code では ⌃` が下のパネルの開閉なので、本人の判断に上げた（#30 の本文）。
+  - **gpui はドラッグ中の物の型を外から見られない**（`App::active_drag` は `pub(crate)`・`has_active_drag` だけ）。
+    特定の型だけの落とし先は「ドラッグ中なら置く・`drag_over::<T>` / `on_drop::<T>` で型を絞る」にする
+    （ほかの型のドラッグでは見えない透明な面になるだけで、下の要素の落とし先も効く）。
+  - **シンボリックリンクは git にはファイル**: `.gitignore` の `node_modules/`（末尾の `/` = フォルダだけ）は、
+    `node_modules` という名前のリンクに当たらない。Task に置いたリンクは `?? node_modules` と出て、
+    `git add -A` で commit される（`task_shared` で実際に確かめた）。無視させるのは共有の `info/exclude`
+    （`git rev-parse --path-format=absolute --git-common-dir` の下・linked worktree からも同じ物）に
+    `/node_modules`。ただし `.gitignore` の `!node_modules` は `info/exclude` より強いので、足した後に
+    `git check-ignore` で確かめ直し、無視されなければリンクを消す。無視されたリンクなら
+    `git worktree remove` は force なしで通り、リンク先の中身は消えない。
+  - **OSC 133 は EventLoop に手を入れずに読める**: alacritty の本物の解析器は OSC 133 を黙って捨てるが、
+    EventLoop は PTY の型に対して汎用なので、既にある読み口の包み（`pty_guard::GuardedPty`・kitty keyboard の
+    ガード）で同じバイト列を小さな状態機械に通せば拾える（ほかの OSC は中身を貯めずに読み飛ばす）。
+    分かるのは「いまコマンドが動いているか」と終了コードまで。**行の位置は分からない**（読み口が呼ばれる時は
+    EventLoop が Term の lock を持っていて、解析との順も塊ごとにずれる）ので、プロンプト間の移動は別の仕組みが要る。
+    zsh の precmd は、フックごとに `$?` をコマンドの終了コードへ戻してから呼ぶ（別のフックが先に `return 3` しても
+    `add-zsh-hook` で足した側に正しい値が届く＝実際の zsh 5.9 で確かめた）。bash は `PS0`（4.4 以降）で C、
+    `PROMPT_COMMAND` の先頭で D と A を出す。
+    **区切りは入れ子のプログラムからも届く**（レビューで見つけた）: 区切りを出さない手元の zsh から `ssh` した先の
+    シェルが出した C は、`exit` で抜けた後も D が来ないまま残り、以後の × と ⌘Q が毎回確かめていた（`cat` した
+    `script` の記録でも同じ）。手元のシェル（unix）は前面のプロセスグループだけで決め、区切りは前面を調べられない
+    端末（Windows の ConPTY・`ssh -tt` の接続先）にだけ使う。
+  - **SSH の host は開いた project の外を cwd にできない**（`RemoteHost::run_command` は cwd を根からの相対に
+    直す・書き込みも根の中だけ・metadata は根の中へ正規化してリンクをたどる）。Task の worktree は
+    `<repo>-worktrees/` にあって統合先の外なので、統合先の host で Task の中のコマンドを流すと必ず断られる。
+    `task_shared` だけでなく、`task_sparse` の `sparse-checkout` / `checkout` と準備スクリプトも同じ形で SSH の
+    repo では通っていなかった（レビューで見つけ、`host.host_for_project(target)` に揃えた）。根の外を断る手元の
+    host（`ScopedHost`・テスト）で Task の作成と準備を通すテストを足した。
+  - **Task の id は worktree の場所から決まる**（`stable_worktree_id_on`）。片付けた Task と同じフォルダ
+    （日本語の依頼の `task/task` など）に作り直すと同じ id になり、`task_parents` の古い行が新しい Task に付いて、
+    関係の無い Task が前の親の下に出る（休ませる・子ごと片付けるの対象にも入る）。upsert は親を知らない書き手の
+    ために `Some` の時だけ書くので、作った時だけは `set_task_parent(id, None)` まで書く（`persist_new_task_space`）。
+  - **整っていないファイルに足す時の rustfmt**: ファイルごと整えると他人の差分が混ざる。`src` を丸ごと
+    scratch に写して rustfmt をかけ、足した関数・テストの範囲だけを（前後の固有の行を目印に）写し戻す。
+    「Diff in」の数が変える前と同じになれば、足した所は整っている（project.rs は 12 のまま）。
+  - **前に来るタブが替わる経路は `select_tab` だけではない**（衝突の 1 枚のレビューで見つけた）: 新しく開く
+    （`open_loaded_tab` は `active_tab` を直に書く）・閉じる・プロジェクトの切替。タブに結び付いた重ね物は、
+    各経路で後始末するより、見せる側で「開いた時のエディタがまだ前か」を確かめて描かず、窓を持つ所
+    （`process_pending_shell_effects`）で閉じる方が漏れない。また、キャレットで対象を選ぶ操作（帯）と
+    写しで見せる画面（1 枚）は、キャレットだけが動くと食い違う（欄の中の F8 が本体のキャレットを動かす）。
+    画面のボタンは写しの物に効かせる。
+  - **GPUI のキーは束が先、`on_key_down` は後**: 押したキーはまず keymap の束（深い文脈から）でアクションになり、
+    誰も受けなかった時だけ `on_key_down`（capture → bubble）へ落ちる。重ねた画面の中に EditorView を置くと、
+    Esc は `editor::Cancel`（複数カーソルを畳む物が無ければ `propagate`）、⌘⏎ は `agent::SubmitPrompt`
+    （EditorView は受けない）のアクションとして上がってくるので、重ねた画面の側で `on_action` で受ける
+    （ソース管理パネルの入力欄と同じ形）。`on_key_down` の Esc は、欄の外（カード）にフォーカスがある時の受け口。
+  - relay の Remote control（WebKit）は、カメラの 2 本に加えて本体の `PWA: …` の 17 行目も落ちたり通ったりする。
+    `test/fixture.mjs` の transcript と送信の数を chromium と webkit が共有するので、2 番目の webkit では
+    前の回の同じ文で `toContainText` が先に通り、数を見る時に送信がまだ届いていない。#30 のコメントに
+    本文を project ごとに変えて `expect.poll` で待つ案を書いた（この PR には入れていない）。
+- 検証: Linux の `cargo check --workspace --all-targets`（`-D warnings`）と Windows 向けの同じ check は警告 0。
+  `cargo test --workspace` 845 通過・落ちるのは Linux で元から落ちる 2 件だけ。#30 の CI は 243152f で CLA 以外すべて緑。
+- 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯・書体の差し替え
+  （エディタのヒットテストがずれないか）・CSV の表（横スクロールと見出しの固定）・Quick Commands の帯・
+  SSH 実機でのアップロード / ダウンロード（大きいフォルダの所要時間）を確かめる。Ghostty の取り込みを本物の
+  設定（アプリ同梱のテーマの名前）で、`task_shared` を本物の `node_modules`（Finder・ファイルの見張り・
+  Windows は開発者モードの有無）で、サイドバーの ⌘⌫、登録の ProxyJump を実際の踏み台で。CLA の判断。
+  スマホから Task を作る（O38・G18）は、作った Task をその端末に共有する（`device.tasks` に足す）か・
+  準備スクリプトが長い時の応答（IPC の待ち）をどうするかが「限定共有」の設計に関わるので、本人に聞いてから。
+
+## 2026-09-27 — parity の PR を統合ブランチ 1 本にまとめた（#21）
+- やったこと: 個別の PR 16 本と #30（クラウド）・#34・#35 を `parity/integration` に集め、元の PR は閉じた（`docs/ORCA-PARITY.md` §7.2）。
+  #30 は作者が「Claude」で CLA を通らないので、中身を変えずに本人名義へ付け替えた版を取り込んだ。
+  R04・R05・R06・R08 は個別 PR 側と #30 で二重に直していたので、#30 の版を土台に足りない所だけを移した。
+  Remote control の WebKit の不安定な 3 本を直し、`necoder Dev.app`（`./scripts/bundle-mac.sh release dev`）を足した。
+  main に入った #31・#33・#36 を取り込み（#31 は統合側の同じ関数と 1 つに）、issue #37（composer の `!` で
+  シェルコマンドを走らせる）を入れた。
+- 学び/罠:
+  - **テストで `.rs` を開くと本物の rust-analyzer が立つ**（手元に入っている機械だけ）。その読み取りスレッドが gpui の
+    テストスケジューラを起こして「Your test is not deterministic」→ 別スレッドでのタスク破棄で abort し、
+    `cargo test -p workspace` がテストバイナリごと止まる。CI の runner には言語サーバが無いので CI では出ない。
+    `ensure_lsp` を DB・ファイル監視と同じく `cfg!(test)` で素通りさせた。
+  - **CLA の allowlist に Claude を足すのは穴になる**: Claude Code on the web などは「Claude <noreply@anthropic.com>」
+    名義でコミットするので、外部の人のその名義のコミットも CLA を素通りする。本人のクラウドのセッションの分は、
+    使い捨てのクローンで `git filter-branch --env-filter`（作者とコミッタだけ・tree は同一）で付け替えるのが安全。
+    共有リポジトリで直接やると `refs/original` が残り、作業ツリーが汚れていると拒まれる（bare のクローンなら通る）。
+  - **main 自体が rustfmt から外れている**（17 ファイル・Captain / Fleet 周り）。統合ブランチで `cargo fmt` をかけると
+    main 由来の行まで書き換わり、main の作業ツリーの未コミット作業との衝突が増えるので、かけていない。
+    整形は main 側で Captain の作業と一緒に。CI は fmt を見ていない。
+  - **GUI ソケットは `NECODER_HOME` に従わない**（mac は `~/.necoder/gui.sock` が既定）。隔離するなら
+    `NECODER_GUI_SOCK` も必ず別に置く（Dev.app の LSEnvironment もそうしている）。
+  - **ディスク**: parity の worktree 14 個の `target/` だけで約 227GB あり、空きが 12GB まで減っていた。
+    使い終えた worktree の `target/` は消した（ソースと worktree は残している）。worktree を切って並走させる時は
+    `target/` の大きさ（1 つ 12〜27GB）に注意。
+  - **素の `cargo test` が本物の置き場に書いていた**: `~/Library/Application Support/necoder/` の `shell-path`
+    （背景の取り直しがテストの差し替えを外した後に書き出し先を決めていた）・`chat-paste/`・`remote-pdf/`、それに
+    端末のテストの対話シェルが `~/.bash_history` へ履歴を書いていた。**洗い出し方**: `env HOME=<使い捨て>
+    CARGO_HOME=~/.cargo RUSTUP_HOME=~/.rustup cargo test --workspace` を流して、使い捨ての HOME に何ができるかを見る
+    （cargo と rustup の置き場は本物を明示する）。直した後は Xcode の python のキャッシュしか残らない。新しいテストで
+    ファイルやシェルを使う時はこれで確かめる。
+  - **背景スレッドから fork の経路で起こした子は、シグナルのブロックを継ぐ**（#37 の `!` で見つけた）: macOS の
+    GCD の worker は SIGTERM などをブロックしていて、`pre_exec` / `process_group` を付けた `Command`（fork + exec の
+    経路）の子はそのマスクを継ぐ。素の `Command`（posix_spawn の経路）は継がない。本番の子（ACP・端末の shell）は
+    `ps -o sigmask` で全部 0 と確かめた。fork の経路で子を起こす時は `pre_exec` でマスクを戻す（`Host::run_user_command`）。
+  - **レビュー台帳の二重修正は確認条件で照合する**: R02 は #30 の版が条件 1〜3 だけで、4（取り消しで処理量も減る）は
+    世代で結果を捨てるだけだった。R08 は条件 3（報告の無い値を 0 と言わない）が無かった。「同じ指摘を直した」で
+    片方を捨てる前に、台帳の [ ] を 1 つずつ当てる。
+- 検証: 手元の `cargo test --workspace` 1049 件すべて通過・`cargo check --workspace --all-targets`（debug / release とも）警告 0。
+  #21 の CI（CLA・audit-deps・Linux・Windows・Remote control の macOS / Windows・リモートサーバのビルド）。
+- 次: 本人が `necoder Dev.app` でチェックリストを回す。見つかった物は統合ブランチで直す。
+  main の Captain の未コミット作業を先に main へ入れてもらい、統合ブランチ側で合わせてから #21 を main へ。
+
+## 2026-09-28 — Fleet のタブ行を会話だけに・Captain の残り（推薦 ✳・台帳の知らせ・トークン・承認後の再開）を取り込んだ
+
+- 本人の依頼: 「fleet が前回言ったように、なぜタブに ACP の AI と変更やファイルなどが同列に並んでいるのか困っています、
+  UX として最悪です」と「やりきってください」（Captain の残り）。`docs/necoder-router.md` は「いったんなし」＝公開しない
+  （CLAUDE.md のその行も入れない）。調査メモ（`reports/`・`research_notes/`）も本人が決めるまで上げない。
+- **Fleet のタブ行（`cb6a679`）**: 2026-09-19 のペインバーは、スレッドタブと 変更 / ターミナル / ファイル のトグルを
+  同じ行の左右に分けただけで、本人には「同じ段に同列」だった（09-16 に一度「変更やファイルも同じ様にタブになってる」と
+  差し戻し済み）。スレッドタブ行（`render_thread_tabs`）は**会話の列の頭**へ移し、スレッドと ＋ だけにした。トグル
+  （`render_side_toggles`・ブリッジは 編隊図 / 采配ログ も）は **Task 見出しの右**へ（Task＝worktree の持ち物なので）。
+  見出しの右側（次へ・トグル・⤢ ⋯）は 1 つの塊で、狭いカード（2〜3 列）では塊ごと 2 行目へ折り返す。サイドペインの見出しは
+  30px にして会話の列の頭と揃えた。FLEET-V2 §3.5 / §3.6・UI-SPEC・GLOSSARY・MANUAL・mock を同じ形に。
+- **`+N −M` の食い違い（`f75cba8`）**: 見出しのトグルとサイドバーは追跡外のファイルを 0 行と数え、変更レビューの見出しは
+  全行追加と数えていた（トグル +3 −1 / レビュー +6 −1）。`project::review::untracked_line_count`（レビューと同じ規則）で
+  数える。読む量は 1 回の git 更新で 4MB まで。
+- **UI-SPEC §11 の全面置換（`ee1cb0a`・F7 の残り）**: 管制タブ・herd サイドバー・N セルのグリッドの記述を消し、FLEET-V2 §3 の
+  要約と Fleet の外と共通の決まり（色・状態・✳・ニュース・音・片付け・削除の確認）だけにした。FLEET-CONTROL-PLAN P3 に
+  廃止の注記。⋯ の「セルを閉じる」とトースト「herd から戻せます」を「カード」「サイドバーの Task 行」へ。
+- **Captain の残りを 3 本の worktree で並行に作って取り込んだ**（どれも be300bb から・統合時に直した物は各マージの本文）:
+  - 承認待ちへの推薦 ✳（`442c5a0`）: Captain 専用の MCP の道具 `fleet_recommend` と IPC `recommend`。推薦は「Task と承認要求の
+    id（`PermissionCard::id` = 既存の `remote_id`）」で持ち、今の要求にだけ付く。要対応カードに `✳ Captain: 許可してよい` と
+    理由（統合時に**見立ての下へ 2 行まで**に直した — 同じ行ではサイドバー 256px で理由が 10 字ほどで切れた）。表示だけで、
+    許可・拒否の働きは変えない。台帳に `captain`、ニュースに丸チップ。リモート管制には載せていない（FLEET-V2 §5.5 に理由）。
+  - 台帳の知らせの灰色カードと Captain のトークン（`7460a37`）: 汎用の necoder の知らせ `Entry::AutoPrompt` /
+    `send_auto_prompt_to`（agent_panel に Fleet の語を持ち込まない）。DB の role `auto_prompt` と送る本文の印
+    `<necoder-event>` で、再起動と `session/load` の再生を越えて灰色のまま。前置きは `<necoder-context>` で囲み、再生で外す。
+    知らせは「頼んだこと」に数えない。Captain バーの右端にトークン、Fleet 中の statusbar に Σ（Captain は 1 回だけ）。
+  - 承認後の再開（`b4d8c49`・R09 条件 1）: 行ごとの実行記録 `captain_proposal_rows`（待機 / 作成中 / 成功 / 失敗 / やめた・
+    段）。名前と場所は作る前に書き、Task の登録は行の記録と 1 トランザクション。起動時はサイドバーに「中断: <段> + 再開 / ×」
+    を出すだけで、押した行だけ続ける（既にある worktree・Task は使い回す）。同じリポジトリの ＋ Task と分解案の行は順に作る。
+  - 前回「残り」に数えた MCP の `fleet_digest` の台帳フォールバックは、2026-09-25 に済んでいた（数え間違い）。
+- 学び/罠:
+  - **左右に分けても同じ段なら本人には「同列」**。会話の相手（スレッド）とそれ以外（Task の持ち物）は段を分ける。
+  - 見出しの右の要素を 1 つずつ `flex_wrap` させると `⋯` だけが 2 行目に落ちる。右側を 1 つの塊にして `ml_auto` で折り返す。
+  - **UI-SPEC の本文には衝突の印（`<<<<<<<`）の説明がある**。衝突を解いたかを「`<<<<<<<` が無い」で確かめると誤検知する
+    （`<<<<<<< HEAD` と `>>>>>>> <ブランチ>` の組で見る）。確かめる前に `git add` まで流すと印ごと積まれる。
+  - 知らせ（`send_auto_prompt_to`）は `last_prompt` に入らない。テストで Captain に届いた文を読むなら transcript の `◇` の行から。
+  - 並行の 3 本は、FLEET-V2 の F6 行・ROADMAP の F6 行・UI-SPEC §11・locales・dev_probes のプローブ一覧で必ずぶつかった。
+    どれも「両方を残す」で解けた（rerere に記録済み）。
+  - **準備スクリプトを本当に流すテストは Windows の CI で落ちる**（手元の Windows は POSIX shell 無し＝`LocalHost::has_posix_shell`
+    が false で、準備はいつも失敗する）。「直したら通る」を確かめる部分は `has_posix_shell()` の時だけ流す（`64324ca`）。
+    macOS の手元では通るので、check-windows で初めて分かった。
+  - **macOS の bash 3.2 は `$VAR（` の全角の 1 バイト目まで変数名と読む**（UTF-8 のロケール）。`set -u` のスクリプトでは
+    `DEV_HOME�: unbound variable` で止まる。`bundle-mac.sh release dev` が最後の表示で失敗し、`&& open` まで進まず
+    Dev.app が開かなかった（09-27 の「開かない」も同じ原因）。日本語の直前の変数は `${…}` で囲む（`d5123ea`）。
+    探し方: `perl -ne 'print if /\$[A-Za-z_][A-Za-z0-9_]*[\x80-\xff]/' scripts/*.sh`。
+- 検証: `cargo test -p workspace -p necoder -p agent_panel -p acp_client -p i18n -p project -p storage`（使い捨ての HOME・
+  workspace 291 件ほか全部通過・HOME には python のキャッシュだけ）、`relay` の `npm test` 18 件、`cargo check --workspace
+  --all-targets` 警告 0。隔離 offscreen で 1 列（変更を開いた Task・ブリッジ）・2〜3 列（並べて比べる・ピン 3 枚）・
+  `+N −M` の一致・推薦（2 行）・台帳のカード・Captain バーのトークン・Σ・中断した行を撮って目視。
+- 次: 本人が Dev.app（`./scripts/bundle-mac.sh release dev`）で ORCA-PARITY-CHECKLIST（158 項目）を回す。Captain の実 e2e・
+  推薦・再開は本物のエージェントが要る（課金）。Gemini / OpenCode を Captain にした時の MCP の承認の形は未確認のまま。
+
+## 2026-09-29 — 外部の worktree を取り込んでも舞台に何も出なかった
+
+- 本人の報告: 「左の worktree で取り込む押しても、何も表示されない」（Dev.app・Fleet サイドバーの「外部の worktree」）。
+- 原因: 取り込み（`adopt_worktree` → `open_folder_in_rail` → `add_worktree_to_rail`）は、レールに開いて Task にし、その slot へ
+  切り替える（サイドバーの Task 行も出る）。ところが舞台（`stage_cards`）は札（`fleet_cells` の `FleetPane::Task`）のある Task
+  しか並べず、札は Fleet に入った時に `seed_fleet_cells` がリポジトリの slot から 1 回だけ作る（2 回目以降は退避した一覧を
+  戻すだけ）。＋ Task と Captain の分解案の経路は札を自分で足していたが、取り込みの経路は足していなかったので、選ばれても
+  中央が空だった。
+- 直し: `seed_fleet_cells` の最後で、選んでいる slot の札を必ず置く（`ensure_task_cell` を captain_proposals から fleet_view へ
+  移して共用）。Fleet に入る時・切り替える時（`switch_project` は Fleet 中に `seed_fleet_cells` を呼ぶ）の両方で効くので、
+  ⌘O で開いた linked worktree や、退避していた一覧を戻した時の同じ穴も塞がる。
+- 検証: 取り込みのテスト（`external_worktrees_show_up_and_can_be_adopted`）に「Fleet の中で取り込むと、その Task を選び舞台に
+  出る」を足した（直しを外すと落ちることを確かめた）。隔離 offscreen で新しいプローブ `adopt`（取り込むと同じ入口）を使い、
+  直す前は中央が空・直した後は Task のカードが出ることを撮って目視。`cargo test -p workspace` 291 件通過・警告 0。
+- 学び/罠: **舞台に出すかどうかは札で決まる**。slot をレールに足す新しい経路を作ったら、札のことも考える（今回からは
+  `seed_fleet_cells` が選んでいる slot の分を補うが、ピンして並べる時は札の有無がそのまま効く）。
+
+## 2026-09-30 — PR #21（Orca parity）を main へ合流・`!` の二重実装を 1 本に・#39
+- やったこと:
+  - **PR #21 を main へ merge**。衝突 6 ファイルの大半は `!`（#37）の二重実装（PR #21 `e77f807` と main `4b3173a`/`01580ac`）。**PR #21 版を土台に採った**（手元はプロセスグループへ SIGTERM → 2 秒で SIGKILL・stdout/stderr を分けて渡す・`$SHELL`・esc で止まる・保存した行の書き換え・テストが多い）。main 版の commit が触ったファイルは一度 PR #21 の中身へ戻し、次の 4 つだけを載せ直した:
+    1. **#39 ＋context の入力**: `toggle_context_menu` が FocusHandle を作るだけで focus していなかった。開いたら絞り込み欄へ、閉じたら composer へ（`close_context_menu`）。キャレットはフォーカス時だけ。テスト `context_menu_takes_keys_and_returns_focus`
+    2. **SSH 先の `!` を止められるように**: `RemoteHost::run_user_command` を daemon の 1 往復から `spawn_process`（`ssh` の子）へ。先頭で `$$` を目印付きで出させ、止める時は同じホストで `pgrep -P` を辿って TERM → 2 秒で KILL（`run_user_command_over_process`・`signal_tree_script`）。`ssh` の子の stderr は捨てられるので `exec 2>&1` で寄せる。`can_stop_user_command` = true
+    3. **実行中の出力を流す**: host に `LiveOutput`（表示用の末尾 16 KiB・clone は同じ中身）を足し、`run_user_command` の引数に。パネルは 0.4 秒ごとに届いた分があれば `!` の行を描き直す（末尾 8 行）
+    4. **青系の見た目**: 本文が `!` のコマンドの間、composer の枠・キャレット・`! シェル` バッジ + 実行場所・実行ボタン・ヒントの `!`・チップの文字・transcript の `!` 行を syn-mac に（UI-SPEC §1.3 に行を追加）
+- 学び/罠:
+  - **クリックで開く面に `window.focus` しても、祖先の `track_focus` が奪い返す**: GPUI はクリックを内→外へ流し、`track_focus` を持つ最初の要素へ focus して `prevent_default` する。子の mouse_down で focus した後に Workspace root が focus し直すので、`cx.stop_propagation()` が要る。閉じる面の中の候補クリックも同じ（消えた面の handle に focus が残ると全キーが死ぬ）
+  - **GPUI のテストスケジューラは、外のスレッドから GPUI のタスクを起こすと panic する**（`Detected activity on thread …`）。専用スレッド + oneshot の select で待つ形はテストで落ちる。PR #21 版は background executor で走らせる形なのでこの問題が無い
+  - 二重実装の合流は「どちらかの commit が触ったファイルを丸ごと相手側へ戻す → 欲しい差分だけ載せ直す」が安全（衝突の塊ごとに混ぜると、両方の型・フィールド・i18n キーが半端に残る）
+- 次: v0.1.21 をテストリリース（プレリリース）で出す。実機（metal 環境）で `!`・SSH 先の停止を確認
 

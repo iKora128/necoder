@@ -134,6 +134,8 @@ impl Workspace {
         else {
             return;
         };
+        // 内蔵の配信で開いている HTML のフォルダが変わったら、その Web タブを読み込み直す。
+        self.reload_static_web_tabs(session_index, &paths, cx);
         let mut tree_changed = false;
         let mut git_changed = false;
         for path in &paths {
@@ -225,6 +227,13 @@ impl Workspace {
                         })
                         .detach();
                     }
+                    // 変更レビューのタブはファイルではない（読み直しは下の mark_review_outdated）。
+                    TabContent::Review(_) => {}
+                    // Web タブの鍵は URL（localhost）か `file://`（内蔵の配信）なので、ファイルの変更が
+                    // ここへ来ることは無い（開発サーバは HMR・内蔵の配信は上の `reload_static_web_tabs`）。
+                    TabContent::Web { .. } => {}
+                    // 端末タブの鍵もファイルではない（O24）。
+                    TabContent::Terminal { .. } => {}
                 }
                 git_changed = true;
                 continue;
@@ -241,6 +250,7 @@ impl Workspace {
         }
         if git_changed {
             self.refresh_git_status_for(session_index, cx);
+            self.mark_review_outdated(session_index, cx);
             let session = &self.project_sessions.sessions[session_index];
             if let Some(editor) = session
                 .tabs
@@ -287,7 +297,7 @@ impl Workspace {
                 view.set_html_preview_evict_minutes(current.html_preview_evict_minutes, cx);
             });
         }
-        // PDF タブのネイティブビューアも同じ回収弁（非表示 WebView の破棄猶予）を共有する。
+        // PDF タブ・Web タブのネイティブビューアも同じ回収弁（非表示 WebView の破棄猶予）を共有する。
         let pdf_views: Vec<Entity<PdfView>> = self
             .project_sessions
             .sessions
@@ -296,6 +306,18 @@ impl Workspace {
             .flat_map(|session| session.tabs.iter().filter_map(|tab| tab.pdf().cloned()))
             .collect();
         for view in pdf_views {
+            view.update(cx, |view, cx| {
+                view.set_evict_minutes(current.html_preview_evict_minutes, cx)
+            });
+        }
+        let web_views: Vec<Entity<WebPreviewView>> = self
+            .project_sessions
+            .sessions
+            .iter()
+            .chain(self.project_sessions.chat.iter())
+            .flat_map(|session| session.tabs.iter().filter_map(|tab| tab.web().cloned()))
+            .collect();
+        for view in web_views {
             view.update(cx, |view, cx| {
                 view.set_evict_minutes(current.html_preview_evict_minutes, cx)
             });
