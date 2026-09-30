@@ -5,6 +5,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-10-01
+
+> **This is a test release, like v0.1.21 and v0.1.22.** It contains everything in v0.1.22, and some of that has not been checked on a real machine yet (`docs/ORCA-PARITY-CHECKLIST.md`). It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.
+
+This release rebuilds the phone screen (remote control, served from control.necoder.com) so you can follow your agents from your phone. It opens on a list of every shared thread, and a conversation reads like a chat: replies are formatted, and the agent's tool calls are folded into a short summary. The Mac app now sends each thread's and project's color, so the phone uses the same colors as your desktop.
+
+### Added
+
+- **Phone: thread list**: The phone opens on every shared thread, grouped by project. Threads waiting for your approval or answer come first under "Needs you", and projects with running threads come next. Each row shows the thread's state by shape and motion, its agent, its tokens and the latest reply.
+- **Phone: readable conversations**: Replies are formatted as Markdown (headings, lists, tables, code). Tool calls in a row are folded into one box that says what the agent did, such as "12 steps · Read 3 · Search 4 · Run 1". While a turn runs, the box shows the command running now. Open the box to see each step, and a step to see its output.
+- **Phone: thread and project colors**: The top bar of a conversation takes the thread's color, and each project in the list gets a bar in its color, the same colors as on your Mac. This needs this version of necoder on the Mac. While the phone is connected to an older version, it stays neutral.
+- **Phone: new thread**: ＋ next to a project starts a new thread with the agent you pick.
+
+### Changed
+
+- **Phone: conversation order**: Messages now read from old to new, with the latest just above the message box, which stays at the bottom of the screen. A conversation opens at the latest message, and new messages do not move the part you are reading. This replaces the newest-first order from v0.1.21 (#36).
+- **Phone: questions and approvals**: They appear at the end of the conversation, right above the message box. Options are radio buttons or checkboxes.
+- **Phone: settings**: The PC, reconnect, notifications, language and "remove this connection" moved into a settings sheet at the top right of the list.
+- The phone reopens the conversation you were reading when you come back to the app.
+
+### Fixed
+
+- **Phone features from v0.1.21**: Typing your own answer to an agent's question and the "finished" notice were in v0.1.21, but control.necoder.com still served an older phone screen, so they did not work. They work now.
+
+### 日本語
+
+> **v0.1.21・v0.1.22 と同じくテストリリースです。** v0.1.22 の変更をすべて含み、その中にはまだ実機で確かめていない所があります（`docs/ORCA-PARITY-CHECKLIST.md`）。自動更新では配信しません。試してくださる方は、この Release ページから手動で入れてください。不具合を見つけたら Issue で教えてもらえると助かります。
+
+スマホの画面（リモート管制・control.necoder.com）を、手元でエージェントを追えるように作り直した版です。開くと共有中のスレッドが一覧で並び、会話はチャットのように読めます。本文は整えて表示し、ツールの実行は短くまとめて畳みます。Mac の necoder がスレッドとプロジェクトの色を送るようになり、スマホでもデスクトップと同じ色で見分けられます。
+
+#### 追加
+
+- **スマホ：スレッド一覧**：開くと、共有中のスレッドがプロジェクトごとに並びます。承認や質問を待っているスレッドは「要対応」として先頭に、実行中のスレッドがあるプロジェクトはその次に並びます。各行には、状態（形と動きで表示）・エージェント・トークン・最後の返事を出します。
+- **スマホ：読みやすい会話**：返事は Markdown（見出し・箇条書き・表・コード）として整えて出します。続けて走ったツール実行は 1 つの箱に畳み、「12 ステップ　読む 3・検索 4・実行 1」のように何をしたかを出します。実行中は、今動いているコマンドを出します。箱を開くと 1 件ずつ、さらに開くと出力が見られます。
+- **スマホ：スレッドとプロジェクトの色**：会話画面の上端バーがスレッドの色になり、一覧ではプロジェクトごとにその色の縦線が付きます。Mac と同じ色です。この版の necoder が Mac に入っている必要があります。古い版に繋がっている間は、色の付かない中立色で出ます。
+- **スマホ：新しいスレッド**：一覧のプロジェクトの ＋ から、エージェントを選んで新しいスレッドを始められます。
+
+#### 変更
+
+- **スマホ：会話の並び**：古い順に並び、最新は画面下に固定した入力欄のすぐ上に来ます。開くと最新の位置から始まり、遡って読んでいる間に新しい返事が届いても、読んでいる所は動きません。v0.1.21 の新しい順の並び（#36）はやめました。
+- **スマホ：質問と承認**：会話の最後、入力欄のすぐ上に出します。質問の選択肢はラジオボタンかチェックボックスです。
+- **スマホ：設定**：PC の切り替え・再接続・通知・言語・接続の削除を、一覧の右上から開く設定シートに移しました。
+- アプリを開き直すと、読んでいた会話に戻ります。
+
+#### 修正
+
+- **v0.1.21 のスマホ側の機能**：質問に自分の言葉で答える欄と「終わった」通知は v0.1.21 に入っていましたが、control.necoder.com が古い画面のままだったため使えていませんでした。今回から使えます。
+
 ## [0.1.22] - 2026-10-01
 
 > **This is a test release, like v0.1.21.** It contains everything in v0.1.21, and some of that has not been checked on a real machine yet (`docs/ORCA-PARITY-CHECKLIST.md`). It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.
