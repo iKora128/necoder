@@ -33,9 +33,15 @@ cat <<FOOTER
 
 ---
 
-### インストール / Install
+### Install
 
-- **macOS 13+（Apple Silicon）**: \`necoder.dmg\` を開いて \`necoder.app\` を Applications へドラッグ。署名・公証済み（Gatekeeper の警告なし）
-- **Windows 10+（x64）**: \`necoder-windows-x64.zip\` を展開して \`necoder.exe\` を起動。未署名のため初回は SmartScreen の「詳細情報 → 実行」が必要
-- 全変更履歴: [CHANGELOG.md](https://github.com/iKora128/necoder/blob/v${version}/CHANGELOG.md) · License: AGPL-3.0 · https://necoder.com
+- **macOS 13+ (Apple Silicon)**: open \`necoder.dmg\` and drag \`necoder.app\` into Applications. Signed and notarized, so Gatekeeper shows no warning.
+- **Windows 10+ (x64)**: unzip \`necoder-windows-x64.zip\` and run \`necoder.exe\`. The build is not signed yet, so on first launch SmartScreen asks you to choose "More info → Run anyway".
+- Full history: [CHANGELOG.md](https://github.com/iKora128/necoder/blob/main/CHANGELOG.md) · License: AGPL-3.0 · https://necoder.com
+
+### インストール
+
+- **macOS 13 以降（Apple Silicon）**：\`necoder.dmg\` を開き、\`necoder.app\` を「アプリケーション」へドラッグします。署名と公証を済ませてあるので、Gatekeeper の警告は出ません。
+- **Windows 10 以降（x64）**：\`necoder-windows-x64.zip\` を展開して \`necoder.exe\` を起動します。まだ署名していないため、初回は SmartScreen で「詳細情報」→「実行」を選んでください。
+- 全変更履歴：[CHANGELOG.md](https://github.com/iKora128/necoder/blob/main/CHANGELOG.md) · ライセンス：AGPL-3.0 · https://necoder.com
 FOOTER

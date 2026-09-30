@@ -17,6 +17,8 @@ welcome・クラッシュ報告）は実装済み — ここに残っている�
 ## 1. リリースを切る（毎回）
 
 1. [ ] `CHANGELOG.md` の Unreleased を版へ繰り上げ（**この節がそのまま Release ページの本文になる**。
+       **英語を先に、`### 日本語` の下に日本語**を書く（海外の読み手が迷わないように・2026-09-30）。
+       前タグからの差分を全部洗ってから書く。
        `scripts/release-notes.sh <version>` で CI と同じ出力を手元で確認できる。節が無いと
        release.yml が落ちる）
 2. [ ] `Cargo.toml` の `[workspace.package] version` を上げる（唯一の出所。Info.plist へは
