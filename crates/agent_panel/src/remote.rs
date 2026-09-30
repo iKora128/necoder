@@ -43,6 +43,8 @@ impl AgentPanel {
             "permission_id": thread.pending_permission.as_ref().map(|p| &p.remote_id),
             "question_pending": thread.pending_elicitation.is_some(),
             "question_id": thread.pending_elicitation.as_ref().map(|q| &q.remote_id),
+            // スマホでもデスクトップと同じ識別色で見分ける（UI-SPEC §1.2）。
+            "color": format!("#{:06x}", theme_core::hex_from_color(thread.color)),
         })).collect())
     }
 

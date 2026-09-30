@@ -8,9 +8,12 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
   await page.goto(pairing.url);
   await expect(page.locator('#status')).toHaveText('接続済み');
-  await expect(page.locator('#destination')).toContainText('PWA integration');
   expect(new URL(page.url()).hash).toBe('');
-  await expect(page.locator('#projects option')).toHaveCount(1);
+  // 一覧には共有したプロジェクトだけが並ぶ。
+  await expect(page.locator('#home-list .project-head')).toHaveCount(1);
+  await expect(page.locator('#home-list')).not.toContainText('共有しないプロジェクト');
+  await page.locator('[data-thread-name="PWA integration"]').first().click();
+  await expect(page.locator('#destination')).toContainText('PWA integration');
   // fixture（transcript と送信の数）は chromium → webkit の順で project をまたいで共有される。本文が同じだと
   // webkit の回では chromium が送った同じ文で toContainText が先に通り、数を見る時に自分の送信がまだ
   // 届いていないことがある。本文を project ごとに変え、数は届くまで待つ。
@@ -18,8 +21,8 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   await page.locator('#message').fill(message);
   await page.locator('#send').click();
   await expect(page.locator('#transcript')).toContainText(message);
-  // 新しい順: 送ったばかりの発話が入力欄のすぐ下（先頭）に来る。
-  await expect(page.locator('#transcript .entry').first()).toContainText(message);
+  // 会話は古い順で、送ったばかりの発話が最後（画面下に固定した入力欄のすぐ上）に来る。
+  await expect(page.locator('#transcript .msg-user').last()).toContainText(message);
   await expect.poll(async () => (await (await request.get('http://127.0.0.1:8792/count')).json()).count).toBe(count + 1);
   await page.locator('#diff').click();
   await expect(page.locator('#diff-text')).toContainText('+remote ready');
@@ -145,6 +148,7 @@ test('PWA 内で QR を読み取ってペアリングする', async ({ page, req
   await expectFakeCamera(page);
   await page.locator('#scan').click();
   await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 20000 });
+  await page.locator('[data-thread-name="PWA integration"]').first().click();
   await expect(page.locator('#destination')).toContainText('PWA integration');
   // 読み取り後はカメラを必ず離す（ダイアログが閉じ、トラックが止まっている）。
   await expect(page.locator('#scan-dialog')).toBeHidden();

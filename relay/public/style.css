@@ -1,30 +1,213 @@
-:root { color-scheme: dark; --bg: #17181b; --panel: #1f2024; --border: #35373e; --fg: #ededf0; --muted: #a5a7b2; --thread: #61afef; font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif; background: var(--bg); color: var(--fg); }
-* { box-sizing: border-box; } [hidden] { display: none !important; }
-body { margin: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-header, main, footer { width: min(100% - 32px, 820px); margin-inline: auto; }
-header { display: flex; align-items: center; justify-content: space-between; min-height: 76px; border-bottom: 1px solid var(--border); gap: 20px; }
-a { color: inherit; } .brand { text-decoration: none; font-size: 21px; font-weight: 650; letter-spacing: -.8px; white-space: nowrap; } .brand span { font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 10px; letter-spacing: .1px; }
-header select { width: auto; font-size: 13px; } main { min-height: 75dvh; padding: 24px 0; }
-h1 { font-size: clamp(28px, 6vw, 42px); line-height: 1.35; letter-spacing: -1px; font-weight: 600; margin: 14px 0 20px; } h2 { font-size: 16px; font-weight: 600; }
-.welcome { max-width: 540px; padding: 30px 0; } .welcome p, .welcome li { color: var(--muted); } .welcome ol { padding-left: 23px; margin: 28px 0; } .welcome li { margin: 16px 0; } .eyebrow { text-transform: uppercase; font-size: 11px; letter-spacing: 2px; }
-button, input, select, textarea { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--border); border-radius: 7px; min-height: 44px; padding: 9px 12px; }
-button { cursor: pointer; font-size: 13px; font-weight: 550; } button:hover:not(:disabled) { background: #2c2e34; border-color: #6b6f7e; } button:disabled { opacity: .4; cursor: default; }
-input, select, textarea { width: 100%; font-size: 16px; } textarea { resize: vertical; min-height: 94px; } label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 7px; }
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
-#pair-form button { width: 100%; margin-top: 12px; } .hint { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
-.connection { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } .connection select { flex: 1; min-width: 140px; width: auto; } #status { font-size: 12px; } #last-seen { min-height: 20px; } .tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 24px; }
-.thread-heading, .dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; }
-.threads { display: flex; overflow: auto; gap: 8px; padding: 12px 1px; } .thread { text-align: left; min-width: 160px; max-width: 270px; white-space: normal; overflow-wrap: anywhere; border-top: 2px solid transparent; } .thread.active { border-top-color: var(--thread); } .thread small { display: block; font-weight: 400; color: var(--muted); }
-.destination { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px; color: var(--muted); font-size: 12px; margin: 18px 0; border-left: 3px solid var(--thread); padding-left: 10px; } #destination { overflow-wrap: anywhere; } .thread-actions { display: flex; gap: 8px; padding-bottom: 14px; }
-.entry { padding: 16px 0; border-bottom: 1px solid var(--border); } .entry .label { font-size: 11px; letter-spacing: .8px; color: var(--muted); margin-bottom: 8px; } .entry pre { margin: 0; font-family: inherit; white-space: pre-wrap; overflow-wrap: anywhere; } .entry.user { border-left: 2px solid var(--thread); padding-left: 14px; } .entry.tool, .entry.thinking { font-size: 13px; color: var(--muted); }
-pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.65; overflow: auto; tab-size: 2; } .permission, .question { border: 1px solid var(--border); padding: 18px; background: var(--panel); border-radius: 9px; margin: 16px 0; overflow-wrap: anywhere; } .permission pre, .question pre { max-height: 360px; padding: 10px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; } .permission h3, .question h3 { font-size: 15px; margin: 0 0 12px; } .choices { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; } .permission label { font-size: 13px; display: flex; gap: 10px; align-items: flex-start; } input[type=checkbox] { width: 20px; min-height: 20px; flex-shrink: 0; } details summary { cursor: pointer; padding: 8px 0; font-size: 13px; }
-#composer { padding-bottom: 16px; border-bottom: 1px solid var(--border); } #message { border-color: var(--thread); } .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 10px; } #receipt { color: var(--muted); font-size: 12px; } #send { border-color: var(--thread); min-width: 88px; }
-#notice { position: sticky; bottom: 16px; background: #30323a; border: 1px solid #646875; border-radius: 8px; padding: 14px; margin: 14px 0; font-size: 13px; overflow-wrap: anywhere; }
-dialog { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 12px; width: min(95vw, 850px); max-height: 85dvh; padding: 20px; } dialog::backdrop { background: #000a; } dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; } .dialog-head { margin: 0; } dialog p { font-size: 12px; color: var(--muted); }
-footer { color: var(--muted); font-size: 11px; border-top: 1px solid var(--border); padding: 20px 0; display: flex; justify-content: space-between; gap: 16px; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-@media (min-width: 700px) { main { padding-top: 36px; } .welcome { margin: 20px auto; } }
-@media (prefers-reduced-motion: no-preference) { button { transition: background .12s ease; } }
+/* 色は docs/UI-SPEC.md §1.1（dark）と同じトークン。識別色（--thread / --project）は GUI から届いた時だけ
+   差し込み、届かなければ中立のまま（色を捏造しない＝デスクトップと食い違う色を出さない）。
+   状態は色相でなく形と動きで出す（§1.3: 実行中 = 点字スピナー / 回答待ち = 半円の脈動 / 新着 = リング）。 */
+:root {
+  color-scheme: dark;
+  --bg0: #16181e; --bg1: #1b1e25; --bg2: #232733; --bg3: #2b3040;
+  --fg0: #d7dae3; --fg1: #9aa1b2; --fg2: #646b7a; --border: #262b36;
+  --ok: #7bc96f; --warn: #e5c07b; --err: #e06c75; --terra: #d97757;
+  --thread: #9aa1b2;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif;
+  background: var(--bg1); color: var(--fg0);
+  -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; min-height: 100dvh; }
+body > section { max-width: 760px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column; }
+a { color: inherit; }
+button, input, select, textarea { font: inherit; color: var(--fg0); }
+button { cursor: pointer; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; min-height: 44px; padding: 8px 14px; font-size: 14px; font-weight: 600; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--fg1); outline-offset: 2px; }
+input, select, textarea { width: 100%; font-size: 16px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; min-height: 44px; padding: 9px 12px; }
+label { display: block; color: var(--fg1); font-size: 12.5px; margin: 14px 0 6px; }
+.hint { color: var(--fg2); font-size: 12.5px; white-space: pre-wrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
+/* ── 上端バー（両画面共通・ステータスバーの下に潜らない） ── */
+.bar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 6px;
+  padding: calc(env(safe-area-inset-top) + 6px) max(10px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left));
+  min-height: 54px; background: var(--bg0); border-bottom: 1px solid var(--border); }
+.bar-title { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.brand { font-size: 18px; font-weight: 700; letter-spacing: -.3px; }
+.brand small { font-size: 12px; font-weight: 500; color: var(--fg2); margin-left: 6px; letter-spacing: 0; }
+.bar-sub { font-size: 11.5px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thread-name { font-size: 15.5px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 会話の上端バー＝そのスレッドのタブ。スレッド色を 22% 混ぜた面（ステータスバーの裏まで）＋下線 2px。
+   色が届かない版の GUI の間は付けない（.colored は色が届いた時だけ）。app.mjs の TINT と割合を揃える。 */
+#thread-view.colored .bar { background: color-mix(in srgb, var(--thread) 22%, var(--bg0)); border-bottom: 2px solid var(--thread); }
+#thread-view.colored .bar .bar-sub { color: color-mix(in srgb, var(--fg0) 62%, transparent); }
+#thread-view.colored .bar .chip { background: color-mix(in srgb, var(--bg0) 45%, transparent); border-color: color-mix(in srgb, var(--thread) 45%, var(--border)); }
+/* どのプロジェクトか: 名前の前にプロジェクト色の縦棒（ピル左縁と同じ流儀・UI-SPEC §1.3）。 */
+.project-chip.colored::before { content: ''; display: inline-block; width: 3px; height: .95em; margin-right: 5px; vertical-align: -.12em; border-radius: 1px; background: var(--project); }
+.icon-button { flex: none; width: 44px; min-height: 44px; padding: 0; display: grid; place-items: center; background: none; border: 0; color: var(--fg1); position: relative; }
+.back { margin-left: -8px; color: var(--fg0); }
+.badge { position: absolute; top: 5px; right: 1px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: var(--fg0); color: var(--bg0); font-size: 10.5px; font-weight: 700; line-height: 17px; text-align: center; }
+.chip { flex: none; min-height: 34px; padding: 4px 12px; font-size: 13px; font-weight: 600; border-radius: 7px; background: var(--bg2); }
+select.compact { width: auto; min-height: 34px; padding: 4px 8px; font-size: 13px; }
+.status { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg1); white-space: nowrap; }
+.status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--fg2); }
+body[data-status=online] .status::before { background: var(--ok); }
+body[data-status=connecting] .status::before, body[data-status=authenticating] .status::before { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+body[data-status=offline] .status::before, body[data-status=guiOffline] .status::before { background: var(--err); }
+/* 前面へ戻るたびに一瞬だけ「接続中…」が点滅しないよう、出るのを 1.2 秒遅らせる（その間に繋がれば出ない）。 */
+.banner { position: sticky; top: calc(env(safe-area-inset-top) + 55px); z-index: 15; padding: 7px 16px; font-size: 12.5px; color: var(--fg0); background: var(--bg3); border-bottom: 1px solid var(--border); animation: appear 0s 1.2s both; }
+@keyframes appear { from { visibility: hidden; } to { visibility: visible; } }
+
+/* ── ホーム: スレッド一覧 ── */
+.home-list { flex: 1; padding: 4px 0 calc(28px + env(safe-area-inset-bottom)); }
+.group-title { display: flex; align-items: center; gap: 8px; padding: 18px 16px 6px; font-size: 12px; font-weight: 700; color: var(--fg1); letter-spacing: .02em; }
+.group-title .count { color: var(--fg2); font-weight: 600; }
+/* プロジェクトの塊。色が届いていれば左端にプロジェクト色の縦線を見出しから最後の行まで通す。 */
+.project { position: relative; border-top: 1px solid var(--border); margin-top: 10px; padding-bottom: 4px; }
+.home-list > .project:first-child { border-top: 0; margin-top: 0; }
+.project.colored::before { content: ''; position: absolute; left: 0; top: 20px; bottom: 10px; width: 3px; border-radius: 0 2px 2px 0; background: var(--project); }
+.project-head { display: flex; align-items: center; gap: 8px; padding: 22px 8px 4px 16px; }
+.project-head .name { font-size: 14px; font-weight: 700; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.project-head .branch { flex: 1; min-width: 0; font: 12px var(--mono); color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.project-head .add { flex: none; min-height: 36px; padding: 2px 10px; font-size: 13px; color: var(--fg1); background: none; border-color: transparent; }
+.row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; column-gap: 10px; row-gap: 1px; width: 100%; text-align: left;
+  padding: 10px 16px 11px; min-height: 58px; background: none; border: 0; border-radius: 0; font-weight: 400; }
+.row:active { background: var(--bg3); }
+.row .glyph { grid-row: 1 / span 3; align-self: start; font-size: 13px; line-height: 22px; text-align: center; color: var(--thread); }
+.row .name { font-size: 15px; font-weight: 600; line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .tokens { font-size: 11.5px; line-height: 22px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+.row .meta { grid-column: 2 / span 2; font-size: 12px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .meta b { color: var(--fg0); font-weight: 600; }
+.row .preview { grid-column: 2 / span 2; font-size: 13px; line-height: 1.5; color: var(--fg1); margin-top: 3px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.row.unseen .name { color: #fff; }
+.empty { padding: 28px 20px; color: var(--fg1); font-size: 14px; text-align: center; white-space: pre-wrap; }
+.empty-row { padding: 4px 16px 10px 46px; margin: 0; color: var(--fg2); font-size: 12.5px; }
+.glyph.blocked { animation: pulse .8s ease-in-out infinite; }
+.glyph.idle, .glyph.lost { opacity: .4; }
+.row .glyph.idle { font-size: 9px; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* ── スレッド: トランスクリプト（VSCode Claude Code 拡張の流儀・UI-SPEC §6） ── */
+.transcript { flex: 1; padding: 6px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left)); overflow-wrap: anywhere; }
+.history { color: var(--fg2); font-size: 12px; text-align: center; margin: 10px 0 14px; }
+.msg-user { margin: 22px 0 12px; padding: 9px 12px; background: var(--bg2); border-left: 2px solid var(--thread); border-radius: 0 8px 8px 0; white-space: pre-wrap; font-size: 15px; line-height: 1.6; }
+.msg-user .more { display: block; margin-top: 6px; min-height: 30px; padding: 2px 0; background: none; border: 0; color: var(--fg2); font-size: 12px; font-weight: 500; }
+.msg-agent { position: relative; margin: 10px 0 12px; padding-left: 17px; font-size: 15px; line-height: 1.7; }
+.msg-agent::before { content: '⏺'; position: absolute; left: 0; top: 0; color: var(--terra); font-size: 10px; line-height: 25px; }
+.msg-agent > :first-child { margin-top: 0; }
+.msg-agent > :last-child { margin-bottom: 0; }
+.msg-agent p { margin: 0 0 .75em; }
+.msg-agent h3, .msg-agent h4, .msg-agent h5, .msg-agent h6 { margin: 1.1em 0 .4em; line-height: 1.4; }
+.msg-agent h3 { font-size: 17px; } .msg-agent h4 { font-size: 15.5px; } .msg-agent h5, .msg-agent h6 { font-size: 14.5px; color: var(--fg1); }
+.msg-agent ul, .msg-agent ol { margin: 0 0 .75em; padding-left: 1.35em; }
+.msg-agent li { margin: .2em 0; }
+.msg-agent li[data-depth="1"] { margin-left: 1.2em; } .msg-agent li[data-depth="2"] { margin-left: 2.4em; } .msg-agent li[data-depth="3"] { margin-left: 3.6em; }
+.msg-agent blockquote { margin: 0 0 .75em; padding-left: 11px; border-left: 2px solid var(--bg3); color: var(--fg1); }
+.msg-agent hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
+.msg-agent code { font: .86em var(--mono); background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.msg-agent pre.code { margin: 0 0 .8em; padding: 10px 12px; background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; font: 12.5px/1.55 var(--mono); white-space: pre; }
+.msg-agent pre.code code { font: inherit; background: none; border: 0; padding: 0; }
+.msg-agent a { text-decoration: underline; text-decoration-color: var(--fg2); text-underline-offset: 2px; }
+.msg-agent .table { overflow-x: auto; margin: 0 0 .8em; }
+.msg-agent table { border-collapse: collapse; font-size: 13px; line-height: 1.5; }
+.msg-agent th, .msg-agent td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; vertical-align: top; min-width: 5em; }
+.msg-agent th { background: var(--bg2); font-weight: 650; }
+.marker { margin: 12px 0; color: var(--fg2); font-size: 12px; text-align: center; }
+/* necoder の知らせ（Captain への台帳の通知など）。人の発話と混ぜない灰色のカード。1 行目が出所と時刻。 */
+.msg-auto { margin: 14px 0; padding: 9px 12px; background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; color: var(--fg1); font-size: 13.5px; line-height: 1.6; white-space: pre-wrap; }
+.msg-auto-head { margin-bottom: 3px; font-size: 11.5px; color: var(--fg2); }
+
+/* 作業の欄: 連続したツール実行と思考を 1 つの箱にまとめ、既定で畳む。閉じた見出しは「何を何回」
+   （読む 4 · 検索 2 · 実行 3）、実行中は「いま何を」。1 件ずつの行は「印 動詞 対象 場所」で、生の
+   コマンドや結果は開いた先で見る。箱も印も中立色（識別色は実行中のスピナーだけ）。 */
+.workbox { margin: 10px 0; background: var(--bg0); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.work-head, .step { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 8px 12px; text-align: left;
+  background: none; border: 0; border-radius: 0; font-size: 13px; font-weight: 400; color: var(--fg1); }
+button.work-head:active, button.step:active { background: var(--bg2); }
+.work-list > div + div, .work-list > div:first-child { border-top: 1px solid var(--border); }
+.work-list .step { min-height: 38px; padding-left: 16px; }
+.bullet { flex: none; width: 10px; color: var(--terra); font-size: 10px; text-align: center; }
+.bullet.glyph { color: var(--thread); font-size: 13px; }
+.mark { flex: none; width: 15px; color: var(--terra); font-size: 12px; text-align: center; }
+.icon { flex: none; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; color: var(--fg1); }
+.verb { flex: none; color: var(--fg0); font-weight: 600; font-size: 12.5px; }
+.target { flex: 1; min-width: 0; color: var(--fg0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.target.code { font: 12px var(--mono); color: var(--fg1); }
+.target.prose { color: var(--fg1); font-style: italic; }
+.place { margin-left: 7px; font: 11.5px -apple-system, 'Hiragino Sans', sans-serif; color: var(--fg2); }
+.lines { flex: none; font-size: 11.5px; color: var(--fg2); }
+.count { flex: none; color: var(--fg0); font-weight: 600; }
+.kinds { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 3px 12px; }
+.kind { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--fg1); white-space: nowrap; }
+.kind b { color: var(--fg0); font-weight: 600; font-variant-numeric: tabular-nums; }
+.kind .icon { width: 14px; height: 14px; }
+.chevron { flex: none; width: 12px; color: var(--fg2); font-size: 10px; transition: transform .15s ease; }
+[aria-expanded=true] > .chevron { transform: rotate(90deg); }
+.working { display: flex; align-items: center; gap: 8px; min-height: 38px; color: var(--fg1); font-size: 13px; }
+.result { margin: 0 12px 10px 16px; padding: 8px 10px; max-height: 55vh; overflow: auto; background: var(--bg1); border: 1px solid var(--border); border-radius: 6px;
+  font: 11.5px/1.5 var(--mono); color: var(--fg1); white-space: pre-wrap; overflow-wrap: anywhere; }
+.thought { margin: 0 12px 10px 16px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--thread) 45%, transparent); color: var(--fg1); font-size: 13.5px; font-style: italic; white-space: pre-wrap; }
+
+/* ── 承認・質問（会話の末尾に置く＝エージェントが聞いた直後に答える） ── */
+.card { margin: 10px max(16px, env(safe-area-inset-right)) 14px max(16px, env(safe-area-inset-left)); padding: 14px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow-wrap: anywhere; }
+.card-eyebrow { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; color: var(--fg1); }
+.card-eyebrow .glyph { color: var(--thread); }
+.card h3 { margin: 6px 0 10px; font-size: 15px; line-height: 1.45; }
+.card pre, .card .message { margin: 0 0 10px; padding: 8px 10px; max-height: 38vh; overflow: auto; background: var(--bg0); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.card .message { font: 14px/1.6 -apple-system, 'Hiragino Sans', sans-serif; background: none; border: 0; padding: 0; max-height: none; }
+.card details { margin: 0 0 8px; }
+.card summary { cursor: pointer; padding: 6px 0; font: 12.5px var(--mono); color: var(--fg1); }
+.card .caption { margin: 6px 0 4px; font-size: 11.5px; color: var(--fg2); }
+.card .check { display: flex; gap: 10px; align-items: flex-start; margin: 12px 0 0; font-size: 13.5px; color: var(--fg0); }
+.card input[type=checkbox], .card input[type=radio] { width: 20px; min-height: 20px; height: 20px; margin: 2px 0 0; flex-shrink: 0; accent-color: var(--fg0); }
+.card fieldset { border: 0; margin: 10px 0 0; padding: 0; }
+.card legend { font-size: 12.5px; color: var(--fg1); margin-bottom: 4px; }
+.card input.custom { margin-top: 8px; }
+.card .option { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 9px 2px; font-size: 14.5px; color: var(--fg0); border-top: 1px solid var(--border); }
+.choices { display: flex; gap: 10px; margin-top: 14px; }
+.choices button { flex: 1; }
+.primary, .choices .allow { background: var(--fg0); color: var(--bg0); border-color: var(--fg0); }
+
+/* ── 入力欄（画面下に固定・送信ボタンはスレッド色面＝UI-SPEC §6 composer） ── */
+.composer { position: sticky; bottom: 0; z-index: 20; background: var(--bg0); border-top: 1px solid var(--border);
+  padding: 8px max(12px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+#message { display: block; min-height: 44px; max-height: 38vh; resize: none; line-height: 1.5; border: 1.5px solid color-mix(in srgb, var(--thread) 40%, var(--border)); border-radius: 10px; }
+#message:focus { outline: none; border-color: var(--thread); }
+.composer-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+#receipt { flex: 1; min-width: 0; font-size: 12px; color: var(--fg2); }
+.send { min-width: 84px; min-height: 40px; background: var(--thread); color: var(--bg0); border: 0; }
+.send:disabled { background: var(--bg3); color: var(--fg2); opacity: 1; }
+.to-latest { position: fixed; z-index: 25; right: max(16px, env(safe-area-inset-right)); bottom: calc(118px + env(safe-area-inset-bottom)); width: 42px; min-height: 42px; padding: 0; display: grid; place-items: center; border-radius: 50%; background: var(--bg2); color: var(--fg1); box-shadow: 0 4px 14px #0008; }
+
+#notice { position: fixed; z-index: 40; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 62px); max-width: 560px; margin: 0 auto; padding: 12px 14px; background: var(--bg3); border: 1px solid #3a4052; border-radius: 10px; font-size: 13.5px; box-shadow: 0 8px 24px #000a; overflow-wrap: anywhere; }
+
+/* ── シート（設定・新規スレッド・差分・QR） ── */
+dialog { color: var(--fg0); background: var(--bg1); border: 1px solid var(--border); border-radius: 14px; padding: 16px; width: min(94vw, 640px); max-height: 88dvh; }
+dialog::backdrop { background: #000a; }
+dialog.sheet { margin: auto auto 0; width: 100%; max-width: 640px; border-radius: 16px 16px 0 0; border-bottom: 0; padding: 12px 18px calc(18px + env(safe-area-inset-bottom)); }
+dialog.sheet.tall { height: 88dvh; }
+dialog.sheet.tall[open] { display: flex; flex-direction: column; } /* [open] 無しで display を上書きすると閉じていても出てしまう */
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+.sheet-head h2 { font-size: 16px; margin: 6px 0; }
+.sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.sheet-actions button { flex: 1; }
+.settings-status { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--fg1); margin: 10px 0; }
+.danger { width: 100%; margin-top: 22px; color: var(--err); background: none; }
+.agent-choices { display: grid; gap: 8px; margin-top: 8px; }
+.agent-choices button { text-align: left; }
+#diff-text { flex: 1; margin: 8px 0 0; padding: 10px; overflow: auto; background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; font: 11.5px/1.55 var(--mono); white-space: pre; }
+#diff-text .add { color: var(--ok); } #diff-text .del { color: var(--err); } #diff-text .hunk { color: var(--fg2); } #diff-text .file { color: var(--fg0); font-weight: 700; }
+.legal { display: flex; justify-content: space-between; gap: 12px; margin-top: 18px; padding: 14px 16px calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); font-size: 11px; color: var(--fg2); }
+dialog .legal { padding: 14px 0 0; }
+
+/* ── 未ペアリング ── */
+.welcome { flex: 1; max-width: 540px; padding: 22px 20px 30px; }
+.welcome h1 { font-size: clamp(27px, 7vw, 38px); line-height: 1.35; letter-spacing: -.8px; font-weight: 650; margin: 10px 0 16px; }
+.welcome p, .welcome li { color: var(--fg1); }
+.welcome ol { padding-left: 22px; margin: 24px 0; } .welcome li { margin: 12px 0; }
+.eyebrow { text-transform: uppercase; font-size: 11px; letter-spacing: 2px; color: var(--fg2); }
+#scan { width: 100%; }
+#pair-manual { margin-top: 14px; } #pair-manual summary { font-size: 12.5px; color: var(--fg1); cursor: pointer; padding: 6px 0; }
+#pair-form button { width: 100%; margin-top: 12px; }
 #scan-video { width: 100%; max-height: 60dvh; border-radius: 10px; background: #000; object-fit: cover; }
-#pair-manual { margin-top: 14px; } #pair-manual summary { font-size: 12px; color: var(--muted); cursor: pointer; }
-.question label input { margin-top: 6px; }
+
+@media (prefers-reduced-motion: reduce) { .glyph.blocked, .status::before { animation: none !important; } .fold .chevron { transition: none; } }
