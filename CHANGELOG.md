@@ -5,6 +5,58 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-10-01
+
+This is the first regular release since v0.1.20, delivered through auto-update. It includes everything from the test releases [v0.1.21](https://github.com/iKora128/necoder/releases/tag/v0.1.21), [v0.1.22](https://github.com/iKora128/necoder/releases/tag/v0.1.22) and [v0.1.23](https://github.com/iKora128/necoder/releases/tag/v0.1.23). If you are updating from v0.1.20, their notes list every change. If something does not work, please let us know in an Issue.
+
+### Highlights since v0.1.20
+
+- **Change review**: Read all of a worktree's changes on one screen, and send line notes to a thread or Task.
+- **Agent composer**: `!` runs a shell command, `/` completes slash commands, and `@` mentions a file.
+- **Web tab for localhost**: Includes Design mode, which attaches a piece of the page to a thread.
+- **Terminal**: Split panes, a floating terminal you can call up from anywhere (⌃`), find in terminal, and much more.
+- **Usage**: Rate limits and per-turn tokens in the status bar and on a statistics screen.
+- **Fleet and the Captain**: More ways to create and clean up Tasks, nested Tasks, parallel Tasks you can compare, and the Captain's recommendations on waiting approvals.
+- **Session history and full-text search**: Search every thread's turns, and open the agent's past sessions.
+- **Agents**: Add any agent from the ACP registry, and switch the account Claude Code and Codex use.
+- **SSH**: Move files, see why a connection failed, and forward ports.
+- **Explorer**: A double-click opens the default app, and ⌥⌘C copies the selected item's path.
+- **Phone (remote control)**: A thread list and readable conversations, in the same thread and project colors as on your Mac.
+
+### Added
+
+- **⌘O lights up the rail**: While the project switcher (⌘O) is open, the project you have selected lights up in the rail on the left. Its frame brightens, and a bar in its color appears at the rail's left edge. You can see where a project sits in the rail while you find it by name. A worktree row lights the project it is listed under, and a Task lights its repository's project.
+
+### Fixed
+
+- **⌘O selection stays put**: If you moved the selection in ⌘O before the branch and worktree rows finished loading, the selection could jump to another row when they arrived. It now stays on the row you chose.
+
+### 日本語
+
+v0.1.20 以来の正式版で、自動更新で配信します。テストリリースの [v0.1.21](https://github.com/iKora128/necoder/releases/tag/v0.1.21)・[v0.1.22](https://github.com/iKora128/necoder/releases/tag/v0.1.22)・[v0.1.23](https://github.com/iKora128/necoder/releases/tag/v0.1.23) の変更をすべて含みます。v0.1.20 から更新した方は、それぞれのリリースノートに変更の一覧があります。うまく動かない所があれば Issue で教えてください。
+
+#### v0.1.20 からの主な変更
+
+- **変更レビュー**：worktree の変更を 1 画面で読み、行ごとの注記をスレッドや Task へまとめて送れます。
+- **エージェントの入力欄**：`!` でシェルのコマンドを実行し、`/` でスラッシュコマンドを補完し、`@` でファイルをメンションできます。
+- **localhost の Web タブ**：Design モードで、ページの一部をスレッドに添付できます。
+- **ターミナル**：分割、どこからでも呼べるフローティングターミナル（⌃`）、ターミナル内の検索など、多くの改善が入りました。
+- **使用量**：レート制限とターンごとのトークンを、ステータスバーと統計の画面で見られます。
+- **Fleet と Captain**：Task の作り方と片付け方が増え、Task の入れ子、並べて比べる並列の Task、承認待ちへの Captain の推薦が入りました。
+- **セッション履歴と全文検索**：全スレッドの発言を探し、エージェントの過去のセッションを開けます。
+- **エージェント**：ACP レジストリから好きなエージェントを追加でき、Claude Code と Codex のアカウントを切り替えられます。
+- **SSH**：ファイルの受け渡し、接続に失敗した理由の表示、ポートの転送ができます。
+- **エクスプローラ**：ダブルクリックで既定のアプリで開き、⌥⌘C で選んでいる項目のパスをコピーします。
+- **スマホ（リモート管制）**：スレッドの一覧と読みやすい会話になり、スレッドとプロジェクトの色も Mac と同じです。
+
+#### 追加
+
+- **⌘O で選んでいるプロジェクトがレールで光る**：プロジェクト切替（⌘O）を開いている間、選んでいるプロジェクトが左のレールで光ります。枠が点き、レールの左端にその色の縦棒が出ます。名前で探しながら、そのプロジェクトがレールのどこにあるかが分かります。worktree の行はその行が並ぶプロジェクト、Task は同じリポジトリのプロジェクトが光ります。
+
+#### 修正
+
+- **⌘O の選択が勝手に動かない**：ブランチ / worktree の行が読み込み終わる前に ⌘O で選択を動かすと、行が届いた時に別の行へ移ることがありました。選んだ行のまま残ります。
+
 ## [0.1.23] - 2026-10-01
 
 > **This is a test release, like v0.1.21 and v0.1.22.** It contains everything in v0.1.22, and some of that has not been checked on a real machine yet (`docs/ORCA-PARITY-CHECKLIST.md`). It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.

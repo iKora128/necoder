@@ -86,7 +86,8 @@ pub struct ProjectSession {
     /// Fleet の Tests surface 専用。通常 Terminal と同じ Entity を二箇所へ描画しない。
     pub(crate) tests_dock: Entity<TerminalDock>,
     pub(crate) agent_active: bool,
-    pub(crate) picker_worktree_rows: Vec<PathBuf>,
+    /// ⌘O の worktree 行（id − 1000 で引く）: (worktree のパス, その行が並ぶプロジェクトの枠)。
+    pub(crate) picker_worktree_rows: Vec<(PathBuf, usize)>,
     pub(crate) picker_ssh_hosts: Vec<host::SshConfigHost>,
     pub(crate) picker_ssh_recent: Vec<String>,
     /// SSH のホストピッカーを「接続を確かめる」で開いた（選んでも開かずに試すだけ・O37）。

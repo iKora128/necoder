@@ -288,12 +288,13 @@ impl Workspace {
     }
 
     /// ⌘O の行を組む: プロジェクト行（●色 + 名前 + パス + 実行中ドット）+ 配下の
-    /// worktree 行（⎇ branch + ↑↓/dirty + 実行中ドット）。戻りは (items, id-1000 → path 表)。
+    /// worktree 行（⎇ branch + ↑↓/dirty + 実行中ドット）。戻りは
+    /// (items, id-1000 → (path, 並ぶプロジェクトの枠) 表)。
     pub(crate) fn build_switcher_items(
         &self,
         collected: &[(usize, Vec<(project::GitWorktree, project::WorktreeStatus)>)],
         cx: &App,
-    ) -> (Vec<PickerItem>, Vec<PathBuf>) {
+    ) -> (Vec<PickerItem>, Vec<(PathBuf, usize)>) {
         let registry = cx.try_global::<agent_panel::RunningRegistry>();
         // ambient に出す状態（実行中/承認待ち/完了・未確認）のスレッド色をドットに。Idle は出さない。
         let running_dots = |path: &Path| -> Vec<Hsla> {
@@ -308,7 +309,7 @@ impl Workspace {
                 .unwrap_or_default()
         };
         let mut items = Vec::new();
-        let mut rows: Vec<PathBuf> = Vec::new();
+        let mut rows: Vec<(PathBuf, usize)> = Vec::new();
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
             let root = slot.worktree.root();
             items.push(
@@ -351,10 +352,58 @@ impl Workspace {
                         .with_detail(detail)
                         .with_dots(running_dots(&worktree.path)),
                 );
-                rows.push(worktree.path.clone());
+                rows.push((worktree.path.clone(), index));
             }
         }
         (items, rows)
+    }
+
+    /// ⌘O で選んでいる行の行き先の枠（開いている間だけ）。worktree の行は、その worktree が
+    /// 枠として開いていればその枠、無ければその行が並ぶプロジェクトの枠（確定した時の行き先と
+    /// 同じ見方・`open_worktree_target`）。
+    fn switcher_selected_slot(&self, cx: &App) -> Option<usize> {
+        if self.overlays.picker_mode != PickerMode::Projects {
+            return None;
+        }
+        let id = self.overlays.picker.as_ref()?.read(cx).selected_id()?;
+        let projects = &self.project_sessions.projects;
+        if id < 1000 {
+            return (id < projects.len()).then_some(id);
+        }
+        let (path, parent) = self.picker_worktree_rows.get(id - 1000)?;
+        projects
+            .iter()
+            .position(|slot| slot.worktree.root() == path.as_path())
+            .or(Some(*parent))
+    }
+
+    /// ⌘O で選んでいる行の行き先を、レールのどの枠で光らせるか（本人要望・2026-10-01）。
+    /// 名前で選んだプロジェクトがレールのどこに居るかを、その場で目で結べるようにする。
+    /// レールに載るのは統合先の枠だけなので、Task の行き先は同じリポジトリの統合先の枠
+    /// （今いる枠の点け方と同じ・`render_rail`）。⌘O が閉じていれば空。
+    pub(crate) fn switcher_rail_slots(&self, cx: &App) -> Vec<usize> {
+        let projects = &self.project_sessions.projects;
+        let Some((target, slot)) = self
+            .switcher_selected_slot(cx)
+            .and_then(|index| projects.get(index).map(|slot| (index, slot)))
+        else {
+            return Vec::new();
+        };
+        if slot.task_space.is_integration() {
+            return vec![target];
+        }
+        let repository = slot.task_space.repository_id.as_str();
+        if repository.is_empty() {
+            return Vec::new();
+        }
+        projects
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| {
+                other.task_space.is_integration() && other.task_space.repository_id == repository
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// ⌘O の worktree 行を確定: 現プロジェクトなら何もしない・レールに居れば切替・
@@ -771,7 +820,9 @@ impl Workspace {
                     PickerMode::Projects => {
                         // id >= 1000 は worktree 行（M12-12）: レール切替 or 新窓で開く。
                         if id >= 1000 {
-                            if let Some(path) = self.picker_worktree_rows.get(id - 1000).cloned() {
+                            if let Some((path, _)) =
+                                self.picker_worktree_rows.get(id - 1000).cloned()
+                            {
                                 self.open_worktree_target(path, None, window, cx);
                             }
                         } else {

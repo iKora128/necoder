@@ -3851,3 +3851,17 @@
   - 新しい worktree では `relay/public/jsqr.mjs`（build の生成物・.gitignore）が無く、BarcodeDetector の無い WebKit だけ QR 読み取りのテストが落ちる。CI と同じく `npm run build` の後にブラウザテストを流す。
   - 同じ文書への fragment 遷移（`/` → `/#room=…`）は再読込されずペアリングが走らない（撮影で welcome を撮った後は about:blank を挟む）。`dialog` に `display: flex` を当てると閉じていても出る（`[open]` に限る）。
 - 次: スマホの画面は Worker へのデプロイで全員に届く。色は v0.1.23 の本体を入れた後。本人が実機で見てから次を考える（「作業場」の受け取り方＝作業の欄で合っているかも）。
+
+## 2026-10-01 — v0.1.24（正式版）: ⌘O で選んでいる行の行き先をレールで光らせる
+
+- 発端（本人・ドッグフーディング）: 「左の workspace をいくら移動できると言っても混乱する。コマンドを打ってプロジェクト名でサジェストされて移動できる、Spotlight の workspace 版が欲しい」→ ⌘O（M12-12 のスイッチャー）が既にそれだと伝えると「cmd o あるんだ。可能なら選択されている workspace が左側で光るとなお UX 的に良いかも」。
+- やったこと:
+  - `ui::Picker`: `selected_id()`（いま選んでいる行の id）。`set_items` は選んでいた行と同じ id の行を選び直す（これまでは位置を保つだけで、背景で worktree の行が差し込まれると選択が別の行へずれていた＝光る枠が飛ぶ）。
+  - `workspace`: `picker_worktree_rows` に「その行が並ぶプロジェクトの枠」を持たせた。`switcher_rail_slots` = 選んでいる行の行き先のレールの枠（worktree の行は開いていればその枠・無ければ並ぶプロジェクト、Task は同じリポジトリの統合先＝今いる枠の点け方と同じ）。`render_rail` はその枠を active と同じ枠線 + hover と同じ 24% の面にし、レールの左端に縦棒 3×18px（`rail_switcher_bar`・出るたびに伸びる 160ms・reduce motion では静止）。
+  - 開発用: `NECODER_SWITCHER_PROBE=<ms>[;<絞り込み>]`（開いてから打つ文字）。
+  - docs: UI-SPEC（§2 の状態・§7 の ⌘O）、MANUAL（§3）、CHANGELOG（Unreleased）。
+- 検証: 新テスト `the_rail_lights_the_project_chosen_in_the_switcher`（開くまで光らない・先頭・↓・背景の行が届いても選んだ物のまま・絞り込み・開いていない worktree の行 → 並ぶプロジェクト・Task → 統合先・Esc で消える）。`set_items` の直しを外すとこのテストが落ちることを確かめた。隔離 offscreen（プロジェクト 4 つ・`NECODER_SWITCHER_PROBE="2000;orca"`）で、orca の枠が点いて左端に青い縦棒が出るのを目視。
+- 学び/罠:
+  - Picker は別の Entity だが、Workspace の描画で `picker.read(cx)` を読めばよい（Picker の notify で窓ごと描き直され、ルートの Workspace はキャッシュしていないので毎回描かれる）。選択の変化をイベントで追う必要はない。
+- リリース: 本人「いったん新しいの本リリースしていいですよ」で、v0.1.20 以来の正式版（Pre-release にしない＝自動更新で届く）として v0.1.24 を出した。テスト版 v0.1.21〜v0.1.23 の中身を全部含むので、CHANGELOG の冒頭に「v0.1.20 からの主な変更」をまとめた（自動更新で来た人が最初に開くのは、この版の Release ページ＝更新後の最初の起動のトースト）。relay は v0.1.23 から変えていないので Worker のデプロイは不要。
+- 次: 本人の実機で見え方（棒の太さ・今いる枠との見分け）を確かめる。v0.1.20 から自動更新で上がる道（チップ → 差し替え → 再起動）も実機で見る。
