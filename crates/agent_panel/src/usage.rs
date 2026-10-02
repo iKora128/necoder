@@ -234,6 +234,16 @@ pub struct UsageKey {
     pub profile: SharedString,
     /// 置き場以外の認証に関わる env の指紋（[`credential_fingerprint`]）。そういう env が無ければ `None`。
     pub credential_fingerprint: Option<u64>,
+    /// セッションに渡した接続（issue #38 H3）。別の会社の契約なので、エージェント自身のログインの値と
+    /// 混ぜない。`None` = エージェント自身のログイン。
+    pub connection: Option<ConnectionTag>,
+}
+
+/// 鍵に入れる接続（名前と、宛先を決める中身の指紋＝ベース URL を書き換えれば別の鍵）。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionTag {
+    pub name: SharedString,
+    pub routing: u64,
 }
 
 /// 使用量の鍵の「場所」: 手元は空、SSH 先はホストの表示名（R08）。Host を呼ぶので描画からは使わない。
@@ -336,6 +346,7 @@ impl UsageKey {
             host: SharedString::default(),
             profile: SharedString::default(),
             credential_fingerprint: None,
+            connection: None,
         }
     }
 
@@ -343,9 +354,28 @@ impl UsageKey {
     /// から作る。Host は呼ばない（描画からも呼ばれる）。
     pub fn for_agent(agent: SharedString, host: SharedString, cx: &App) -> Self {
         // 足したエージェント（H1）も同じ一覧で引く（`start_session` と同じ上書きから鍵を作る）。
-        let agent_override = settings::agent_by_label(cx, agent.as_ref())
+        let candidate = settings::agent_by_label(cx, agent.as_ref());
+        let agent_override = candidate
+            .as_ref()
             .and_then(|candidate| crate::agent_server_override(candidate.id(), cx));
+        // 接続は手元のエージェントにだけ渡す（`start_session` と同じ決まり）。
+        let connection = candidate
+            .filter(|_| host.is_empty())
+            .and_then(|candidate| settings::agent_connection_in(cx, candidate.id()));
         Self::with_override(agent, host, agent_override.as_ref())
+            .with_connection(connection.as_ref())
+    }
+
+    /// 鍵に接続を入れる（`None` = エージェント自身のログイン）。
+    pub(crate) fn with_connection(
+        mut self,
+        connection: Option<&acp_client::connections::Connection>,
+    ) -> Self {
+        self.connection = connection.map(|connection| ConnectionTag {
+            name: SharedString::from(connection.name.clone()),
+            routing: connection.routing_fingerprint(),
+        });
+        self
     }
 
     /// 設定の上書き（`agent_servers.<id>`）から作る（[`Self::for_agent`] の本体。セッションを立てる時は
@@ -369,12 +399,14 @@ impl UsageKey {
             host,
             profile,
             credential_fingerprint: env.and_then(credential_fingerprint),
+            connection: None,
         }
     }
 
-    /// 見出し: `Claude Code` / `Claude Code · dev-box` / `Claude Code · ~/.claude-work` /
-    /// `Claude Code · 設定の env #1a2b3c`（認証に関わる env の指紋で分かれる時。置き場のパスもあれば
-    /// その後ろに添える＝同じ見出しの行を作らない）。指紋は下 24 bit の 16 進だけを出す。
+    /// 見出し: `Claude Code` / `Claude Code · GLM Coding Plan (Z.ai)`（接続）/ `Claude Code · dev-box` /
+    /// `Claude Code · ~/.claude-work` / `Claude Code · 設定の env #1a2b3c`（認証に関わる env の指紋で
+    /// 分かれる時。置き場のパスもあればその後ろに添える＝同じ見出しの行を作らない）。指紋は下 24 bit の
+    /// 16 進だけを出す。
     pub fn label(&self) -> SharedString {
         let mut label = self.agent.to_string();
         let credentials = self.credential_fingerprint.map(|fingerprint| {
@@ -384,6 +416,10 @@ impl UsageKey {
             )
         });
         for part in [
+            self.connection
+                .as_ref()
+                .map(|connection| connection.name.as_ref())
+                .unwrap_or_default(),
             self.host.as_ref(),
             self.profile.as_ref(),
             credentials.as_deref().unwrap_or_default(),

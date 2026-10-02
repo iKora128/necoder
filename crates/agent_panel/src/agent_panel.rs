@@ -1030,15 +1030,34 @@ impl RunningRegistry {
 
 /// あるエージェントが広告した選択肢の在庫（モデル・思考量・権限モード）。
 ///
-/// 広告は **agent 固有でスレッド非依存**（同じ `claude-agent-acp` なら、どのセッションに聞いても
-/// 同じ一覧が返る）。だから 1 度でも受け取ったらパネル内で使い回す — まだセッションが開いていない
+/// 広告は**スレッド非依存**（同じ `claude-agent-acp` を同じ接続・同じログインで起こせば、どのセッションに
+/// 聞いても同じ一覧が返る）。だから 1 度でも受け取ったらパネル内で使い回す — まだセッションが開いていない
 /// タブでも、ピルが表示名で出て**押して選べる**（選んだ値は sticky に載り、次に開くセッションへ
 /// [`acp_client::SessionPreferences`] で渡る）。捏造ではなく「そのエージェントが実際に広告した物」
-/// だけを持つのが要点。
+/// だけを持つのが要点。鍵は [`StockKey`]: 接続やログインを替えるとモデルの一覧が変わるので、別の接続・
+/// 別のログインの一覧を出さない（issue #38 H3）。
 #[derive(Default, Clone)]
 struct AgentAdvertisement {
     configs: Vec<ConfigOption>,
     modes: Vec<(SharedString, SharedString)>,
+}
+
+/// 広告の在庫の鍵（issue #38 H3）: 使用量の鍵（エージェント・動かしている場所・認証の置き場・認証に
+/// 関わる env の指紋・接続）+ ログインの指紋（ログインと設定のファイル・`.claude.json` のアカウント）。
+/// セッションを立てた時に決めてスレッドに持たせ（[`Thread::stock_key`]）、そのセッションの広告はこの鍵へ
+/// 控える。まだセッションの無いタブは、今の設定で立てた時に付く鍵（[`AgentPanel::prospective_stock_key`]）
+/// で引く。実行ファイルの版は鍵に入れない（起こす前に解決しないと分からない・版が変われば次のセッションの
+/// 広告で入れ替わる）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StockKey {
+    usage: usage::UsageKey,
+    /// [`acp_client::connections::login_fingerprint`]（手元だけ。SSH 先は 0）。
+    login: u64,
+}
+
+/// エージェントごとの在庫のうち、接続やログインでは変わらない物（表示名で持つ）。
+#[derive(Default, Clone)]
+struct HarnessStock {
     /// slash コマンド一覧（O2）。セッションがまだ開いていないタブの `/` 補完に使う。
     /// 同じパネルのスレッドは宛先（cwd）も同じなので、同じ agent なら一覧もほぼ同じ。
     commands: Vec<acp_client::SlashCommand>,
@@ -1229,6 +1248,10 @@ struct Thread {
     /// セッションは前の鍵のまま（アカウントの切り替えは次に立てるセッションから効く・O14）。
     /// セッションを 1 度も立てていなければ `None`。
     usage_key: Option<usage::UsageKey>,
+    /// 今のセッションの広告の在庫の鍵（[`StockKey`]・issue #38 H3）。セッションを立てた時に決め、その
+    /// セッションの広告（モデル・思考量・権限モード）はこの鍵へ控える。接続やログインを替えた後は、
+    /// 前のセッションの広告（`configs` / `available_modes`）をピルに出さない。
+    stock_key: Option<StockKey>,
     /// エージェント側の過去の会話を開いたばかりで、`session/load` の再生を待っている（O15）。
     /// 起動時に `replay_history` を頼み、再生を transcript に積んだら（`SessionStarted` で）下ろす。
     replay_pending: bool,
@@ -1325,6 +1348,7 @@ impl Thread {
             last_active_at_ms: 0,
             usage: usage::CostMeter::default(),
             usage_key: None,
+            stock_key: None,
             replay_pending: false,
             handoff_preamble: None,
             seat: None,
@@ -2404,9 +2428,16 @@ pub struct AgentPanel {
     /// リサイズ開始時のマウス Y と高さ（ドラッグ量の基準）。
     composer_resize_start_y: f32,
     composer_resize_start_height: f32,
-    /// エージェント別の広告在庫（[`AgentAdvertisement`]）。セッションがまだ開いていないタブの
-    /// ピルは、同じ agent のこの在庫から選択肢と表示名を引く。
-    catalog: HashMap<SharedString, AgentAdvertisement>,
+    /// 広告の在庫（[`AgentAdvertisement`]・鍵は [`StockKey`]）。セッションがまだ開いていないタブの
+    /// ピルは、同じ鍵のこの在庫から選択肢と表示名を引く。
+    catalog: HashMap<StockKey, AgentAdvertisement>,
+    /// エージェント別の在庫のうち接続やログインで変わらない物（slash コマンド・会話名）。
+    harness_stock: HashMap<SharedString, HarnessStock>,
+    /// 最後に確かめたログインの指紋（使用量の鍵ごと）。描画でファイルを見ないための控え
+    /// （セッションを立てる時・ピルのメニューを開く時・設定が変わった時に確かめ直す）。
+    login_fingerprints: HashMap<usage::UsageKey, u64>,
+    /// 「接続はリモートのエージェントには渡さない」を知らせ済みのエージェント（表示名）。
+    remote_connection_noted: std::collections::HashSet<SharedString>,
     /// 先張りの世代。タブを続けて切り替えた時、最後の予約だけを生かす。
     prewarm_gen: u32,
     /// この宛先で先張りを試したスレッド id。失敗しても連打しない（1 スレッド 1 回）。
@@ -2580,6 +2611,8 @@ impl AgentPanel {
                 });
                 cx.notify();
             }
+            // 接続・認証の環境を替えたら、まだ使っていない先張りを今の設定で張り直す（issue #38 H3）。
+            panel.retire_stale_prewarms(cx);
         })
         .detach();
         // 開発用: NECODER_AGENT_START_PROBE=<エージェントの名前> で、いまのスレッドをそのエージェントにして
@@ -2909,6 +2942,9 @@ PYEOF"#;
             composer_resize_start_y: 0.0,
             composer_resize_start_height: 0.0,
             catalog: HashMap::new(),
+            harness_stock: HashMap::new(),
+            login_fingerprints: HashMap::new(),
+            remote_connection_noted: std::collections::HashSet::new(),
             prewarm_gen: 0,
             prewarmed: std::collections::HashSet::new(),
             prewarm_order: Vec::new(),
@@ -3323,9 +3359,9 @@ PYEOF"#;
     /// その agent が会話名を自分で送ってこない（O2）。
     fn needs_own_auto_name(&self, thread: &Thread) -> bool {
         let agent_names_itself = self
-            .catalog
+            .harness_stock
             .get(&thread.agent)
-            .is_some_and(|advertisement| advertisement.sends_titles);
+            .is_some_and(|stock| stock.sends_titles);
         !thread.name_is_custom && is_placeholder_name(&thread.name) && !agent_names_itself
     }
 
@@ -3376,8 +3412,8 @@ PYEOF"#;
                 // 一覧は捨て、新しいセッションの広告で埋め直す（在庫も同じ理由で捨てる）。
                 thread.commands.clear();
             }
-            for advertisement in self.catalog.values_mut() {
-                advertisement.commands.clear();
+            for stock in self.harness_stock.values_mut() {
+                stock.commands.clear();
             }
             // 宛先が変われば cwd も変わる＝別のセッション。先張りの試行履歴も畳んで張り直す。
             self.prewarmed.clear();
@@ -5950,6 +5986,70 @@ PYEOF"#;
         } else {
             Some(selector)
         };
+        // 一覧を見ようとした時に、ログインを替えていないか確かめ直す（ターミナルでログインし直した後に
+        // 前のログインの一覧を出さない・issue #38 H3）。ファイルの更新時刻を見るだけ。
+        if self.open_menu.is_some() && selector != Selector::Agent {
+            self.refresh_login_fingerprint(cx);
+        }
+        cx.notify();
+    }
+
+    /// アクティブスレッドのエージェントのログインの指紋を確かめ直す（手元・セッションがまだ無いタブだけ。
+    /// 動いているセッションの広告はそのセッションの物が正）。
+    fn refresh_login_fingerprint(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        if thread.command_tx.is_some() || self.dest_host.is_remote() {
+            return;
+        }
+        let Some(agent) = settings::agent_by_label(cx, &thread.agent) else {
+            return;
+        };
+        let usage =
+            usage::UsageKey::for_agent(thread.agent.clone(), self.dest_host_label.clone(), cx);
+        let env = agent_server_override(agent.id(), cx)
+            .map(|agent_override| agent_override.env)
+            .unwrap_or_default();
+        let login = acp_client::connections::login_fingerprint(agent.id(), &env);
+        self.login_fingerprints.insert(usage, login);
+    }
+
+    /// 設定が変わった時: 先張りしたまま 1 度も使っていないセッションのうち、今の設定（接続・認証の環境）
+    /// なら別の鍵で立つ物を畳んで張り直す（前の接続のまま最初の送信が走らない・issue #38 H3）。
+    /// 使ったセッションは畳まない（動いているスレッドは立てた時の接続のまま・次に立てる時から効く）。
+    fn retire_stale_prewarms(&mut self, cx: &mut Context<Self>) {
+        let stale: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|thread| {
+                thread.command_tx.is_some()
+                    && !thread.session_used
+                    && !thread.running
+                    && thread.pending_permission.is_none()
+                    && thread.pending_elicitation.is_none()
+                    && thread.stock_key.as_ref().is_some_and(|key| {
+                        key.usage != self.prospective_stock_key(thread, cx).usage
+                    })
+            })
+            .map(|thread| thread.id.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for id in &stale {
+            if let Some(thread) = self.threads.iter_mut().find(|thread| &thread.id == id) {
+                // 送信路を捨てる＝プロセスも落ちる。通し番号を 0 にして切断のバナーを出さない
+                // （[`Self::retire_idle_prewarms`] と同じ畳み方）。広告は前の鍵の物なので捨てる。
+                thread.command_tx = None;
+                thread.session_serial = 0;
+                thread.available_modes.clear();
+                thread.configs.clear();
+            }
+            self.prewarmed.remove(id);
+        }
+        self.prewarm_order.retain(|id| !stale.contains(id));
+        self.schedule_prewarm(cx);
         cx.notify();
     }
 
@@ -6003,9 +6103,10 @@ PYEOF"#;
         // 在庫（別タブ・先張りで受け取った物）で代替する。どちらも無ければ空＝ピルは押せない。
         match selector {
             Selector::Mode => {
-                let stock = self.catalog.get(&thread.agent);
-                let modes = if thread.available_modes.is_empty() {
-                    stock
+                let modes = if thread.available_modes.is_empty()
+                    || !self.own_advertisement_current(thread, cx)
+                {
+                    self.stock(thread, cx)
                         .map(|stock| stock.modes.as_slice())
                         .unwrap_or_default()
                 } else {
@@ -6019,26 +6120,93 @@ PYEOF"#;
                     })
                     .collect()
             }
-            Selector::Model => self.stocked_config_choices(thread, ConfigCategory::Model),
-            Selector::Effort => self.stocked_config_choices(thread, ConfigCategory::ThoughtLevel),
+            Selector::Model => self.stocked_config_choices(thread, ConfigCategory::Model, cx),
+            Selector::Effort => {
+                self.stocked_config_choices(thread, ConfigCategory::ThoughtLevel, cx)
+            }
             Selector::Agent => Vec::new(),
         }
     }
 
-    /// 選択肢を「スレッド自身の広告 → 同じ agent の在庫」の順で引く。
+    /// 選択肢を「スレッド自身の広告 → 同じ鍵の在庫」の順で引く。スレッド自身の広告は、接続やログインを
+    /// 替える前のセッションの物なら使わない（[`Self::own_advertisement_current`]）。
     fn stocked_config_choices(
         &self,
         thread: &Thread,
         category: ConfigCategory,
+        cx: &App,
     ) -> Vec<SelectorChoice> {
-        let advertised = config_choices(&thread.configs, category);
-        if !advertised.is_empty() {
-            return advertised;
+        if self.own_advertisement_current(thread, cx) {
+            let advertised = config_choices(&thread.configs, category);
+            if !advertised.is_empty() {
+                return advertised;
+            }
         }
-        self.catalog
-            .get(&thread.agent)
+        self.stock(thread, cx)
             .map(|stock| config_choices(&stock.configs, category))
             .unwrap_or_default()
+    }
+
+    /// 今の設定（接続・認証の環境）と宛先でこのスレッドのセッションを立てた時に付く在庫の鍵
+    /// （[`Self::start_session`] と同じ作り方・issue #38 H3）。ログインの指紋はファイルを見ずに、最後に
+    /// 確かめた値（[`Self::login_fingerprints`]）を使う（描画から呼ぶ）。
+    fn prospective_stock_key(&self, thread: &Thread, cx: &App) -> StockKey {
+        let usage =
+            usage::UsageKey::for_agent(thread.agent.clone(), self.dest_host_label.clone(), cx);
+        let login = self
+            .login_fingerprints
+            .get(&usage)
+            .copied()
+            .unwrap_or_default();
+        StockKey { usage, login }
+    }
+
+    /// [`Self::prospective_stock_key`] を添字で引く（スレッドが無ければエージェントの既定で）。
+    fn prospective_stock_key_at(&self, thread_index: usize, cx: &App) -> StockKey {
+        match self.threads.get(thread_index) {
+            Some(thread) => self.prospective_stock_key(thread, cx),
+            None => StockKey {
+                usage: usage::UsageKey::for_agent(
+                    SharedString::from("Claude Code"),
+                    self.dest_host_label.clone(),
+                    cx,
+                ),
+                login: 0,
+            },
+        }
+    }
+
+    /// このスレッドの在庫の鍵: セッションが動いていれば立てた時の鍵、無ければ今の設定で立てた時の鍵。
+    fn stock_key(&self, thread: &Thread, cx: &App) -> StockKey {
+        match (&thread.command_tx, &thread.stock_key) {
+            (Some(_), Some(key)) => key.clone(),
+            _ => self.prospective_stock_key(thread, cx),
+        }
+    }
+
+    /// アクティブスレッドが使う接続の名前（エージェントのピルに添える）。セッションが動いていれば立てた
+    /// 時の接続、無ければ今の設定で手元に立てた時に使う接続（リモートには渡さないので出さない）。
+    fn active_connection_name(&self, cx: &App) -> Option<SharedString> {
+        let thread = self.threads.get(self.active)?;
+        self.stock_key(thread, cx)
+            .usage
+            .connection
+            .map(|connection| connection.name)
+    }
+
+    /// このスレッドに出す在庫（同じ鍵で別のタブ・先張りが受け取った広告）。
+    fn stock(&self, thread: &Thread, cx: &App) -> Option<&AgentAdvertisement> {
+        self.catalog.get(&self.stock_key(thread, cx))
+    }
+
+    /// スレッド自身の広告（`configs` / `available_modes`）を出してよいか: セッションが動いている、または
+    /// 前のセッションを今と同じ鍵で立てた（接続・ログインを替えた後は、前の接続のモデルを出さない）。
+    fn own_advertisement_current(&self, thread: &Thread, cx: &App) -> bool {
+        thread.command_tx.is_some()
+            || thread
+                .stock_key
+                .as_ref()
+                .is_some_and(|key| *key == self.prospective_stock_key(thread, cx))
     }
 
     /// 現在の選択を **value_id** で返す（未選択なら空）。比較・保存・送信はこの値だけを使う。
@@ -6361,6 +6529,17 @@ PYEOF"#;
         } else if locked {
             tip = i18n::t!("agent.pill_awaiting_agent");
         }
+        // 接続（issue #38 H3 / §5-2）: Claude Code に他社の接続を挿しても中身を隠さない。エージェントの
+        // ピルに接続の名前を添える（動いているセッションは立てた時の接続・まだなら今の設定で使う接続）。
+        let connection = (selector == Selector::Agent)
+            .then(|| self.active_connection_name(cx))
+            .flatten();
+        if let Some(connection) = &connection {
+            tip = format!(
+                "{tip}\n{}",
+                i18n::t!("agent.pill_connection", "connection" => connection.as_ref())
+            );
+        }
         let label_color = if is_open { accent } else { theme.fg1 };
         let mut pill = div()
             .id(id)
@@ -6379,6 +6558,13 @@ PYEOF"#;
                 element.child(agent_badge(&value, 12.))
             })
             .child(value.clone())
+            .when_some(connection, |element, connection| {
+                element.child(
+                    div()
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(format!("· {connection}"))),
+                )
+            })
             .tooltip(Tooltip::text(tip, theme.clone()));
         if !locked {
             pill = pill
@@ -6658,9 +6844,9 @@ PYEOF"#;
             if !thread.commands.is_empty() || self.chat_mode {
                 &thread.commands
             } else {
-                self.catalog
+                self.harness_stock
                     .get(&thread.agent)
-                    .map(|advertisement| advertisement.commands.as_slice())
+                    .map(|stock| stock.commands.as_slice())
                     .unwrap_or(&[])
             };
         agent_commands
@@ -7103,10 +7289,11 @@ PYEOF"#;
 
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
     /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドル・通し番号・
-    /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる。
-    /// 起動できなければ理由の文（組み込みは「見つかりません」・足したエージェントは原因）。
+    /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる
+    /// （広告の在庫の鍵 [`Thread::stock_key`] はここで持たせる）。
+    /// 起動できなければ理由の文（組み込みは「見つかりません」・足したエージェントは原因・接続を渡せない）。
     fn start_session(
-        &self,
+        &mut self,
         thread_index: usize,
         cwd: PathBuf,
         cx: &mut Context<Self>,
@@ -7137,13 +7324,62 @@ PYEOF"#;
         // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
         let agent_override = agent_server_override(agent.id(), cx);
-        // このセッションの使用量の鍵は、起動に渡すのと同じ宛先と env から今決める（R08。後で設定を
-        // 変えても、このセッションの知らせは立てた時の鍵へ重ねる）。
+        // 接続（issue #38 H3）: 設定で選んだ接続を、渡し方の分かるエージェントにだけ渡す。**リモート
+        // （SSH 先で起こすエージェント）には渡さない**（キーを手元の外へ出さない）— そのエージェント自身の
+        // ログインで動くので、一度だけ知らせる。渡せない接続を選んでいたら起こさない（黙って自分の
+        // ログインで走らせない＝別の契約に請求させない）。
+        let mut connection_notice = None;
+        let connection = match settings::agent_connection_in(cx, agent.id()) {
+            Some(connection) if host.is_remote() => {
+                if self.remote_connection_noted.insert(agent_label.clone()) {
+                    connection_notice = Some(i18n::t!(
+                        "agent.connection_remote_skipped",
+                        "connection" => &connection.name
+                    ));
+                }
+                None
+            }
+            Some(connection) => {
+                let harness = acp_client::connections::Harness::of(&agent).ok_or_else(|| {
+                    i18n::t!(
+                        "agent.connection_unsupported",
+                        "agent" => agent.label(),
+                        "connection" => &connection.name
+                    )
+                })?;
+                harness.accepts(&connection).map_err(|refusal| {
+                    i18n::t!(
+                        "agent.connection_refused",
+                        "connection" => &connection.name,
+                        "reason" => settings::refusal_text(refusal)
+                    )
+                })?;
+                Some((connection, harness))
+            }
+            None => None,
+        };
+        // このセッションの使用量の鍵は、起動に渡すのと同じ宛先と env と接続から今決める（R08。後で
+        // 設定を変えても、このセッションの知らせは立てた時の鍵へ重ねる）。
         let usage_key = usage::UsageKey::with_override(
             agent_label.clone(),
             self.dest_host_label.clone(),
             agent_override.as_ref(),
-        );
+        )
+        .with_connection(connection.as_ref().map(|(connection, _)| connection));
+        // 広告の在庫の鍵（issue #38 H3）: 使用量の鍵 + ログインの指紋（手元のファイルを見る。SSH 先は 0）。
+        let login = if host.is_remote() {
+            0
+        } else {
+            let env = agent_override
+                .as_ref()
+                .map(|agent_override| agent_override.env.clone())
+                .unwrap_or_default();
+            acp_client::connections::login_fingerprint(agent.id(), &env)
+        };
+        let stock_key = StockKey {
+            usage: usage_key.clone(),
+            login,
+        };
         let registry = acp_client::registry::load_cached();
         // レジストリから足した binary をまだ置いていなければ、背景で落として検証・展開してから起こす
         // （H2-b・UI スレッドでダウンロードを待たない）。落としている間は transcript に 1 行出す。
@@ -7194,7 +7430,7 @@ PYEOF"#;
                     .filter(|mode| !mode.is_empty())
                     .or_else(|| {
                         let wanted = bypass_by_default && thread.chat.is_none();
-                        let stock = self.catalog.get(&thread.agent).filter(|_| wanted)?;
+                        let stock = self.catalog.get(&stock_key).filter(|_| wanted)?;
                         bypass_mode_among(&stock.modes).map(|mode| mode.to_string())
                     }),
                 model: Some(thread.model.to_string()).filter(|model| !model.is_empty()),
@@ -7205,6 +7441,8 @@ PYEOF"#;
                 preset: acp_client::preset::SessionPreset::default(),
                 // エージェント側の過去の会話を開いた直後だけ、再生された履歴を受け取る（O15）。
                 replay_history: thread.replay_pending,
+                // 接続はキーチェーンからキーを読んでから、下の背景で載せる。
+                connection: None,
             })
             .unwrap_or_default();
         // claude.ai のコネクタを読み込まない設定なら、エージェントのプロセスへそう伝える
@@ -7223,9 +7461,66 @@ PYEOF"#;
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
+        // 接続のキーはキーチェーンにある。有無はここで**中身を読まずに**確かめる（許可のダイアログを
+        // 出さない）— 無ければ起こさない＝先張りは黙り、送信なら理由が出る。中身を読むのは下の背景で
+        // （許可のダイアログで UI を止めない）。
+        let secrets = connection.is_some().then(|| settings::secret_store(cx));
+        let missing_key = connection.as_ref().map(|(connection, _)| {
+            i18n::t!(
+                "agent.connection_refused",
+                "connection" => &connection.name,
+                "reason" => settings::refusal_text(acp_client::connections::Refusal::MissingKey)
+            )
+        });
+        if let (Some((connection, _)), Some(secrets)) = (&connection, &secrets) {
+            if connection.needs_key() {
+                match secrets.contains(&connection.id) {
+                    Ok(true) => {}
+                    Ok(false) => return Err(missing_key.clone().unwrap_or_default()),
+                    Err(error) => {
+                        return Err(i18n::t!(
+                            "agent.connection_key_unreadable",
+                            "connection" => &connection.name,
+                            "reason" => format!("{error:#}")
+                        ))
+                    }
+                }
+            }
+        }
+        self.login_fingerprints.insert(usage_key.clone(), login);
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            thread.stock_key = Some(stock_key);
+        }
 
         cx.background_executor()
             .spawn(async move {
+                if let Some(notice) = connection_notice {
+                    error_tx.unbounded_send(AgentEvent::Notice(notice)).ok();
+                }
+                let mut preferences = preferences;
+                if let (Some((connection, harness)), Some(secrets)) = (connection, secrets) {
+                    let key = match secrets.get(&connection.id) {
+                        Ok(key) => key,
+                        Err(error) => {
+                            let message = i18n::t!(
+                                "agent.connection_key_unreadable",
+                                "connection" => &connection.name,
+                                "reason" => format!("{error:#}")
+                            );
+                            error_tx.unbounded_send(AgentEvent::Failed(message)).ok();
+                            return;
+                        }
+                    };
+                    match harness.launch(&connection, key.as_deref()) {
+                        Ok(launch) => preferences.connection = Some(launch),
+                        Err(_) => {
+                            error_tx
+                                .unbounded_send(AgentEvent::Failed(missing_key.unwrap_or_default()))
+                                .ok();
+                            return;
+                        }
+                    }
+                }
                 let command = match (command, deploying) {
                     (Some(command), _) => command,
                     (None, Some(deploying)) => {
@@ -7316,8 +7611,9 @@ PYEOF"#;
         let mut celebrate_now = false;
         // 広告（モデル/思考量/モード）は agent 固有なので、受け取ったら在庫へ控えて他タブでも使う。
         // `thread` の借用が残っている間は self を触れないので、末尾でまとめて反映する。
-        let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
-        let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
+        // 在庫の鍵はセッションを立てた時の鍵（[`Thread::stock_key`]・無ければ今の設定の鍵を末尾で引く）。
+        let mut stocked_configs: Option<(Option<StockKey>, Vec<ConfigOption>)> = None;
+        let mut stocked_modes: Option<(Option<StockKey>, Vec<(SharedString, SharedString)>)> = None;
         let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
         // レート制限の知らせ（O11）。鍵ごとの全体の置き場（Global）へ末尾で重ねる。鍵はスレッドが持つ
         // 「セッションを立てた時の鍵」（R08）。`None` = セッションを立てていない（今の宛先と設定で決める）。
@@ -7591,7 +7887,7 @@ PYEOF"#;
                     .into_iter()
                     .map(|(id, name)| (SharedString::from(id), SharedString::from(name)))
                     .collect();
-                stocked_modes = Some((thread.agent.clone(), thread.available_modes.clone()));
+                stocked_modes = Some((thread.stock_key.clone(), thread.available_modes.clone()));
                 let advertised_current = SharedString::from(current);
                 // 権限の既定が「聞かずに進める」（O16）なら、希望の無いスレッドは広告の中の「聞かない」
                 // モードで始める（無ければエージェントの既定のまま）。Chat は裁定を necoder が持つので対象外。
@@ -7640,7 +7936,7 @@ PYEOF"#;
                 // 通常ここは一致して無送信（ここからの SetConfig はターン中 deferred＝初回ターンに
                 // 間に合わない）。ターン途中の `ConfigOptionUpdate` と広告に無い値のフォールバックが担当。
                 thread.configs = configs;
-                stocked_configs = Some((thread.agent.clone(), thread.configs.clone()));
+                stocked_configs = Some((thread.stock_key.clone(), thread.configs.clone()));
                 for category in [ConfigCategory::Model, ConfigCategory::ThoughtLevel] {
                     let desired = match category {
                         ConfigCategory::Model => thread.model.clone(),
@@ -7922,6 +8218,15 @@ PYEOF"#;
                     .entries
                     .push(Entry::Agent(SharedString::from(message)));
             }
+            // 接続を渡すので task.env から読まなかった変数（issue #38 H3）。走行状態は触らない。
+            AgentEvent::TaskEnvSkipped(names) => {
+                thread
+                    .entries
+                    .push(Entry::Agent(SharedString::from(i18n::t!(
+                        "agent.connection_task_env_skipped",
+                        "names" => names.join(", ")
+                    ))));
+            }
             AgentEvent::Failed(error) => {
                 // 遷移スナップショット（P1 素材③）: Failed = エラー文字列（1 行に畳む）。
                 thread.digest = digest_tail(&error).or(thread.digest.take());
@@ -8091,14 +8396,16 @@ PYEOF"#;
         if turn_finished {
             self.flush_queued_prompt_at(thread_index, cx);
         }
-        if let Some((agent, configs)) = stocked_configs {
-            self.catalog.entry(agent).or_default().configs = configs;
+        if let Some((key, configs)) = stocked_configs {
+            let key = key.unwrap_or_else(|| self.prospective_stock_key_at(thread_index, cx));
+            self.catalog.entry(key).or_default().configs = configs;
         }
-        if let Some((agent, modes)) = stocked_modes {
-            self.catalog.entry(agent).or_default().modes = modes;
+        if let Some((key, modes)) = stocked_modes {
+            let key = key.unwrap_or_else(|| self.prospective_stock_key_at(thread_index, cx));
+            self.catalog.entry(key).or_default().modes = modes;
         }
         if let Some((agent, commands)) = stocked_commands {
-            self.catalog.entry(agent).or_default().commands = commands;
+            self.harness_stock.entry(agent).or_default().commands = commands;
         }
         if let Some((key, limits)) = rate_limits {
             // 鍵は「エージェント + 動かしている場所 + 認証の環境」（R08・SSH 先や別の環境の値と混ぜない）。
@@ -8110,7 +8417,7 @@ PYEOF"#;
                 .record(key, limits, now_unix_ms());
         }
         if let Some(agent) = titled_by_agent {
-            self.catalog.entry(agent).or_default().sends_titles = true;
+            self.harness_stock.entry(agent).or_default().sends_titles = true;
         }
         if let Some(name) = agent_renamed {
             // 自動命名と同じ出口（Task 名の引き継ぎ・一覧の更新）。保存はメタだけ — ターンの途中に
@@ -13613,6 +13920,13 @@ fn launch_error_text(error: &anyhow::Error) -> String {
 /// 異常終了: ACP initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context だけに
 /// なりハンドシェイクの無言ハングが埋もれるため。
 fn session_error_text(error: &anyhow::Error) -> String {
+    if let Some(rejected) = error.downcast_ref::<acp_client::connections::ProviderRejected>() {
+        return i18n::t!(
+            "agent.connection_provider_rejected",
+            "connection" => &rejected.connection,
+            "reason" => &rejected.reason
+        );
+    }
     match error.downcast_ref::<acp_client::AgentExited>() {
         Some(exited) => i18n::t!("agent.err_agent_exited", "status" => exit_status_text(exited)),
         None => format!("{error:#}"),
@@ -13878,6 +14192,7 @@ fn seed_threads() -> Vec<Thread> {
         last_active_at_ms: 0,
         usage: usage::CostMeter::default(),
         usage_key: None,
+        stock_key: None,
         replay_pending: false,
         handoff_preamble: None,
         seat: None,
@@ -16344,6 +16659,103 @@ PYEOF"#;
                 vec!["opus[1m]", "xhigh", "opus[1m]", "xhigh"],
                 "ピル選択時と、再広告で current がずれている時の両方で合わせに行く"
             );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// issue #38 H3: モデルの在庫は接続ごとに分かれる。接続を替えると、まだセッションの無いタブにも、
+    /// 前の接続で立てたスレッド自身の広告にも、前の接続のモデルを出さない。戻せば元の在庫が出る。
+    /// エージェントのピルには接続の名前が付く（中身が Claude でないことを隠さない）。
+    #[gpui::test]
+    fn the_model_stock_is_split_by_connection(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_connection_stock_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"connections":{"glm":{"name":"GLM","preset":"zai-coding-plan",
+                "protocol":"anthropic","base_url":"https://api.z.ai/api/anthropic"}}}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let claude_models = || {
+            vec![config(
+                ConfigCategory::Model,
+                "opus",
+                &[("opus", "Opus"), ("fable", "Fable")],
+            )]
+        };
+        let glm_models = || {
+            vec![config(
+                ConfigCategory::Model,
+                "glm-5.3",
+                &[("glm-5.3", "GLM-5.3"), ("glm-5.3-flash", "GLM-5.3 Flash")],
+            )]
+        };
+        let labels = |panel: &AgentPanel, cx: &App| -> Vec<String> {
+            panel
+                .selector_choices(Selector::Model, cx)
+                .into_iter()
+                .map(|choice| choice.label.to_string())
+                .collect()
+        };
+        // 自分のログインのセッションが広告した一覧を控える（立てた時の鍵 = 今の設定の鍵）。
+        let start = |panel: &mut AgentPanel, index: usize, cx: &mut Context<AgentPanel>| {
+            let key = panel.prospective_stock_key(&panel.threads[index], cx);
+            let (command_tx, _command_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[index].stock_key = Some(key);
+            panel.threads[index].command_tx = Some(command_tx);
+        };
+        panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            start(panel, first, cx);
+            panel.on_event(first, AgentEvent::Configs(claude_models()), cx);
+            panel.threads[first].command_tx = None;
+            panel.add_thread(cx);
+            assert_eq!(labels(panel, cx), vec!["Opus", "Fable"], "同じ鍵の在庫");
+            assert_eq!(panel.active_connection_name(cx), None);
+        });
+        // Claude Code の接続を GLM にする。
+        cx.update(|_window, cx| {
+            settings::set_agent_connection(cx, "claude", Some("glm")).expect("書ける")
+        });
+        panel.update(cx, |panel, cx| {
+            assert!(
+                labels(panel, cx).is_empty(),
+                "別の接続のモデルを出さない（GLM の一覧はまだ届いていない）"
+            );
+            assert_eq!(
+                panel.active_connection_name(cx).as_deref(),
+                Some("GLM"),
+                "ピルに接続の名前"
+            );
+            let second = panel.active;
+            start(panel, second, cx);
+            panel.on_event(second, AgentEvent::Configs(glm_models()), cx);
+            panel.threads[second].command_tx = None;
+            assert_eq!(labels(panel, cx), vec!["GLM-5.3", "GLM-5.3 Flash"]);
+            panel.add_thread(cx);
+            assert_eq!(
+                labels(panel, cx),
+                vec!["GLM-5.3", "GLM-5.3 Flash"],
+                "同じ接続の新しいタブは GLM の在庫"
+            );
+            panel.active = second;
+        });
+        // 自分のログインへ戻す: GLM で立てたスレッドにも GLM のモデルを出さない。
+        cx.update(|_window, cx| {
+            settings::set_agent_connection(cx, "claude", None).expect("書ける")
+        });
+        panel.update(cx, |panel, cx| {
+            assert_eq!(
+                labels(panel, cx),
+                vec!["Opus", "Fable"],
+                "前の接続のセッションの広告ではなく、今の鍵の在庫"
+            );
+            assert_eq!(panel.active_connection_name(cx), None);
         });
         let _ = std::fs::remove_file(path);
     }

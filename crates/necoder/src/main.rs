@@ -785,6 +785,8 @@ fn main() {
             .filter(|source| !source.is_remote())
             .map(|source| source.root().to_path_buf());
         settings::init(settings_core::user_settings_path(), local_settings_root, cx);
+        // 接続の API キーは OS のキーチェーン（issue #38 H3）。テストはメモリの置き場のまま。
+        settings::install_os_keychain(cx);
         stage(&startup, "settings_ready");
         // OS 通知（O12）の身元。Windows の通知は AppUserModelID が無いと出ない（mac は bundle ID
         // が身元なので何もしない・Linux は表示名だけ使う）。bundle-mac.sh の CFBundleIdentifier と揃える。

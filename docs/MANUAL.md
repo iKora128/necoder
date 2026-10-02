@@ -486,7 +486,38 @@ ACP エージェントも、settings.json の `agent_servers` に新しい id �
 - 組み込みの 7 件（Claude Code など）は「組み込み」と出て、ここからは足さない
 - このマシンの OS / arch 向けの配布が無い物は「このマシンでは使えません」
 - 開いただけではネットワークへ行かない（手元に取ってあるレジストリを読む）。**取り直す** で最新を取る
-- 足した物を外すには、一覧の行の下の **外す**。落とした binary も一緒に消える（プロジェクトの `.necoder/settings.json` など、ほかの所でまだ同じ id を書いていれば消さない。necoder が置いた物だけを消し、自分で置いたファイルは残す）
+- 足した物を外すには、一覧の行の下の **外す**。落とした binary も一緒に消える（消す直前に settings.json を読み直し、まだ同じ id が書かれていれば消さない。necoder が置いた物だけを消し、自分で置いたファイルは残す）
+
+### 接続（GLM・Kimi・DeepSeek などの API をエージェントに使わせる）
+
+Claude Code などのエージェントを、自分のログイン（サブスク）ではなく、各社の API やコーディングプランにつないで動かせる。
+**設定（⌘,）→ 接続** で接続を足し、エージェントごとにどの接続を使うかを選ぶ。
+
+1. **＋ 接続を追加** を押し、ひな形を選ぶ（GLM Coding Plan・Kimi Code・Kimi API・MiniMax・Qwen Coding Plan・Qwen API・Xiaomi MiMo・DeepSeek API・OpenRouter・Ollama・その他の OpenAI 互換 / Anthropic 互換）。名前・形式（Anthropic 互換 / OpenAI 互換）・ベース URL はひな形が埋める
+2. 各社のコンソールで API キーをコピーし、**クリップボードから貼る** を押す。キーは画面に出ない（末尾 4 文字と長さだけ）
+3. **保存**。キーは OS のキーチェーン（macOS はログインのキーチェーンの `necoder.connection.<id>`、Windows は資格情報マネージャ）に入り、settings.json には書かない
+4. 下の **エージェントごとの接続** で、エージェントの行のチップから接続を選ぶ（**自分のログイン** で元に戻る）
+
+- 効くのは次に起動するセッションから。動いているスレッドは今の接続のまま（会話を送ってまだ止まっていないスレッド）。開いただけのタブは、選び直すとすぐ新しい接続で起こし直す
+- 接続を使うスレッドは、composer のエージェントのピルに **Claude Code · GLM Coding Plan** のように接続の名前が出る（中身が Claude でないことを隠さない）
+- 渡せるエージェントと接続:
+  - **Claude Code**: Anthropic 互換の接続。アダプタが `providers/set` に対応していればそれで渡し、古いアダプタには `ANTHROPIC_BASE_URL` と `ANTHROPIC_AUTH_TOKEN` で渡す
+  - **OpenCode**: ひな形が OpenCode の組み込みのプロバイダに当たる接続（GLM・Kimi・MiniMax・Qwen・MiMo・DeepSeek・OpenRouter）。OpenCode は自分の既定の口で繋ぐので、ベース URL を書き換えた接続は渡せない。Ollama・その他の互換 API は OpenCode の設定で足す
+  - **DeepSeek Harness**（settings.json に `dsh-acp` で足した物）: DeepSeek API の接続だけ（ほかの会社は dsh の設定で選ぶ）
+  - それ以外のエージェント（Codex・GitHub Copilot・Qwen Code・Kimi CLI・Grok Build・足したほかのエージェント）には、まだ渡せない
+- **リモート（SSH 先で起こすエージェント）には渡さない。** SSH のプロジェクトのスレッドは、SSH 先のエージェント自身のログインで動く（transcript に一度だけ出る）
+- 選んだ接続を渡せない時（キーがキーチェーンに無い・そのエージェントが受け付けない形式）は、エージェントを起こさずに理由を出す。黙って自分のログインで走らせることはない
+- necoder はキーで API を呼ばない。エージェントを起こす時に渡すだけ
+- 接続を外すと、キーチェーンのキーも消える。その接続を使っていたエージェントは自分のログインに戻る
+- Linux ではまだキーを保存できない（キーチェーンに未対応）
+
+**リポジトリの設定が決められないこと**: clone したリポジトリの `.necoder/settings.json` は、開いただけで設定に重なる。
+次のキーはリポジトリに決めさせると危ないので、リポジトリの設定からは読まない（ユーザー設定だけが決める）:
+`connections` / `agent_connections`（接続）・`agent_servers`（エージェントの起動）・`mcp_servers`・
+`agent_permission_default` / `agent_config_defaults`（聞かずに進める既定）・`allow_terminal_send`・
+`terminal_shell` / `terminal_shell_args`・`captain_agent`・`claude_ai_connectors`・`chat`。
+また接続を渡すセッションでは、リポジトリの `.necoder/task.env` から宛先・プロキシ・差し込むコードを変える変数
+（`ANTHROPIC_*`・`HTTPS_PROXY`・`NODE_OPTIONS` など）を読まない（読まなかった名前は transcript に出る）。
 
 ### 権限の既定（毎回聞く / 聞かずに進める）
 
@@ -710,7 +741,7 @@ Captain は、目標を Task に分解して起動・レビューまで采配す
 任命中の行は `⚑ Captain` と表示され、もう一度押すと解任する。Fleet の Captain 行 / ⌘0 からは、ブリッジ内の任命画面でエージェントを選ぶこともできる。
 未任命でも Fleet は使える（settings.json の `captain_agent` に直接書いても同じ）。
 
-このボタンが更新するのはユーザー設定。プロジェクトの `.necoder/settings.json` に `captain_agent` がある場合はそちらが優先されるため、その設定を編集・削除して変更する。
+このボタンが更新するのはユーザー設定。任命はユーザー設定だけが決める（リポジトリの `.necoder/settings.json` に `captain_agent` を書いても読まない）。
 
 **Captain が Task を切る前に、必ずあなたに聞く。** ⌘0 で目標を渡すと、Captain は「この N 本に分けたい」という分解案を出す。
 分解案は要対応に **⚑ Captain の分解案 · N 本** のカードで並び、行ごとに目的・完了条件・範囲・担当エージェントが出る。
@@ -858,14 +889,14 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 
 ### 設定画面（⌘,）
 
-左のナビでページを選ぶ: **AI エージェント / MCP サーバ / 外観 / リモート / 動作とエディタ**。
+左のナビでページを選ぶ: **AI エージェント / 接続 / MCP サーバ / 外観 / リモート / 動作とエディタ**。
 探したい設定があれば、ナビの上の**検索欄**に打つ（例: `自動保存`・`通知`・`font_size`）。一致した設定が全ページから集まり、その場で切り替えられる。ページ名を押すとそのページが開く。
 ファイルで編集したいときは、コマンドパレット「設定: settings.json を開く」。
 
 | 置き場所 | 効く範囲 |
 |---|---|
 | アプリの `settings.json`（macOS: `~/Library/Application Support/necoder/`） | 全体 |
-| プロジェクトの `.necoder/settings.json` | そのプロジェクトだけ（`color` / `icon` / `task_base` / `task_sparse` / `task_shared` など） |
+| プロジェクトの `.necoder/settings.json` | そのプロジェクトだけ（`color` / `icon` / `task_base` / `task_sparse` / `task_shared` など。接続・エージェントの起動・MCP・権限の既定などは読まない＝§8「接続」の末尾） |
 
 よく使う設定:
 

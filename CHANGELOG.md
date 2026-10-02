@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Added
+
+- **Connections**: Run an agent on another company's API or coding plan instead of its own login. In Settings › Connections, add a connection from a template (GLM Coding Plan, Kimi Code, Kimi API, MiniMax, Qwen Coding Plan, Qwen API, Xiaomi MiMo, DeepSeek API, OpenRouter, Ollama, or any other OpenAI- or Anthropic-compatible API), paste its API key from the clipboard, and choose which connection each agent uses. The key goes into the OS keychain and never into settings.json, and it is never shown on screen. necoder never calls an API with it; it only hands it to the agent it starts. Claude Code gets the connection through its adapter's `providers/set` (older adapters get environment variables), OpenCode through its built-in provider, and DeepSeek Harness through its DeepSeek route. The agent's pill names the connection, for example "Claude Code · GLM Coding Plan". Connections are not passed to agents started over SSH, and Linux can't store keys yet.
+
+### Changed
+
+- **Model lists follow the connection and the login**: The model, effort and mode choices shown before a session starts are kept per connection and per login. A new tab no longer offers another connection's models, or the models of an account you have logged out of.
+
+### Security
+
+- **A repository can no longer redirect your agents**: A project's `.necoder/settings.json` no longer sets `connections`, `agent_connections`, `agent_servers`, `mcp_servers`, `agent_permission_default`, `agent_config_defaults`, `allow_terminal_send`, `terminal_shell`, `terminal_shell_args`, `captain_agent`, `claude_ai_connectors` or `chat`. Only your user settings decide them. In a session that carries a connection's key, a project's `.necoder/task.env` can't set API endpoint, proxy, certificate or code-loading variables.
+
+### 日本語
+
+#### 追加
+
+- **接続**：エージェントを、自分のログインではなく各社の API やコーディングプランで動かせます。設定 › 接続 で、ひな形（GLM Coding Plan・Kimi Code・Kimi API・MiniMax・Qwen Coding Plan・Qwen API・Xiaomi MiMo・DeepSeek API・OpenRouter・Ollama・その他の OpenAI 互換 / Anthropic 互換）から接続を足し、API キーをクリップボードから貼って、エージェントごとに使う接続を選びます。キーは OS のキーチェーンに入り、settings.json には書かず、画面にも出しません。necoder はこのキーで API を呼ばず、起こすエージェントに渡すだけです。Claude Code にはアダプタの `providers/set`（古いアダプタには環境変数）、OpenCode には組み込みのプロバイダ、DeepSeek Harness には DeepSeek の経路で渡します。エージェントのピルに「Claude Code · GLM Coding Plan」のように接続の名前が出ます。SSH 先で起こすエージェントには渡しません。Linux はまだキーを保存できません。
+
+#### 変更
+
+- **モデルの一覧は接続とログインごと**：セッションを開く前に出すモデル・思考量・モードの選択肢を、接続ごと・ログインごとに分けて覚えます。新しいタブに、別の接続のモデルや、ログアウトしたアカウントのモデルを出しません。
+
+#### セキュリティ
+
+- **リポジトリがエージェントの行き先を変えられなくなりました**：プロジェクトの `.necoder/settings.json` の `connections`・`agent_connections`・`agent_servers`・`mcp_servers`・`agent_permission_default`・`agent_config_defaults`・`allow_terminal_send`・`terminal_shell`・`terminal_shell_args`・`captain_agent`・`claude_ai_connectors`・`chat` は読みません。決めるのはユーザー設定だけです。接続のキーを渡すセッションでは、プロジェクトの `.necoder/task.env` で API の宛先・プロキシ・証明書・読み込むコードの変数を変えられません。
+
 ## [0.1.24] - 2026-10-01
 
 This is the first regular release since v0.1.20, delivered through auto-update. It includes everything from the test releases [v0.1.21](https://github.com/iKora128/necoder/releases/tag/v0.1.21), [v0.1.22](https://github.com/iKora128/necoder/releases/tag/v0.1.22) and [v0.1.23](https://github.com/iKora128/necoder/releases/tag/v0.1.23). If you are updating from v0.1.20, their notes list every change. If something does not work, please let us know in an Issue.

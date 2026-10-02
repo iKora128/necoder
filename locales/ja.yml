@@ -71,6 +71,13 @@ agent:
   pill_awaiting_agent: 接続すると選べます（エージェントが候補を送ってきます）
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
+  connection_remote_skipped: "接続「%{connection}」はリモート（SSH 先）のエージェントには渡しません。このスレッドは SSH 先のエージェント自身のログインで動きます"
+  connection_unsupported: "%{agent} には接続「%{connection}」を渡せません（渡し方が分かっていません）。設定 › 接続 で「自分のログイン」に戻してください"
+  connection_refused: "接続「%{connection}」を渡せないので起動しません: %{reason}"
+  connection_key_unreadable: "接続「%{connection}」のキーをキーチェーンから読めませんでした: %{reason}"
+  connection_provider_rejected: "接続「%{connection}」をエージェントが受け付けなかったので起動しません: %{reason}"
+  connection_task_env_skipped: "接続を渡すセッションなので、.necoder/task.env の %{names} は読みませんでした"
+  pill_connection: "接続: %{connection}（エージェントはこの契約の API で動きます・設定 › 接続 で変える）"
   err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
   err_launch_not_in_registry: "%{id} が ACP レジストリに見つかりません（設定 → AI エージェント → エージェントを追加 で取り直してください）"
   err_launch_no_distribution: "このマシン（%{platform}）向けの配布がありません"
@@ -826,6 +833,59 @@ settings:
   mcp_sub: エージェントに持たせる道具。有効にしたものだけが新しいスレッドから見えます。
   mcp_empty: MCP サーバがありません。settings.json の mcp_servers に書くか、Codex CLI・Claude Code・Cursor に登録すると、ここに並びます。
   mcp_note: 変更は次に開くスレッドから効きます（実行中のセッションは繋ぎ直しません）。
+  connections_heading: 接続
+  connections_sub: エージェントがモデルの API を呼ぶ口と、その契約のキー（GLM・Kimi・DeepSeek など）。キーは OS のキーチェーンに入り、settings.json には書きません。necoder はこのキーで API を呼ばず、エージェントを起こす時に渡すだけです。
+  connections_remote_note: リモート（SSH 先で起こすエージェント）には接続を渡しません。渡すのは手元で起こすエージェントだけで、リモートのスレッドはそのエージェント自身のログインで動きます。
+  connections_empty: まだ接続がありません。「＋ 接続を追加」でひな形を選び、キーを貼ります。
+  connections_add: ＋ 接続を追加
+  connections_agents_heading: エージェントごとの接続
+  connections_agents_sub: 選んだ接続は次に起動するセッションから使います（動いているスレッドはそのまま）。Claude Code に他社の接続を挿すと、ピルに「Claude Code · 接続の名前」と出ます。
+  connections_other_agents: Codex・GitHub Copilot・Qwen Code・Kimi CLI・Grok Build と、足したほかのエージェントには、まだ接続を渡せません。
+  connection_refusal_protocol: "%{protocol}の口だけを受け付けます"
+  connection_refusal_only_deepseek: DeepSeek Harness には DeepSeek API の接続だけを渡せます（ほかの会社は dsh の設定で選びます）
+  connection_refusal_opencode: OpenCode の組み込みのプロバイダに当たらないので渡せません（OpenCode の設定で足してください）
+  connection_refusal_opencode_url: ベース URL を書き換えた接続は OpenCode に渡せません（OpenCode は自分の既定の口で繋ぎます）
+  connection_refusal_missing_key: キーがキーチェーンにありません（設定 › 接続 の「変える…」で貼ってください）
+  connection_protocol_anthropic: Anthropic 互換
+  connection_protocol_openai: OpenAI 互換
+  connection_preset_openai_compatible: その他の OpenAI 互換
+  connection_preset_anthropic_compatible: その他の Anthropic 互換
+  connection_key_pasted: "貼りました（…%{tail}・%{length} 文字）"
+  connection_key_present: "キー: キーチェーンにあります"
+  connection_key_missing: "キー: まだありません（「変える…」で貼ってください）"
+  connection_key_not_needed: キーは要りません
+  connection_key_unavailable: "キー: この OS ではまだキーチェーンに置けません"
+  connection_key_failed: "キー: キーチェーンを引けませんでした（%{reason}）"
+  connection_key_checking: "キー: 確かめています…"
+  connection_used_by_none: "使うエージェント: なし（下で選びます）"
+  connection_used_by: "使うエージェント: %{agents}"
+  connection_edit: 変える…
+  connection_remove: 外す
+  connection_own_login: 自分のログイン
+  connection_choice_missing: "選んでいる接続「%{id}」がありません。このエージェントは起動しません（選び直してください）"
+  connection_choice_refused: "選んでいる接続「%{name}」は渡せません（%{reason}）。このエージェントは起動しません"
+  connection_refused_list: "渡せない接続: %{list}"
+  connection_refused_item: "%{names}（%{reason}）"
+  connection_removed: "接続「%{name}」を外しました（使っていたエージェントは自分のログインに戻ります）"
+  connection_removed_key_left: "接続「%{name}」を外しましたが、キーチェーンのキーを消せませんでした（%{reason}）"
+  connection_key_paste_invalid: クリップボードにキーがありません（1 行で空白を含まない文字列をコピーしてから押してください）
+  connection_url_invalid: ベース URL は http:// か https:// で始めてください
+  connection_key_required: キーを貼ってください（コピーしてから「クリップボードから貼る」）
+  connection_key_keep: キーチェーンのキーをそのまま使います（貼ると置き換えます）
+  connection_key_not_pasted: まだ貼っていません
+  connection_key_optional: キーは要りません（要る口なら貼ってください）
+  connection_edit_title: 接続を変える
+  connection_add_title: 接続を追加
+  connection_preset: ひな形
+  connection_preset_fixed: "ひな形: %{preset}"
+  connection_name: 名前
+  connection_protocol: 形式
+  connection_base_url: ベース URL
+  connection_key: API キー
+  connection_paste_key: クリップボードから貼る
+  connection_key_note: キーは OS のキーチェーンに入り、settings.json には書きません。画面にも出しません（末尾 4 文字だけ）。
+  connection_docs: "各社の手順: %{url}"
+  connection_saving: 保存しています…
   mcp_source_necoder: necoder の設定
   mcp_source_codex: Codex CLI で発見
   mcp_source_claude: Claude Code で発見

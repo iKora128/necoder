@@ -22,15 +22,136 @@ use std::time::{Duration, SystemTime};
 use theme_core::Theme;
 mod add_agent;
 mod agent_launch;
+mod connections;
 mod remote;
 
 pub use agent_launch::set_agent_server;
+pub use connections::{connection_harnesses, connection_name, refusal_text};
 
 pub use settings_core::{
     persist_agent_config_default, persist_mcp_enabled, persist_user_value, persist_user_values,
-    user_settings_path, Density, McpServerSetting, QuickCommandSetting, Settings, SettingsStore,
-    UnreadableSettings,
+    user_settings_path, ConnectionProtocol, ConnectionSetting, Density, McpServerSetting,
+    QuickCommandSetting, Settings, SettingsStore, UnreadableSettings,
 };
+
+/// 接続の API キーの置き場（issue #38 H3）。**アプリの起動（main）だけが OS のキーチェーンを置く** —
+/// 置かれていなければメモリだけの置き場（テスト・隔離した offscreen の起動が本物のキーチェーンに
+/// 触れない）。
+pub struct SecretStoreGlobal(pub std::sync::Arc<dyn acp_client::connections::secrets::SecretStore>);
+
+impl Global for SecretStoreGlobal {}
+
+impl Default for SecretStoreGlobal {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(
+            acp_client::connections::secrets::MemoryStore::default(),
+        ))
+    }
+}
+
+/// キーの置き場を決める（main が起動時に 1 回・OS のキーチェーン）。
+pub fn install_secret_store(
+    store: std::sync::Arc<dyn acp_client::connections::secrets::SecretStore>,
+    cx: &mut App,
+) {
+    cx.set_global(SecretStoreGlobal(store));
+}
+
+/// アプリの起動（main）が呼ぶ: 接続のキーの置き場を OS のキーチェーンにする。
+///
+/// 開発用（debug ビルドだけ）: `NECODER_SECRET_STORE=memory` ならメモリだけの置き場にする（隔離した
+/// offscreen の撮影が本物のキーチェーンに触れない）。`memory:<id>,<id>` で、その接続に撮影用の偽のキーを
+/// 置いておく（「キーチェーンにあります」の見た目を撮る）。
+pub fn install_os_keychain(cx: &mut App) {
+    use acp_client::connections::secrets::SecretStore as _;
+    #[cfg(debug_assertions)]
+    if let Some(seed) = std::env::var("NECODER_SECRET_STORE")
+        .ok()
+        .and_then(|value| value.strip_prefix("memory").map(str::to_string))
+    {
+        let store = acp_client::connections::secrets::MemoryStore::default();
+        for id in seed
+            .trim_start_matches(':')
+            .split(',')
+            .filter(|id| !id.is_empty())
+        {
+            if let Err(error) = store.set(id, "necoder-offscreen-dummy-key") {
+                eprintln!("撮影用のキーを置けない: {error:#}");
+            }
+        }
+        install_secret_store(std::sync::Arc::new(store), cx);
+        return;
+    }
+    install_secret_store(
+        std::sync::Arc::new(acp_client::connections::secrets::Keychain),
+        cx,
+    );
+}
+
+/// キーの置き場（置かれていなければメモリだけの置き場をここで置く）。読み書きはキーチェーンの許可の
+/// ダイアログで止まりうるので、背景のスレッドで使うこと。
+pub fn secret_store(
+    cx: &mut App,
+) -> std::sync::Arc<dyn acp_client::connections::secrets::SecretStore> {
+    cx.default_global::<SecretStoreGlobal>().0.clone()
+}
+
+/// 設定の接続（`connections.<id>`）を acp_client の言葉へ写す（名前は `name` → ひな形の名前 → id）。
+pub fn connection_of(id: &str, setting: &ConnectionSetting) -> acp_client::connections::Connection {
+    acp_client::connections::Connection {
+        id: id.to_string(),
+        name: connection_name(id, setting),
+        preset: setting.preset.clone(),
+        protocol: match setting.protocol {
+            ConnectionProtocol::Anthropic => acp_client::connections::Protocol::Anthropic,
+            ConnectionProtocol::OpenAi => acp_client::connections::Protocol::OpenAi,
+        },
+        base_url: setting.base_url.clone(),
+    }
+}
+
+/// エージェント（`AgentKind::id`）が次のセッションで使う接続（`agent_connections`・issue #38 H3）。
+/// 決めていない・指している接続が無ければ `None`（自分のログインのまま）。
+pub fn agent_connection(
+    settings: &Settings,
+    agent_id: &str,
+) -> Option<acp_client::connections::Connection> {
+    settings
+        .connection_for(agent_id)
+        .map(|(id, setting)| connection_of(id, setting))
+}
+
+/// [`agent_connection`] の今の設定版（設定全体を写さずに引く・描画からも呼ぶ）。
+pub fn agent_connection_in(
+    cx: &App,
+    agent_id: &str,
+) -> Option<acp_client::connections::Connection> {
+    cx.try_global::<SettingsGlobal>()
+        .and_then(|global| agent_connection(global.settings(), agent_id))
+}
+
+/// `connections.<id>` を書く（`None` = 消す・指していた `agent_connections` も消える）。**即適用 + 永続化**。
+/// キーは書かない（キーチェーンは呼び手が [`secret_store`] で）。
+pub fn set_connection(
+    cx: &mut App,
+    connection_id: &str,
+    setting: Option<&ConnectionSetting>,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_connection(path, connection_id, setting)
+    })
+}
+
+/// `agent_connections.<agent_id>` を書く（`None` = 自分のログインに戻す）。**即適用 + 永続化**。
+pub fn set_agent_connection(
+    cx: &mut App,
+    agent_id: &str,
+    connection_id: Option<&str>,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_agent_connection(path, agent_id, connection_id)
+    })
+}
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
 const POLL_INTERVAL: Duration = Duration::from_millis(1200);
@@ -493,6 +614,8 @@ pub enum SettingsViewEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     Agents,
+    /// 接続（issue #38 H3・`connections.rs`）。
+    Connections,
     Mcp,
     Appearance,
     Remote,
@@ -501,8 +624,9 @@ pub enum SettingsPage {
 
 impl SettingsPage {
     /// ナビに並べる全ページ（上から順）。
-    const ALL: [SettingsPage; 5] = [
+    const ALL: [SettingsPage; 6] = [
         SettingsPage::Agents,
+        SettingsPage::Connections,
         SettingsPage::Mcp,
         SettingsPage::Appearance,
         SettingsPage::Remote,
@@ -513,6 +637,7 @@ impl SettingsPage {
     fn heading_key(self) -> &'static str {
         match self {
             SettingsPage::Agents => "settings.agents_heading",
+            SettingsPage::Connections => "settings.connections_heading",
             SettingsPage::Mcp => "settings.mcp_heading",
             SettingsPage::Appearance => "settings.appearance_heading",
             SettingsPage::Remote => "settings.remote_heading",
@@ -524,6 +649,7 @@ impl SettingsPage {
     fn sub_key(self) -> &'static str {
         match self {
             SettingsPage::Agents => "settings.agents_sub",
+            SettingsPage::Connections => "settings.connections_sub",
             SettingsPage::Mcp => "settings.mcp_sub",
             SettingsPage::Appearance => "settings.appearance_sub",
             SettingsPage::Remote => "settings.remote_sub",
@@ -584,6 +710,12 @@ pub struct SettingsView {
     launch_editor: Option<agent_launch::LaunchEditor>,
     /// 「エージェントを追加」のダイアログ（H2・`add_agent`）。
     add_agent: Option<add_agent::AddAgentDialog>,
+    /// 接続を足す / 変えるダイアログ（issue #38 H3・`connections`）。
+    connection_editor: Option<connections::ConnectionEditor>,
+    /// 接続ごとのキーの有無（キーチェーンを中身を読まずに引いた結果）。描画でキーチェーンを引かない
+    /// よう、開き直すたび / 書くたびに背景で読む（[`Self::refresh_connection_keys`]）。
+    connection_keys: std::collections::BTreeMap<String, connections::KeyState>,
+    connection_keys_generation: u64,
     /// ACP レジストリの手元の写し（足したエージェントの状態・追加の画面に使う）。描画のたびに
     /// ファイルを読まないよう、開き直すたびに [`Self::refresh_lists`] で読む。
     registry: Option<std::sync::Arc<acp_client::registry::Registry>>,
@@ -713,6 +845,9 @@ impl SettingsView {
             accounts: Vec::new(),
             launch_editor: None,
             add_agent: None,
+            connection_editor: None,
+            connection_keys: std::collections::BTreeMap::new(),
+            connection_keys_generation: 0,
             registry: None,
             agent_binary_root: acp_client::deploy::binary_root(),
             ghostty_config_present: false,
@@ -796,6 +931,7 @@ impl SettingsView {
             .iter()
             .any(|path| path.is_file());
         self.registry = acp_client::registry::load_cached().map(std::sync::Arc::new);
+        self.refresh_connection_keys(cx);
     }
 
     // ── アカウント切替（O14）─────────────────────────────────────────────────────
@@ -2748,6 +2884,7 @@ impl SettingsView {
     pub fn debug_select_page(&mut self, page: &str, cx: &mut Context<Self>) {
         let page = match page {
             "prefs" => SettingsPage::Preferences,
+            "connections" => SettingsPage::Connections,
             "mcp" => SettingsPage::Mcp,
             "appearance" => SettingsPage::Appearance,
             "remote" => SettingsPage::Remote,
@@ -2956,6 +3093,7 @@ impl SettingsView {
                 })
                 // エージェントが読む手順書（SKILL.md）。`ne` の次＝「エージェントに necoder を教える」の並び。
                 .child(self.skills_section(cx)),
+            SettingsPage::Connections => self.connections_section(settings, cx),
             SettingsPage::Mcp => self.mcp_section(cx),
             SettingsPage::Appearance => self.appearance_section(settings, cx),
             SettingsPage::Remote => self.remote_section(cx),
@@ -4187,6 +4325,7 @@ impl Render for SettingsView {
             )
             .children(self.render_launch_editor(cx))
             .children(self.render_add_agent(&settings, cx))
+            .children(self.render_connection_editor(cx))
     }
 }
 
@@ -4680,8 +4819,9 @@ mod tests {
     }
 
     /// 外す（H2-b）: 足したエージェントを外すと、落とした binary（`external_agents/binary/<id>`）を消す。
-    /// 消す直前に settings.json を読み直し、同じ id がまだ書かれていれば（プロジェクトの設定で足している・
-    /// 書き直した）消さない。消す先は一時フォルダ（本物の置き場に触らない）。
+    /// 消す直前に settings.json を読み直し、同じ id がまだ書かれていれば（書き直した）消さない。
+    /// リポジトリの `.necoder/settings.json` の `agent_servers` は読まない（issue #38 H3）ので、そこに
+    /// 同じ id があっても使っていない＝消す。消す先は一時フォルダ（本物の置き場に触らない）。
     #[gpui::test]
     fn removing_an_added_agent_deletes_its_downloaded_binary(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
@@ -4712,7 +4852,7 @@ mod tests {
         }
         let project = root.join("project");
         std::fs::create_dir_all(project.join(".necoder")).expect("作れる");
-        // プロジェクトの設定でも vtcode を足している（user の層から外しても、まだ使われている）。
+        // リポジトリの設定にも vtcode がある（project 層の agent_servers は読まない＝使われていない）。
         std::fs::write(
             project.join(".necoder/settings.json"),
             r#"{ "agent_servers": { "vtcode": { "type": "registry", "name": "VT Code" } } }"#,
@@ -4735,17 +4875,35 @@ mod tests {
         });
         view.update(cx, |view, cx| {
             view.remove_custom_agent("amp-acp", false, cx);
+            // 消す直前に読み直した settings.json にまだ書かれている（別の書き手が書き直した）。
+            let user_path = cx
+                .try_global::<SettingsGlobal>()
+                .and_then(|global| global.user_path.clone())
+                .expect("user の設定");
             view.remove_custom_agent("vtcode", false, cx);
+            settings_core::persist_agent_server(
+                &user_path,
+                "vtcode",
+                Some(&settings_core::AgentServerSetting::Registry {
+                    name: Some("VT Code".to_string()),
+                    env: Default::default(),
+                }),
+            )
+            .expect("書き直す");
         });
         cx.run_until_parked();
         assert!(!binaries.join("amp-acp").exists(), "外すと落とした物を消す");
         assert!(
             binaries.join("vtcode/1.0.0/darwin-aarch64/agent").exists(),
-            "プロジェクトの設定でまだ使っている id は消さない"
+            "消す直前にまた書かれていた id は消さない"
         );
         cx.update(|_window, cx| {
             assert!(!get(cx).agent_servers.contains_key("amp-acp"));
-            assert!(get(cx).agent_servers.contains_key("vtcode"));
+            let project_only = SettingsStore::load(None, Some(&project));
+            assert!(
+                project_only.settings().agent_servers.is_empty(),
+                "リポジトリの agent_servers は読まない"
+            );
         });
         std::fs::remove_dir_all(&root).ok();
     }
