@@ -160,6 +160,77 @@ td.ex .chip { pointer-events: none; }
 .cap { font-size: 11px; color: var(--fg2); margin-top: 7px; line-height: 1.6; }
 .cap b { color: var(--fg1); }
 .try { font-size: 11px; color: var(--fg2); margin-top: 6px; }
+
+/* ============ 思考量のゲージ（2026-10-02 追加・本人が選ぶ）============ */
+.gauge-col { width: 300px; flex: none; }
+.gauge-col h3 .sub { font-weight: 400; color: var(--fg2); font-size: 11px; margin-left: 6px; }
+.gcard { position: relative; width: 290px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-menu); overflow: hidden; outline: none; }
+.gcard:focus { box-shadow: var(--shadow-menu), 0 0 0 1px var(--fg2); }
+.gcard .agent { display: flex; align-items: center; gap: 7px; padding: 9px 12px 0; font-size: 11px; color: var(--fg1); }
+.gcard .agent .badge { width: 14px; height: 14px; }
+.gcard .agent .slot { flex: 1; }
+.gcard .agent .tabhint { font-size: 10px; color: var(--fg2); display: flex; align-items: center; gap: 4px; }
+.gcard .agent .tabhint .kbd { font-size: 9.5px; padding: 0 4px; color: var(--fg1); }
+.gcard .model { padding: 5px 12px 0; }
+.gcard .model .name { font-size: 14px; font-weight: 600; color: var(--fg0); }
+.gcard .model .name .go { font-size: 12px; color: var(--fg2); font-weight: 400; margin-left: 4px; }
+.gcard .eff { padding: 9px 12px 10px; }
+.gcard .eff .head { display: flex; align-items: baseline; font-size: 10.5px; color: var(--fg2); }
+.gcard .eff .head b { margin-left: auto; font-size: 12px; font-weight: 600; color: var(--fg0); }
+.gcard .opts { border-top: 1px solid var(--border); padding: 3px 0; }
+.gcard .o { display: flex; align-items: center; gap: 10px; padding: 5px 12px; }
+.gcard .o .l { flex: 1; min-width: 0; }
+.gcard .o .n { font-size: 11.5px; color: var(--fg1); display: flex; align-items: center; gap: 5px; }
+.gcard .foot { border-top: 1px solid var(--border); padding: 5px 12px 6px; font-size: 10px; color: var(--fg2); display: flex; gap: 0 8px; }
+.gcard .foot b { color: var(--fg1); font-weight: 400; font-family: var(--mono); font-size: 10px; }
+.gctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--fg2); }
+.gctl button { all: unset; cursor: pointer; padding: 1px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg1); background: var(--bg1); font-size: 11px; }
+.gctl button:hover { color: var(--fg0); background: var(--bg3); }
+.gctl button.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
+.gctl .sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; }
+.gnote { font-size: 11px; color: var(--fg2); margin-top: 8px; line-height: 1.6; }
+.gnote li { margin: 2px 0 2px 14px; color: var(--fg1); }
+.gnote .warn { color: var(--fg0); border-left: 2px solid var(--fg2); padding-left: 7px; margin-top: 6px; }
+/* G-1 / G-4 回転計 */
+.tacho { display: block; flex: none; overflow: visible; }
+.tacho .arc-track { fill: none; stroke: var(--bg3); stroke-width: 4; stroke-linecap: round; }
+.tacho .fill { fill: none; stroke: var(--fg1); stroke-width: 4; stroke-linecap: round; }
+.tacho .tick { stroke: var(--fg2); stroke-width: 1.5; stroke-linecap: round; transition: stroke .2s; }
+.tacho .tick.on { stroke: var(--fg0); }
+.tacho .hit { fill: transparent; cursor: pointer; }
+.tacho .needle { stroke: var(--fg0); stroke-width: 2.5; stroke-linecap: round; }
+.tacho .hub { fill: var(--fg0); }
+.tacho .hubin { fill: var(--bg2); }
+.tacho .end { font-size: 9px; fill: var(--fg2); }
+.tacho .detent { fill: var(--fg2); cursor: pointer; transition: fill .2s; }
+.tacho .detent.on { fill: var(--fg0); }
+.tacho .read { font-size: 15px; font-weight: 600; fill: var(--fg0); }
+.tacho .readsub { font-size: 9.5px; fill: var(--fg2); }
+.tacho.colored .fill, .tacho.colored .needle { stroke: var(--tc); }
+.tacho.colored .tick.on { stroke: var(--tc); }
+.trow { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.tread { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.tread .big { font-size: 19px; font-weight: 600; color: var(--fg0); letter-spacing: .01em; }
+.tread .cap { font-size: 10px; color: var(--fg2); }
+/* G-2 段の棒 */
+.bars { display: flex; align-items: flex-end; gap: 10px; margin-top: 8px; height: 34px; }
+.bars .dpill { align-self: center; font-size: 10px; color: var(--fg2); border: 1px solid var(--border); border-radius: 9px; padding: 1px 8px; cursor: pointer; transition: color .2s, background .2s; }
+.bars .dpill.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
+.bars .dsep { align-self: center; width: 1px; height: 22px; background: var(--border); }
+.bars .bset { display: flex; align-items: flex-end; gap: 5px; height: 34px; }
+.bars .bar { width: 15px; border-radius: 3px; background: var(--bg3); cursor: pointer; transition: background-color .18s ease-out, transform .18s ease-out; transform-origin: bottom; }
+.bars .bar.on { background: var(--fg0); }
+.bars .bar.pop { transform: scaleY(1.12); }
+.bars .rng { margin-left: auto; align-self: center; font-size: 9.5px; color: var(--fg2); }
+/* G-3 リング */
+.ringrow { display: flex; align-items: center; gap: 14px; margin-top: 6px; }
+.ring .seg { fill: none; stroke: var(--bg3); stroke-width: 7; cursor: pointer; transition: stroke .2s ease-out; }
+.ring .seg.on { stroke: var(--fg0); }
+.ring .lbl { font-size: 11.5px; font-weight: 600; fill: var(--fg0); }
+.ring .lblsub { font-size: 8.5px; fill: var(--fg2); }
+.ringside { display: flex; flex-direction: column; gap: 6px; font-size: 10.5px; color: var(--fg2); }
+.ringside .dpill { align-self: flex-start; font-size: 10px; color: var(--fg2); border: 1px solid var(--border); border-radius: 9px; padding: 1px 8px; cursor: pointer; }
+.ringside .dpill.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
 </style>
 </head>
 <body>
@@ -168,7 +239,7 @@ td.ex .chip { pointer-events: none; }
 <div class="meta">2026-10-02 · 中身はエージェントが実際に広告している設定（claude-agent-acp 0.81.2・codex-acp 1.13.1 の <code>configOptions</code>）。今は boolean を捨てているので Fast が選べない（<code>acp_client.rs</code> の <code>map_config_option</code>）。どちらの形でも boolean は出せる。</div>
 
 <div class="lead">
-  <b>決定（2026-10-02・本人）: 案 C + C-1</b> — チップ 1 つ → カード 1 枚、権限モードはカードの外のピル。実装は <code>crates/agent_panel/src/config_card.rs</code>（UI-SPEC §6）。以下は決める時に並べた比較のまま残す。<br><br>
+  <b>追加で選ぶこと（2026-10-02）: 思考量のゲージ</b> — 下の「0.」に G-1〜G-4 を並べました（「G-2」のように一言で）。<br><b>決定（2026-10-02・本人）: 案 C + C-1</b> — チップ 1 つ → カード 1 枚、権限モードはカードの外のピル。実装は <code>crates/agent_panel/src/config_card.rs</code>（UI-SPEC §6）。以下は決める時に並べた比較のまま残す。<br><br>
   <b>決めたいこと 2 つ</b>
   <ol>
     <li><b>形</b>: 案 P「今のピルのまま、boolean と残りの select をピルとして足す」/ 案 C「チップ 1 つ → 開くとカード 1 枚（zeron 風）」。推しは <b>案 C</b>（理由は下）。</li>
@@ -176,6 +247,12 @@ td.ex .chip { pointer-events: none; }
   </ol>
   <div class="note">どちらでも守る決まり: value_id で保存・比較・送信 / エージェントごとの sticky（<code>agent_config_defaults</code>）/ 広告が届くまで候補を捏造しない / 権限モード（O16）/ エージェントは会話を始める前だけ変えられる。色は識別だけ（カードの中に色相を置かない）。</div>
 </div>
+
+
+<!-- =========================================================== 0. 思考量のゲージ -->
+<h2>0. 思考量のゲージを選ぶ（2026-10-02 追加・本人が選ぶ）</h2>
+<p class="meta" style="max-width:1180px">本人「think のところとかもうちょっとかっこいい感じにしたいな。ゲージよ。線と棒だけではつまらない」。カード（C-1）の思考量の欄だけを差し替える案です。どの案も、<b>段の数はエージェントのまま</b>（Claude は Default + 5 段・Codex は 4 段・3 段のモデルもある）、<b>Claude の Default は目盛りに乗せない</b>（エージェント任せ＝目盛りの外の位置）、<b>表示名は広告のまま</b>。下のボタンか、カードを押して <span class="kbd">←</span><span class="kbd">→</span>（<span class="kbd">Tab</span> でエージェント）で動きを見られます。</p>
+<div class="row" id="gauge-row" style="gap:14px"></div>
 
 <!-- =========================================================== 1. 並べて比べる -->
 <h2>1. 並べて比べる（Claude Code・Opus 4.8・High・Fast on の同じ状態）</h2>
@@ -577,6 +654,214 @@ composer.addEventListener('keydown', e => {
 document.addEventListener('mousedown', e => { if (open && !e.target.closest('#live-chip')) { open = false; render(); } });
 paint(document);
 open = true; render();
+
+/* ============ 思考量のゲージ（G-1〜G-4）============ */
+const GA = {
+  claude: { label: 'Claude（Default + 5 段）', name: 'Claude Code', badge: 'claude', model: 'Opus 4.8',
+            choices: [['default','Default'],['low','Low'],['medium','Medium'],['high','High'],['xhigh','Xhigh'],['max','Max']] },
+  codex:  { label: 'Codex（4 段）', name: 'Codex', badge: 'codex', model: 'GPT-5.6-Sol',
+            choices: [['low','Low'],['medium','Medium'],['high','High'],['xhigh','Xhigh']] },
+  three:  { label: '3 段のモデル', name: 'OpenCode', badge: 'mono', model: 'GPT OSS 20B',
+            choices: [['low','Low'],['medium','Medium'],['high','High']] },
+};
+const OPEN_DESC = 'エージェントの既定';
+const GAUGES = [
+  { id: 'G-1', title: 'G-1 回転計', sub: '弧の目盛りと針', kind: 'tacho', rec: true,
+    notes: ['針が振れて、上がった / 下がったが一目で分かる（いちばん「ゲージ」らしい）', 'Default は針が目盛りの外（左下の点）に寝る＝エージェント任せ', '欄の高さが 45px → 120px ほどになる（カードが少し縦に伸びる）。値の名前は右に大きく'] },
+  { id: 'G-2', title: 'G-2 段の棒', sub: '電波・音量のような棒', kind: 'bars',
+    notes: ['小さく収まる。段が 1 本ずつ点いていく', 'Default は棒の左の「Default」の札が点き、棒は全部消える', '「線と棒」から一番近い（落ち着いた見た目）'] },
+  { id: 'G-3', title: 'G-3 リング', sub: '段に分かれた輪', kind: 'ring',
+    notes: ['輪が段ごとに点き、値の名前は輪の中', 'Default は輪が全部消えて、横の「Default」の札が点く', '段が 6 つを超えると 1 つが細くなる'] },
+  { id: 'G-4', title: 'G-4 回転計（色あり）', sub: 'G-1 の弧と針をスレッド色', kind: 'tacho', colored: true,
+    notes: ['G-1 と同じ形で、振れた弧と針だけスレッド色（トークンメーターと同じ色の使い方）', 'いちばん目立ち、どのスレッドの設定かとも結び付く'],
+    warn: '色の原則（CLAUDE.md・UI-SPEC §1.3）から外れます: スレッド色の置き場所に「思考量のゲージ」を足すことになる（今の許可はトークンメーターなど）。' },
+];
+const gstate = GAUGES.map(() => ({ agent: 'claude', value: 'high', theta: null, anim: null }));
+
+/* 段の並び: Default（目盛りの外）+ 目盛りの段 */
+function scaleOf(agentKey) {
+  const ch = GA[agentKey].choices;
+  return { off: ch.find(c => c[0] === 'default') || null, levels: ch.filter(c => c[0] !== 'default'), all: ch };
+}
+const nameOf = (agentKey, v) => (GA[agentKey].choices.find(c => c[0] === v) || [v, v])[1];
+
+/* ---- G-1 / G-4 回転計 ---- */
+const TCX = 75, TCY = 58, TR = 48, T0 = 210, T1 = -30, TAUTO = 242;
+const rad = d => d * Math.PI / 180;
+const tp = (deg, r = TR) => [TCX + r * Math.cos(rad(deg)), TCY - r * Math.sin(rad(deg))];
+function arcPath(from, to, r = TR) {
+  const [x0, y0] = tp(from, r), [x1, y1] = tp(to, r);
+  const large = Math.abs(from - to) > 180 ? 1 : 0;
+  return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+}
+function levelTheta(i, n) { return n <= 1 ? 90 : T0 - (T0 - T1) * i / (n - 1); }
+function thetaOf(st) {
+  const sc = scaleOf(st.agent);
+  if (st.value === 'default') return TAUTO;
+  const i = sc.levels.findIndex(c => c[0] === st.value);
+  return levelTheta(Math.max(0, i), sc.levels.length);
+}
+function tachoSVG(k) {
+  const st = gstate[k], g = GAUGES[k], sc = scaleOf(st.agent), n = sc.levels.length;
+  const ticks = sc.levels.map((c, i) => {
+    const t = levelTheta(i, n), [a, b] = tp(t, TR - 10), [c2, d] = tp(t, TR - 5), [hx, hy] = tp(t, TR);
+    return `<line class="tick" data-i="${i}" x1="${a}" y1="${b}" x2="${c2}" y2="${d}"/><circle class="hit" data-v="${c[0]}" cx="${hx}" cy="${hy}" r="9"/>`;
+  }).join('');
+  const [sx, sy] = tp(T0), [ex, ey] = tp(T1);
+  const h = sc.off ? 118 : 100;
+  const detent = sc.off ? (() => { const [dx, dy] = tp(TAUTO); return `<circle class="detent" data-v="default" cx="${dx}" cy="${dy}" r="3.2"/><circle class="hit" data-v="default" cx="${dx}" cy="${dy}" r="9"/><text class="end" x="${dx}" y="${dy + 14}" text-anchor="middle">${sc.off[1]}</text>`; })() : '';
+  return `<div class="trow"><svg class="tacho ${g.colored ? 'colored' : ''}" width="150" height="${h}" viewBox="0 0 150 ${h}">
+    <path class="arc-track" d="${arcPath(T0, T1)}"/>
+    <path class="fill" d=""/>
+    ${ticks}
+    <text class="end" x="${sx}" y="${sy + 14}" text-anchor="middle">${sc.levels[0][1]}</text>
+    <text class="end" x="${ex}" y="${ey + 14}" text-anchor="middle">${sc.levels[n - 1][1]}</text>
+    ${detent}
+    <g class="ndl"><line class="needle" x1="${TCX}" y1="${TCY}" x2="${TCX + TR - 13}" y2="${TCY}"/></g>
+    <circle class="hub" cx="${TCX}" cy="${TCY}" r="5"/><circle class="hubin" cx="${TCX}" cy="${TCY}" r="2"/>
+  </svg><div class="tread"><div class="big"></div><div class="cap"></div></div></div>`;
+}
+function tachoPaint(k, theta) {
+  const root = document.getElementById('g' + k), st = gstate[k], sc = scaleOf(st.agent);
+  root.querySelector('.ndl').setAttribute('transform', `rotate(${-theta} ${TCX} ${TCY})`);
+  const fillTo = Math.max(Math.min(theta, T0), T1);
+  root.querySelector('.fill').setAttribute('d', theta >= T0 ? '' : arcPath(T0, fillTo));
+  const level = sc.levels.findIndex(c => c[0] === st.value);
+  root.querySelectorAll('.tick').forEach(t => t.classList.toggle('on', +t.dataset.i <= level));
+  root.querySelectorAll('.detent').forEach(d => d.classList.toggle('on', st.value === 'default'));
+  root.querySelector('.tread .big').textContent = nameOf(st.agent, st.value);
+  root.querySelector('.tread .cap').textContent = st.value === 'default'
+    ? OPEN_DESC + '（目盛りの外）'
+    : `${sc.levels[0][1]} → ${sc.levels[sc.levels.length - 1][1]}`;
+}
+const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+function tachoTo(k, target, animate) {
+  const st = gstate[k];
+  if (st.anim) cancelAnimationFrame(st.anim);
+  const from = st.theta == null ? target : st.theta;
+  if (!animate || reduceMotion) { st.theta = target; tachoPaint(k, target); return; }
+  const t0 = performance.now(), dur = 520;
+  const step = now => {
+    const t = Math.min(1, (now - t0) / dur), th = from + (target - from) * easeOutBack(t);
+    st.theta = th; tachoPaint(k, th);
+    if (t < 1) st.anim = requestAnimationFrame(step); else st.anim = null;
+  };
+  st.anim = requestAnimationFrame(step);
+}
+
+/* ---- G-2 段の棒 ---- */
+function barsHTML(k) {
+  const st = gstate[k], sc = scaleOf(st.agent), n = sc.levels.length;
+  const bars = sc.levels.map((c, i) => `<div class="bar" data-i="${i}" data-v="${c[0]}" title="${c[1]}" style="height:${Math.round(9 + (25 * i) / Math.max(1, n - 1))}px"></div>`).join('');
+  return `<div class="bars">${sc.off ? `<div class="dpill" data-v="default">${sc.off[1]}</div><div class="dsep"></div>` : ''}<div class="bset">${bars}</div><div class="rng">${sc.levels[0][1]} → ${sc.levels[n - 1][1]}</div></div>`;
+}
+function barsPaint(k, prevLevel) {
+  const st = gstate[k], sc = scaleOf(st.agent), root = document.getElementById('g' + k);
+  const level = sc.levels.findIndex(c => c[0] === st.value);
+  root.querySelectorAll('.bar').forEach(b => {
+    const i = +b.dataset.i, on = i <= level;
+    const delay = reduceMotion ? 0 : (on ? Math.max(0, i - prevLevel - 1) * 55 : Math.max(0, prevLevel - i) * 40);
+    b.style.transitionDelay = delay + 'ms';
+    if (b.classList.contains('on') !== on) { b.classList.toggle('on', on); if (on && !reduceMotion) { setTimeout(() => { b.classList.add('pop'); setTimeout(() => b.classList.remove('pop'), 170); }, delay); } }
+  });
+  root.querySelectorAll('.dpill').forEach(d => d.classList.toggle('on', st.value === 'default'));
+  root.querySelector('.eff .head b').textContent = nameOf(st.agent, st.value);
+}
+
+/* ---- G-3 リング ---- */
+const RCX = 42, RCY = 42, RR = 30, R0 = 225, RSPAN = 270, RGAP = 8;
+function ringSVG(k) {
+  const st = gstate[k], sc = scaleOf(st.agent), n = sc.levels.length, span = RSPAN / n;
+  const segs = sc.levels.map((c, i) => {
+    const a = R0 - i * span - RGAP / 2, b = R0 - (i + 1) * span + RGAP / 2;
+    const [x0, y0] = [RCX + RR * Math.cos(rad(a)), RCY - RR * Math.sin(rad(a))], [x1, y1] = [RCX + RR * Math.cos(rad(b)), RCY - RR * Math.sin(rad(b))];
+    return `<path class="seg" data-i="${i}" data-v="${c[0]}" d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${RR} ${RR} 0 ${Math.abs(a - b) > 180 ? 1 : 0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}"><title>${c[1]}</title></path>`;
+  }).join('');
+  return `<div class="ringrow"><svg class="ring" width="84" height="84" viewBox="0 0 84 84">${segs}<text class="lbl" x="${RCX}" y="${RCY + 4}" text-anchor="middle"></text><text class="lblsub" x="${RCX}" y="${RCY + 16}" text-anchor="middle"></text></svg>
+    <div class="ringside">${sc.off ? `<div class="dpill" data-v="default">${sc.off[1]}</div>` : ''}<div>${sc.levels[0][1]} → ${sc.levels[n - 1][1]}</div><div>${n} 段</div></div></div>`;
+}
+function ringPaint(k, prevLevel) {
+  const st = gstate[k], sc = scaleOf(st.agent), root = document.getElementById('g' + k);
+  const level = sc.levels.findIndex(c => c[0] === st.value);
+  root.querySelectorAll('.seg').forEach(sg => {
+    const i = +sg.dataset.i, on = i <= level;
+    sg.style.transitionDelay = (reduceMotion ? 0 : (on ? Math.max(0, i - prevLevel - 1) * 60 : Math.max(0, prevLevel - i) * 45)) + 'ms';
+    sg.classList.toggle('on', on);
+  });
+  root.querySelectorAll('.dpill').forEach(d => d.classList.toggle('on', st.value === 'default'));
+  root.querySelector('.ring .lbl').textContent = nameOf(st.agent, st.value);
+  root.querySelector('.ring .lblsub').textContent = st.value === 'default' ? '既定' : '';
+}
+
+/* ---- カードと操作 ---- */
+const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function badgeHTML(kind) {
+  if (kind === 'mono') return '<span class="badge" style="display:inline-grid;place-items:center;border-radius:3px;background:#4b5563;color:#fff;font-size:7px;font-weight:700">OC</span>';
+  return `<span class="badge ${kind}" data-badge="${kind}"></span>`;
+}
+function gaugeBody(k) {
+  const g = GAUGES[k];
+  if (g.kind === 'tacho') return `<div class="eff"><div class="head">思考量</div>${tachoSVG(k)}</div>`;
+  if (g.kind === 'bars') return `<div class="eff"><div class="head">思考量<b></b></div>${barsHTML(k)}</div>`;
+  return `<div class="eff"><div class="head">思考量</div>${ringSVG(k)}</div>`;
+}
+function buildGauge(k) {
+  const g = GAUGES[k], st = gstate[k], a = GA[st.agent];
+  const col = document.getElementById('gc' + k);
+  col.innerHTML = `<h3>${g.title}<span class="sub">${g.sub}</span>${g.rec ? '<span class="rec">推し</span>' : ''}${g.colored ? '<span class="rec" style="border-style:dashed">色あり・原則外</span>' : ''}</h3>
+    <div class="gcard" id="g${k}" tabindex="0">
+      <div class="agent">${badgeHTML(a.badge)}${a.name}<span class="slot"></span><span class="tabhint"><span class="kbd">Tab</span>で切り替え</span></div>
+      <div class="model"><div class="name">${a.model}<span class="go">›</span></div></div>
+      ${gaugeBody(k)}
+      <div class="opts"><div class="o"><div class="l"><div class="n"><span class="bolt" data-bolt></span>Fast mode</div></div><span class="sw"></span></div></div>
+      <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
+    </div>
+    <div class="gctl">${Object.keys(GA).map(key => `<button class="${key === st.agent ? 'on' : ''}" data-agent="${key}">${GA[key].label}</button>`).join('')}
+      <span class="sep"></span><button data-step="-1">←</button><button data-step="1">→</button><button data-play>▶ 動き</button></div>
+    <div class="gnote"><ul>${g.notes.map(x => `<li>${x}</li>`).join('')}</ul>${g.warn ? `<div class="warn">${g.warn}</div>` : ''}</div>`;
+  paint(col);
+  const card = document.getElementById('g' + k);
+  card.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') stepGauge(k, -1); else if (e.key === 'ArrowRight') stepGauge(k, 1);
+    else if (e.key === 'Tab') { const keys = Object.keys(GA); setAgent(k, keys[(keys.indexOf(st.agent) + (e.shiftKey ? keys.length - 1 : 1)) % keys.length]); document.getElementById('g' + k).focus(); }
+    else return;
+    e.preventDefault();
+  });
+  card.addEventListener('click', e => { const v = e.target.closest('[data-v]'); if (v) setValue(k, v.dataset.v); });
+  col.querySelectorAll('[data-agent]').forEach(b => b.onclick = () => setAgent(k, b.dataset.agent));
+  col.querySelectorAll('[data-step]').forEach(b => b.onclick = () => stepGauge(k, +b.dataset.step));
+  col.querySelector('[data-play]').onclick = () => playGauge(k);
+  st.theta = null;
+  repaint(k, -1, false);
+}
+function repaint(k, prevLevel, animate) {
+  const g = GAUGES[k];
+  if (g.kind === 'tacho') tachoTo(k, thetaOf(gstate[k]), animate);
+  else if (g.kind === 'bars') barsPaint(k, prevLevel);
+  else ringPaint(k, prevLevel);
+}
+function levelIndex(k) { const st = gstate[k]; return scaleOf(st.agent).levels.findIndex(c => c[0] === st.value); }
+function setValue(k, v) { const prev = levelIndex(k); gstate[k].value = v; repaint(k, prev, true); }
+function stepGauge(k, d) {
+  const st = gstate[k], all = GA[st.agent].choices.map(c => c[0]);
+  const i = all.indexOf(st.value), next = Math.max(0, Math.min(all.length - 1, i + d));
+  if (next !== i) setValue(k, all[next]);
+}
+function setAgent(k, key) {
+  const st = gstate[k]; st.agent = key;
+  const ch = GA[key].choices.map(c => c[0]);
+  if (!ch.includes(st.value)) st.value = ch.includes('high') ? 'high' : ch[ch.length - 1];
+  buildGauge(k);
+}
+function playGauge(k) {
+  const st = gstate[k], all = GA[st.agent].choices.map(c => c[0]);
+  const seq = [...all, ...all.slice(0, -1).reverse()];
+  seq.forEach((v, n) => setTimeout(() => setValue(k, v), n * 650));
+}
+const grow = document.getElementById('gauge-row');
+grow.innerHTML = GAUGES.map((g, k) => `<div class="gauge-col" id="gc${k}"></div>`).join('');
+GAUGES.forEach((g, k) => buildGauge(k));
+
 </script>
 </body>
 </html>
