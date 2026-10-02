@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Changed
+
+- **"Now" on a queued message steers the running turn**: If the agent supports it (Claude Code and Codex), the button on a queued message is now **Steer now**. It hands the message to the running turn instead of interrupting it, so work in progress, such as a running command, is not thrown away. The command finishes, and then the agent reads your message. The message appears in the conversation where the agent took it, and the turn continues as one turn. Agents that do not support it keep **Interrupt & send**. Slash commands are always sent that way, because they only work at the start of a turn.
+
+### 日本語
+
+#### 変更
+
+- **送信待ちの「今すぐ」が実行中のターンに差し込むように**：エージェントが対応していれば（Claude Code と Codex）、送信待ちの行のボタンが **今すぐ差し込む** になります。ターンを中断せずに文を渡すので、走っているコマンドなどの途中の作業を捨てません。コマンドは最後まで走り、そのあとでエージェントが文を読みます。文はエージェントが受け取った位置で会話に入り、ターンは 1 つのまま続きます。対応していないエージェントは今までどおり **中断して今すぐ** です。スラッシュコマンドはターンの頭でしか効かないので、いつもこちらで送ります。
+
 ## [0.1.24] - 2026-10-01
 
 This is the first regular release since v0.1.20, delivered through auto-update. It includes everything from the test releases [v0.1.21](https://github.com/iKora128/necoder/releases/tag/v0.1.21), [v0.1.22](https://github.com/iKora128/necoder/releases/tag/v0.1.22) and [v0.1.23](https://github.com/iKora128/necoder/releases/tag/v0.1.23). If you are updating from v0.1.20, their notes list every change. If something does not work, please let us know in an Issue.

@@ -22,7 +22,8 @@
 
 use acp_client::{
     AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
-    PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
+    PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, SteerOutcome,
+    ToolCallInfo, TurnEnd,
 };
 mod auto_prompt;
 mod chat;
@@ -1110,6 +1111,44 @@ pub struct QuestionCard {
     pub waited_secs: u64,
 }
 
+/// 1 通の送信の中身（[`AgentPanel::compose_prompt`]）。エージェントへ送る全文と、送れた時に片付ける物。
+struct ComposedPrompt {
+    /// エージェントへ送る全文（引き継ぎの前置き・添付の `@パス`・スレッドの前置き・`!` の結果 + 本文）。
+    text: String,
+    /// image ブロックで送る画像（添付のうち画像として読めた物）。
+    images: Vec<acp_client::PromptImage>,
+    /// 画像として送った添付（送れたら添付から外す・transcript の発話に名前を添える）。
+    image_paths: Vec<SharedString>,
+    /// 添えた `!` の結果（送れたら渡し済みにする）。
+    shell_delivered: Option<Vec<u64>>,
+    /// 引き継ぎの前置きを付けた（送れたら捨てる）。
+    handoff: bool,
+}
+
+/// 応答を待っている差し込み（[`Thread::steering`]）。受け取られたら transcript に出して、添付などを
+/// 渡し済みにする（[`ComposedPrompt`] の後始末の分だけ持つ）。
+struct PendingSteer {
+    /// [`SessionCommand::Steer`] の id（結果の [`AgentEvent::Steered`] と突き合わせる）。
+    id: u64,
+    /// 人が書いた本文（送信待ちの 1 行）。受け取られなかったら送信待ちの先頭へ戻す。
+    prompt: String,
+    image_paths: Vec<SharedString>,
+    shell_delivered: Option<Vec<u64>>,
+    handoff: bool,
+}
+
+/// transcript に出す人の発話。画像を添えた時は名前を `▦ a.png · b.png` で添える。
+fn user_entry_text(prompt: &str, image_paths: &[SharedString]) -> SharedString {
+    if image_paths.is_empty() {
+        return SharedString::from(prompt.to_string());
+    }
+    let names: Vec<String> = image_paths
+        .iter()
+        .map(|path| context_chip_label(path.as_ref()).to_string())
+        .collect();
+    SharedString::from(format!("{prompt}\n\n▦ {}", names.join(" · ")))
+}
+
 /// 1 スレッド = 1 会話。固有色を持ち、UI 全体へ貫通する。
 struct Thread {
     /// 永続化キー（unix ms + 連番。再起動を跨いで同一・M12-1）。
@@ -1188,8 +1227,15 @@ struct Thread {
     /// **状態を上書きしない**（状態と数字は事実層・これは添える文）。新しいターン開始でクリア。
     tier2: Option<SharedString>,
     /// 生成中に積んだ送信待ちの prompt（キュー・FIFO）。ターン完了で先頭から自動フラッシュする。
-    /// 「今すぐ送信（steer）」はこのキューを介さず即 [`Self::send_prompt_text`] する。
+    /// 行の「今すぐ」は、差し込める相手なら実行中のターンへ差し込み（[`Self::steering`]）、そうで
+    /// なければ中断してから先頭として送る（[`AgentPanel::send_queued_now`]）。
     queued_prompts: Vec<String>,
+    /// このセッションのエージェントが実行中のターンへの差し込み（`_session/steering`）を広告している
+    /// （`AgentEvent::SessionStarted.steerable`・ARCHITECTURE §7.6）。
+    steerable: bool,
+    /// 応答を待っている差し込み（送信待ちから「今すぐ差し込む」で送った 1 行）。1 本ずつ。ある間は
+    /// 送信待ちを流さない（受け取られなかったら先頭へ戻して順番を守る）。
+    steering: Option<PendingSteer>,
     /// エージェント側のセッション id（`SessionStarted` で控え、DB にも書く）。次にこのスレッドの
     /// エージェントを立ち上げ直すとき `session/load` に渡して会話を引き継ぐ（2026-09-08）。
     acp_session_id: Option<String>,
@@ -1246,6 +1292,14 @@ struct Thread {
 }
 
 impl Thread {
+    /// 応答を待っていた差し込みを送信待ちの先頭へ戻す。セッションが終わった・立て直した＝もう応答は
+    /// 来ない（文は届いたか分からないが、失うよりは送り直す側に倒す）。
+    fn requeue_pending_steer(&mut self) {
+        if let Some(steer) = self.steering.take() {
+            self.queued_prompts.insert(0, steer.prompt);
+        }
+    }
+
     /// `/compact` を送る先の会話があるか（生きたセッション、**または**次の送信で `session/load` が
     /// 引き継ぐ id）。無いのは一度も起こしていないスレッドだけ＝圧縮する文脈が無い。
     ///
@@ -1313,6 +1367,8 @@ impl Thread {
             muted: false,
             tier2: None,
             queued_prompts: Vec::new(),
+            steerable: false,
+            steering: None,
             acp_session_id: None,
             session_lost: false,
             startup_exit: None,
@@ -2732,6 +2788,22 @@ impl AgentPanel {
                     panel.on_event(active, AgentEvent::GoalChanged(Some(goal)), cx);
                 }) {
                     eprintln!("NECODER_GOAL_PROBE: パネルが無い: {error:#}");
+                }
+            })
+            .detach();
+        }
+        // 開発用: NECODER_QUEUE_PROBE=steer|steering|interrupt|injected で、生成中のスレッドに送信待ちを
+        // 積んで撮る（UI-SPEC §6 の送信待ち・実エージェント無し）。`steering` は応答待ちの差し込み、
+        // `injected` は差し込みが受け取られた後の transcript（実経路の `Steered` を通す）。
+        #[cfg(debug_assertions)]
+        if let Ok(mode) = std::env::var("NECODER_QUEUE_PROBE") {
+            cx.spawn(async move |panel, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                if let Err(error) = panel.update(cx, |panel, cx| panel.seed_queue_probe(&mode, cx))
+                {
+                    eprintln!("NECODER_QUEUE_PROBE: パネルが無い: {error:#}");
                 }
             })
             .detach();
@@ -4657,6 +4729,7 @@ PYEOF"#;
         thread.session_lost = true;
         // 「再開中…」の一言はもう当たらない（切れた印とカードが代わりに出る）。
         thread.session_note = None;
+        thread.requeue_pending_steer();
         self.tidy_chat_dir(index);
         // 終端イベント無しでターン中に終わった場合の畳み（running=false なら何もしない）。
         self.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
@@ -4674,6 +4747,7 @@ PYEOF"#;
         thread.command_tx = None;
         thread.session_lost = true;
         thread.session_note = None;
+        thread.requeue_pending_steer();
         let message = self.session_lost_reason();
         self.abandon_turn(thread_index, &message, cx);
         self.sync_running_registry(cx);
@@ -6558,7 +6632,13 @@ PYEOF"#;
     /// 再接続で直近の指示を送り直した後、そのターン完了で改めてキューが流れる）。
     fn flush_queued_prompt_at(&mut self, thread_index: usize, cx: &mut Context<Self>) {
         let next = self.threads.get_mut(thread_index).and_then(|thread| {
-            if thread.running || thread.auth_required || thread.queued_prompts.is_empty() {
+            // 差し込みの応答を待っている間も流さない: 受け取られなかったらその行が先頭に戻り、
+            // 次のターンとして先に送られる（順番を守る）。
+            if thread.running
+                || thread.auth_required
+                || thread.steering.is_some()
+                || thread.queued_prompts.is_empty()
+            {
                 None
             } else {
                 Some(thread.queued_prompts.remove(0))
@@ -6569,35 +6649,230 @@ PYEOF"#;
         }
     }
 
-    /// キュー内の prompt を今すぐ送る（割り込み送信）。生成中なら**現ターンを中断してから**送る。
-    /// ACP は生成中に届いた prompt を deferred に回す（＝そのままでは割り込めず、しかも UI の
-    /// running が取り残される）ため、cancel を挟んで確実に新ターンとして送るのが正しい。
-    /// idle の時は即送信。宛先チップ横のボタンから。
+    /// 送信待ちの行を今すぐ送る（行の「今すぐ」・UI-SPEC §6 の送信待ち）。待機中は即送信。生成中は、
+    /// エージェントが差し込みを広告していれば（[`Thread::steerable`]）**ターンを止めずに**差し込む
+    /// （[`Self::steer_queued_prompt`]・途中のツール作業を捨てない）。広告が無い相手と slash コマンド
+    /// （ターンの頭でしか効かない）は**現ターンを中断してから**先頭として送る — ACP は生成中に届いた
+    /// prompt を deferred に回す（＝そのままでは割り込めず、しかも UI の running が取り残される）ため、
+    /// cancel を挟んで確実に新ターンとして送る。差し込みの応答を待っている間は押せない（1 本ずつ）。
     fn send_queued_now(&mut self, queue_index: usize, cx: &mut Context<Self>) {
-        let running = self.threads.get(self.active).and_then(|thread| {
-            (queue_index < thread.queued_prompts.len()).then_some(thread.running)
-        });
-        let Some(running) = running else {
+        let thread_index = self.active;
+        let Some(thread) = self.threads.get(thread_index) else {
             return;
         };
-        if running {
-            // 対象を先頭へ寄せ、現ターンを中断。中断完了（TurnEnded）で `flush_queued_prompt` が
-            // 先頭＝この prompt を新ターンとして送る（running も正しく立つ）。
-            if let Some(thread) = self.threads.get_mut(self.active) {
-                let prompt = thread.queued_prompts.remove(queue_index);
-                thread.queued_prompts.insert(0, prompt);
-            }
-            self.cancel_turn(self.active, cx);
-        } else {
+        if queue_index >= thread.queued_prompts.len() || thread.steering.is_some() {
+            return;
+        }
+        if !thread.running {
             // idle: 即送れる。
             if let Some(prompt) = self
                 .threads
-                .get_mut(self.active)
+                .get_mut(thread_index)
                 .map(|thread| thread.queued_prompts.remove(queue_index))
             {
                 self.send_prompt_text(prompt, cx);
             }
+            return;
         }
+        if thread.steerable && !is_slash_command(&thread.queued_prompts[queue_index]) {
+            self.steer_queued_prompt(thread_index, queue_index, cx);
+            return;
+        }
+        // 対象を先頭へ寄せ、現ターンを中断。中断完了（TurnEnded）で `flush_queued_prompt` が
+        // 先頭＝この prompt を新ターンとして送る（running も正しく立つ）。
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            let prompt = thread.queued_prompts.remove(queue_index);
+            thread.queued_prompts.insert(0, prompt);
+        }
+        self.cancel_turn(thread_index, cx);
+    }
+
+    /// 送信待ちの行を実行中のターンへ差し込む（`_session/steering`・ARCHITECTURE §7.6）。中身は
+    /// 普通の送信と同じく組む（添付・スレッドの前置き・`!` の結果）。行は応答が届くまで
+    /// [`Thread::steering`] に移す（カードでは先頭に `差し込み中…`）。送信路が死んでいたら行を戻して
+    /// 中断に落とす（`cancel_turn` がローカルで畳む）。
+    fn steer_queued_prompt(
+        &mut self,
+        thread_index: usize,
+        queue_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        // 結果（`AgentEvent::Steered`）と突き合わせる id。前のセッションの残響を取り違えないよう、
+        // パネル全体で使い回さない。
+        static NEXT_STEER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let Some(prompt) = self
+            .threads
+            .get_mut(thread_index)
+            .filter(|thread| queue_index < thread.queued_prompts.len())
+            .map(|thread| thread.queued_prompts.remove(queue_index))
+        else {
+            return;
+        };
+        let ComposedPrompt {
+            text,
+            images,
+            image_paths,
+            shell_delivered,
+            handoff,
+        } = self.compose_prompt(thread_index, &prompt, None);
+        let id = NEXT_STEER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sent = self
+            .threads
+            .get(thread_index)
+            .and_then(|thread| thread.command_tx.as_ref())
+            .is_some_and(|command_tx| {
+                command_tx
+                    .unbounded_send(SessionCommand::Steer { id, text, images })
+                    .is_ok()
+            });
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        if !sent {
+            thread.queued_prompts.insert(0, prompt);
+            self.cancel_turn(thread_index, cx);
+            return;
+        }
+        thread.steering = Some(PendingSteer {
+            id,
+            prompt,
+            image_paths,
+            shell_delivered,
+            handoff,
+        });
+        cx.notify();
+    }
+
+    /// 差し込みの結果（`AgentEvent::Steered`）。受け取られたら（`Injected` / `StartedTurn`）**その時点の
+    /// transcript の末尾**に人の発話として出し、添付などを渡し済みにする（UI-SPEC §6 の送信待ち）。
+    /// 受け取られなかったら行を送信待ちの先頭へ戻す: ターンがもう無かった（`TurnOver`）なら次のターン
+    /// として送り（生成中ならターンの終わりのフラッシュに任せる）、拒まれた（`Refused`）なら理由を
+    /// 1 行出して「中断 → 送り直し」に落ちる。
+    fn on_steered(
+        &mut self,
+        thread_index: usize,
+        id: u64,
+        outcome: SteerOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.active;
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        // 待っている差し込みと違う id は、立て直す前のセッションの残響（その行は送信待ちへ戻し済み）。
+        let Some(steer) = thread.steering.take_if(|steer| steer.id == id) else {
+            return;
+        };
+        let running = thread.running;
+        match outcome {
+            SteerOutcome::Injected | SteerOutcome::StartedTurn => {
+                // 直前の本文はここで伸び止まる（以後のチャンクは差し込みの下の新しい本文になる）。
+                // 最後に測ったのは前のフレームなので、測り直させる。
+                let previous_tail = thread.entries.len().checked_sub(1);
+                thread.entries.push(Entry::User(user_entry_text(
+                    &steer.prompt,
+                    &steer.image_paths,
+                )));
+                thread
+                    .context
+                    .retain(|path| !steer.image_paths.contains(path));
+                if let Some(delivered) = &steer.shell_delivered {
+                    shell::mark_shell_runs_delivered(&mut thread.entries, delivered);
+                }
+                if steer.handoff {
+                    thread.handoff_preamble = None;
+                }
+                let now = now_unix_ms();
+                thread.last_input_at_ms = Some(now);
+                thread.last_active_at_ms = now;
+                thread.last_prompt = Some(SharedString::from(steer.prompt));
+                if let Some(previous_tail) = previous_tail.filter(|_| thread_index == active) {
+                    self.transcript_list
+                        .remeasure_items(previous_tail..previous_tail + 1);
+                }
+                // ターンの後に受け取られた差し込み（ターンの終わりのフラッシュは待っていた）は、ここで
+                // 次を流す。Codex が自分で始めたターン（`StartedTurn`）の最中には流さない
+                // （ARCHITECTURE §7.6 の既知の端）。
+                if !running && outcome == SteerOutcome::Injected {
+                    self.flush_queued_prompt_at(thread_index, cx);
+                }
+            }
+            SteerOutcome::TurnOver => {
+                thread.queued_prompts.insert(0, steer.prompt);
+                if !running {
+                    self.flush_queued_prompt_at(thread_index, cx);
+                }
+            }
+            SteerOutcome::Refused(reason) => {
+                thread.queued_prompts.insert(0, steer.prompt);
+                thread
+                    .entries
+                    .push(Entry::Agent(SharedString::from(i18n::t!(
+                        "agent.steer_refused",
+                        "reason" => reason
+                    ))));
+                if running {
+                    self.cancel_turn(thread_index, cx);
+                } else {
+                    self.flush_queued_prompt_at(thread_index, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 撮影用（`NECODER_QUEUE_PROBE`）: アクティブなスレッドを生成中にして送信待ちを積む。エージェントは
+    /// 起こさない（送信路は持たない）。`injected` は差し込みの結果を実経路（[`Self::on_steered`]）で通す。
+    #[cfg(debug_assertions)]
+    fn seed_queue_probe(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let active = self.active;
+        let Some(thread) = self.threads.get_mut(active) else {
+            return;
+        };
+        thread.entries.push(Entry::User(
+            "ログイン画面のバリデーションを直して、テストも足して".into(),
+        ));
+        thread.entries.push(build_step_entry(ToolCallInfo {
+            id: "queue-probe-test".to_string(),
+            title: Some("cargo test -p auth".to_string()),
+            kind: Some(acp_client::ToolCallKind::Execute),
+            locations: Vec::new(),
+            diffs: Vec::new(),
+            output: None,
+            completed: None,
+            parent: None,
+        }));
+        thread.entries.push(Entry::Agent(
+            "テストを流しています。落ちているのは `validate_email` の空文字の扱いです。".into(),
+        ));
+        thread.running = true;
+        thread.turn_started_at = Some(std::time::Instant::now());
+        thread.steerable = mode != "interrupt";
+        thread.queued_prompts = vec![
+            "エラーメッセージも日本語にして".to_string(),
+            "/compact".to_string(),
+        ];
+        if matches!(mode, "steering" | "injected") {
+            thread.steering = Some(PendingSteer {
+                id: 0,
+                prompt: "やっぱり README の手順も直して".to_string(),
+                image_paths: Vec::new(),
+                shell_delivered: None,
+                handoff: false,
+            });
+        }
+        if mode == "injected" {
+            self.on_steered(active, 0, SteerOutcome::Injected, cx);
+            self.on_event(
+                active,
+                AgentEvent::AgentChunk(
+                    "了解です。テストが通ったら README の手順も直します。".into(),
+                ),
+                cx,
+            );
+        }
+        self.reset_transcript_list(true);
+        cx.notify();
     }
 
     /// キューから prompt を取り消す（宛先チップ横の ✕ から）。
@@ -6881,35 +7156,29 @@ PYEOF"#;
         true
     }
 
-    /// `auto_source` = necoder の知らせの出所（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
-    fn send_prompt_entry(
-        &mut self,
+    /// 1 通の送信の中身を組む（普通の送信と、送信待ちからの差し込みで同じ物）。`auto` = necoder の
+    /// 知らせ（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
+    fn compose_prompt(
+        &self,
         thread_index: usize,
-        prompt: String,
-        auto_source: Option<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        let auto = auto_source.map(|source| auto_prompt::AutoPrompt::now(source, prompt.clone()));
+        prompt: &str,
+        auto: Option<&auto_prompt::AutoPrompt>,
+    ) -> ComposedPrompt {
         // slash コマンド（`/clear` `/compact` 等）は**本文 1 ブロックだけ**で送る。エージェントに
         // よってコマンドとして読むブロックが違い（Claude は末尾・Codex は先頭）、添付や画像を
         // 1 つでも足すとどちらかで効かない（`acp_client::prompt_blocks` の説明）。スレッドの
         // context（Captain の役割・現況表）・`@path` の添付・画像は付けない。添付は外さずに残す＝
         // 次の通常の送信に付く（毎ターン送る設計はそのまま）。necoder の知らせは印で始まるので
         // コマンドにはならない。
-        let is_slash_command = auto.is_none() && is_slash_command(&prompt);
+        let is_slash_command = auto.is_none() && is_slash_command(prompt);
+        let thread = self.threads.get(thread_index).filter(|_| !is_slash_command);
         // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
         // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
-        let (images, image_paths) = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
+        let (images, image_paths) = thread
             .map(|thread| load_prompt_images(&thread.context, self.dest_cwd.as_deref()))
             .unwrap_or_default();
         // それ以外の添付は prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
-        let mut context_prefix: String = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
+        let mut context_prefix: String = thread
             .map(|thread| {
                 thread
                     .context
@@ -6919,57 +7188,63 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(context) = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
-            .and_then(|thread| self.prompt_context.get(thread.id.as_str()))
+        if let Some(context) = thread.and_then(|thread| self.prompt_context.get(thread.id.as_str()))
         {
             context_prefix.push_str(&auto_prompt::wrap_prompt_context(context));
         }
         // `!` で人が走らせたコマンドの結果（#37）は、次の通常の送信に 1 回だけ添える（本文の直前）。
         // この会話の持ち主の文脈なので、composer 以外の入口（キュー・Captain の台帳など）から来た
         // 送信にも添える。slash コマンドには添えない（本文 1 ブロックの約束・次の通常の送信まで残す）。
-        let shell_attachment = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
-            .and_then(|thread| shell::pending_shell_attachment(&thread.entries));
+        let shell_attachment =
+            thread.and_then(|thread| shell::pending_shell_attachment(&thread.entries));
         if let Some((block, _)) = &shell_attachment {
             context_prefix.push_str(block);
         }
         // 「新しいセッションで続ける」の前置き（O15）は、次の通常の送信の頭に 1 回だけ付ける
         // （表示は人の本文のまま）。送れたら捨てる。
-        let handoff = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
-            .and_then(|thread| thread.handoff_preamble.clone());
-        if let Some(preamble) = &handoff {
+        let handoff = thread.and_then(|thread| thread.handoff_preamble.as_deref());
+        if let Some(preamble) = handoff {
             context_prefix.insert_str(0, &format!("{preamble}\n\n"));
         }
         // necoder の知らせは印で囲んで送る（再生された会話でも人の発話と見分けられる・`auto_prompt.rs`）。
         let body = auto
-            .as_ref()
             .map(auto_prompt::AutoPrompt::wire)
-            .unwrap_or_else(|| prompt.clone());
-        let full_prompt = if context_prefix.is_empty() {
+            .unwrap_or_else(|| prompt.to_string());
+        let text = if context_prefix.is_empty() {
             body
         } else {
             format!("{context_prefix}\n{body}")
         };
+        ComposedPrompt {
+            text,
+            images,
+            image_paths,
+            shell_delivered: shell_attachment.map(|(_, delivered)| delivered),
+            handoff: handoff.is_some(),
+        }
+    }
+
+    /// `auto_source` = necoder の知らせの出所（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
+    fn send_prompt_entry(
+        &mut self,
+        thread_index: usize,
+        prompt: String,
+        auto_source: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let auto = auto_source.map(|source| auto_prompt::AutoPrompt::now(source, prompt.clone()));
+        let ComposedPrompt {
+            text: full_prompt,
+            images,
+            image_paths,
+            shell_delivered,
+            handoff,
+        } = self.compose_prompt(thread_index, &prompt, auto.as_ref());
         if let Some(thread) = self.threads.get_mut(thread_index) {
             let human = auto.is_none();
             thread.entries.push(match auto {
                 Some(auto) => Entry::AutoPrompt(auto),
-                None if images.is_empty() => Entry::User(prompt.clone().into()),
-                None => {
-                    let names: Vec<String> = image_paths
-                        .iter()
-                        .map(|path| context_chip_label(path.as_ref()).to_string())
-                        .collect();
-                    Entry::User(format!("{prompt}\n\n▦ {}", names.join(" · ")).into())
-                }
+                None => Entry::User(user_entry_text(&prompt, &image_paths)),
             });
             // 画像は**その 1 通だけ**に添える（パスの添付と違って毎ターン送り直すと重い）。
             thread.context.retain(|path| !image_paths.contains(path));
@@ -7071,11 +7346,11 @@ PYEOF"#;
             }
             self.fail_turn(thread_index, &i18n::t!("agent.err_session_lost"), cx);
         } else if let Some(thread) = self.threads.get_mut(thread_index) {
-            if handoff.is_some() {
+            if handoff {
                 thread.handoff_preamble = None;
             }
             // 添えたシェルの結果は渡し済み（次の送信には添えない）。
-            if let Some((_, delivered)) = &shell_attachment {
+            if let Some(delivered) = &shell_delivered {
                 shell::mark_shell_runs_delivered(&mut thread.entries, delivered);
             }
         }
@@ -7336,6 +7611,11 @@ PYEOF"#;
             self.on_session_lost(thread_index, cx);
             return;
         }
+        // 差し込みの結果は送信待ち・中断・フラッシュに触るので、スレッドの借用の外で捌く。
+        if let AgentEvent::Steered { id, outcome } = event {
+            self.on_steered(thread_index, id, outcome, cx);
+            return;
+        }
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
@@ -7368,8 +7648,12 @@ PYEOF"#;
                 session_id,
                 resumed,
                 resumable,
+                steerable,
             } => {
                 thread.session_resumable = resumable;
+                thread.steerable = steerable;
+                // 前のセッションで応答を待っていた差し込みは、もう答えが来ない。送信待ちへ戻す。
+                thread.requeue_pending_steer();
                 // 開けた＝前に起動してすぐ終わった時のカードはもう要らない。
                 thread.startup_exit = None;
                 // 目標への操作は新しいセッションの広告で決め直す（届かなければ操作なし・O17）。
@@ -7419,7 +7703,7 @@ PYEOF"#;
                 }
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
-            AgentEvent::SessionLost => {}
+            AgentEvent::SessionLost | AgentEvent::Steered { .. } => {}
             // 起動してすぐ終わった: 終わり方と stderr の末尾をカードに出す（画面だけ・保存しない）。
             // transcript に残る失敗の 1 行は、続いて届く `Failed`（stderr を含まない文）が書く。
             AgentEvent::ExitedAtStartup(exited) => {
@@ -11179,8 +11463,6 @@ PYEOF"#;
         Some(card.into_any_element())
     }
 
-    /// 送信待ちキュー（生成中に積んだ prompt）を composer 上部に並べる。各チップは 1 行プレビュー +
-    /// 「今すぐ」（steer・割り込み送信）+ ✕（取消）。空なら None（描画しない）。
     /// セッションが切れた印（composer の直上）: 何が起きたかの一文 + 「再開」チップ。送信待ちの
     /// チップと同じ様式（文字チップ・枠 1px・10.5px）。再開中/再開直後の一言（引き継げた・
     /// 引き継げなかった）も同じ場所に薄字で出し、次のターン開始で消す（2026-09-08）。
@@ -11361,31 +11643,22 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// 送信待ち（UI-SPEC §6）。応答を待っている差し込みを先頭に `差し込み中…` で出し、続けて送信待ちの
+    /// 行。行の「今すぐ」は差し込める相手なら `今すぐ差し込む`、それ以外（と slash コマンド）は
+    /// `中断して今すぐ`。差し込みを待っている間は押せない（1 本ずつ）。
     fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
-        if thread.queued_prompts.is_empty() {
+        let steering = thread.steering.as_ref().map(|steer| steer.prompt.clone());
+        if thread.queued_prompts.is_empty() && steering.is_none() {
             return None;
         }
         let theme = self.theme.clone();
         let color = thread.color;
+        let steerable = thread.steerable;
         let prompts = thread.queued_prompts.clone();
-        let mut card = div()
-            .id("queued-prompts")
-            .mx(px(12.))
-            .mb(px(8.))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(
-                        i18n::t!("agent.queued_title", "n" => prompts.len()),
-                    )),
-            );
-        for (index, prompt) in prompts.iter().enumerate() {
-            let row = div()
+        let count = prompts.len() + usize::from(steering.is_some());
+        let row = |preview: &str| {
+            div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -11403,31 +11676,71 @@ PYEOF"#;
                         .whitespace_nowrap()
                         .text_size(px(11.5))
                         .text_color(theme.fg1)
-                        .child(step_args_preview("", prompt)),
+                        .child(step_args_preview("", preview)),
                 )
-                .child(
+        };
+        let mut card = div()
+            .id("queued-prompts")
+            .mx(px(12.))
+            .mb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(
+                        i18n::t!("agent.queued_title", "n" => count),
+                    )),
+            );
+        if let Some(prompt) = &steering {
+            card = card.child(
+                row(prompt).child(
                     div()
-                        .id(("queue-send-now", index))
                         .flex_none()
                         .px(px(7.))
                         .py(px(2.))
-                        .rounded(px(5.))
-                        .border_1()
-                        .border_color(theme.border)
                         .text_size(px(10.5))
-                        .text_color(theme.fg1)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                        .child(SharedString::from(i18n::t!("agent.queue_send_now")))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |panel, _, _window, cx| {
-                                cx.stop_propagation();
-                                panel.send_queued_now(index, cx);
-                            }),
-                        ),
-                )
-                .child(
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("agent.queue_steering"))),
+                ),
+            );
+        }
+        for (index, prompt) in prompts.iter().enumerate() {
+            let label = if steerable && !is_slash_command(prompt) {
+                i18n::t!("agent.queue_steer_now")
+            } else {
+                i18n::t!("agent.queue_send_now")
+            };
+            let send_now = div()
+                .id(("queue-send-now", index))
+                .flex_none()
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(10.5))
+                .child(SharedString::from(label));
+            // 差し込みの応答を待っている間は押せない（1 本ずつ・押しても `send_queued_now` が無視する）。
+            let send_now = if steering.is_some() {
+                send_now.text_color(theme.fg2)
+            } else {
+                send_now
+                    .text_color(theme.fg1)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |panel, _, _window, cx| {
+                            cx.stop_propagation();
+                            panel.send_queued_now(index, cx);
+                        }),
+                    )
+            };
+            card = card.child(
+                row(prompt).child(send_now).child(
                     div()
                         .id(("queue-remove", index))
                         .flex_none()
@@ -11443,8 +11756,8 @@ PYEOF"#;
                                 panel.remove_queued_prompt(index, cx);
                             }),
                         ),
-                );
-            card = card.child(row);
+                ),
+            );
         }
         Some(card.into_any_element())
     }
@@ -13866,6 +14179,8 @@ fn seed_threads() -> Vec<Thread> {
         muted: false,
         tier2: None,
         queued_prompts: Vec::new(),
+        steerable: false,
+        steering: None,
         acp_session_id: None,
         session_lost: false,
         startup_exit: None,
@@ -15052,6 +15367,285 @@ PYEOF"#;
                 !panel.send_user_prompt_to(99, "x".into(), cx),
                 "無いスレッドは false"
             );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 送信待ちの「今すぐ」のテスト用: 生成中のアクティブスレッドに手で送信路を付け、送信待ちを積む。
+    /// ターンの終わりで本物のエージェント（自動命名・要約・先張り）を起こさない設定で開く。
+    fn running_thread_with_queue<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        label: &str,
+        steerable: bool,
+        queue: &[&str],
+    ) -> (
+        Entity<AgentPanel>,
+        &'a mut gpui::VisualTestContext,
+        mpsc::UnboundedReceiver<SessionCommand>,
+        PathBuf,
+    ) {
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_{label}_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"agent_auto_name":false,"tier2_summaries":false}"#,
+        )
+        .expect("テスト用の設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (command_tx, command_rx) = mpsc::unbounded::<SessionCommand>();
+        panel.update(cx, |panel, _cx| {
+            let active = panel.active;
+            panel.dest_cwd = Some(std::env::temp_dir());
+            let thread = &mut panel.threads[active];
+            thread.command_tx = Some(command_tx);
+            thread.running = true;
+            thread.steerable = steerable;
+            thread.queued_prompts = queue.iter().map(|prompt| prompt.to_string()).collect();
+        });
+        (panel, cx, command_rx, settings_path)
+    }
+
+    fn last_user_text(panel: &AgentPanel) -> Option<String> {
+        panel.threads[panel.active]
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::User(text) => Some(text.to_string()),
+                _ => None,
+            })
+    }
+
+    /// 差し込める相手（`steerable`）の「今すぐ」: ターンを止めずに `Steer` を送る（`Cancel` は出さない）。
+    /// 受け取られる（`Injected`）までは transcript に出さず、カードの先頭で待つ。受け取られたら
+    /// **その時点の transcript の末尾**に人の発話として入り、ターンは走ったまま。残りの送信待ちは
+    /// ターンの終わりで流れる。待っている間の「今すぐ」は押せない。
+    #[gpui::test]
+    fn queued_now_steers_into_the_running_turn_when_advertised(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, mut command_rx, settings_path) =
+            running_thread_with_queue(cx, "steer_now", true, &["次はテスト", "README も直して"]);
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.on_event(active, AgentEvent::AgentChunk("作業中の本文".into()), cx);
+            let entries_before = panel.threads[active].entries.len();
+            panel.send_queued_now(1, cx);
+            let id = match command_rx.try_recv() {
+                Ok(SessionCommand::Steer { id, text, images }) => {
+                    assert_eq!(text, "README も直して");
+                    assert!(images.is_empty());
+                    id
+                }
+                other => panic!("Steer を期待: {other:?}"),
+            };
+            assert!(command_rx.try_recv().is_err(), "Cancel は出さない");
+            let thread = &panel.threads[active];
+            assert_eq!(thread.queued_prompts, vec!["次はテスト".to_string()]);
+            assert_eq!(
+                thread.steering.as_ref().map(|steer| steer.prompt.as_str()),
+                Some("README も直して")
+            );
+            assert_eq!(thread.entries.len(), entries_before, "受け取られるまで出さない");
+            assert!(thread.running);
+
+            // 待っている間は 1 本ずつ（押しても何も送らない）。
+            panel.send_queued_now(0, cx);
+            assert!(command_rx.try_recv().is_err(), "2 本目は送らない");
+
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::Injected,
+                },
+                cx,
+            );
+            let thread = &panel.threads[active];
+            assert!(thread.steering.is_none());
+            assert!(thread.running, "同じターンの続き");
+            assert!(
+                matches!(thread.entries.last(), Some(Entry::User(text)) if text.as_ref() == "README も直して"),
+                "transcript の末尾に人の発話として入る"
+            );
+            assert_eq!(
+                thread.last_prompt.as_ref().map(|prompt| prompt.as_ref()),
+                Some("README も直して")
+            );
+            // 差し込みの後の本文は、差し込みの下の新しい本文になる。
+            panel.on_event(active, AgentEvent::AgentChunk("了解".into()), cx);
+            assert!(matches!(
+                panel.threads[active].entries.last(),
+                Some(Entry::Agent(text)) if text.as_ref() == "了解"
+            ));
+            assert!(command_rx.try_recv().is_err());
+
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "次はテスト"),
+                other => panic!("残りの送信待ちが流れていない: {other:?}"),
+            }
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 差し込みを広告しない相手の「今すぐ」は今までどおり: 行を先頭へ寄せて中断し、閉じたら送る。
+    /// slash コマンドの行は差し込める相手でも中断して送る（ターンの頭でしか効かない）。
+    #[gpui::test]
+    fn queued_now_interrupts_then_resends_without_the_advertisement(cx: &mut gpui::TestAppContext) {
+        for (steerable, prompt) in [(false, "README も直して"), (true, "/compact")] {
+            let (panel, cx, mut command_rx, settings_path) =
+                running_thread_with_queue(cx, "interrupt_now", steerable, &["次はテスト", prompt]);
+            panel.update(cx, |panel, cx| {
+                let active = panel.active;
+                panel.send_queued_now(1, cx);
+                assert!(
+                    matches!(command_rx.try_recv(), Ok(SessionCommand::Cancel)),
+                    "中断する（steerable={steerable}）"
+                );
+                assert_eq!(
+                    panel.threads[active].queued_prompts,
+                    vec![prompt.to_string(), "次はテスト".to_string()],
+                    "押した行が先頭"
+                );
+                assert!(panel.threads[active].steering.is_none());
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnEnded {
+                        reason: TurnEnd::Interrupted,
+                    },
+                    cx,
+                );
+                match command_rx.try_recv() {
+                    Ok(SessionCommand::Prompt(text)) => assert_eq!(text, prompt),
+                    other => panic!("中断の後に送り直していない: {other:?}"),
+                }
+                assert_eq!(last_user_text(panel).as_deref(), Some(prompt));
+            });
+            let _ = std::fs::remove_file(settings_path);
+        }
+    }
+
+    /// ターンの閉じ際に着いた差し込み（`TurnOver`）: 応答を待つ間はターンの終わりでも送信待ちを流さず、
+    /// 応答で行を先頭へ戻して次のターンとして送る（後ろの行より先に）。セッションを立て直したら、
+    /// 待っていた差し込みは送信待ちへ戻り、前のセッションの残響（古い id）は捨てる。
+    #[gpui::test]
+    fn a_steer_that_missed_the_turn_is_sent_first_next_turn(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, mut command_rx, settings_path) =
+            running_thread_with_queue(cx, "steer_late", true, &["次はテスト", "README も直して"]);
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.send_queued_now(1, cx);
+            let Ok(SessionCommand::Steer { id, .. }) = command_rx.try_recv() else {
+                panic!("Steer を期待");
+            };
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            assert!(command_rx.try_recv().is_err(), "応答を待つ間は流さない");
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::TurnOver,
+                },
+                cx,
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "README も直して"),
+                other => panic!("差し込めなかった行が先に送られていない: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].queued_prompts,
+                vec!["次はテスト".to_string()]
+            );
+            assert_eq!(last_user_text(panel).as_deref(), Some("README も直して"));
+
+            // 立て直し: 待っていた差し込みは送信待ちの先頭へ戻り、古い id の結果は何もしない。
+            panel.send_queued_now(0, cx);
+            let Ok(SessionCommand::Steer { id: stale, .. }) = command_rx.try_recv() else {
+                panic!("Steer を期待");
+            };
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "next".into(),
+                    resumed: true,
+                    resumable: true,
+                    steerable: true,
+                },
+                cx,
+            );
+            assert!(panel.threads[active].steering.is_none());
+            assert_eq!(
+                panel.threads[active].queued_prompts,
+                vec!["次はテスト".to_string()]
+            );
+            let entries = panel.threads[active].entries.len();
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id: stale,
+                    outcome: SteerOutcome::Injected,
+                },
+                cx,
+            );
+            assert_eq!(panel.threads[active].entries.len(), entries, "残響は捨てる");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 差し込みが拒まれた（`Refused`）: 理由を 1 行出し、行を先頭へ戻して「中断 → 送り直し」に落ちる。
+    #[gpui::test]
+    fn a_refused_steer_falls_back_to_interrupt_and_resend(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, mut command_rx, settings_path) =
+            running_thread_with_queue(cx, "steer_refused", true, &["README も直して"]);
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.send_queued_now(0, cx);
+            let Ok(SessionCommand::Steer { id, .. }) = command_rx.try_recv() else {
+                panic!("Steer を期待");
+            };
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::Refused("model rejected images".into()),
+                },
+                cx,
+            );
+            assert!(matches!(command_rx.try_recv(), Ok(SessionCommand::Cancel)));
+            assert!(matches!(
+                panel.threads[active].entries.last(),
+                Some(Entry::Agent(text)) if text.contains("model rejected images")
+            ));
+            assert_eq!(
+                panel.threads[active].queued_prompts,
+                vec!["README も直して".to_string()]
+            );
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Interrupted,
+                },
+                cx,
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "README も直して"),
+                other => panic!("送り直していない: {other:?}"),
+            }
         });
         let _ = std::fs::remove_file(settings_path);
     }
@@ -18171,6 +18765,7 @@ PYEOF"#;
                     session_id: "other".into(),
                     resumed: true,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );
@@ -18206,6 +18801,7 @@ PYEOF"#;
                 session_id: "sess".into(),
                 resumed,
                 resumable: true,
+                steerable: false,
             };
             panel.on_event(active, started(true), cx);
             assert!(
@@ -18337,6 +18933,7 @@ PYEOF"#;
                     session_id: "session-1".into(),
                     resumed: false,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );
@@ -18384,6 +18981,7 @@ PYEOF"#;
                     session_id: "session-1".into(),
                     resumed: true,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );

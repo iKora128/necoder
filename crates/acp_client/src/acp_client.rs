@@ -367,7 +367,15 @@ pub enum AgentEvent {
         /// 会話を引き継げる。UI はこれが `true` のスレッドだけ、使っていないエージェントを止めてよい
         /// （広告しないエージェントを止めると会話の文脈が失われる）。
         resumable: bool,
+        /// エージェントが実行中のターンへの差し込み（`_session/steering`）を広告している
+        /// （[`steering_supported`]）。UI はこれが `true` のスレッドだけ [`SessionCommand::Steer`] を送り、
+        /// それ以外は「中断 → 送り直し」にする。
+        steerable: bool,
     },
+    /// 差し込み（[`SessionCommand::Steer`]）の結果。送った `Steer` 1 つにつき必ず 1 回（セッションが
+    /// 終わった時を除く）。実行中のターンの間にも、ターンが閉じた後にも届く（ターンの終わり際に
+    /// 送った分は、エージェントの答えがターンの後になる）。
+    Steered { id: u64, outcome: SteerOutcome },
     /// エージェントとの transport が閉じた（プロセス終了・SSH 切断）。**この後セッションは終わる**
     /// （[`run_session_on`] が戻り、イベントチャネルも閉じる）。ターン中なら UI はそのターンを
     /// 畳み、以後の送信は新しいセッションを立ち上げる。待機中にも届く（EOF を待機中も見張るため）。
@@ -556,6 +564,23 @@ pub enum TurnEnd {
     Interrupted,
 }
 
+/// 差し込み（`_session/steering`）の結果。エージェントの応答の `outcome` を簡約したもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerOutcome {
+    /// 実行中のターンに入った（`injected`）。返事は同じターンの続きとして流れる。
+    Injected,
+    /// エージェントが**自分で新しいターン**を始めた（`startedNewTurn`）。文は届いたが、necoder が
+    /// 送った `session/prompt` のターンではない＝そのターンの終わりは知らされない。
+    /// `idleBehavior: promptRequired` を読まないアダプタ（codex-acp 1.13.1）が、ターンの閉じた直後に
+    /// 差し込みを受けた時だけ起きる（ARCHITECTURE §7.6）。
+    StartedTurn,
+    /// 走っているターンが無かった（`promptRequired`・または待機中に届いた差し込み）。文は**届いていない**
+    /// ＝普通の送信として送り直す。
+    TurnOver,
+    /// 差し込めなかった（広告が無い・エラー応答・知らない outcome）。文は届いていない。理由つき。
+    Refused(String),
+}
+
 /// prompt に添える画像 1 枚（ACP の image ブロック）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptImage {
@@ -587,26 +612,132 @@ pub enum SessionCommand {
     /// 目標を一時停止 / 再開 / 取り消す（エージェントが広告した拡張メソッド・O17）。
     /// ターン中でも待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
     Goal(GoalAction),
+    /// 実行中のターンへ文を差し込む（ACP 拡張 `_session/steering`・ARCHITECTURE §7.6）。ターンを
+    /// 止めない。結果は同じ `id` の [`AgentEvent::Steered`] で返る。`TurnOver` / `Refused` の時は
+    /// 文は届いていないので、送り直すのは UI の役目（この層は勝手に `session/prompt` にしない）。
+    /// 待機中に届いた分は送らずに `TurnOver`。
+    Steer {
+        id: u64,
+        text: String,
+        images: Vec<PromptImage>,
+    },
 }
 
-/// ターンループが待つ 3 系統（エージェントからの更新 / UI からのコマンド / prompt 応答）。
-/// `select!` の戻り値を所有型にして、`session` と `command_rx` の借用をブロック内で閉じる。
+/// ターンループが待つ 4 系統（エージェントからの更新 / 差し込みの応答 / prompt 応答 / UI からの
+/// コマンド）。`select!` の戻り値を所有型にして、`session` と `command_rx` の借用をブロック内で閉じる。
 enum TurnEvent {
     Update(Result<acp::SessionMessage, acp::Error>),
     Command(Option<SessionCommand>),
+    /// `_session/steering` の応答（[`Steering`]）。
+    Steered(Result<serde_json::Value, acp::Error>),
     /// `session/prompt` の応答＝ターンの終端。`Ok` は StopReason、`Err` は API/エージェント側の
     /// 失敗（例: ストリーミング切断）。どちらでもセッション自体は生きている。
     PromptFinished(Result<v1::PromptResponse, acp::Error>),
 }
 
-/// 待機中（ターンとターンの間）に待つ 3 系統。エージェントは待機中にも更新を送ってくる
+/// 待機中（ターンとターンの間）に待つ 4 系統。エージェントは待機中にも更新を送ってくる
 /// （`session/new` 直後のコマンド一覧・ターン後に非同期で付く会話名・自走する目標のターン）。
 /// 読まずにおくと SDK のチャネルに溜まり、次の prompt の頭でまとめて流れて遅れる。
 enum IdleEvent {
     Update(Result<acp::SessionMessage, acp::Error>),
     Command(Option<SessionCommand>),
+    /// ターンの終わり際に送った差し込みの応答（ターンの後に届くことがある）。
+    Steered(Result<serde_json::Value, acp::Error>),
     /// transport が閉じた（プロセス終了・SSH 切断）。
     Closed,
+}
+
+/// 実行中のターンへの差し込みの拡張メソッド（claude-agent-acp・codex-acp の `STEER_METHOD` /
+/// `SESSION_STEERING_METHOD`）。広告は [`steering_supported`]。
+const STEER_METHOD: &str = "_session/steering";
+
+/// initialize の**最上位**の `_meta.steering.supported` が `true` か（`agentCapabilities` の中ではない）。
+/// claude-agent-acp 0.81.2 / codex-acp 1.13.1 がこの形で広告する。無い・`true` 以外は広告なし。
+fn steering_supported(meta: Option<&v1::Meta>) -> bool {
+    meta.and_then(|meta| meta.get("steering"))
+        .and_then(|steering| steering.get("supported"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// `_session/steering` の params。`idleBehavior: promptRequired` は「走っているターンが無ければ
+/// 自分でターンを始めず、文を返せ」の頼み（claude-agent-acp は従い、codex-acp 1.13.1 は読まない）。
+/// これが無いと、ターンの閉じ際に送った差し込みが necoder の知らないターンになる。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SteerParams {
+    session_id: String,
+    prompt: Vec<v1::ContentBlock>,
+    #[serde(rename = "_meta")]
+    meta: serde_json::Value,
+}
+
+/// `_session/steering` の応答を [`SteerOutcome`] へ。知らない outcome（codex-acp の `failed` など）と
+/// エラー応答は「届いていない」として扱う（送り直す側に倒す＝文を失わない）。
+fn steer_outcome(response: Result<serde_json::Value, acp::Error>) -> SteerOutcome {
+    match response {
+        Ok(response) => match response.get("outcome").and_then(serde_json::Value::as_str) {
+            Some("injected") => SteerOutcome::Injected,
+            Some("startedNewTurn") => SteerOutcome::StartedTurn,
+            Some("promptRequired") => SteerOutcome::TurnOver,
+            Some(other) => SteerOutcome::Refused(format!("outcome: {other}")),
+            None => SteerOutcome::Refused("outcome がありません".to_string()),
+        },
+        Err(error) => SteerOutcome::Refused(error.to_string()),
+    }
+}
+
+/// 応答を待っている差し込み。1 セッション 1 本ずつ送り（codex-acp もセッションごとに 1 本ずつ捌く）、
+/// 待っている間に来た分は `waiting` に並べる。応答の future はターンでも待機中でも同じ物を見張る
+/// （ターンの閉じ際に送った分の応答はターンの後に届く）。
+struct Steering {
+    /// 応答を待っている差し込みの id（`response` が生きている間だけ `Some`）。
+    in_flight: Option<u64>,
+    response: futures::future::Fuse<
+        futures::future::BoxFuture<'static, Result<serde_json::Value, acp::Error>>,
+    >,
+    waiting: std::collections::VecDeque<(u64, String, Vec<PromptImage>)>,
+}
+
+impl Steering {
+    fn new() -> Self {
+        Self {
+            in_flight: None,
+            response: futures::future::Fuse::terminated(),
+            waiting: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 応答を受けた: 結果を UI へ流す。待っていた次の分は呼び手が [`Self::waiting`] から取る
+    /// （ターン中なら送り、待機中なら [`Self::release_waiting`]）。
+    fn settle(
+        &mut self,
+        response: Result<serde_json::Value, acp::Error>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        if let Some(id) = self.in_flight.take() {
+            let outcome = steer_outcome(response);
+            if let SteerOutcome::Refused(reason) = &outcome {
+                eprintln!("差し込みが受け取られなかった: {reason}");
+            }
+            event_tx
+                .unbounded_send(AgentEvent::Steered { id, outcome })
+                .ok();
+        }
+    }
+
+    /// ターンが閉じた: 待っていた（まだ送っていない）分は送らずに「ターンが無かった」で返す。
+    /// 応答を待っている分はそのまま（待機中に届く）。
+    fn release_waiting(&mut self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        for (id, _, _) in self.waiting.drain(..) {
+            event_tx
+                .unbounded_send(AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::TurnOver,
+                })
+                .ok();
+        }
+    }
 }
 
 /// ACP エージェント（claude-agent-acp）の起動設定。
@@ -1964,11 +2095,14 @@ pub async fn run_session_on(
                 }
             };
             opened.store(true, std::sync::atomic::Ordering::SeqCst);
+            // 実行中のターンへの差し込み（`_session/steering`）を受けるか。initialize の実物で決める。
+            let steerable = steering_supported(initialized.meta.as_ref());
             event_tx
                 .unbounded_send(AgentEvent::SessionStarted {
                     session_id: session.session_id().to_string(),
                     resumed,
                     resumable: can_load,
+                    steerable,
                 })
                 .ok();
             // 目標への操作の入口（Codex の `_meta.goal`・O17）。広告した時だけ流す（UI は
@@ -1993,6 +2127,20 @@ pub async fn run_session_on(
                     Ok(message) => connection.send_request(message).detach(),
                     Err(error) => eprintln!("目標の操作を組めない: {error}"),
                 }
+            };
+            // 差し込みを送り、応答の future を返す（応答はターン・待機中の select で待つ）。
+            let send_steer = |text: String, images: Vec<PromptImage>| {
+                use futures::future::FutureExt as _;
+                let params = SteerParams {
+                    session_id: session_id_text.clone(),
+                    prompt: prompt_blocks(text, images, accepts_images, &event_tx),
+                    meta: serde_json::json!({"steering": {"idleBehavior": "promptRequired"}}),
+                };
+                match acp::UntypedMessage::new(STEER_METHOD, params) {
+                    Ok(message) => connection.send_request(message).block_task().boxed(),
+                    Err(error) => futures::future::ready(Err(error)).boxed(),
+                }
+                .fuse()
             };
 
             // エージェントが広告する権限モード一覧 + 現在モードを UI へ（セレクタを実モードで組む）。
@@ -2074,6 +2222,8 @@ pub async fn run_session_on(
             // ターンが畳まれてから順に処理する。
             let mut deferred: std::collections::VecDeque<SessionCommand> =
                 std::collections::VecDeque::new();
+            // 応答を待っている差し込み（ターンを跨いで見張る）。
+            let mut steering = Steering::new();
 
             // UI からの指示（prompt / モード変更）を単一チャネルで捌く。
             loop {
@@ -2096,6 +2246,7 @@ pub async fn run_session_on(
                             futures::pin_mut!(update, next_command, closed);
                             futures::select_biased! {
                                 update = update => IdleEvent::Update(update),
+                                response = &mut steering.response => IdleEvent::Steered(response),
                                 command = next_command => IdleEvent::Command(command),
                                 _ = closed => IdleEvent::Closed,
                             }
@@ -2103,6 +2254,20 @@ pub async fn run_session_on(
                         match idle_event {
                             IdleEvent::Update(Ok(message)) => {
                                 handle_session_message(message, &event_tx).await?;
+                                continue;
+                            }
+                            // ターンの閉じ際に送った差し込みの応答。待っている分があっても、もう
+                            // ターンが無いので送らずに返す。
+                            IdleEvent::Steered(response) => {
+                                if response
+                                    .as_ref()
+                                    .is_err_and(acp::is_incoming_transport_closed)
+                                {
+                                    event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                    break;
+                                }
+                                steering.settle(response, &event_tx);
+                                steering.release_waiting(&event_tx);
                                 continue;
                             }
                             IdleEvent::Update(Err(error)) => {
@@ -2137,6 +2302,16 @@ pub async fn run_session_on(
                     SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
+                    // 差し込む先のターンが無い。送らずに返す（UI が普通の送信として送り直す）。
+                    SessionCommand::Steer { id, .. } => {
+                        event_tx
+                            .unbounded_send(AgentEvent::Steered {
+                                id,
+                                outcome: SteerOutcome::TurnOver,
+                            })
+                            .ok();
+                        continue;
+                    }
                     SessionCommand::Goal(action) => {
                         send_goal_action(action);
                         continue;
@@ -2192,13 +2367,17 @@ pub async fn run_session_on(
                 // running を立てさせる（楽観 UI の取りこぼしを塞ぐ）。TurnEnded と対になる。
                 event_tx.unbounded_send(AgentEvent::TurnStarted).ok();
                 loop {
-                    // エージェントの更新・UI のコマンド・prompt 応答を**同時に**待つ。こうしないと
-                    // ターン中（`read_update` で待っている間）に cancel を受け取れない。
+                    // エージェントの更新・差し込みの応答・prompt 応答・UI のコマンドを**同時に**
+                    // 待つ。こうしないとターン中（`read_update` で待っている間）に cancel を受け取れない。
                     // `read_update` はチャネル受信なので途中で future を捨てても取りこぼさない。
-                    // `select_biased!` で更新をコマンド・応答より先に読む: 応答（終端）が届いた
-                    // 時点で未処理の update がチャネルに残っていることがあり（応答は stream 上
-                    // 最後だが、両者が同時に ready になる）、公平 select だと末尾のチャンクを
-                    // 取りこぼす。
+                    // `select_biased!` の順（ARCHITECTURE §7.6）:
+                    // - 更新が最初: 応答（終端）が届いた時点で未処理の update がチャネルに残って
+                    //   いることがあり（応答は stream 上最後だが、両者が同時に ready になる）、
+                    //   公平 select だと末尾のチャンクを取りこぼす。
+                    // - 差し込みの応答を prompt 応答より先に: 同時に届いたら、差し込んだ文を
+                    //   ターンの終わりより前に置く（UI はそこで transcript に入れる）。
+                    // - prompt 応答をコマンドより先に: 終端が手元に届いているのに、`Steer` を
+                    //   終わったターンへ送らない（codex-acp はそれを自分のターンにしてしまう）。
                     let turn_event = {
                         use futures::future::FutureExt as _;
                         let update = session.read_update().fuse();
@@ -2206,8 +2385,9 @@ pub async fn run_session_on(
                         futures::pin_mut!(update, command);
                         futures::select_biased! {
                             update = update => TurnEvent::Update(update),
-                            command = command => TurnEvent::Command(command),
+                            response = &mut steering.response => TurnEvent::Steered(response),
                             result = prompt_response => TurnEvent::PromptFinished(result),
+                            command = command => TurnEvent::Command(command),
                         }
                     };
                     let update = match turn_event {
@@ -2224,6 +2404,43 @@ pub async fn run_session_on(
                             send_goal_action(action);
                             continue;
                         }
+                        // 実行中のターンへの差し込み。後回し（deferred）にしない — 待つとターンが
+                        // 閉じてから届き、差し込む意味が無くなる。広告の無いエージェントには送らない。
+                        TurnEvent::Command(Some(SessionCommand::Steer { id, text, images })) => {
+                            if !steerable {
+                                event_tx
+                                    .unbounded_send(AgentEvent::Steered {
+                                        id,
+                                        outcome: SteerOutcome::Refused(
+                                            "このエージェントは差し込みを広告していない"
+                                                .to_string(),
+                                        ),
+                                    })
+                                    .ok();
+                            } else if steering.in_flight.is_some() {
+                                steering.waiting.push_back((id, text, images));
+                            } else {
+                                steering.in_flight = Some(id);
+                                steering.response = send_steer(text, images);
+                            }
+                            continue;
+                        }
+                        TurnEvent::Steered(response) => {
+                            if response
+                                .as_ref()
+                                .is_err_and(acp::is_incoming_transport_closed)
+                            {
+                                event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                return Ok(());
+                            }
+                            steering.settle(response, &event_tx);
+                            // 待っていた次の分を送る（まだターン中）。
+                            if let Some((id, text, images)) = steering.waiting.pop_front() {
+                                steering.in_flight = Some(id);
+                                steering.response = send_steer(text, images);
+                            }
+                            continue;
+                        }
                         // ターン中のモデル変更等は畳んでから処理する（取りこぼさない）。
                         TurnEvent::Command(Some(other)) => {
                             deferred.push_back(other);
@@ -2237,6 +2454,7 @@ pub async fn run_session_on(
                                 event_tx.unbounded_send(AgentEvent::SessionLost).ok();
                                 return Ok(());
                             }
+                            steering.release_waiting(&event_tx);
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
@@ -2259,6 +2477,9 @@ pub async fn run_session_on(
                             {
                                 event_tx.unbounded_send(AgentEvent::TurnUsage(tokens)).ok();
                             }
+                            // まだ送っていない差し込みは、閉じたターンには送らない（UI が送り直す）。
+                            // 応答を待っている分は待機中に届く。
+                            steering.release_waiting(&event_tx);
                             event_tx
                                 .unbounded_send(AgentEvent::TurnEnded { reason: end })
                                 .ok();
@@ -2279,6 +2500,7 @@ pub async fn run_session_on(
                                 event_tx.unbounded_send(AgentEvent::SessionLost).ok();
                                 return Ok(());
                             }
+                            steering.release_waiting(&event_tx);
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
@@ -4668,6 +4890,440 @@ for line in sys.stdin:
         );
     }
 
+    /// 差し込みの偽エージェント。`__ADVERTISE__` = initialize の最上位 `_meta.steering.supported` を出すか、
+    /// `__ON_STEER__` = `_session/steering` への答え方（`inject` = 走っているターンに入れて、その文に
+    /// 答えてから prompt 応答を返す / `turn_over` = 先に prompt 応答を返してから `promptRequired`＝
+    /// ターンの閉じ際に着いた差し込み）。最初の `session/prompt` は応答を保留して `working` を流し、
+    /// 2 通目以降の prompt には「ここまでに届いた method」を返す（cancel が出ていないかを線で確かめる）。
+    const STEERING_AGENT: &str = r#"
+import json, sys
+
+ADVERTISE = __ADVERTISE__
+ON_STEER = "__ON_STEER__"
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+def chunk(text):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": "steer-1",
+                     "update": {"sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": text}}}})
+
+seen = []
+prompts = 0
+pending = None
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method:
+        seen.append(method)
+    if method == "initialize":
+        result = {"protocolVersion": params.get("protocolVersion", 1)}
+        if ADVERTISE:
+            result["_meta"] = {"steering": {"supported": True}}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "steer-1"}})
+    elif method == "session/prompt":
+        prompts += 1
+        if prompts == 1:
+            pending = rid
+            chunk("working")
+        else:
+            chunk("seen:" + ",".join(seen))
+            send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+    elif method == "_session/steering":
+        steer = {"text": params["prompt"][-1]["text"], "meta": params.get("_meta")}
+        if ON_STEER == "inject" and pending is not None:
+            send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": "injected"}})
+            chunk("steered:" + json.dumps(steer, ensure_ascii=False, sort_keys=True))
+            send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "end_turn"}})
+        else:
+            if pending is not None:
+                send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "end_turn"}})
+            send({"jsonrpc": "2.0", "id": rid,
+                  "result": {"outcome": "promptRequired", "reason": "noRunningTurn"}})
+        pending = None
+    elif method == "session/cancel":
+        if pending is not None:
+            send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "cancelled"}})
+            pending = None
+"#;
+
+    fn steering_agent(advertise: bool, on_steer: &str) -> String {
+        STEERING_AGENT
+            .replace("__ADVERTISE__", if advertise { "True" } else { "False" })
+            .replace("__ON_STEER__", on_steer)
+    }
+
+    /// UI の代役: 偽エージェントのセッションを回し、`script`（届いたイベントを見て次のコマンドを送る）が
+    /// 終わったら送信路を閉じる。返り値は届いた全イベント。
+    fn run_steering_scenario(
+        agent: &str,
+        first_prompt: &str,
+        script: impl AsyncFnOnce(
+            &mpsc::UnboundedSender<SessionCommand>,
+            &mut mpsc::UnboundedReceiver<AgentEvent>,
+            &mut Vec<AgentEvent>,
+        ),
+    ) -> Option<Vec<AgentEvent>> {
+        let command = fake_agent_command(agent)?;
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt(first_prompt.into()))
+            .expect("send");
+        Some(futures::executor::block_on(async move {
+            let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
+            let scenario = async move {
+                let mut seen = Vec::new();
+                script(&command_tx, &mut event_rx, &mut seen).await;
+                // command_tx はシナリオを終えてから drop する（ターン中に閉じるとループが畳まれる）。
+                drop(command_tx);
+                seen
+            };
+            let (outcome, seen) = futures::join!(session, scenario);
+            outcome.expect("セッションは正常終了する");
+            seen
+        }))
+    }
+
+    /// `until` に当たるイベントまで読み進め、読んだ分を `seen` に積む。
+    async fn read_until(
+        event_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
+        seen: &mut Vec<AgentEvent>,
+        until: impl Fn(&AgentEvent) -> bool,
+    ) {
+        loop {
+            let event = event_rx.next().await.expect("イベントが途切れた");
+            let done = until(&event);
+            seen.push(event);
+            if done {
+                return;
+            }
+        }
+    }
+
+    fn is_turn_end(event: &AgentEvent) -> bool {
+        matches!(event, AgentEvent::TurnEnded { .. })
+    }
+
+    fn is_working(event: &AgentEvent) -> bool {
+        matches!(event, AgentEvent::AgentChunk(text) if text == "working")
+    }
+
+    fn steerable_of(events: &[AgentEvent]) -> bool {
+        events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::SessionStarted { steerable, .. } => Some(*steerable),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("SessionStarted を期待: {events:?}"))
+    }
+
+    fn chunk_starting_with<'a>(events: &'a [AgentEvent], prefix: &str) -> &'a str {
+        events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => text.strip_prefix(prefix),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{prefix}` のチャンクを期待: {events:?}"))
+    }
+
+    fn position_of(events: &[AgentEvent], wanted: impl Fn(&AgentEvent) -> bool) -> usize {
+        events
+            .iter()
+            .position(wanted)
+            .unwrap_or_else(|| panic!("期待したイベントが無い: {events:?}"))
+    }
+
+    /// 広告あり（initialize の `_meta.steering.supported`）: ターン中の `Steer` は `_session/steering` として
+    /// **そのターンの間に**届き、`session/cancel` は出ず、ターンは 1 本のまま `end_turn` で閉じる。
+    /// 差し込みの結果（`Injected`）はターンの終わりより先に UI へ届く。
+    #[test]
+    fn steering_reaches_the_running_turn_without_cancelling_it() {
+        let agent = steering_agent(true, "inject");
+        let Some(events) = run_steering_scenario(
+            &agent,
+            "最初の依頼",
+            async |command_tx, event_rx, seen| {
+                read_until(event_rx, seen, is_working).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 7,
+                        text: "やっぱり README も直して".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("steer");
+                read_until(event_rx, seen, is_turn_end).await;
+                // 線に何が出たか（cancel が無いこと）を、次の prompt の答えで受け取る。
+                command_tx
+                    .unbounded_send(SessionCommand::Prompt("確認".into()))
+                    .expect("prompt");
+                read_until(event_rx, seen, is_turn_end).await;
+            },
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+
+        assert!(steerable_of(&events), "広告を読めていない: {events:?}");
+        let steered = position_of(&events, |event| {
+            matches!(
+                event,
+                AgentEvent::Steered {
+                    id: 7,
+                    outcome: SteerOutcome::Injected
+                }
+            )
+        });
+        let first_end = position_of(&events, is_turn_end);
+        assert!(
+            steered < first_end,
+            "差し込みの結果はターンの終わりより先: {events:?}"
+        );
+        assert!(
+            matches!(
+                events[first_end],
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed
+                }
+            ),
+            "{events:?}"
+        );
+        let turns_started = events[..first_end]
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::TurnStarted))
+            .count();
+        assert_eq!(
+            turns_started, 1,
+            "差し込みは新しいターンを作らない: {events:?}"
+        );
+        // 差し込んだ文と、ターンの閉じ際の頼み（`promptRequired`）がそのまま線に乗った。
+        let steer: serde_json::Value =
+            serde_json::from_str(chunk_starting_with(&events, "steered:")).expect("JSON");
+        assert_eq!(steer["text"], "やっぱり README も直して");
+        assert_eq!(
+            steer["meta"],
+            serde_json::json!({"steering": {"idleBehavior": "promptRequired"}})
+        );
+        assert_eq!(
+            chunk_starting_with(&events, "seen:"),
+            "initialize,session/new,session/prompt,_session/steering,session/prompt",
+            "session/cancel は出ていない"
+        );
+    }
+
+    /// 広告なし: `Steer` は線に出さずに `Refused` で返り、UI は今までどおり中断 → 送り直しに落ちる
+    /// （`session/cancel` → `Cancelled` でターンが閉じる → 同じ文を新しいターンとして送る）。
+    #[test]
+    fn without_the_advertisement_now_means_cancel_then_resend() {
+        let agent = steering_agent(false, "inject");
+        let Some(events) = run_steering_scenario(
+            &agent,
+            "最初の依頼",
+            async |command_tx, event_rx, seen| {
+                read_until(event_rx, seen, is_working).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 8,
+                        text: "やっぱり README も直して".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("steer");
+                read_until(event_rx, seen, |event| {
+                    matches!(event, AgentEvent::Steered { id: 8, .. })
+                })
+                .await;
+                // UI の後始末（agent_panel の send_queued_now / on_steered と同じ手順）。
+                command_tx
+                    .unbounded_send(SessionCommand::Cancel)
+                    .expect("cancel");
+                read_until(event_rx, seen, is_turn_end).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Prompt("やっぱり README も直して".into()))
+                    .expect("resend");
+                read_until(event_rx, seen, is_turn_end).await;
+            },
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+
+        assert!(
+            !steerable_of(&events),
+            "広告が無いのに差し込める扱い: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Steered {
+                    id: 8,
+                    outcome: SteerOutcome::Refused(_)
+                }
+            )),
+            "{events:?}"
+        );
+        let first_end = position_of(&events, is_turn_end);
+        assert!(
+            matches!(
+                events[first_end],
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Interrupted
+                }
+            ),
+            "中断で閉じる: {events:?}"
+        );
+        assert_eq!(
+            chunk_starting_with(&events, "seen:"),
+            "initialize,session/new,session/prompt,session/cancel,session/prompt",
+            "広告の無いエージェントには `_session/steering` を送らない"
+        );
+    }
+
+    /// ターンの閉じ際に着いた差し込み（エージェントが先に prompt 応答を返し、`promptRequired` で
+    /// 文を返す）: 結果は `TurnOver`（届いていない）で、この層は勝手に `session/prompt` にしない
+    /// （送り直しは UI の役目）。待機中に届いた `Steer` は線に出さずに `TurnOver`。
+    #[test]
+    fn a_steer_that_misses_the_turn_is_handed_back_unsent() {
+        let agent = steering_agent(true, "turn_over");
+        let Some(events) = run_steering_scenario(
+            &agent,
+            "最初の依頼",
+            async |command_tx, event_rx, seen| {
+                read_until(event_rx, seen, is_working).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 9,
+                        text: "間に合わなかった文".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("steer");
+                // 終わりと差し込みの結果はどちらが先でもよい（UI はどちらの順でも送信待ちへ戻す）。
+                let mut ended = false;
+                let mut steered = false;
+                while !(ended && steered) {
+                    let event = event_rx.next().await.expect("イベントが途切れた");
+                    ended |= is_turn_end(&event);
+                    steered |= matches!(event, AgentEvent::Steered { id: 9, .. });
+                    seen.push(event);
+                }
+                // 待機中の差し込みは送らない。
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 10,
+                        text: "待機中の文".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("idle steer");
+                read_until(event_rx, seen, |event| {
+                    matches!(event, AgentEvent::Steered { id: 10, .. })
+                })
+                .await;
+                command_tx
+                    .unbounded_send(SessionCommand::Prompt("間に合わなかった文".into()))
+                    .expect("resend");
+                read_until(event_rx, seen, is_turn_end).await;
+            },
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+
+        for wanted in [9, 10] {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::Steered {
+                        id,
+                        outcome: SteerOutcome::TurnOver
+                    } if *id == wanted
+                )),
+                "id {wanted} は TurnOver: {events:?}"
+            );
+        }
+        assert_eq!(
+            chunk_starting_with(&events, "seen:"),
+            "initialize,session/new,session/prompt,_session/steering,session/prompt",
+            "cancel も、勝手な session/prompt も、待機中の差し込みも線に出ていない"
+        );
+    }
+
+    /// 広告は initialize の**最上位**の `_meta.steering.supported` だけを読む（`agentCapabilities` の中の
+    /// 同名や、`true` 以外の値は広告なし）。
+    #[test]
+    fn steering_advertisement_is_read_from_the_top_level_meta() {
+        let meta =
+            |value: serde_json::Value| -> v1::Meta { serde_json::from_value(value).expect("meta") };
+        assert!(steering_supported(Some(&meta(
+            json!({"steering": {"supported": true}, "goal": {}})
+        ))));
+        assert!(!steering_supported(Some(&meta(
+            json!({"steering": {"supported": false}})
+        ))));
+        assert!(!steering_supported(Some(&meta(
+            json!({"steering": {"supported": "yes"}})
+        ))));
+        assert!(!steering_supported(Some(&meta(json!({"goal": {}})))));
+        assert!(!steering_supported(None));
+        // 実アダプタの initialize 応答の形（claude-agent-acp 0.81.2 / codex-acp 1.13.1）。
+        let response: v1::InitializeResponse = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {"loadSession": true, "_meta": {"steering": {"supported": true}}},
+            "_meta": {"steering": {"supported": true}}
+        }))
+        .expect("initialize 応答");
+        assert!(steering_supported(response.meta.as_ref()));
+        let nested_only: v1::InitializeResponse = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {"_meta": {"steering": {"supported": true}}}
+        }))
+        .expect("initialize 応答");
+        assert!(!steering_supported(nested_only.meta.as_ref()));
+    }
+
+    /// 応答の `outcome` の読み方。知らない値・無い・エラーは「届いていない」（送り直す側に倒す）。
+    #[test]
+    fn steer_outcomes_map_to_delivered_or_not() {
+        assert_eq!(
+            steer_outcome(Ok(json!({"outcome": "injected"}))),
+            SteerOutcome::Injected
+        );
+        assert_eq!(
+            steer_outcome(Ok(json!({"outcome": "startedNewTurn"}))),
+            SteerOutcome::StartedTurn
+        );
+        assert_eq!(
+            steer_outcome(Ok(
+                json!({"outcome": "promptRequired", "reason": "noRunningTurn"})
+            )),
+            SteerOutcome::TurnOver
+        );
+        assert!(matches!(
+            steer_outcome(Ok(json!({"outcome": "failed"}))),
+            SteerOutcome::Refused(reason) if reason.contains("failed")
+        ));
+        assert!(matches!(
+            steer_outcome(Ok(json!({}))),
+            SteerOutcome::Refused(_)
+        ));
+        assert!(matches!(
+            steer_outcome(Err(acp::Error::new(
+                i32::from(acp::ErrorCode::InvalidParams),
+                "steer params require a non-empty prompt array"
+            ))),
+            SteerOutcome::Refused(reason) if reason.contains("non-empty prompt")
+        ));
+    }
+
     #[test]
     fn oneshot_maps_default_agent_to_its_cli() {
         // タイトル生成は「既定 Agent の CLI テンプレート」を使う（Claude 決め打ちをやめた）。
@@ -4897,8 +5553,14 @@ for line in sys.stdin:
                         AgentEvent::SessionStarted {
                             session_id,
                             resumed,
+                            steerable,
                             ..
-                        } => eprintln!("[session started] {session_id} resumed={resumed}"),
+                        } => eprintln!(
+                            "[session started] {session_id} resumed={resumed} steerable={steerable}"
+                        ),
+                        AgentEvent::Steered { id, outcome } => {
+                            eprintln!("[steered] {id} {outcome:?}")
+                        }
                         AgentEvent::SessionLost => eprintln!("[session lost]"),
                         // stderr は画面だけの物なので、ここでも終わり方だけを出す。
                         AgentEvent::ExitedAtStartup(exited) => eprintln!("[exited] {exited}"),
