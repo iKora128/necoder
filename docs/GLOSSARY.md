@@ -72,6 +72,13 @@
 | ↳ **配布の形**（レジストリの項目の起動の仕方。このマシン向けの binary → npx → uvx の順で選ぶ） | `acp_client::registry::DistributionKind` / `RegistryAgent::launch_for` | binary / npx / uvx | binary / npx / uvx |
 | ↳ ↳ **binary の配備**（レジストリの URL から落とし、sha256 で照合して、版ごとの置き場に展開する。最初の起動の時に背景で） | `acp_client::deploy`（`BinaryTarget::deploy` / `binary_root`）/ `Agent::deploy_command` | 落としています / 検証の値がありません | Downloading / No checksum |
 | ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
+| **接続**（エージェントがモデルの API を呼ぶ口と、その契約。issue #38 の「エージェント × 接続」の接続の側。宛先は settings.json の `connections`（**user の層だけ**）、キーは OS のキーチェーン。ACP の `providers/*` の provider はこれの code 側の語で、UI には「プロバイダ」と書かない — zeron は provider をエージェントの意味で使う） | `settings_core::ConnectionSetting` / `acp_client::connections::Connection` / 設定 `connections` / `agent_connections` / `settings::connections`（面） | 接続 / 接続を追加 / 自分のログイン | Connection / Add connection / Own login |
+| ↳ **ひな形**（各社の口と形式とキーの載せ方の組。GLM Coding Plan・Kimi Code・DeepSeek API … と汎用の OpenAI 互換 / Anthropic 互換。従量課金とコーディングプランで口とキーが別の会社は別のひな形） | `acp_client::connections::PRESETS` / `Preset` | ひな形 | Template |
+| ↳ **形式**（接続の API の話し方） | `connections::Protocol` / `settings_core::ConnectionProtocol` | 形式 / Anthropic 互換 / OpenAI 互換 | API format / Anthropic-compatible / OpenAI-compatible |
+| ↳ **キー**（接続の API キー。OS のキーチェーンの `necoder.connection.<id>`。settings.json に書かない・画面に出さない・入れ方はクリップボードから貼るだけ） | `connections::secrets::SecretStore` / `Keychain` / `settings::install_os_keychain` | API キー / クリップボードから貼る | API key / Paste from clipboard |
+| ↳ **渡し方**（接続をエージェントへ渡す方法。`providers/set` を広告する Claude Code のアダプタは `session/new` / `session/load` の前に送り、他は起動時の env。手元のエージェントだけ） | `connections::Harness` / `ConnectionLaunch` / `ProviderRoute` | （UI には出さない語） | — |
+| ↳ **在庫の鍵**（モデル・思考量・権限モードの在庫を分ける単位 = 使用量の鍵（接続を含む）+ ログインの指紋。別の接続・別のログインのモデルを出さない） | `agent_panel::StockKey` / `Thread.stock_key` / `connections::login_fingerprint` | — | — |
+| **リポジトリに決めさせないキー**（project 層 = リポジトリの `.necoder/settings.json` から読まない設定。接続・起動コマンド・MCP・権限の既定など） | `settings_core::USER_ONLY_KEYS` / `SettingsStore::ignored_project_keys` | — | — |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |
 | ↳ **シェルモード**（composer の 1 文字目の `!`。人が打ったコマンドをスレッドの作業ディレクトリで走らせ、エージェントには送らない。結果は次の送信に添える。**composer からの人の送信だけ**が解釈する・#37） | `agent_panel::shell`（`shell_command_input` / `ShellRun`）/ `Entry::Shell`（DB の role `shell`）/ `Host::run_user_command` | シェルで実行 | Run in the shell |
@@ -166,6 +173,7 @@
 - **session** — `ProjectSession`（1 project の UI/controller 束）と ACP `session`（LLM 接続）は別物。前者を「session」と略さない。
 - **workspace ≠ フォルダ** — 窓/シェル全体。1 フォルダ = project。
 - **panel** — ドックの `*_panel`（agent / git / todo …）を指す。Fleet のタイルは **cell**（"panel" と呼ばない）。
+- **provider / ハーネス** — issue #38 の「ハーネス」は UI では**エージェント**（`AgentKind`）。「provider」は ACP の `providers/*`（＝**接続**）の code 側の語で、UI には出さない（zeron は provider をエージェントの意味で使うので逆になる）。
 
 ## 廃止・禁止語（見つけたら置換）
 

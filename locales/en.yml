@@ -70,6 +70,11 @@ agent:
   pill_awaiting_agent: Available once the agent connects
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
+  connection_remote_skipped: "Connection \"%{connection}\" isn't passed to remote (SSH) agents. This thread runs on the remote agent's own login"
+  connection_unsupported: "Can't pass connection \"%{connection}\" to %{agent} (no known way to inject it). Switch back to \"Own login\" in Settings › Connections"
+  connection_refused: "Not starting because connection \"%{connection}\" can't be used: %{reason}"
+  connection_key_unreadable: "Couldn't read the key of connection \"%{connection}\" from the keychain"
+  pill_connection: "Connection: %{connection} (the agent runs on this plan's API; change it in Settings › Connections)"
   err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
   err_launch_not_in_registry: "%{id} isn't in the ACP registry (refresh it from Settings → AI agents → Add agent)"
   err_launch_no_distribution: "No build for this machine (%{platform})"
@@ -825,6 +830,58 @@ settings:
   mcp_sub: Tools you hand to the agent. Only the ones you enable are visible to new threads.
   mcp_empty: No MCP servers yet. Add them under mcp_servers in settings.json, or register them with Codex CLI, Claude Code or Cursor and they show up here.
   mcp_note: Changes apply to the next thread you open; running sessions are not reconnected.
+  connections_heading: Connections
+  connections_sub: Where agents call model APIs, and the key for that plan (GLM, Kimi, DeepSeek and more). Keys go into the OS keychain, never into settings.json. necoder never calls an API with them; it only hands them to the agent it starts.
+  connections_remote_note: Connections are not passed to remote agents (started over SSH). Only agents started on this machine get them; remote threads use the agent's own login.
+  connections_empty: No connections yet. Use "+ Add connection" to pick a template and paste a key.
+  connections_add: + Add connection
+  connections_agents_heading: Connection per agent
+  connections_agents_sub: The chosen connection applies from the next session the agent starts (running threads keep theirs). When Claude Code uses another company's connection, its pill reads "Claude Code · <connection>".
+  connections_other_agents: Codex, GitHub Copilot, Qwen Code, Kimi CLI, Grok Build and other added agents can't take a connection yet.
+  connection_refusal_protocol: "only takes %{protocol} endpoints"
+  connection_refusal_only_deepseek: DeepSeek Harness only takes the DeepSeek API connection (choose other providers in dsh's own settings)
+  connection_refusal_opencode: not one of OpenCode's built-in providers (add it in OpenCode's settings)
+  connection_refusal_opencode_url: OpenCode can't take a connection with an edited base URL (it connects to its own default endpoint)
+  connection_refusal_missing_key: the key is not in the keychain (paste it from Settings › Connections › Edit…)
+  connection_protocol_anthropic: Anthropic-compatible
+  connection_protocol_openai: OpenAI-compatible
+  connection_preset_openai_compatible: Other OpenAI-compatible
+  connection_preset_anthropic_compatible: Other Anthropic-compatible
+  connection_key_pasted: "Pasted (…%{tail}, %{length} characters)"
+  connection_key_present: "Key: in the keychain"
+  connection_key_missing: "Key: not set yet (paste it with Edit…)"
+  connection_key_not_needed: No key needed
+  connection_key_unavailable: "Key: this OS's keychain isn't supported yet"
+  connection_key_failed: "Key: couldn't read the keychain (%{reason})"
+  connection_key_checking: "Key: checking…"
+  connection_used_by_none: "Used by: none (choose below)"
+  connection_used_by: "Used by: %{agents}"
+  connection_edit: Edit…
+  connection_remove: Remove
+  connection_own_login: Own login
+  connection_choice_missing: "The chosen connection \"%{id}\" doesn't exist. This agent won't start until you choose again"
+  connection_choice_refused: "The chosen connection \"%{name}\" can't be used (%{reason}). This agent won't start"
+  connection_refused_list: "Can't use: %{list}"
+  connection_removed: "Removed connection \"%{name}\" (agents that used it go back to their own login)"
+  connection_removed_key_left: "Removed connection \"%{name}\", but couldn't delete its key from the keychain (%{reason})"
+  connection_key_paste_invalid: No key on the clipboard (copy a single line without spaces, then press again)
+  connection_url_invalid: The base URL must start with http:// or https://
+  connection_key_required: Paste the key (copy it, then press "Paste from clipboard")
+  connection_key_keep: Keeps the key in the keychain (pasting replaces it)
+  connection_key_not_pasted: Not pasted yet
+  connection_key_optional: No key needed (paste one if the endpoint wants it)
+  connection_edit_title: Edit connection
+  connection_add_title: Add connection
+  connection_preset: Template
+  connection_preset_fixed: "Template: %{preset}"
+  connection_name: Name
+  connection_protocol: API format
+  connection_base_url: Base URL
+  connection_key: API key
+  connection_paste_key: Paste from clipboard
+  connection_key_note: The key goes into the OS keychain, never into settings.json, and is never shown (only its last 4 characters).
+  connection_docs: "Provider's guide: %{url}"
+  connection_saving: Saving…
   mcp_source_necoder: necoder settings
   mcp_source_codex: found in Codex CLI
   mcp_source_claude: found in Claude Code

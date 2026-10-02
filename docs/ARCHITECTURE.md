@@ -265,7 +265,8 @@ manifest の名前・版・`bin` を確かめてから rename で公開し、以
 - **外す**（設定の「外す」・2026-09-27）: `external_agents/binary/<id>` の中の **necoder が置いた物だけ**を消す
   （`deploy::remove_deployed`: 完了の印のある `<version>/<os>-<arch>` と途中の `.staging-*` / `.download-*`。
   `<id>` 自体が symlink なら何もしない・中の symlink はリンクだけ消えて先は触らない・知らないファイルは残す）。
-  消す直前に settings.json（user と project の層）を読み直し、同じ id がまだ書かれていれば消さない
+  消す直前に settings.json を読み直し、同じ id がまだ書かれていれば消さない（`agent_servers` は user の層
+  だけから読む・§7.6）
 - 同じアプリの中で同時に初回が起きても落とすのは 1 回（プロセスの中の lock）。別のプロセスが先に同じ版を
   置いたら、その完成品を使う
 
@@ -380,6 +381,81 @@ herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さ
 **`RunningRegistry`（全窓横断のスレッド台帳）は panel ごとの行を保持して root で集約する。**
 root キーに直接 upsert すると、同じ root の 2 枚目の ACP が 1 枚目の行を消す。パネルの解放は
 `cx.on_release` で自分の行だけ落とす。
+
+### 7.6 設定の層と接続（issue #38 H3・2026-10-02）
+
+**project 層はリポジトリが持つファイル**。設定は既定 → user → リポジトリの `.necoder/settings.json` を深く重ねるが、
+clone しただけのリポジトリが「どこへ何を送るか・何を起こすか・何を聞かずに通すか」を決められると、キーチェーンの
+キーを別の宛先へ送らせたり、任意のコマンドを起こさせたりできる。だから `settings_core::USER_ONLY_KEYS` を
+project 層から**外してから**重ねる（`SettingsStore::load`。外したキーは `ignored_project_keys` に残し標準エラーに 1 行）:
+
+| キー | リポジトリに決めさせると |
+|---|---|
+| `connections` / `agent_connections` | 接続の `base_url` を差し替えて、キーを別の宛先へ送らせる |
+| `agent_servers` | 任意の起動コマンド・`ANTHROPIC_BASE_URL` などの env |
+| `mcp_servers` | 任意の MCP のコマンド・URL（ヘッダの `${VAR}` は手元の env を展開する＝秘密を外へ送らせる） |
+| `agent_permission_default` / `agent_config_defaults` | 「聞かずに進める」権限モードを既定にする |
+| `allow_terminal_send` | CLI から端末へキーを打たせる |
+| `terminal_shell` / `terminal_shell_args` | 端末を開くたびに任意のコマンド |
+| `captain_agent` | 自分から起きて 1 ターン走る Captain の任命（人の明示操作に限る） |
+| `claude_ai_connectors` | claude.ai のコネクタ（メール・カレンダー等）をセッションへ持ち込む |
+| `chat` | 全チャットのシステムプロンプトへの追記と置き場（プロジェクトに紐づかない） |
+
+読むのは見た目と、人が押すまで何も起きない物（`quick_commands` は押すと端末で走るが、押すまで何も起きず中身は
+ツールチップで見える）。書き手（`persist_*`）は元から user のファイルだけを書く。
+
+**接続 = エージェントがモデルの API を呼ぶ口と、その契約**（GLM Coding Plan・Kimi Code・DeepSeek API …）:
+
+- **置き場**: 宛先（ひな形・名前・形式・ベース URL）は `connections.<id>`、エージェントごとの選択は
+  `agent_connections.<agent id>`（どちらも user の層だけ）。**API キーは OS のキーチェーン**
+  （`acp_client::connections::secrets`・項目名 `necoder.connection.<id>`・macOS = ログインのキーチェーン /
+  Windows = 資格情報マネージャ / Linux は未対応で保存できない旨を出す）。settings.json にキーの欄は無い。
+  **necoder 自身はこのキーで API を呼ばない** — エージェントを起こす時に渡すだけ（issue #38 §5-1）
+- **キーの読み書きは背景のスレッド**（macOS は許可のダイアログで止まりうる）。設定の面のキーの有無は中身を読まずに
+  項目の属性だけで引く（`SecretStore::contains`・ダイアログを出さない）。中身を読むのはセッションを起こす時だけ。
+  キーの置き場はアプリの起動（`settings::install_os_keychain`）だけが OS のキーチェーンにする — 置かれていなければ
+  メモリだけの置き場（テストと隔離した offscreen は本物のキーチェーンに触れない。debug ビルドの
+  `NECODER_SECRET_STORE=memory[:id,…]` も同じ）
+- **渡し方**（`connections::Harness`・渡し方の分かるエージェントだけ）:
+  - Claude Code（claude-agent-acp）: Anthropic 互換だけ。`initialize` の `agentCapabilities.providers` を見て、
+    広告していれば `session/new` / `session/load` の**前に** `providers/set`（`providerId: "main"`・
+    `apiType: "anthropic"`・キーは `Authorization: Bearer`、`x-api-key` の口は両方に載せる）。Rust の ACP crate 1.3 は
+    この要求を持たないので、型はスキーマ crate（feature `unstable_llm_providers`）から引いて `UntypedMessage` で送る。
+    アダプタはこの値を Claude Code の env と**設定**の両方へ入れる（リポジトリの `.claude/settings.json` の env でも
+    上書きできない）。プロセス単位の設定で、necoder はスレッド 1 本 = プロセス 1 本なので混ざらない。
+    **広告しない古いアダプタ**は、セッションを開かずにプロセスを畳み、`ANTHROPIC_BASE_URL` /
+    `ANTHROPIC_AUTH_TOKEN`（`x-api-key` の口は `ANTHROPIC_API_KEY`）を足して 1 回だけ起こし直す。この時は他の
+    宛先と資格情報の変数（`ANTHROPIC_API_KEY`・`CLAUDE_CODE_OAUTH_TOKEN` …）を空にしてから入れる（手元のキーを
+    別の会社へ送らない・アダプタの `providers/set` と同じ顔ぶれ）
+  - DeepSeek Harness（足したエージェントのコマンドが `dsh-acp`）: dsh の DeepSeek の経路は Anthropic Messages の口で、
+    `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` を読まず `providers/set` も持たない。DeepSeek API の接続だけを
+    `DSH_PROVIDER=deepseek` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` で渡す
+  - OpenCode: ひな形が OpenCode の組み込みのプロバイダ（models.dev の id）に当たる時だけ、そのプロバイダの環境変数で
+    キーを渡し、`OPENCODE_CONFIG_CONTENT`（リポジトリの `opencode.json` より強い）の `enabled_providers` でその
+    プロバイダだけにする。宛先は OpenCode の既定の口なので、ベース URL を書き換えた接続は渡さない
+  - それ以外（Codex・Copilot・Qwen Code・Kimi CLI・Grok Build・他の足したエージェント）は渡さない。Pi は別 Task
+- **env の積み順**: task.env → `agent_servers` の env → プリセット（Chat・席）→ **接続**（最後＝どれにも上書きさせない）。
+  接続を渡すセッションでは、リポジトリの `.necoder/task.env` から宛先・プロキシ・証明書・差し込むコードを変える変数
+  （`ANTHROPIC_*` / `OPENAI_*` / `OPENCODE_*` / `HTTPS_PROXY` / `NODE_OPTIONS` / `NODE_EXTRA_CA_CERTS` / `DYLD_*` …・
+  `connections::guarded_from_task_env`）を読まず、読まなかった名前を transcript に 1 行出す
+- **渡せない時は起こさない**: 選んだ接続をそのエージェントが受け付けない・キーがキーチェーンに無い・キーチェーンを読めない
+  時は、黙って自分のログインで走らせず（別の契約に請求させない）、理由を transcript に出す
+- **リモート（SSH 先で起こすエージェント）には渡さない**（キーを手元の外へ出さない・H3 の範囲外）。そのスレッドは
+  SSH 先のエージェント自身のログインで動き、エージェントごとに一度だけ transcript で知らせる
+- **効くのは次に起動するセッションから**（アカウントの切り替えと同じ）。ただし先張りしたまま 1 度も使っていない
+  セッションは、設定が変わって鍵が変わったら畳んで張り直す（前の接続のまま最初の送信が走らない）
+- **見せ方**: エージェントのピルに `· 接続の名前` を添える（Claude Code に他社の接続を挿しても中身を隠さない・§5-2）。
+  使用量の鍵（R08）にも接続を入れる（別の契約の値を混ぜない）
+
+**モデル一覧の在庫の鍵**（`agent_panel::StockKey`）: 広告の在庫（モデル・思考量・権限モード）は今まで表示名だけで
+引いていたが、接続やログインを替えると一覧が変わる。鍵 = 使用量の鍵（エージェント・動かしている場所・認証の置き場・
+認証に関わる env の指紋・接続）+ ログインの指紋（`connections::login_fingerprint`: ログインと設定のファイルの更新時刻と
+大きさ・Claude Code は `.claude.json` のアカウントの id。資格情報の中身は読まない。zeron の `model_context` と同じ
+考え方を独立に実装）。セッションを立てた時に決めてスレッドに持たせ、まだセッションの無いタブは今の設定で立てた時の
+鍵で引く（ログインの指紋は最後に確かめた値＝描画でファイルを見ない。ピルのメニューを開いた時に確かめ直す）。
+スレッド自身の広告も、前のセッションの鍵が今の鍵と違えば出さない。実行ファイルの版は鍵に入れない（起こす前に
+解決しないと分からない・版が変われば次のセッションの広告で入れ替わる）。slash コマンドと会話名の在庫は接続で
+変わらないので表示名のまま（`HarnessStock`）。
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 

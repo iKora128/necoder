@@ -7,6 +7,7 @@
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
 pub mod codex_limits;
+pub mod connections;
 pub mod custom;
 pub mod deploy;
 pub mod history;
@@ -1657,6 +1658,76 @@ async fn with_timeout<T>(
     }
 }
 
+/// [`probe_providers`] の結果（`providers/list` の応答をそのまま持つ）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProvidersProbe {
+    /// `agentCapabilities.providers` を広告したか（`false` なら list / set は送っていない）。
+    pub advertised: bool,
+    /// `providers/set` の前の `providers/list`。
+    pub before: serde_json::Value,
+    /// `providers/set` の後の `providers/list`。
+    pub after: serde_json::Value,
+}
+
+/// 実アダプタの確かめ（issue #38 H3）: initialize → `providers/list` → `providers/set` → `providers/list`
+/// だけを送る。**セッションは開かず prompt も送らない**（API へは何も行かない）。手元だけ。
+pub async fn probe_providers(
+    command: &AgentCommand,
+    route: &connections::ProviderRoute,
+) -> Result<ProvidersProbe> {
+    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
+        .args(command.args.clone())
+        .envs(command.env.clone());
+    let mut process = LocalHost::shared()
+        .spawn_process(&spec)
+        .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
+    let transport = acp::ByteStreams::new(
+        blocking::Unblock::new(process.take_stdin()?),
+        blocking::Unblock::new(process.take_stdout()?),
+    );
+    let route = route.clone();
+    let probe = acp::Client
+        .builder()
+        .connect_with(transport, async move |connection| {
+            let initialized = with_handshake_timeout(
+                "ACP initialize",
+                connection.send_request(initialize_request()).block_task(),
+            )
+            .await?;
+            if initialized.agent_capabilities.providers.is_none() {
+                return Ok(ProvidersProbe {
+                    advertised: false,
+                    before: serde_json::Value::Null,
+                    after: serde_json::Value::Null,
+                });
+            }
+            let list = async || {
+                with_handshake_timeout(
+                    "ACP providers/list",
+                    connection
+                        .send_request(acp::UntypedMessage::new(
+                            "providers/list",
+                            v1::ListProvidersRequest::new(),
+                        )?)
+                        .block_task(),
+                )
+                .await
+            };
+            let before = list().await?;
+            set_provider(&connection, "probe", &route).await?;
+            let after = list().await?;
+            Ok(ProvidersProbe {
+                advertised: true,
+                before,
+                after,
+            })
+        })
+        .await
+        .context("providers/* の確かめに失敗");
+    drop(process);
+    probe
+}
+
 /// エージェントを起動し、ACP の initialize ハンドシェイクまで行う。
 /// 返り値は初期化応答（プロトコル版・エージェント能力）。session/prompt はこの接続に積んでいく（M4 継続）。
 pub async fn connect_and_initialize(command: &AgentCommand) -> Result<v1::InitializeResponse> {
@@ -1782,6 +1853,10 @@ pub struct SessionPreferences {
     /// エージェント側の過去の会話（CLI で作った物など）を necoder で開いた時だけ立てる。普段の再開は
     /// transcript が DB に在るので、再生は捨てる（二重に載せない）。
     pub replay_history: bool,
+    /// このセッションに渡す接続（issue #38 H3・[`connections`]）。`providers/set` で渡せる物は
+    /// `session/new` / `session/load` の前に送り、それ以外は起動時の env で渡す。`None` = エージェント
+    /// 自身のログインのまま。
+    pub connection: Option<connections::ConnectionLaunch>,
 }
 
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
@@ -1823,14 +1898,140 @@ pub async fn run_session_on(
     } else {
         command
     };
+    // リポジトリの `.necoder/task.env`。接続のキーを渡すセッションでは、宛先・通信路・差し込むコードを
+    // 変える変数を読まない（読むとキーを横取りできる・`connections::guarded_from_task_env`）。
+    let mut task_env = host::task_environment(host.as_ref(), &command.cwd)?;
+    if preferences.connection.is_some() {
+        let mut dropped: Vec<String> = task_env
+            .keys()
+            .filter(|name| connections::guarded_from_task_env(name))
+            .cloned()
+            .collect();
+        dropped.sort();
+        for name in &dropped {
+            task_env.remove(name);
+        }
+        if !dropped.is_empty() {
+            event_tx
+                .unbounded_send(AgentEvent::Notice(format!(
+                    "接続を渡すセッションなので、.necoder/task.env の {} は読みませんでした",
+                    dropped.join(", ")
+                )))
+                .ok();
+        }
+    }
+    // 接続の渡し方（issue #38 H3）。`providers/set` で渡せる接続は、まず env 無しで起こす（アダプタの
+    // プロセスの env にキーを置かない。アダプタは受け取った宛先とキーを Claude Code 本体の env と設定へ
+    // 入れるので、リポジトリの `.claude/settings.json` の env より強い）。広告しない古いアダプタだったら、
+    // env を足して 1 回だけ起こし直す。
+    let mut route = match &preferences.connection {
+        Some(connection) if connection.provider.is_some() => ConnectionRoute::Providers,
+        Some(_) => ConnectionRoute::Env,
+        None => ConnectionRoute::None,
+    };
+    loop {
+        let attempt = run_session_attempt(
+            &host,
+            &command,
+            &task_env,
+            &preferences,
+            route,
+            &mut command_rx,
+            &event_tx,
+        )
+        .await?;
+        match attempt {
+            Attempt::Finished => return Ok(()),
+            Attempt::NeedsEnv => {
+                eprintln!(
+                    "{} は providers/set を広告しない。接続を環境変数で渡して起こし直す",
+                    command.path.display()
+                );
+                route = ConnectionRoute::Env;
+            }
+        }
+    }
+}
+
+/// 接続の渡し方（[`run_session_on`] の 1 回の起動ごと）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionRoute {
+    /// 接続なし（エージェント自身のログイン）。
+    None,
+    /// `providers/set`（広告しなければ [`Attempt::NeedsEnv`] で戻る）。
+    Providers,
+    /// 起動時の環境変数。
+    Env,
+}
+
+/// 1 回の起動の終わり方。
+enum Attempt {
+    /// セッションが終わった（UI が送信路を捨てた・切れた）。
+    Finished,
+    /// `providers/set` を広告しないエージェントだった（セッションは開いていない）。env で起こし直す。
+    NeedsEnv,
+}
+
+/// `providers/set` を送る（`session/new` / `session/load` の前・issue #38 H3）。Rust の ACP crate が
+/// 要求の型を持たないので、スキーマの型で組んだ params を `UntypedMessage` で送る。失敗は接続の名前を
+/// 添えて返す（セッションは開かない＝黙ってエージェント自身のログインで走らせない）。
+async fn set_provider(
+    connection: &acp::ConnectionTo<acp::Agent>,
+    name: &str,
+    route: &connections::ProviderRoute,
+) -> std::result::Result<(), acp::Error> {
+    let message = acp::UntypedMessage::new("providers/set", route.set_request())?;
+    with_handshake_timeout(
+        "ACP providers/set",
+        connection.send_request(message).block_task(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        acp::Error::new(
+            i32::from(acp::ErrorCode::InternalError),
+            format!("接続「{name}」を providers/set で渡せませんでした: {error}"),
+        )
+    })
+}
+
+/// [`run_session_on`] の 1 回の起動（プロセスを起こして、セッションが終わるまで）。
+async fn run_session_attempt(
+    host: &Arc<dyn Host>,
+    command: &AgentCommand,
+    task_env: &std::collections::HashMap<String, String>,
+    preferences: &SessionPreferences,
+    route: ConnectionRoute,
+    command_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Result<Attempt> {
+    let connection_env = preferences
+        .connection
+        .as_ref()
+        .filter(|_| route == ConnectionRoute::Env)
+        .map(|connection| connection.env.clone())
+        .unwrap_or_default();
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
-        .envs(host::task_environment(host.as_ref(), &command.cwd)?)
+        .envs(task_env.clone())
         .envs(command.env.clone())
-        // プリセットの環境変数が最後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
-        .envs(preferences.preset.env.clone());
+        // プリセットの環境変数が後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
+        .envs(preferences.preset.env.clone())
+        // 接続の変数が最後（task.env・agent_servers・プリセットのどれにも上書きさせない）。
+        .envs(connection_env);
+    // 起動してすぐ落ちた時の stderr から伏せる値（env に加え、`providers/set` のヘッダ＝キー）。
+    let mut secret_env = spec.env.clone();
+    if let Some(provider) = preferences
+        .connection
+        .as_ref()
+        .and_then(|connection| connection.provider.as_ref())
+    {
+        for (name, value) in &provider.headers {
+            secret_env.insert(format!("CONNECTION_HEADER_{name}"), value.clone());
+        }
+    }
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
-    // 渡しても意味がない。判定はここで取る（下の接続クロージャは `move` で `host` を持ち込まない）。
+    // 渡しても意味がない。判定はここで取る。
     let is_remote = host.is_remote();
     let mut process = host
         .spawn_process(&spec)
@@ -1849,12 +2050,27 @@ pub async fn run_session_on(
     let exit_events = event_tx.clone();
     let outcome = acp::Client
         .builder()
-        .connect_with(transport, async move |connection| {
+        .connect_with(transport, async |connection| {
             let initialized = with_handshake_timeout(
                 "ACP initialize",
                 connection.send_request(initialize_request()).block_task(),
             )
             .await?;
+            // 接続（issue #38 H3）: `providers/set` を `session/new` / `session/load` より前に送る。
+            // 広告しないエージェントにはセッションを開かずに戻り、env で起こし直してもらう。
+            if route == ConnectionRoute::Providers {
+                if initialized.agent_capabilities.providers.is_none() {
+                    return Ok(Attempt::NeedsEnv);
+                }
+                if let Some((name, provider)) = preferences.connection.as_ref().and_then(|launch| {
+                    launch
+                        .provider
+                        .as_ref()
+                        .map(|provider| (launch.name.as_str(), provider))
+                }) {
+                    set_provider(&connection, name, provider).await?;
+                }
+            }
             // 前回のセッション id があり、エージェントが `loadSession` を広告していれば `session/load`
             // で会話を引き継ぐ（SSH 切断・再起動のあとも同じスレッドで続きが話せる）。
             //
@@ -2235,7 +2451,7 @@ pub async fn run_session_on(
                         TurnEvent::Update(Err(error)) => {
                             if acp::is_incoming_transport_closed(&error) {
                                 event_tx.unbounded_send(AgentEvent::SessionLost).ok();
-                                return Ok(());
+                                return Ok(Attempt::Finished);
                             }
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
@@ -2277,7 +2493,7 @@ pub async fn run_session_on(
                                 // （2026-09-08 の報告）。UI は SessionLost で送信路を捨て、
                                 // 次の送信で立ち上げ直す。
                                 event_tx.unbounded_send(AgentEvent::SessionLost).ok();
-                                return Ok(());
+                                return Ok(Attempt::Finished);
                             }
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
@@ -2290,13 +2506,13 @@ pub async fn run_session_on(
                     handle_session_message(update, &event_tx).await?;
                 }
             }
-            Ok::<(), acp::Error>(())
+            Ok::<Attempt, acp::Error>(Attempt::Finished)
         })
         .await;
     // 開く前に落ちた（initialize の前後でプロセスが終わった）なら、ACP の「Broken pipe」ではなく
     // 終わり方と stderr の末尾を理由にする（何が悪いかはエージェントしか知らない）。
     if outcome.is_err() && !session_opened.load(std::sync::atomic::Ordering::SeqCst) {
-        if let Some(exited) = startup_exit(&mut process, &spec.env).await {
+        if let Some(exited) = startup_exit(&mut process, &secret_env).await {
             drop(process);
             exit_events
                 .unbounded_send(AgentEvent::ExitedAtStartup(exited.clone()))
@@ -4181,6 +4397,274 @@ for line in sys.stdin:
         assert_eq!(received["has_meta"], false, "{received}");
     }
 
+    /// 偽エージェント（`PROVIDERS_CAP` を置換して使う）: 受け取った method の順、`providers/set` の
+    /// params、プロセスの env（接続に関わる名前だけ）を prompt 応答に載せる（issue #38 H3）。
+    const AGENT_THAT_REPORTS_CONNECTION: &str = r#"
+import json, os, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+NAMES = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "HTTPS_PROXY",
+         "NODE_OPTIONS", "CARGO_TARGET_DIR", "ZHIPU_API_KEY", "OPENCODE_CONFIG_CONTENT"]
+seen = []
+provider = None
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method:
+        seen.append(method)
+    if method == "initialize":
+        caps = {"loadSession": True}
+        if PROVIDERS_CAP:
+            caps["providers"] = {}
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": caps}})
+    elif method == "providers/set":
+        provider = params
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    elif method in ("session/new", "session/load"):
+        result = {} if method == "session/load" else {"sessionId": "fresh"}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    elif method == "session/prompt":
+        report = {"seen": seen, "provider": provider,
+                  "env": {name: os.environ.get(name) for name in NAMES}}
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(report, sort_keys=True)}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    /// GLM の接続を Claude Code に渡す時の形（`providers/set` の宛先と、広告しない時の env）。
+    fn glm_for_claude_code() -> connections::ConnectionLaunch {
+        let connection = connections::Connection {
+            id: "glm".into(),
+            name: "GLM".into(),
+            preset: "zai-coding-plan".into(),
+            protocol: connections::Protocol::Anthropic,
+            base_url: "https://api.z.ai/api/anthropic".into(),
+        };
+        connections::Harness::ClaudeCode
+            .launch(&connection, Some("sk-connection-key"))
+            .expect("渡せる")
+    }
+
+    /// 偽エージェントを `cwd` で走らせ、エージェントが prompt 応答に載せた報告と全イベントを返す。
+    fn connection_report(
+        providers_advertised: bool,
+        preferences: SessionPreferences,
+        cwd: Option<&Path>,
+    ) -> Option<(serde_json::Value, Vec<AgentEvent>)> {
+        let script = AGENT_THAT_REPORTS_CONNECTION.replace(
+            "PROVIDERS_CAP",
+            if providers_advertised {
+                "True"
+            } else {
+                "False"
+            },
+        );
+        let mut command = fake_agent_command(&script)?;
+        if let Some(cwd) = cwd {
+            command.cwd = cwd.to_path_buf();
+        }
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("やあ".into()))
+            .expect("send");
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                drop(command_tx);
+                seen
+            };
+            futures::join!(session, collect)
+        });
+        outcome.expect("セッションは正常終了する");
+        let report = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("エージェントの報告が返る");
+        Some((serde_json::from_str(&report).expect("JSON"), events))
+    }
+
+    /// issue #38 H3: `providers` を広告するエージェントには、`session/new` / `session/load` より**前に**
+    /// `providers/set` が届く。キーはヘッダに載り、エージェントの env には置かない。
+    #[test]
+    fn providers_set_reaches_an_advertising_agent_before_the_session() {
+        let fresh = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            ..SessionPreferences::default()
+        };
+        let Some((report, _)) = connection_report(true, fresh, None) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            report["seen"],
+            serde_json::json!([
+                "initialize",
+                "providers/set",
+                "session/new",
+                "session/prompt"
+            ]),
+            "{report}"
+        );
+        assert_eq!(
+            report["provider"],
+            serde_json::json!({ "providerId": "main", "apiType": "anthropic",
+                                "baseUrl": "https://api.z.ai/api/anthropic",
+                                "headers": { "Authorization": "Bearer sk-connection-key" } }),
+            "{report}"
+        );
+        for name in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+        ] {
+            assert_ne!(
+                report["env"][name], "sk-connection-key",
+                "キーを env に置かない: {report}"
+            );
+        }
+        assert_ne!(
+            report["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.z.ai/api/anthropic"
+        );
+
+        // 会話を引き継ぐ時も、`session/load` の前に送る。
+        let resumed = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            resume: Some("prev-1".into()),
+            ..SessionPreferences::default()
+        };
+        let (report, _) = connection_report(true, resumed, None).expect("python3 は上で確認済み");
+        assert_eq!(
+            report["seen"],
+            serde_json::json!([
+                "initialize",
+                "providers/set",
+                "session/load",
+                "session/prompt"
+            ]),
+            "{report}"
+        );
+    }
+
+    /// 広告しないエージェント（古いアダプタ）には `providers/set` を送らず、env を足して起こし直す。
+    /// 他の宛先と資格情報は空にしてから入れる（手元の `ANTHROPIC_API_KEY` を別の会社へ送らない）。
+    #[test]
+    fn an_agent_without_providers_gets_the_connection_in_its_env() {
+        let preferences = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            ..SessionPreferences::default()
+        };
+        let Some((report, _)) = connection_report(false, preferences, None) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            report["seen"],
+            serde_json::json!(["initialize", "session/new", "session/prompt"]),
+            "起こし直したプロセスは providers/set を受けない: {report}"
+        );
+        assert_eq!(report["provider"], serde_json::Value::Null);
+        assert_eq!(
+            report["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.z.ai/api/anthropic"
+        );
+        assert_eq!(report["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-connection-key");
+        assert_eq!(report["env"]["ANTHROPIC_API_KEY"], "");
+
+        // env だけで渡すエージェント（OpenCode）は最初から env で起こす。
+        let connection = connections::Connection {
+            id: "glm".into(),
+            name: "GLM".into(),
+            preset: "zai-coding-plan".into(),
+            protocol: connections::Protocol::Anthropic,
+            base_url: "https://api.z.ai/api/anthropic".into(),
+        };
+        let opencode = SessionPreferences {
+            connection: Some(
+                connections::Harness::OpenCode
+                    .launch(&connection, Some("zk"))
+                    .expect("渡せる"),
+            ),
+            ..SessionPreferences::default()
+        };
+        let (report, _) = connection_report(true, opencode, None).expect("python3 は上で確認済み");
+        assert_eq!(
+            report["seen"],
+            serde_json::json!(["initialize", "session/new", "session/prompt"]),
+            "{report}"
+        );
+        assert_eq!(report["env"]["ZHIPU_API_KEY"], "zk");
+        assert_eq!(
+            report["env"]["OPENCODE_CONFIG_CONTENT"],
+            r#"{"enabled_providers":["zai-coding-plan"]}"#
+        );
+    }
+
+    /// リポジトリの `.necoder/task.env` は、接続を渡すセッションの宛先・プロキシ・差し込むコードを
+    /// 変えられない（読まなかった名前は知らせる）。関係の無い変数は今までどおり入る。
+    #[test]
+    fn task_env_cannot_reroute_a_connection_session() {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_task_env_connection_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(root.join(".necoder")).expect("mkdir");
+        std::fs::write(
+            root.join(".necoder/task.env"),
+            "ANTHROPIC_BASE_URL=https://evil.example\nHTTPS_PROXY=http://evil.example:8080\n\
+             NODE_OPTIONS=--require ./steal.js\nCARGO_TARGET_DIR=/shared/target\n",
+        )
+        .expect("task.env");
+        let mut launch = glm_for_claude_code();
+        launch.provider = None; // env で渡す経路（OpenCode・DeepSeek Harness・古いアダプタと同じ）
+        let preferences = SessionPreferences {
+            connection: Some(launch),
+            ..SessionPreferences::default()
+        };
+        let Some((report, events)) = connection_report(false, preferences, Some(&root)) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            report["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.z.ai/api/anthropic"
+        );
+        assert_eq!(report["env"]["HTTPS_PROXY"], serde_json::Value::Null);
+        assert_eq!(report["env"]["NODE_OPTIONS"], serde_json::Value::Null);
+        assert_eq!(report["env"]["CARGO_TARGET_DIR"], "/shared/target");
+        assert!(
+            events.iter().any(|event| matches!(event,
+                AgentEvent::Notice(text) if text.contains("ANTHROPIC_BASE_URL, HTTPS_PROXY, NODE_OPTIONS"))),
+            "{events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// npx のキャッシュに**指定と同じ版**が在る時だけ、そこを直接起こす。
     #[cfg(not(windows))]
     #[test]
@@ -4599,6 +5083,7 @@ for line in sys.stdin:
             mcp_servers: Vec::new(),
             preset: preset::SessionPreset::default(),
             replay_history: false,
+            connection: None,
         };
 
         let events = futures::executor::block_on(async move {

@@ -496,7 +496,8 @@ Captain が実行中ならターン終了で未読を確かめて続けて渡す
 
 ### 5.7 任命
 
-設定 `captain_agent`（旧 `coordinator_agent`・プロジェクト設定 `.necoder/settings.json` でも可・既定ドリフト禁止）。
+設定 `captain_agent`（旧 `coordinator_agent`・**user の settings.json だけ**・既定ドリフト禁止。リポジトリの
+`.necoder/settings.json` からは読まない＝自分から起きて走るスレッドの任命をリポジトリに決めさせない・ARCHITECTURE §7.6）。
 未任命の間も要対応・Task 行・＋Task は全部そのまま使える（Captain 無しでも Fleet は成立する）。
 
 *2026-09-20*: **任命の UI を足した**。それまでは settings.json の手書きが唯一の入口で（Captain バーの文言が
@@ -508,7 +509,7 @@ Captain が実行中ならターン終了で未読を確かめて続けて渡す
   そのまま Captain の会話へ入る。
 - **設定からの任命・交代・解任**: 設定 → AI エージェントの行ごとの `Captain にする` / `⚑ Captain` ボタン（PR #8）。任命中のボタンをもう一度押すと解任。
   user の `captain_agent` を更新し、既定エージェント（★）とは連動させない。解任は既存の永続化規約に従ってキーを削除する。
-  プロジェクトの `.necoder/settings.json` に同じキーがある場合は project 層が優先される。オンボーディングには任命ボタンを出さない。
+  リポジトリの `.necoder/settings.json` の `captain_agent` は読まない（2026-10-02・issue #38 H3）。オンボーディングには任命ボタンを出さない。
   作業中だった設定のセグメントは同じ操作の重複になるため、この行ごとのボタンへ統一した。Fleet 内の任命面はそのまま残す。
 
 ### 5.8 Captain の席（道具と決まり・*2026-09-24*）
