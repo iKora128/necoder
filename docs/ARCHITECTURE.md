@@ -381,6 +381,50 @@ herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さ
 root キーに直接 upsert すると、同じ root の 2 枚目の ACP が 1 枚目の行を消す。パネルの解放は
 `cx.on_release` で自分の行だけ落とす。
 
+### 7.6 実行中のターンへの差し込み（`_session/steering`・2026-10-02）
+
+送信待ちの「今すぐ」（UI-SPEC §6 の送信待ち）は、エージェントが広告していれば**実行中のターンを止めずに**文を渡す。
+以前は `session/cancel` でターンを畳んでから送り直しており、途中のツール作業を捨てていた。広告の無い
+エージェントは今までどおり「中断 → 閉じたら先頭として送る」。
+
+- **判定は initialize の実物から**: 応答の**最上位**の `_meta.steering.supported == true`（`agentCapabilities` の
+  中ではない）。claude-agent-acp 0.81.2（`dist/acp-agent.js` の `initialize`・`STEER_METHOD`）と codex-acp 1.13.1
+  （`dist/index.js` の `initialize`・`SESSION_STEERING_METHOD`）が同じ形で広告する（レジストリの今の版
+  claude-agent-acp 0.84.0・codex-acp 2.1.0 もソース上は同じ契約）。`acp_client::steering_supported`
+  が読み、`AgentEvent::SessionStarted.steerable` で UI へ渡す
+- **線の形**: request `_session/steering` `{sessionId, prompt: ContentBlock[], _meta: {steering: {idleBehavior:
+  "promptRequired"}}}` → `{outcome}`。`injected` = 走っているターンに入った / `promptRequired` = もうターンが
+  無かった（文は**届いていない**）/ `startedNewTurn` = エージェントが自分で新しいターンを始めた。
+  `SteerOutcome` は `Injected` / `TurnOver` / `StartedTurn` / `Refused(理由)`（エラー応答・知らない outcome）
+- **`SessionCommand::Steer { id, text, images }`**: `run_session_on` は応答を**ターンの select の 1 本**として待つ
+  （その場で await しない＝待つ間も更新は流れる）。待機中も同じ future を見張る（ターンの終わり際に送った分は
+  応答がターンの後に来る）。1 セッション 1 本ずつで、後から来た分は前の応答を待つ。ターンが閉じた時に
+  待っていた分は送らずに `TurnOver`。待機中に届いた `Steer` も送らずに `TurnOver`（＝普通の送信に回す）
+- **select の順は 更新 → 差し込みの応答 → prompt 応答 → コマンド**。差し込みの応答を prompt 応答より先に
+  読むのは、両方が同時に届いた時に「差し込んだ文」をターンの終わりより前の位置に置くため。prompt 応答を
+  コマンドより先に読むのは、終端が手元に届いているのに `Steer` を終わったターンへ送らないため
+- **UI の後始末は 1 か所（キュー）**: `TurnOver` と `Refused` は文を送信待ちの先頭へ戻す。`TurnOver` は
+  ターンの終わりのフラッシュがそのまま次のターンとして送り、`Refused` は理由を 1 行出して「中断 → 送り直し」
+  に落ちる。差し込みの応答を待つ間は、ターンが閉じても送信待ちを流さない（順序を守る）
+- **ターンの終わりの判定は変えない**: ターンは `session/prompt` の応答（`stopReason`）でだけ閉じる。差し込みは
+  新しいターンを作らない — claude-agent-acp は差し込みの後、ターンの決着を SDK の idle まで遅らせ
+  （`Turn.steeredEchoes`）、codex-acp は Codex の `turn/steer` で同じターンに足す。どちらも差し込んだ文に
+  答え終えてから prompt 応答を返す。zeron が Claude / Codex のアダプタを捨てた理由（背景の作業のために
+  ターンを開いたままにして完了判定が狂う・`zeron/crates/harness/src/lib.rs` 冒頭）に当たらないことは、
+  実アダプタで確かめた（`cargo run -p acp_client --example probe_steering`・2026-10-02）: `sleep 6` を
+  走らせている最中に差し込むと、claude-agent-acp 0.81.2（haiku）も codex-acp 1.13.1（gpt-5.6-luna）も
+  すぐ `injected` を返し、**走っているシェルは止めずに最後まで走らせ**、終わってから差し込んだ文に答えて
+  ターン 1 本のまま `Completed` で閉じた（ツールの終わりから Claude 1.6 秒・Codex 2.4 秒）。Claude は呼び出しを
+  **書いている途中**に差し込むと、その生成を止めて（優先度 `now`）呼び出しを出し直す（書きかけの呼び出しは
+  走らず、結果の更新も来ない）
+- **既知の端: codex-acp 1.13.1 は `idleBehavior` を読まない**（`parseSessionSteerParams` は `sessionId` と
+  `prompt` だけ）。Codex のターンが閉じた（`turn/completed`）直後〜prompt 応答がこちらに届くまでの数 ms に
+  差し込みが着くと、Codex は自分で新しいターンを始める（`startedNewTurn`）。necoder は文を transcript に出し、
+  返事は待機中の更新の道（目標の自走ターンと同じ）で届くが、そのターンの実行中・完了は示せない。
+  残りの送信待ちは自動では流さない（codex-acp は自分で始めたターンの最中に `session/prompt` が来ると
+  ターンの控えを上書きする）。次のターンの終わりか、人の送信で流れる。Claude は `promptRequired` を返すので
+  この端は無い
+
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 
 - `cargo bench` + 起動時間計測を `scripts/` に置き、一般的な「キー入力→フレーム提示」の

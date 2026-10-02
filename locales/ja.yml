@@ -158,6 +158,9 @@ agent:
   file_append: "追記 %{path}"
   queued_title: "送信待ち %{n} 件（ターン完了で自動送信）"
   queue_send_now: 中断して今すぐ
+  queue_steer_now: 今すぐ差し込む
+  queue_steering: 差し込み中…
+  steer_refused: "差し込めませんでした（%{reason}）。中断して送り直します"
   elicitation_submit: これで回答
   elicitation_decline: 答えない
   elicitation_custom_single: 自分で書く（案を選んだ時はその案に添えるメモになる）

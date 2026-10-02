@@ -66,12 +66,14 @@ impl AgentPanel {
             .count()
     }
 
-    /// 止めてよいスレッドか: 走行中・承認待ち・回答待ちでなく、送信待ちの入力も無く、会話を引き継げる。
+    /// 止めてよいスレッドか: 走行中・承認待ち・回答待ちでなく、送信待ちの入力も応答待ちの差し込みも
+    /// 無く、会話を引き継げる。
     fn can_stop_agent_of(thread: &Thread) -> bool {
         let quiet = matches!(
             thread.activity(),
             ThreadActivity::Idle | ThreadActivity::Done { .. }
-        ) && thread.queued_prompts.is_empty();
+        ) && thread.queued_prompts.is_empty()
+            && thread.steering.is_none();
         let resumable = thread.session_resumable && thread.acp_session_id.is_some();
         quiet && resumable
     }
