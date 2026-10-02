@@ -495,7 +495,13 @@ impl SettingsView {
             }
             let refused: Vec<String> = refused
                 .into_iter()
-                .map(|(reason, names)| format!("{}（{reason}）", names.join("・")))
+                .map(|(reason, names)| {
+                    i18n::t!(
+                        "settings.connection_refused_item",
+                        "names" => names.join(", "),
+                        "reason" => reason
+                    )
+                })
                 .collect();
             // 手で書いた設定が、渡せない・無い接続を指している（起動はそこで止まる）。
             let broken = chosen

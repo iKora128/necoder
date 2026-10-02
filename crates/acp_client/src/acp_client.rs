@@ -350,6 +350,9 @@ pub enum AgentEvent {
     /// 失敗ではないが黙って進めたくない知らせ（MCP サーバを渡せなかった等）。transcript に 1 行
     /// 出すだけで、ターン状態（running / auth_required）には触らない。
     Notice(String),
+    /// 接続のキーを渡すセッションなので、リポジトリの `.necoder/task.env` から読まなかった変数の名前
+    /// （名前の順・issue #38 H3・[`connections::guarded_from_task_env`]）。言葉にするのは UI（transcript に 1 行）。
+    TaskEnvSkipped(Vec<String>),
     /// `session/load` が再生した履歴（O15）。[`SessionPreferences::replay_history`] の時だけ、load が
     /// 成功したら [`AgentEvent::SessionStarted`] の直前に 1 回流す。`items` は古い順・最大
     /// [`history::REPLAY_KEEP`] 件で、`omitted` はそれより前に捨てた項目の数。
@@ -1714,7 +1717,7 @@ pub async fn probe_providers(
                 .await
             };
             let before = list().await?;
-            set_provider(&connection, "probe", &route).await?;
+            set_provider(&connection, &route).await?;
             let after = list().await?;
             Ok(ProvidersProbe {
                 advertised: true,
@@ -1913,10 +1916,7 @@ pub async fn run_session_on(
         }
         if !dropped.is_empty() {
             event_tx
-                .unbounded_send(AgentEvent::Notice(format!(
-                    "接続を渡すセッションなので、.necoder/task.env の {} は読みませんでした",
-                    dropped.join(", ")
-                )))
+                .unbounded_send(AgentEvent::TaskEnvSkipped(dropped))
                 .ok();
         }
     }
@@ -1973,11 +1973,11 @@ enum Attempt {
 }
 
 /// `providers/set` を送る（`session/new` / `session/load` の前・issue #38 H3）。Rust の ACP crate が
-/// 要求の型を持たないので、スキーマの型で組んだ params を `UntypedMessage` で送る。失敗は接続の名前を
-/// 添えて返す（セッションは開かない＝黙ってエージェント自身のログインで走らせない）。
+/// 要求の型を持たないので、スキーマの型で組んだ params を `UntypedMessage` で送る。断られたら、呼び手は
+/// セッションを開かずに [`connections::ProviderRejected`] で戻る（黙ってエージェント自身のログインで
+/// 走らせない）。
 async fn set_provider(
     connection: &acp::ConnectionTo<acp::Agent>,
-    name: &str,
     route: &connections::ProviderRoute,
 ) -> std::result::Result<(), acp::Error> {
     let message = acp::UntypedMessage::new("providers/set", route.set_request())?;
@@ -1987,12 +1987,6 @@ async fn set_provider(
     )
     .await
     .map(|_| ())
-    .map_err(|error| {
-        acp::Error::new(
-            i32::from(acp::ErrorCode::InternalError),
-            format!("接続「{name}」を providers/set で渡せませんでした: {error}"),
-        )
-    })
 }
 
 /// [`run_session_on`] の 1 回の起動（プロセスを起こして、セッションが終わるまで）。
@@ -2048,6 +2042,8 @@ async fn run_session_attempt(
     let session_opened = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let opened = session_opened.clone();
     let exit_events = event_tx.clone();
+    // `providers/set` を断られた（セッションは開いていない・UI が言葉にする）。
+    let mut provider_rejected: Option<connections::ProviderRejected> = None;
     let outcome = acp::Client
         .builder()
         .connect_with(transport, async |connection| {
@@ -2068,7 +2064,13 @@ async fn run_session_attempt(
                         .as_ref()
                         .map(|provider| (launch.name.as_str(), provider))
                 }) {
-                    set_provider(&connection, name, provider).await?;
+                    if let Err(error) = set_provider(&connection, provider).await {
+                        provider_rejected = Some(connections::ProviderRejected {
+                            connection: name.to_string(),
+                            reason: error.to_string(),
+                        });
+                        return Err(error);
+                    }
                 }
             }
             // 前回のセッション id があり、エージェントが `loadSession` を広告していれば `session/load`
@@ -2511,6 +2513,10 @@ async fn run_session_attempt(
         .await;
     // 開く前に落ちた（initialize の前後でプロセスが終わった）なら、ACP の「Broken pipe」ではなく
     // 終わり方と stderr の末尾を理由にする（何が悪いかはエージェントしか知らない）。
+    if let Some(rejected) = provider_rejected {
+        drop(process);
+        return Err(anyhow::Error::new(rejected));
+    }
     if outcome.is_err() && !session_opened.load(std::sync::atomic::Ordering::SeqCst) {
         if let Some(exited) = startup_exit(&mut process, &secret_env).await {
             drop(process);
@@ -4428,7 +4434,12 @@ for line in sys.stdin:
                          "agentCapabilities": caps}})
     elif method == "providers/set":
         provider = params
-        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+        if REJECT_SET:
+            send({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32602,
+                            "message": "Invalid params: baseUrl must be a non-empty absolute http(s) URL."}})
+        else:
+            send({"jsonrpc": "2.0", "id": rid, "result": {}})
     elif method in ("session/new", "session/load"):
         result = {} if method == "session/load" else {"sessionId": "fresh"}
         send({"jsonrpc": "2.0", "id": rid, "result": result})
@@ -4464,14 +4475,16 @@ for line in sys.stdin:
         preferences: SessionPreferences,
         cwd: Option<&Path>,
     ) -> Option<(serde_json::Value, Vec<AgentEvent>)> {
-        let script = AGENT_THAT_REPORTS_CONNECTION.replace(
-            "PROVIDERS_CAP",
-            if providers_advertised {
-                "True"
-            } else {
-                "False"
-            },
-        );
+        let script = AGENT_THAT_REPORTS_CONNECTION
+            .replace(
+                "PROVIDERS_CAP",
+                if providers_advertised {
+                    "True"
+                } else {
+                    "False"
+                },
+            )
+            .replace("REJECT_SET", "False");
         let mut command = fake_agent_command(&script)?;
         if let Some(cwd) = cwd {
             command.cwd = cwd.to_path_buf();
@@ -4567,6 +4580,53 @@ for line in sys.stdin:
         );
     }
 
+    /// エージェントが `providers/set` を断ったら、セッションを開かずに（`session/new` を送らずに）
+    /// [`connections::ProviderRejected`] で戻る — 黙ってエージェント自身のログインで走らせない。
+    #[test]
+    fn a_rejected_provider_keeps_the_session_closed() {
+        let script = AGENT_THAT_REPORTS_CONNECTION
+            .replace("PROVIDERS_CAP", "True")
+            .replace("REJECT_SET", "True");
+        let Some(command) = fake_agent_command(&script) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let preferences = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            ..SessionPreferences::default()
+        };
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("やあ".into()))
+            .expect("send");
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                drop(command_tx);
+                seen
+            };
+            futures::join!(session, collect)
+        });
+        let error = outcome.expect_err("断られたら起こさない");
+        let rejected = error
+            .downcast_ref::<connections::ProviderRejected>()
+            .expect("理由を型で返す（UI が言葉にする）");
+        assert_eq!(rejected.connection, "GLM");
+        assert!(rejected.reason.contains("baseUrl"), "{}", rejected.reason);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SessionStarted { .. } | AgentEvent::AgentChunk(_)
+            )),
+            "セッションは開かない: {events:?}"
+        );
+    }
+
     /// 広告しないエージェント（古いアダプタ）には `providers/set` を送らず、env を足して起こし直す。
     /// 他の宛先と資格情報は空にしてから入れる（手元の `ANTHROPIC_API_KEY` を別の会社へ送らない）。
     #[test]
@@ -4659,7 +4719,8 @@ for line in sys.stdin:
         assert_eq!(report["env"]["CARGO_TARGET_DIR"], "/shared/target");
         assert!(
             events.iter().any(|event| matches!(event,
-                AgentEvent::Notice(text) if text.contains("ANTHROPIC_BASE_URL, HTTPS_PROXY, NODE_OPTIONS"))),
+                AgentEvent::TaskEnvSkipped(names)
+                    if names == &["ANTHROPIC_BASE_URL", "HTTPS_PROXY", "NODE_OPTIONS"])),
             "{events:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -5376,6 +5437,9 @@ for line in sys.stdin:
                         }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
                         AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
+                        AgentEvent::TaskEnvSkipped(names) => {
+                            eprintln!("[task.env skipped] {}", names.join(", "))
+                        }
                         AgentEvent::HistoryReplayed { items, omitted } => {
                             eprintln!("[history] {} items, {omitted} omitted", items.len())
                         }

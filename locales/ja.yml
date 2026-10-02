@@ -74,7 +74,9 @@ agent:
   connection_remote_skipped: "接続「%{connection}」はリモート（SSH 先）のエージェントには渡しません。このスレッドは SSH 先のエージェント自身のログインで動きます"
   connection_unsupported: "%{agent} には接続「%{connection}」を渡せません（渡し方が分かっていません）。設定 › 接続 で「自分のログイン」に戻してください"
   connection_refused: "接続「%{connection}」を渡せないので起動しません: %{reason}"
-  connection_key_unreadable: "接続「%{connection}」のキーをキーチェーンから読めませんでした"
+  connection_key_unreadable: "接続「%{connection}」のキーをキーチェーンから読めませんでした: %{reason}"
+  connection_provider_rejected: "接続「%{connection}」をエージェントが受け付けなかったので起動しません: %{reason}"
+  connection_task_env_skipped: "接続を渡すセッションなので、.necoder/task.env の %{names} は読みませんでした"
   pill_connection: "接続: %{connection}（エージェントはこの契約の API で動きます・設定 › 接続 で変える）"
   err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
   err_launch_not_in_registry: "%{id} が ACP レジストリに見つかりません（設定 → AI エージェント → エージェントを追加 で取り直してください）"
@@ -863,6 +865,7 @@ settings:
   connection_choice_missing: "選んでいる接続「%{id}」がありません。このエージェントは起動しません（選び直してください）"
   connection_choice_refused: "選んでいる接続「%{name}」は渡せません（%{reason}）。このエージェントは起動しません"
   connection_refused_list: "渡せない接続: %{list}"
+  connection_refused_item: "%{names}（%{reason}）"
   connection_removed: "接続「%{name}」を外しました（使っていたエージェントは自分のログインに戻ります）"
   connection_removed_key_left: "接続「%{name}」を外しましたが、キーチェーンのキーを消せませんでした（%{reason}）"
   connection_key_paste_invalid: クリップボードにキーがありません（1 行で空白を含まない文字列をコピーしてから押してください）

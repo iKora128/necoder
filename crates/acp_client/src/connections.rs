@@ -389,6 +389,28 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// エージェントが `providers/set` を断った（issue #38 H3）。セッションは開いていない。UI が言葉にする
+/// （`Display` はログ用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRejected {
+    /// 接続の名前。
+    pub connection: String,
+    /// エージェントが返した理由（`-32602 Invalid params: …` など）。
+    pub reason: String,
+}
+
+impl std::fmt::Display for ProviderRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "接続「{}」を providers/set で渡せない: {}",
+            self.connection, self.reason
+        )
+    }
+}
+
+impl std::error::Error for ProviderRejected {}
+
 /// DeepSeek Harness の ACP アダプタのコマンド名（`@openma/deepseek-harness-acp`）。
 const DEEPSEEK_HARNESS_COMMAND: &str = "dsh-acp";
 

@@ -7465,9 +7465,6 @@ PYEOF"#;
         // 出さない）— 無ければ起こさない＝先張りは黙り、送信なら理由が出る。中身を読むのは下の背景で
         // （許可のダイアログで UI を止めない）。
         let secrets = connection.is_some().then(|| settings::secret_store(cx));
-        let key_unreadable = connection.as_ref().map(|(connection, _)| {
-            i18n::t!("agent.connection_key_unreadable", "connection" => &connection.name)
-        });
         let missing_key = connection.as_ref().map(|(connection, _)| {
             i18n::t!(
                 "agent.connection_refused",
@@ -7481,9 +7478,10 @@ PYEOF"#;
                     Ok(true) => {}
                     Ok(false) => return Err(missing_key.clone().unwrap_or_default()),
                     Err(error) => {
-                        return Err(format!(
-                            "{}: {error:#}",
-                            key_unreadable.clone().unwrap_or_default()
+                        return Err(i18n::t!(
+                            "agent.connection_key_unreadable",
+                            "connection" => &connection.name,
+                            "reason" => format!("{error:#}")
                         ))
                     }
                 }
@@ -7504,8 +7502,11 @@ PYEOF"#;
                     let key = match secrets.get(&connection.id) {
                         Ok(key) => key,
                         Err(error) => {
-                            let message =
-                                format!("{}: {error:#}", key_unreadable.unwrap_or_default());
+                            let message = i18n::t!(
+                                "agent.connection_key_unreadable",
+                                "connection" => &connection.name,
+                                "reason" => format!("{error:#}")
+                            );
                             error_tx.unbounded_send(AgentEvent::Failed(message)).ok();
                             return;
                         }
@@ -8216,6 +8217,15 @@ PYEOF"#;
                 thread
                     .entries
                     .push(Entry::Agent(SharedString::from(message)));
+            }
+            // 接続を渡すので task.env から読まなかった変数（issue #38 H3）。走行状態は触らない。
+            AgentEvent::TaskEnvSkipped(names) => {
+                thread
+                    .entries
+                    .push(Entry::Agent(SharedString::from(i18n::t!(
+                        "agent.connection_task_env_skipped",
+                        "names" => names.join(", ")
+                    ))));
             }
             AgentEvent::Failed(error) => {
                 // 遷移スナップショット（P1 素材③）: Failed = エラー文字列（1 行に畳む）。
@@ -13910,6 +13920,13 @@ fn launch_error_text(error: &anyhow::Error) -> String {
 /// 異常終了: ACP initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context だけに
 /// なりハンドシェイクの無言ハングが埋もれるため。
 fn session_error_text(error: &anyhow::Error) -> String {
+    if let Some(rejected) = error.downcast_ref::<acp_client::connections::ProviderRejected>() {
+        return i18n::t!(
+            "agent.connection_provider_rejected",
+            "connection" => &rejected.connection,
+            "reason" => &rejected.reason
+        );
+    }
     match error.downcast_ref::<acp_client::AgentExited>() {
         Some(exited) => i18n::t!("agent.err_agent_exited", "status" => exit_status_text(exited)),
         None => format!("{error:#}"),
