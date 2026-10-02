@@ -161,7 +161,7 @@ td.ex .chip { pointer-events: none; }
 .cap b { color: var(--fg1); }
 .try { font-size: 11px; color: var(--fg2); margin-top: 6px; }
 
-/* ============ 思考量のゲージ（2026-10-02・モダン版 M-1〜M-4）============ */
+/* ============ 思考量のゲージ（2026-10-02・決定: M-3 デジタル・メーター）============ */
 .gauge-col { width: 300px; flex: none; }
 .gauge-col h3 .sub { font-weight: 400; color: var(--fg2); font-size: 11px; margin-left: 6px; }
 .gcard { position: relative; width: 290px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-menu); overflow: hidden; outline: none; }
@@ -191,12 +191,10 @@ td.ex .chip { pointer-events: none; }
 .gread .dflt { align-self: flex-start; margin-top: 3px; font-size: 9.5px; color: var(--fg2); border: 1px dashed var(--fg2); border-radius: 9px; padding: 0 7px; cursor: pointer; }
 .gread .dflt.on { color: var(--fg0); border-style: solid; border-color: var(--fg1); background: var(--bg3); }
 .gctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--fg2); }
-.gctl button, .gmode button { all: unset; cursor: pointer; padding: 1px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg1); background: var(--bg1); font-size: 11px; }
-.gctl button:hover, .gmode button:hover { color: var(--fg0); background: var(--bg3); }
-.gctl button.on, .gmode button.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
+.gctl button, .gctl button:hover, .gctl button.on, .gctl button { all: unset; cursor: pointer; padding: 1px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg1); background: var(--bg1); font-size: 11px; }
+.gctl button:hover { color: var(--fg0); background: var(--bg3); }
+.gctl button.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
 .gctl .sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; }
-.gmode { display: flex; align-items: center; gap: 8px; margin: 4px 0 14px; font-size: 11.5px; color: var(--fg1); }
-.gmode .warnnote { color: var(--fg2); font-size: 11px; }
 .gnote { font-size: 11px; color: var(--fg2); margin-top: 8px; line-height: 1.6; }
 .gnote li { margin: 2px 0 2px 14px; color: var(--fg1); }
 </style>
@@ -207,7 +205,7 @@ td.ex .chip { pointer-events: none; }
 <div class="meta">2026-10-02 · 中身はエージェントが実際に広告している設定（claude-agent-acp 0.81.2・codex-acp 1.13.1 の <code>configOptions</code>）。今は boolean を捨てているので Fast が選べない（<code>acp_client.rs</code> の <code>map_config_option</code>）。どちらの形でも boolean は出せる。</div>
 
 <div class="lead">
-  <b>追加で選ぶこと（2026-10-02）: 思考量のゲージ</b> — 下の「0.」に M-1〜M-4（モダン版）を並べました（「M-1」のように一言で・光の色も白 / スレッド色から）。<br><b>決定（2026-10-02・本人）: 案 C + C-1</b> — チップ 1 つ → カード 1 枚、権限モードはカードの外のピル。実装は <code>crates/agent_panel/src/config_card.rs</code>（UI-SPEC §6）。以下は決める時に並べた比較のまま残す。<br><br>
+  <b>思考量のゲージ（2026-10-02・本人）: M-3 デジタル・メーター</b> — 下の「0.」。光は白。<br><b>決定（2026-10-02・本人）: 案 C + C-1</b> — チップ 1 つ → カード 1 枚、権限モードはカードの外のピル。実装は <code>crates/agent_panel/src/config_card.rs</code>（UI-SPEC §6）。以下は決める時に並べた比較のまま残す。<br><br>
   <b>決めたいこと 2 つ</b>
   <ol>
     <li><b>形</b>: 案 P「今のピルのまま、boolean と残りの select をピルとして足す」/ 案 C「チップ 1 つ → 開くとカード 1 枚（zeron 風）」。推しは <b>案 C</b>（理由は下）。</li>
@@ -218,9 +216,8 @@ td.ex .chip { pointer-events: none; }
 
 
 <!-- =========================================================== 0. 思考量のゲージ -->
-<h2>0. 思考量のゲージを選ぶ（2026-10-02・モダン版）</h2>
-<p class="meta" style="max-width:1180px">本人「High とかのやつのゲージはもう少しモダンでかっこいいやつに。この線と棒だけでなく」。前の G-1〜G-4（弧と針・棒・輪）を取り下げ、光とグラデーションで作り直しました。どれも <b>GPUI で描ける表現だけ</b>（弧・多角形・グラデーション・光の輪は重ね塗り）で、<b>動くのは値を変えた時だけ</b>（止まっている間は描き直さない＝idle 0%）。段の数はエージェントのまま（Claude は Default + 5 段・Codex は 4 段・3 段のモデル）、<b>Default は目盛りの外</b>（エージェント任せ）、表示名は広告のまま。カードを押して <span class="kbd">←</span><span class="kbd">→</span>（<span class="kbd">Tab</span> でエージェント）、またはボタンで動きを見られます。</p>
-<div class="gmode"><span>光の色:</span><button class="on" data-color="0">白（色の原則どおり）</button><button data-color="1">スレッド色</button><span class="warnnote">スレッド色は UI-SPEC §1.3 の外（スレッド色の置き場所に「思考量のゲージ」を足すことになる）。決めるのは本人。</span></div>
+<h2>0. 思考量のゲージ（決定 2026-10-02: M-3 デジタル・メーター・光は白）</h2>
+<p class="meta" style="max-width:1180px">本人が光るメーター 4 案（M-1 グロウ・リング / M-2 チャージ・セル / M-3 デジタル・メーター / M-4 リキッド）から M-3 を選んだ（「めっちゃいい」）。光の色は色の原則（UI-SPEC §1.3）どおり白。ほかの案と比べた時の物は git の履歴（mock の 19944b6）に残る。弧に並んだ細い LED が段に合わせて灯り、値を変えると走って少し行き過ぎてから戻る（動くのは変えた時だけ）。段の数はエージェントのまま、Default は目盛りの外（LED が全部消え、横の札が灯る）、表示名は広告のまま。カードを押して <span class="kbd">←</span><span class="kbd">→</span>（<span class="kbd">Tab</span> でエージェント）。</p>
 <div class="row" id="gauge-row" style="gap:14px"></div>
 
 <!-- =========================================================== 1. 並べて比べる -->
@@ -624,7 +621,7 @@ document.addEventListener('mousedown', e => { if (open && !e.target.closest('#li
 paint(document);
 open = true; render();
 
-/* ============ 思考量のゲージ（モダン版 M-1〜M-4）============ */
+/* ============ 思考量のゲージ（M-3 デジタル・メーター）============ */
 const GA = {
   claude: { label: 'Claude（Default + 5 段）', name: 'Claude Code', badge: 'claude', model: 'Opus 4.8',
             choices: [['default','Default'],['low','Low'],['medium','Medium'],['high','High'],['xhigh','Xhigh'],['max','Max']] },
@@ -634,21 +631,14 @@ const GA = {
             choices: [['low','Low'],['medium','Medium'],['high','High']] },
 };
 const GAUGES = [
-  { id: 'M-1', title: 'M-1 グロウ・リング', sub: '光る輪（Apple Watch の輪の感じ）', kind: 'ring', rec: true,
-    notes: ['太い輪が先端に向かって明るくなり、先端が光る。値は輪の横に大きく', '段が上がるほど輪が伸びる（Max で一周の 3/4）。輪の外の小さな点が段の区切り', 'Default は輪が空で、下の切れ目の点が灯る'] },
-  { id: 'M-2', title: 'M-2 チャージ・セル', sub: '斜めのセルが順に充電される', kind: 'cells',
-    notes: ['斜めに傾いたセルが段ごとに背を高くして並び、上がる時は 1 つずつ充電されるように灯る', 'ゲームの HUD や EV の充電表示の感じ', 'Default はセルが全部ガラスのままで、横の破線の札が灯る'] },
-  { id: 'M-3', title: 'M-3 デジタル・メーター', sub: 'LED の目盛りが走る回転計', kind: 'digital',
-    notes: ['弧に並んだ細い LED が、値を上げるとエンジンを吹かしたように走って灯る（少し行き過ぎて戻る）', '車のデジタルメーターの感じ。段の区切りは弧の外の点', 'Default は LED が全部消える'] },
-  { id: 'M-4', title: 'M-4 リキッド', sub: 'ガラス玉の液面', kind: 'liquid',
-    notes: ['丸いガラスの中の液面が段に合わせて上下し、変えた時だけ波が立つ', 'いちばん柔らかい見た目', 'Default は空のガラス'] },
+  { id: 'M-3', title: 'M-3 デジタル・メーター', sub: 'LED の目盛りが走る回転計（決定）', kind: 'digital',
+    notes: ['弧に並んだ細い LED が、値を上げるとエンジンを吹かしたように走って灯る（少し行き過ぎて戻る）', '段の区切りは弧の外の点。値の名前・何段目か・段の端の名前は右に', 'Default は LED が全部消え、右の「Default」の札が灯る'] },
 ];
-let colorMode = 0;
 const gstate = GAUGES.map(() => ({ agent: 'claude', value: 'high', frac: null, anim: null, lit: [] }));
 const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-/* 色: 光る所だけ。白（原則どおり）かスレッド色（原則外） */
-const lit = a => colorMode ? `rgba(97,175,239,${a})` : `rgba(235,238,246,${a})`;
+/* 色: 光る所だけ・白（色の原則どおり） */
+const lit = a => `rgba(235,238,246,${a})`;
 const glass = a => `rgba(255,255,255,${a})`;
 
 function scaleOf(agentKey) {
@@ -666,31 +656,6 @@ const pt = (cx, cy, r, deg) => [cx + r * Math.cos(rad(deg)), cy - r * Math.sin(r
 function arc(cx, cy, r, from, to) {
   const [x0, y0] = pt(cx, cy, r, from), [x1, y1] = pt(cx, cy, r, to);
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${Math.abs(from - to) > 180 ? 1 : 0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
-}
-
-/* ---- M-1 グロウ・リング ---- */
-function drawRing(st, frac, pulse) {
-  const cx = 52, cy = 50, r = 38, sw = 9, A0 = 225, SW = 270, sc = scaleOf(st.agent), n = sc.levels.length;
-  let g = `<path d="${arc(cx, cy, r, A0, A0 - SW)}" stroke="${glass(.07)}" stroke-width="${sw}" fill="none" stroke-linecap="round"/>`;
-  for (let i = 0; i < n; i++) {
-    const [x, y] = pt(cx, cy, r + 9.5, A0 - SW * (i + 1) / n);
-    g += `<circle cx="${x}" cy="${y}" r="1.4" fill="${frac >= (i + 1) / n - 1e-6 ? lit(.75) : glass(.18)}"/>`;
-  }
-  if (frac > 0.002) {
-    const segs = Math.max(3, Math.ceil(56 * frac)), end = A0 - SW * frac;
-    for (let j = 0; j < segs; j++) {
-      const a0 = A0 - SW * frac * j / segs, a1 = A0 - SW * frac * (j + 1) / segs - (j < segs - 1 ? 0.8 : 0);
-      g += `<path d="${arc(cx, cy, r, a0, a1)}" stroke="${lit(.22 + .78 * Math.pow((j + 1) / segs, 1.4))}" stroke-width="${sw}" fill="none" stroke-linecap="${j === 0 || j === segs - 1 ? 'round' : 'butt'}"/>`;
-    }
-    const [hx, hy] = pt(cx, cy, r, end);
-    g += `<circle cx="${hx}" cy="${hy}" r="${13 + pulse * 5}" fill="${lit(.07 + pulse * .08)}"/><circle cx="${hx}" cy="${hy}" r="${8.5 + pulse * 2}" fill="${lit(.16)}"/><circle cx="${hx}" cy="${hy}" r="3.4" fill="${glass(.97)}"/>`;
-  }
-  if (sc.off) {
-    const [dx, dy] = pt(cx, cy, r, 270), on = st.value === 'default';
-    g += `<circle cx="${dx}" cy="${dy}" r="3.6" fill="${on ? lit(.95) : 'none'}" stroke="${on ? lit(.95) : glass(.35)}" stroke-width="1.2"/>`;
-    if (on) g += `<circle cx="${dx}" cy="${dy}" r="8" fill="${lit(.14)}"/>`;
-  }
-  return `<svg width="104" height="100" viewBox="0 0 104 100">${g}</svg>`;
 }
 
 /* ---- M-3 デジタル・メーター ---- */
@@ -712,42 +677,6 @@ function drawDigital(st, frac, pulse) {
   return `<svg width="112" height="100" viewBox="0 0 112 100">${g}</svg>`;
 }
 
-/* ---- M-2 チャージ・セル ---- */
-function cellsSVG(st) {
-  const sc = scaleOf(st.agent), n = sc.levels.length, w = 17, gap = 5, skew = 6, base = 62, h0 = 18, h1 = 50;
-  let defs = `<defs><linearGradient id="cellg${colorMode}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${lit(1)}"/><stop offset="1" stop-color="${lit(.42)}"/></linearGradient></defs>`;
-  let g = '';
-  sc.levels.forEach((c, i) => {
-    const h = h0 + (h1 - h0) * i / Math.max(1, n - 1), x = 6 + i * (w + gap);
-    const poly = `${x + skew},${base - h} ${x + w + skew},${base - h} ${x + w},${base} ${x},${base}`;
-    g += `<g class="cell" data-i="${i}" data-v="${c[0]}"><polygon points="${poly}" fill="${glass(.05)}" stroke="${glass(.13)}" stroke-width="1"/>
-      <g class="litl"><polygon points="${poly}" fill="${lit(.10)}" stroke="${lit(.14)}" stroke-width="9" stroke-linejoin="round"/><polygon points="${poly}" fill="none" stroke="${lit(.24)}" stroke-width="4" stroke-linejoin="round"/><polygon points="${poly}" fill="url(#cellg${colorMode})"/></g></g>`;
-  });
-  const width = 6 + n * (w + gap) + skew;
-  return `<svg class="cells" width="${width}" height="70" viewBox="0 0 ${width} 70">${defs}${g}</svg>`;
-}
-
-/* ---- M-4 リキッド ---- */
-function drawLiquid(st, frac, phase, amp) {
-  const cx = 48, cy = 48, r = 38;
-  const level = cy + r - 2 * r * frac;
-  let g = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${glass(.035)}" stroke="${glass(.12)}" stroke-width="1.2"/>`;
-  if (frac > 0.002) {
-    const top = [], bot = [];
-    for (let x = cx - r; x <= cx + r + 0.01; x += 1.5) {
-      const dy = Math.sqrt(Math.max(0, r * r - (x - cx) * (x - cx))), yTop = cy - dy, yBot = cy + dy;
-      const wave = level + amp * Math.sin((x / 9) + phase);
-      top.push([x, Math.min(Math.max(wave, yTop), yBot)]); bot.push([x, yBot]);
-    }
-    const pts = [...top, ...bot.reverse()].map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-    g += `<defs><linearGradient id="liqg${colorMode}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${lit(.75)}"/><stop offset="1" stop-color="${lit(.22)}"/></linearGradient></defs>`;
-    g += `<polygon points="${pts}" fill="url(#liqg${colorMode})"/>`;
-    g += `<polyline points="${top.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')}" fill="none" stroke="${lit(.95)}" stroke-width="1.4"/>`;
-  }
-  g += `<path d="${arc(cx, cy, r - 6, 150, 110)}" stroke="${glass(.22)}" stroke-width="2.5" fill="none" stroke-linecap="round"/>`;
-  return `<svg width="96" height="96" viewBox="0 0 96 96">${g}</svg>`;
-}
-
 /* ---- 描き直し・動き ---- */
 function readHTML(k) {
   const st = gstate[k], sc = scaleOf(st.agent), i = sc.levels.findIndex(c => c[0] === st.value), n = sc.levels.length;
@@ -756,49 +685,28 @@ function readHTML(k) {
     <div class="rng">${sc.levels[0][1]} → ${sc.levels[n - 1][1]}</div>
     ${sc.off ? `<div class="dflt ${st.value === 'default' ? 'on' : ''}" data-v="default">${sc.off[1]}</div>` : ''}</div>`;
 }
-function paintGauge(k, frac, pulse, phase, amp) {
+function paintGauge(k, frac, pulse) {
   const g = GAUGES[k], st = gstate[k], host = document.querySelector(`#g${k} .gfx`);
   let svg;
-  if (g.kind === 'ring') svg = drawRing(st, frac, pulse);
-  else if (g.kind === 'digital') svg = drawDigital(st, frac, pulse);
-  else if (g.kind === 'liquid') svg = drawLiquid(st, frac, phase, amp);
+  svg = drawDigital(st, frac, pulse);
   host.innerHTML = svg + readHTML(k);
 }
-const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
 const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
 function animateTo(k, animate) {
   const g = GAUGES[k], st = gstate[k], target = fracOf(st);
-  if (g.kind === 'cells') return paintCells(k, animate);
   if (st.anim) cancelAnimationFrame(st.anim);
   const from = st.frac == null ? target : st.frac;
-  if (!animate || reduceMotion || from === target) { st.frac = target; paintGauge(k, target, 0, 0, g.kind === 'liquid' ? 1.6 : 0); return; }
-  const t0 = performance.now(), dur = g.kind === 'liquid' ? 900 : 560;
-  const ease = g.kind === 'digital' ? easeOutBack : easeOutCubic;
+  if (!animate || reduceMotion || from === target) { st.frac = target; paintGauge(k, target, 0); return; }
+  const t0 = performance.now(), dur = 560, ease = easeOutBack;
   const step = now => {
     const t = Math.min(1, (now - t0) / dur), f = from + (target - from) * ease(t);
     st.frac = Math.max(0, Math.min(1, f));
     const pulse = Math.sin(Math.PI * Math.min(1, t * 1.4));
-    paintGauge(k, st.frac, pulse, t * 9, 1.6 + 4 * (1 - t));
-    if (t < 1) st.anim = requestAnimationFrame(step); else { st.anim = null; st.frac = target; paintGauge(k, target, 0, 9, 1.6); }
+    paintGauge(k, st.frac, pulse);
+    if (t < 1) st.anim = requestAnimationFrame(step); else { st.anim = null; st.frac = target; paintGauge(k, target, 0); }
   };
   st.anim = requestAnimationFrame(step);
 }
-function paintCells(k, animate) {
-  const st = gstate[k], sc = scaleOf(st.agent), host = document.querySelector(`#g${k} .gfx`);
-  if (!host.querySelector('svg.cells')) host.innerHTML = cellsSVG(st) + readHTML(k);
-  else host.querySelector('.gread').outerHTML = readHTML(k);
-  const level = sc.levels.findIndex(c => c[0] === st.value), prev = st.prevLevel == null ? level : st.prevLevel;
-  host.querySelectorAll('.cell').forEach(cell => {
-    const i = +cell.dataset.i, on = i <= level, layer = cell.querySelector('.litl');
-    const delay = (!animate || reduceMotion) ? 0 : (on ? Math.max(0, i - prev - 1) * 70 : Math.max(0, prev - i) * 45);
-    layer.style.transition = `opacity ${animate && !reduceMotion ? 180 : 0}ms ease-out ${delay}ms, transform ${animate && !reduceMotion ? 220 : 0}ms cubic-bezier(.34,1.56,.64,1) ${delay}ms`;
-    layer.style.transformBox = 'fill-box'; layer.style.transformOrigin = 'bottom';
-    layer.style.opacity = on ? 1 : 0;
-    layer.style.transform = on ? 'scaleY(1)' : 'scaleY(.85)';
-  });
-  st.prevLevel = level;
-}
-
 /* ---- カードと操作 ---- */
 function badgeHTML(kind) {
   if (kind === 'mono') return '<span class="badge" style="display:inline-grid;place-items:center;border-radius:3px;background:#4b5563;color:#fff;font-size:7px;font-weight:700">OC</span>';
@@ -807,7 +715,7 @@ function badgeHTML(kind) {
 function buildGauge(k) {
   const g = GAUGES[k], st = gstate[k], a = GA[st.agent];
   const col = document.getElementById('gc' + k);
-  col.innerHTML = `<h3>${g.title}<span class="sub">${g.sub}</span>${g.rec ? '<span class="rec">推し</span>' : ''}</h3>
+  col.innerHTML = `<h3>${g.title}<span class="sub">${g.sub}</span><span class="rec">決定</span></h3>
     <div class="gcard" id="g${k}" tabindex="0">
       <div class="agent">${badgeHTML(a.badge)}${a.name}<span class="slot"></span><span class="tabhint"><span class="kbd">Tab</span>で切り替え</span></div>
       <div class="model"><div class="name">${a.model}<span class="go">›</span></div></div>
@@ -854,11 +762,7 @@ function playGauge(k) {
   const seq = [...all, ...all.slice(0, -1).reverse()];
   seq.forEach((v, n) => setTimeout(() => setValue(k, v), n * 700));
 }
-document.querySelectorAll('.gmode [data-color]').forEach(b => b.onclick = () => {
-  colorMode = +b.dataset.color;
-  document.querySelectorAll('.gmode [data-color]').forEach(x => x.classList.toggle('on', x === b));
-  GAUGES.forEach((g, k) => buildGauge(k));
-});
+
 const grow = document.getElementById('gauge-row');
 grow.innerHTML = GAUGES.map((g, k) => `<div class="gauge-col" id="gc${k}"></div>`).join('');
 GAUGES.forEach((g, k) => buildGauge(k));

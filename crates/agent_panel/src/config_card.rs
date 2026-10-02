@@ -14,7 +14,9 @@
 //! エージェントの行の名前の右は、issue #38 H4 の「接続」の欄が入る場所（今は何も描かない）。
 
 use super::*;
-use gpui::Div;
+use gpui::{Bounds, Div, MouseDownEvent, Pixels};
+
+mod effort_meter;
 
 /// Claude Code / codex-acp が Fast mode に付ける config_id。チップでは名前の代わりに稲妻の絵で出す。
 const FAST_CONFIG_ID: &str = "fast";
@@ -37,10 +39,29 @@ pub(crate) struct ConfigCard {
     focus: FocusHandle,
     /// 一覧のスクロール（印に合わせて動かす）。
     scroll: ScrollHandle,
+    /// 思考量のメーターの動き（カードで値を変えた時だけ）。
+    effort_motion: Option<EffortMotion>,
+    /// 動きの通し番号（変えるたびに増やす＝メーターが動き直す）。
+    motion_serial: u64,
+    /// メーターがいま描いている割合（動きの途中から次の動きを始めるため）。
+    meter_shown: Rc<Cell<f32>>,
+}
+
+/// 思考量のメーターの動き: `from` から `to`（灯す割合）へ、少し行き過ぎてから戻る。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EffortMotion {
+    from: f32,
+    to: f32,
+    serial: u64,
 }
 
 #[cfg(test)]
 impl ConfigCard {
+    /// 試験用: 思考量のメーターが向かっている割合（動いていなければ `None`）。
+    pub(crate) fn effort_motion_target(&self) -> Option<f32> {
+        self.effort_motion.map(|motion| motion.to)
+    }
+
     /// 試験用: いまの面の名前。
     pub(crate) fn page_name(&self) -> &'static str {
         match self.page {
@@ -269,6 +290,9 @@ impl AgentPanel {
             cursor: 0,
             focus,
             scroll: ScrollHandle::new(),
+            effort_motion: None,
+            motion_serial: 0,
+            meter_shown: Rc::new(Cell::new(0.0)),
         });
         cx.notify();
     }
@@ -411,11 +435,26 @@ impl AgentPanel {
             }
             SharedString::from(choices[next].value_id.clone())
         };
-        self.select_option(Selector::Effort, next, cx);
+        self.set_card_effort(next, cx);
     }
 
-    /// 思考量の段を押した（トラックの点）。
-    fn choose_card_effort(&mut self, value_id: SharedString, cx: &mut Context<Self>) {
+    /// 思考量を変える（←→・メーターを押す・Default の札）。メーターの動きを記録してから、ピルと同じ道
+    /// （sticky に value_id・セッションへ送る）で決める。
+    fn set_card_effort(&mut self, value_id: SharedString, cx: &mut Context<Self>) {
+        let to = self.threads.get(self.active).and_then(|thread| {
+            self.stocked_configs(thread)
+                .iter()
+                .find(|config| config.category == ConfigCategory::ThoughtLevel)
+                .map(|config| effort_meter::EffortScale::of(config, &value_id).fraction())
+        });
+        if let (Some(card), Some(to)) = (self.config_card.as_mut(), to) {
+            card.motion_serial += 1;
+            card.effort_motion = Some(EffortMotion {
+                from: card.meter_shown.get(),
+                to,
+                serial: card.motion_serial,
+            });
+        }
         self.select_option(Selector::Effort, value_id, cx);
     }
 
@@ -598,7 +637,7 @@ impl AgentPanel {
     fn render_config_card(&self, card: &ConfigCard, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme.clone();
         let body = match &card.page {
-            CardPage::Main => self.render_card_main(cx).into_any_element(),
+            CardPage::Main => self.render_card_main(card, cx).into_any_element(),
             page => self.render_card_list(page, card, cx).into_any_element(),
         };
         let element = div()
@@ -651,7 +690,7 @@ impl AgentPanel {
     }
 
     /// カードの面: ①エージェント ②モデル ③思考量 ④その他の設定 ⑤キーの一言。
-    fn render_card_main(&self, cx: &mut Context<Self>) -> Div {
+    fn render_card_main(&self, card: &ConfigCard, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
         let Some(thread) = self.threads.get(self.active) else {
             return div();
@@ -784,7 +823,7 @@ impl AgentPanel {
 
         // ③ 思考量（広告の順の段のトラック）。点を押して選ぶ・←→ で 1 段ずつ。
         if let Some(config) = effort {
-            main = main.child(self.render_card_effort(thread, config, cx));
+            main = main.child(self.render_card_effort(card, thread, config, cx));
         }
 
         // 広告がまだ無い（会話の前でエージェントだけ選べる）。
@@ -830,102 +869,196 @@ impl AgentPanel {
         main.child(self.render_card_keys(keys, cx))
     }
 
-    /// 思考量の段（トラック）。線 2px bg3・つまみまでの塗り fg2・段の点 fg2・つまみ fg0（色相なし）。
+    /// 思考量の欄: デジタル・メーター（`effort_meter.rs`・本人が mock で選んだ M-3）と、右に値の名前・
+    /// 何段目か・段の端の名前・Default の札。メーターを押すと押した向きの段に、札を押すと Default にする。
     fn render_card_effort(
         &self,
+        card: &ConfigCard,
         thread: &Thread,
         config: &ConfigOption,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = self.theme.clone();
-        let choices = config.choices();
         let value = card_value(thread, ConfigCategory::ThoughtLevel, Some(config));
+        let scale = effort_meter::EffortScale::of(config, &value);
+        let target = scale.fraction();
+        let levels = scale.levels.len();
         let label = choice_name(config, &value).unwrap_or_else(|| value.clone().into());
-        let at = choices.iter().position(|choice| choice.value_id == value);
-        let last = choices.len().saturating_sub(1).max(1) as f32;
-        let fraction = |index: usize| index as f32 / last;
-        let mut track = div().relative().h(px(18.)).mt(px(4.)).mx(px(6.)).child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(8.))
-                .h(px(2.))
-                .rounded(px(1.))
-                .bg(theme.bg3),
-        );
-        if let Some(at) = at {
-            track = track.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(8.))
-                    .h(px(2.))
-                    .w(relative(fraction(at)))
-                    .rounded(px(1.))
-                    .bg(theme.fg2),
+        // カードで変えた直後だけ動く（エージェントが値を戻した時などは、その値で止まって描く）。
+        let motion = card
+            .effort_motion
+            .filter(|motion| (motion.to - target).abs() < 1e-6);
+        let progress = Rc::new(Cell::new(1.0_f32));
+        let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let shown = card.meter_shown.clone();
+        let colors = effort_meter::MeterColors {
+            lit: theme.fg0,
+            unlit: theme.fg2,
+        };
+        let meter = canvas(|_, _, _| {}, {
+            let progress = progress.clone();
+            let bounds = bounds.clone();
+            move |area, (), window, _cx| {
+                bounds.set(Some(area));
+                let (fraction, pulse) = match motion {
+                    Some(motion) => {
+                        let t = progress.get();
+                        (
+                            motion.from + (motion.to - motion.from) * effort_meter::overshoot(t),
+                            (std::f32::consts::PI * (t * 1.4).min(1.0)).sin(),
+                        )
+                    }
+                    None => (target, 0.0),
+                };
+                shown.set(fraction.clamp(0.0, 1.0));
+                effort_meter::paint(area, window, fraction, pulse, levels, &colors);
+            }
+        })
+        .w(px(effort_meter::WIDTH))
+        .h(px(effort_meter::HEIGHT));
+        let meter = match motion {
+            Some(motion) => meter
+                .with_animation(
+                    ("card-effort-meter", motion.serial as usize),
+                    Animation::new(effort_meter::MOTION),
+                    move |element, delta| {
+                        progress.set(delta);
+                        element
+                    },
+                )
+                .into_any_element(),
+            None => meter.into_any_element(),
+        };
+        let level_values: Vec<SharedString> = scale
+            .levels
+            .iter()
+            .map(|choice| SharedString::from(choice.value_id.clone()))
+            .collect();
+        let meter = div()
+            .id("card-effort-meter")
+            .flex_none()
+            .cursor_pointer()
+            .child(meter)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let Some(area) = bounds.get() else {
+                        return;
+                    };
+                    let x = f32::from(event.position.x - area.origin.x);
+                    let y = f32::from(event.position.y - area.origin.y);
+                    if let Some(level) = effort_meter::level_at(x, y, level_values.len()) {
+                        this.set_card_effort(level_values[level - 1].clone(), cx);
+                    }
+                }),
             );
-        }
-        for (index, choice) in choices.iter().enumerate() {
+
+        let off_scale_selected = scale
+            .off_scale
+            .as_ref()
+            .is_some_and(|choice| choice.value_id == value);
+        let caption: Option<SharedString> = match scale.position {
+            Some(position) => Some(
+                i18n::t!(
+                    "agent.card_effort_step",
+                    "position" => position,
+                    "total" => levels
+                )
+                .into(),
+            ),
+            None if off_scale_selected => Some(i18n::t!("agent.card_effort_default").into()),
+            None => None,
+        };
+        let range = match (scale.levels.first(), scale.levels.last()) {
+            (Some(first), Some(last)) => Some(SharedString::from(format!(
+                "{} → {}",
+                first.name, last.name
+            ))),
+            _ => None,
+        };
+        let default_tag = scale.off_scale.as_ref().map(|choice| {
             let value_id = SharedString::from(choice.value_id.clone());
-            track = track.child(
-                div()
-                    .id(("card-effort-stop", index))
-                    .absolute()
-                    .left(relative(fraction(index)))
-                    .ml(px(-8.))
-                    .top(px(1.))
-                    .size(px(16.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .child(div().size(px(4.)).rounded_full().bg(theme.fg2))
-                    .tooltip(Tooltip::text(choice.name.clone(), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.choose_card_effort(value_id.clone(), cx);
-                        }),
-                    ),
-            );
-        }
-        if let Some(at) = at {
-            track = track.child(
-                div()
-                    .absolute()
-                    .left(relative(fraction(at)))
-                    .ml(px(-6.))
-                    .top(px(3.))
-                    .size(px(12.))
-                    .rounded_full()
-                    .border_2()
-                    .border_color(theme.bg2)
-                    .bg(theme.fg0),
-            );
-        }
+            div()
+                .id("card-effort-default")
+                .flex_none()
+                .mt(px(3.))
+                .px(px(7.))
+                .rounded(px(9.))
+                .border_1()
+                .text_size(px(9.5))
+                .cursor_pointer()
+                .when(off_scale_selected, |element| {
+                    element
+                        .border_color(theme.fg1)
+                        .bg(theme.bg3)
+                        .text_color(theme.fg0)
+                })
+                .when(!off_scale_selected, |element| {
+                    element
+                        .border_dashed()
+                        .border_color(theme.fg2)
+                        .text_color(theme.fg2)
+                        .hover(|style| style.text_color(theme.fg0))
+                })
+                .child(choice.name.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_card_effort(value_id.clone(), cx);
+                    }),
+                )
+        });
         div()
             .px(px(12.))
-            .pt(px(10.))
-            .pb(px(11.))
+            .pt(px(8.))
+            .pb(px(10.))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("agent.card_effort"))),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .text_size(px(10.5))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("agent.card_effort")))
-                    .child(div().flex_1())
+                    .gap(px(14.))
+                    .mt(px(4.))
+                    .child(meter)
                     .child(
                         div()
-                            .text_size(px(11.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg0)
-                            .child(label),
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .gap(px(3.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .truncate()
+                                    .text_size(px(21.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg0)
+                                    .child(label),
+                            )
+                            .when_some(caption, |element, caption| {
+                                element.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(theme.fg1)
+                                        .child(caption),
+                                )
+                            })
+                            .when_some(range, |element, range| {
+                                element.child(
+                                    div().text_size(px(9.5)).text_color(theme.fg2).child(range),
+                                )
+                            })
+                            .children(default_tag),
                     ),
             )
-            .child(track)
     }
 
     /// その他の設定の 1 行。boolean はスイッチ（押すとすぐ送る）、select は今の値 + ›（押すと一覧）。

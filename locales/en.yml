@@ -72,6 +72,8 @@ agent:
   card_tab_hint: to switch
   card_agent_fixed: Fixed for this conversation
   card_effort: Effort
+  card_effort_step: "%{position} of %{total}"
+  card_effort_default: Agent decides
   card_no_options: Models and other settings appear once the agent sends them
   card_key_models: model
   card_key_effort: effort

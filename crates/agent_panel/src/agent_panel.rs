@@ -16755,6 +16755,11 @@ PYEOF"#;
 
         cx.simulate_keystrokes("right");
         redraw(cx);
+        panel.read_with(cx, |panel, _cx| {
+            // Default（目盛りの外・割合 0）から Low（2 段の 1 段目）へ、メーターが動く。
+            let card = panel.config_card.as_ref().expect("開いたまま");
+            assert_eq!(card.effort_motion_target(), Some(0.5));
+        });
         cx.simulate_keystrokes("down");
         redraw(cx);
         panel.read_with(cx, |panel, _cx| {

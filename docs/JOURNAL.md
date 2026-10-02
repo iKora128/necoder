@@ -3879,4 +3879,5 @@
   - **GPUI は枠線を子の後に描く**。composer の中から上へ開く浮かぶ面は、composer の枠と上の区切り線が上に透けて乗る（実画面で初めて見えた）。`gpui::deferred(...).with_priority(1)` で最前面に描く（位置はチップ基準のまま）。権限モードのピルのメニューも同じ作りで、4 行なら composer の中に収まって透けないが、背の低い composer（Fleet の埋め込み）では枠をまたぐので同じく `deferred` にした。
   - Claude Code の `/model` は CLI のコマンド（`/model opus` を送るとアダプタが PostModelSwitch でピッカーへ映し返す）。necoder が取るとエージェントへ届かなくなるので取らない。
   - claude-agent-acp は client が boolean の受け取りを広告すると Fast mode を `type: "boolean"`（無ければ on/off の select）で送る。使えない時は説明に理由を足し、SDK の知らせで値を戻してくる。
+- 追記（同じ日）: 本人「think のところ…ゲージよ。線と棒だけではつまらない」「もう少しモダンでかっこいいやつに」。mock に回転計・段の棒・リングを並べたが「線と棒だけでなく」と戻り、光とグラデーションで作り直した 4 案（グロウ・リング / チャージ・セル / デジタル・メーター / リキッド）から本人が M-3 デジタル・メーターを選んだ（「めっちゃいい」・光は色の原則どおり白）。`config_card/effort_meter.rs`: 250° の弧に LED 34 本、`default` は目盛りの外（LED を全部消して横の札）、値を変えた時だけ走って行き過ぎて戻る。GPUI の `with_animation` は easing の戻り値が 0..=1 を外れると debug ビルドで止まる（`debug_assert`）ので、行き過ぎは線形の delta から自分で計算する。`PathBuilder::stroke` は端が四角（lyon の `LineCap` を gpui が出していない）なので、丸い端の LED は多角形で塗る。
 - 次: #44（steer）と #47（在庫の鍵 `StockKey`・接続）が main に入ったら、カードの在庫を `StockKey` で引き、#47 がエージェントのピルに出していた接続名をカードのエージェントの行（H4 の欄の場所）とチップに移す。本人の実機で ⌘/ と Fast mode の体感を見る。

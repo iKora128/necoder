@@ -73,6 +73,8 @@ agent:
   card_tab_hint: で切り替え
   card_agent_fixed: この会話では固定
   card_effort: 思考量
+  card_effort_step: "%{position} / %{total} 段"
+  card_effort_default: エージェント任せ
   card_no_options: モデルなどはエージェントが送ってきてから選べます
   card_key_models: モデル
   card_key_effort: 思考量
