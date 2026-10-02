@@ -458,7 +458,7 @@ ACP エージェントも、settings.json の `agent_servers` に新しい id �
     "name": "DeepSeek Harness",
     "command": "dsh-acp",
     "args": [],
-    "env": { "DEEPSEEK_MODEL": "deepseek-v4" }
+    "env": { "DSH_MODEL": "deepseek-v4-pro" }
   }
 }
 ```
@@ -487,6 +487,45 @@ ACP エージェントも、settings.json の `agent_servers` に新しい id �
 - このマシンの OS / arch 向けの配布が無い物は「このマシンでは使えません」
 - 開いただけではネットワークへ行かない（手元に取ってあるレジストリを読む）。**取り直す** で最新を取る
 - 足した物を外すには、一覧の行の下の **外す**。落とした binary も一緒に消える（プロジェクトの `.necoder/settings.json` など、ほかの所でまだ同じ id を書いていれば消さない。necoder が置いた物だけを消し、自分で置いたファイルは残す）
+
+### Pi と DeepSeek Harness を使う
+
+どちらも組み込みの 7 件には入っていないので、上の 2 つのやり方で足す。足したら **設定（⌘,）→ AI エージェント** で「既定」にすると、新しいスレッドはそれで始まる。
+
+**Pi**（ChatGPT・GitHub Copilot などのサブスクや、多くの API キーで使えるエージェント）
+
+1. ターミナルで `npm i -g @earendil-works/pi-coding-agent`。ACP でつなぐ pi-acp はこの `pi` を起動するだけなので、本体が要る
+2. `pi` を開き、`/login` でサブスクにログインするか API キーを入れる。資格情報は `~/.pi/agent/auth.json` に入り、necoder から起動した時もそのまま使われる
+3. **＋ エージェントを追加** で「pi ACP」を追加する
+4. 最初の返答の頭に pi の起動情報が混ざるのが気になる時は、`~/.pi/agent/settings.json` に `"quietStartup": true` を書く
+
+組み込みのエージェントとの違い:
+
+- ツールを実行する前に許可を求めない。Chat モードでも、チャットのフォルダの外へ書けてしまう
+- 思考量が、権限モードのピルにも「Thinking: …」として並ぶ
+- シェルの出力が transcript に出ない。necoder が渡す MCP サーバも Pi には届かない
+- モデル側でエラーになると、何も書かれないまま返事が終わることがある。その時は `pi` を開いて確かめる
+- Claude のサブスクでログインすると、Claude のプランの枠ではなく従量（extra usage）で請求される。Claude は Claude Code で使う
+
+**DeepSeek Harness**（DeepSeek の API キーで使う。サブスクは無く、使った分だけ払う）
+
+1. ターミナルで `npm i -g @openma/deepseek-harness-acp`。DeepSeek Harness 本体が無くても、同梱の分で動く
+2. `dsh-acp login` で API キーを保存する（`~/.dsh/.credentials.yaml` に入る）
+3. settings.json の `agent_servers` に足す（上の「自分のエージェントを足す」の例）
+
+組み込みのエージェントとの違い:
+
+- 文章は流れてこず、言い終わってからまとめて出る
+- 既定で、会話の記録（セッションのログ）を DeepSeek の API へ一緒に送る。止めるには `~/.dsh/cordis.patch.yml` に次を書く
+
+  ```yaml
+  - id: session-log-deepseek
+    config:
+      enabled: false
+  ```
+
+- 失敗した依頼の文は会話に残り、次に送る依頼と一緒にモデルへ渡る
+- その Mac で初めて起動する時は、10 秒ほどかかる
 
 ### 権限の既定（毎回聞く / 聞かずに進める）
 

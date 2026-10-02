@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Added
+
+- **Manual: Pi and DeepSeek Harness**: The manual now explains how to add Pi and DeepSeek Harness, how to sign in to each, and what works differently from the built-in agents. The DeepSeek Harness example sets `DSH_MODEL`, the variable `dsh-acp` reads, instead of `DEEPSEEK_MODEL`.
+
+### 日本語
+
+#### 追加
+
+- **マニュアル：Pi と DeepSeek Harness**：Pi と DeepSeek Harness の足し方、それぞれのログインのしかた、組み込みのエージェントとの違いをマニュアルに書きました。DeepSeek Harness の例は、`dsh-acp` が読まない `DEEPSEEK_MODEL` をやめて `DSH_MODEL` にしました。
+
 ## [0.1.24] - 2026-10-01
 
 This is the first regular release since v0.1.20, delivered through auto-update. It includes everything from the test releases [v0.1.21](https://github.com/iKora128/necoder/releases/tag/v0.1.21), [v0.1.22](https://github.com/iKora128/necoder/releases/tag/v0.1.22) and [v0.1.23](https://github.com/iKora128/necoder/releases/tag/v0.1.23). If you are updating from v0.1.20, their notes list every change. If something does not work, please let us know in an Issue.
