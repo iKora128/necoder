@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Added
+
+- **AI Agents: check an SSH host**: At the top of Settings › AI Agents, pick the host of an SSH project open in this window to see whether each agent runs there and which version it has. necoder runs one read-only command over that project's connection (`command -v`, `package.json` versions, the npx cache, and whether sign-in files and API key variables exist). It doesn't start any CLI, read credentials, or open a new SSH connection.
+
+### Changed
+
+- **AI Agents: one list**: Built-in agents, agents you added with your own command, and agents added from the ACP registry now sit on one card. Each row says whether the agent runs on this machine or what's missing (node, uv, the CLI, a sign-in, or your command), the version you have next to the registry's (and whether the next start moves to it), and whether it's on. Versions are read from files only. Click a row to see its role (default, Captain), launch settings, account, and the commands to sign in and install, with Copy.
+- **AI Agents: the last agent stays on**: You can't turn off or remove the last agent that's on, so the composer always has an agent to pick.
+
+### 日本語
+
+#### 追加
+
+- **AI エージェント：SSH 先の状態を見る**：設定 › AI エージェントの上で、この窓で開いている SSH のプロジェクトの接続先を選ぶと、その機械でエージェントが動くかと版が見られます。そのプロジェクトの接続で読み取りだけのコマンドを 1 回流します（`command -v`・`package.json` の版・npx のキャッシュ・ログインの資格情報のファイルと API キーの環境変数が在るか）。CLI は起動せず、資格情報も読まず、新しい SSH 接続も張りません。
+
+#### 変更
+
+- **AI エージェント：1 枚の一覧に**：組み込み・自分のコマンドで足した物・ACP レジストリから足した物を 1 枚のカードに並べました。行ごとに、このマシンで動くか（足りない物：node・uv・CLI 本体・ログイン・自分のコマンド）、今の版とレジストリの版（次の起動で合わせるか）、使う / 使わないを出します。版はファイルから読むだけです。行を押すと、役割（既定・Captain）・起動の設定・アカウント・ログインと入れ方のコマンド（コピーつき）がまとまって出ます。
+- **AI エージェント：最後の 1 つは外せない**：使うエージェントが最後の 1 つなら、使わないにも外すにもできません。composer で選べるエージェントが無くならないようにするためです。
+
 ## [0.1.24] - 2026-10-01
 
 This is the first regular release since v0.1.20, delivered through auto-update. It includes everything from the test releases [v0.1.21](https://github.com/iKora128/necoder/releases/tag/v0.1.21), [v0.1.22](https://github.com/iKora128/necoder/releases/tag/v0.1.22) and [v0.1.23](https://github.com/iKora128/necoder/releases/tag/v0.1.23). If you are updating from v0.1.20, their notes list every change. If something does not work, please let us know in an Issue.

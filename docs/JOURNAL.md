@@ -3865,3 +3865,20 @@
   - Picker は別の Entity だが、Workspace の描画で `picker.read(cx)` を読めばよい（Picker の notify で窓ごと描き直され、ルートの Workspace はキャッシュしていないので毎回描かれる）。選択の変化をイベントで追う必要はない。
 - リリース: 本人「いったん新しいの本リリースしていいですよ」で、v0.1.20 以来の正式版（Pre-release にしない＝自動更新で届く）として v0.1.24 を出した。テスト版 v0.1.21〜v0.1.23 の中身を全部含むので、CHANGELOG の冒頭に「v0.1.20 からの主な変更」をまとめた（自動更新で来た人が最初に開くのは、この版の Release ページ＝更新後の最初の起動のトースト）。relay は v0.1.23 から変えていないので Worker のデプロイは不要。
 - 次: 本人の実機で見え方（棒の太さ・今いる枠との見分け）を確かめる。v0.1.20 から自動更新で上がる道（チップ → 差し替え → 再起動）も実機で見る。
+
+## 2026-10-02 — 設定 › AI エージェントを「導入・版・使う / 使わない」の 1 列に（#38 H2 の見せ方）
+
+- 発端（本人の Task）: zeron の Providers 画面（`/tmp/zeron-report/index.html` §1 ⑤・`zeron/crates/ui/src/settings/harnesses.rs`）の型に寄せる。レジストリ・カスタム・binary / uvx の配備はもう入っているので、足すのは見せ方だけ。CLI 本体の自動更新と、他アプリの認証情報に触る機能（zeron の Accounts）は入れない。
+- やったこと:
+  - mock を先に: `mock/settings-agents.html`（このマシン / SSH 先 / 最後の 1 つ を mockbar で切り替え）→ UI-SPEC §12 に「AI エージェントのページ」の節（ホストの行・1 枚のカード・行の頭・状態の文・足りない物の決め方・版の行・行を開く・最後の 1 つ・初回の案内）を書いてから実装。
+  - `acp_client::readiness`（新・読むだけ）: 事実（`HostFacts`: PATH・`package.json` の版・npx のキャッシュ・necoder の置き場・置いた binary の印・ログインの跡）と見立て（`assess` → `Readiness` / `Missing` / `VersionInfo`）。このマシンは `local_facts`、SSH 先は `probe_remote`（開いているプロジェクトの接続で `sh -lc` の読み取りだけのシェルを 1 回）。読み取りの口を `install::installed_versions`・`deploy::deployed_versions`・`registry::split_npm_spec`・`AgentKind::cli_command` に足し、ログインの跡は `AgentKind::login_traces` の表 1 本にして `configured_auth_state` と共有した（振る舞いは同じ）。
+  - `settings::agents_page`（新）: ホストのチップ（このマシン + この窓の SSH のプロジェクトの接続先・workspace が `set_agent_hosts` で渡す）・1 枚のカード・行の頭（状態は fg0 / fg1 / fg2 の濃さだけ・右に 入れる / ログイン / CLI を開く）・行を開いた中（役割・起動・配布・アカウント・ログイン・入れ方・コピー）。「使わない」にできない理由は `disable_refusal` 1 本（既定・Captain・使う最後の 1 つ）で、スイッチと「外す」が書く前に確かめる。旧来の行（`agents_rows` / `custom_agent_rows` / `agent_card` / 足した物の状態の関数）は消し、使われなくなった訳語（`agent_available` 等・前から孤立していた `logged_in` 等も）を ja / en から外した。
+  - 開発用: `NECODER_CHAT_PROBE` に `settings-open:<id>`（行を開く）と `settings-host:<名前>`（偽の SSH 先 = 一時フォルダの偽のホームに、SSH 先へ流すのと同じシェルを流す・本物の SSH には繋がない）。
+  - docs: UI-SPEC §12・MANUAL §8 / §9・FLEET-V2 §5.7（Captain にするは行を開いた中へ）・GLOSSARY・ARCHITECTURE・CHAT §7・CHANGELOG（Unreleased）。
+- 検証: acp_client（見立て 6 本・SSH 先のシェルを手元の sh と dash で偽のホームへ本当に流す 1 本・置き場の版・npm の指定）、settings（`disabled_agents` がファイルを往復する・最後の 1 つはスイッチでも外すでも断る・断る理由の順・版の行の文を ja / en で固定・偽の SSH 先でページを描く）。`cargo test --workspace`（使い捨て HOME）緑。隔離 offscreen（`NECODER_HOME` ほか + `NECODER_ACP_REGISTRY_CACHE` に実物のレジストリの写し）で、このマシン（使える・足りない物・使わない・レジストリから足した行・Codex を開いた所）・偽の SSH 先（Claude を開いた所）・初回の案内・英語を撮って目視。
+- 学び/罠:
+  - SSH 先のコマンドはプロジェクトの根の中でしか流せない（`RemoteHost::relative`）ので、ホストだけでなく根も渡す（`AgentHost { host, root }`）。
+  - `package.json` を sed で読むと 1 行に詰めた物を取りこぼす。`tr ',{}' '\n\n\n'` で割ってから読む（テストで気づいた）。
+  - main は rustfmt も clippy もまっさらではない。`cargo fmt --all` を流すと無関係な 22 ファイルが書き換わる — 触った所だけ整え、ほかは戻す。clippy は自分の行に出た物だけ直す。
+  - `NECODER_SCREENSHOT` の `@Nms` は撮るのに掛かった時間で、起動からの時間ではない。
+- 次: 本人の実機（本物の SSH 先）で、ホストの切り替えと読み取りの速さ・版の行の言い方を見る。#38 の H3（接続）・H4（composer の 2 軸のチップ）は別 Task。

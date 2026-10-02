@@ -242,6 +242,18 @@ impl RegistryAgent {
     }
 }
 
+/// npm の指定（`pkg@1.2.3` / `@scope/pkg@1.2.3` / `pkg`）をパッケージ名と版に分ける（読むだけ）。
+/// 先頭の `@` は scope で、版の区切りは最後の `@`。版の無い指定は `None`。
+pub fn split_npm_spec(spec: &str) -> (&str, Option<&str>) {
+    match spec.rfind('@').filter(|index| *index > 0) {
+        Some(index) => {
+            let version = &spec[index + 1..];
+            (&spec[..index], (!version.is_empty()).then_some(version))
+        }
+        None => (spec, None),
+    }
+}
+
 /// このマシンのレジストリ用プラットフォームキー（`darwin-aarch64` 等）。未知なら `None`。
 ///
 /// レジストリの表記は `<os>-<arch>` で、arch は Rust の `target_arch` と同じ語彙
@@ -602,6 +614,18 @@ mod tests {
         assert_eq!(names("uvx apache"), vec!["fast-agent"]);
         assert_eq!(names("npx claude"), vec!["claude-acp"]);
         assert!(names("npx amp").is_empty(), "全部の語が当たる物だけ");
+    }
+
+    #[test]
+    fn npm_specs_split_into_name_and_version() {
+        assert_eq!(
+            split_npm_spec("@agentclientprotocol/claude-agent-acp@0.84.0"),
+            ("@agentclientprotocol/claude-agent-acp", Some("0.84.0"))
+        );
+        assert_eq!(split_npm_spec("pi-acp@0.0.34"), ("pi-acp", Some("0.0.34")));
+        assert_eq!(split_npm_spec("opencode-ai"), ("opencode-ai", None));
+        assert_eq!(split_npm_spec("@scope/name"), ("@scope/name", None));
+        assert_eq!(split_npm_spec("name@"), ("name", None));
     }
 
     #[test]

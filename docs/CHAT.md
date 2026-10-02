@@ -242,4 +242,5 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
 | `edit:<文字>` | 成果物を書き換えて**本番と同じ合図**（`FilesTouched` → `TurnEnded`）を出す |
 | `search:<語>` / `find:<語>` | 一覧の絞り込み / transcript 内検索 |
 | `menu` / `delete` / `settings:<page>` / `source` / `state` / `wait:<ms>` | 行メニュー / 削除の確認 / 設定画面 / 右をソース表示 / 状態を出力 / 待つ |
+| `settings-open:<id>` / `settings-host:<名前>` | 設定 › AI エージェントで行を開く / 偽の SSH 先（一時フォルダの偽のホームに、SSH 先へ流すのと同じ読み取りのシェルを流す・本物の SSH には繋がない）を足して選ぶ。`settings:agents` の後に置く（UI-SPEC §12） |
 `reduce_motion` を入れるのは、transcript のフェードインが offscreen では 1 フレーム目で固定されて薄く写るため。隔離の検証は `NECODER_WEBVIEW_PROBE_LOG=<file>` と `NECODER_CHAT_PROBE_PAGE=<html>` で、ページが `document.title` に書いた結果をログへ落とす（debug ビルド限定）。

@@ -739,35 +739,80 @@ settings:
   mcp_claude_connectors_sub: アカウントに繋いだコネクタ（Figma・Google Calendar など）。切ると初回応答が速くなります（実測 4.2 秒 → 1.8 秒）。Chat モードは常に読み込みません
   title: 設定
   agents_heading: AI エージェント
-  agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を necoder は保存しません。
+  agents_sub: ホストごとに、エージェントが動くか・版・使う / 使わないを見ます。認証情報を necoder は保存しません。
   permission_default: 権限の既定
   permission_default_sub: 新しいスレッドを始めるモード。選ぶとピルで選んだモードの記憶を全エージェントで消して揃える。「聞かずに進める」はそのモードを持つエージェントだけに効く（Claude Code の bypassPermissions など）。Chat には効かない
   permission_default_agent: エージェントの既定
   permission_default_bypass: 聞かずに進める（Yolo）
   permission_remembered: ピルで選んだモード（押すと忘れる）
-  installed: 導入済み
-  available_npx: 初回に取得（npx）
-  not_installed: 未導入
-  agent_checking: 確認中…
-  agent_available: 利用可能
-  agent_configured: 設定あり・未確認
-  agent_signed_out: 未ログイン
-  agent_disabled: 使わない（選択肢に出さない）
   agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
   agent_remove: 外す
   agent_remove_binary_failed: "%{agent} の落とした binary を消せませんでした: %{reason}"
-  custom_command_ready: "自分のコマンドで起動（%{command}）"
-  custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
-  custom_registry_npx: "レジストリ %{version} · npx（初回に取得）"
+  agent_host_label: "ホスト"
+  agent_host_local: "このマシン"
+  agent_host_ssh: "SSH"
+  agent_host_recheck: "確かめ直す"
+  agent_host_note: "使う / 使わない・既定・起動の変更はどのホストでも同じです。SSH のプロジェクトを開くと、その接続先もここで選べます。"
+  agent_host_failed: "%{host} の状態を読めませんでした: %{reason}"
+  agent_kind_builtin: "組み込み"
+  agent_kind_command: "自分のコマンド"
+  agent_kind_registry: "レジストリ"
+  agent_kind_registry_with: "レジストリ · %{kind}"
+  agent_status_ready: "使える"
+  agent_status_unverified: "ログインの跡があります（確かめられませんでした）"
+  agent_status_unverified_remote: "ログインの跡があります（SSH 先では確かめません）"
+  agent_status_checking: "確かめています…"
+  agent_status_disabled: "使わない（composer に出しません）"
+  agent_status_unreachable: "確かめられませんでした"
+  agent_status_missing: "足りない物:"
+  agent_missing_node: "node"
+  agent_missing_uv: "uv"
+  agent_missing_cli: "CLI 本体（%{name}）"
+  agent_missing_command: "コマンド（%{command}）"
+  agent_missing_login: "ログイン"
+  agent_missing_separator: "・"
+  agent_version_same: "%{version}（レジストリと同じ）"
+  agent_version_update: "%{current} → %{target}（次の起動でレジストリの版にします）"
+  agent_version_fetch: "レジストリ %{version}（最初の起動で取得します）"
+  agent_version_behind: "%{current} · レジストリ %{target}"
+  agent_version_registry: "レジストリ %{version}"
+  agent_version_binary_same: "%{version} · sha256 で照合済み"
+  agent_version_binary_same_unverified: "%{version} · 検証の値がありません"
+  agent_version_binary_update: "%{current} → %{target}（次の起動で落として sha256 で照合します）"
+  agent_version_binary_update_unverified: "%{current} → %{target}（次の起動で落とします・検証の値がありません）"
+  agent_version_binary_fetch: "レジストリ %{version}（最初の起動で落として sha256 で照合します）"
+  agent_version_binary_fetch_unverified: "レジストリ %{version}（最初の起動で落とします・検証の値がありません）"
+  agent_version_path_same: "%{version}（レジストリと同じ・PATH の %{command} を使います）"
+  agent_version_path_behind: "%{current} · レジストリ %{registry}（PATH の %{command} を使います）"
+  agent_version_path_current: "%{version}（PATH の %{command} を使います）"
+  agent_version_path_registry: "PATH の %{command} · レジストリ %{registry}"
+  agent_version_path: "PATH の %{command}"
+  agent_version_own: "自分のコマンドで起動（%{command}）"
+  agent_action_install: "入れる"
+  agent_action_login: "ログイン"
+  agent_action_open_cli: "CLI を開く"
+  agent_detail_role: "役割"
+  agent_detail_launch: "起動"
+  agent_detail_distribution: "配布"
+  agent_detail_account: "アカウント"
+  agent_detail_login: "ログイン"
+  agent_detail_install: "入れ方"
+  agent_detail_run_login: "ターミナルで開く"
+  agent_detail_run_install: "ターミナルで流す"
+  agent_detail_copy: "コピー"
+  agent_detail_remote_note: "コマンドは SSH 先のターミナルで打ってください（ここからは手元でしか流せません）"
+  agent_copied: "コピーしました: %{command}"
+  agent_role_unusable: "このマシンで使えるようになると、既定・Captain にできます"
+  agent_distribution_npx: "npx · %{package}"
+  agent_distribution_uvx: "uvx · %{package}"
+  agent_distribution_binary: "binary · %{platform} · sha256 あり"
+  agent_distribution_binary_unverified: "binary · %{platform} · sha256 なし"
+  agent_disable_last: "外せません: 最後の 1 つは使うままにします（composer で選べるエージェントが無くなります）。先に別のエージェントを使うにしてください"
+  captain_dismiss: "⚑ Captain（押すとやめる）"
   custom_not_in_registry: "レジストリに見つかりません（%{id}）。エージェントを追加 で取り直してください"
   custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
   custom_needs_node: node が要ります（npx で起動する配布）
   custom_needs_uv: uv が要ります（uvx で起動する配布）。uv を入れると使えます（necoder は入れません）
-  custom_registry_uvx: "レジストリ %{version} · uvx（初回に取得）"
-  custom_binary_ready: "レジストリ %{version} · binary（置いてあります・sha256 で照合済み）"
-  custom_binary_ready_unverified: "レジストリ %{version} · binary（置いてあります・検証の値がありません）"
-  custom_binary_download: "レジストリ %{version} · binary（最初の起動で落として sha256 で照合します）"
-  custom_binary_download_unverified: "レジストリ %{version} · binary（最初の起動で落とします・検証の値がありません）"
   custom_binary_on_remote: binary の配布しか無いので、リモート（SSH）では起動できません
   custom_not_deployed: まだ落としていません（最初の起動で落とします）
   custom_deploy_failed: "binary を置けませんでした: %{reason}"
@@ -809,16 +854,10 @@ settings:
   launch_command_missing: コマンドを入れてください
   launch_cancel: キャンセル
   launch_save: 保存
-  logged_in: ログイン済み
-  login_required: ログインが必要
-  login_status_unknown: ログイン状態は CLI で確認
   make_default: 既定にする
   is_default: ★ 既定
   make_captain: Captain にする
   is_captain: ⚑ Captain
-  login: ログイン
-  open_cli: CLI を開く
-  install: 導入
   welcome_title: ようこそ 🎨
   welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
   get_started: これで始める →
@@ -903,7 +942,6 @@ settings:
   tabs_view_list: 縦リスト
   pref_system_notifications: OS の通知
   pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
-  account_label: "アカウント:"
   account_default: 既定
   account_elsewhere: （ほかの場所）
   account_add: ＋ 新しいアカウント

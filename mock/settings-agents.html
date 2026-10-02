@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>設定 › AI エージェント — 導入・版・使う / 使わないを 1 列に（#38 H2 の見せ方・正は UI-SPEC §12）</title>
+<style>
+/* ============================================================
+   設定 › AI エージェント（2026-10-02・issue #38 H2 の見せ方）
+   ねらい: 組み込み・自分のコマンドで足した物・レジストリから足した物を 1 枚のカードに 1 列で並べ、
+     行ごとに「このホストで動くか（使える / 足りない物）」「版（今の版とレジストリの版）」「使う / 使わない」を出す。
+     ホスト（このマシン / SSH 先）を切り替えると、その機械での状態に変わる。
+     行を開くと、役割（既定・Captain）・起動の上書き（O16）・アカウント（O14）・ログイン・入れ方がまとまって出る。
+   作らないもの: CLI 本体の自動更新 / 他アプリの認証情報に触る機能（zeron の Accounts）
+   規律: 色 = 識別だけ。状態は文字の濃さ（fg0 / fg1 / fg2）で分け、色相を使わない。
+         色が付くのは スイッチの on（プロジェクト色）・★ 既定のバッジ（accent-dim）・ナビの選択の左バー・ブランドのロゴだけ
+   ============================================================ */
+:root {
+  --desktop: #0c0d11;
+  --bg0: #16181e; --bg1: #1b1e25; --bg2: #232733; --bg3: #2b3040;
+  --fg0: #d7dae3; --fg1: #9aa1b2; --fg2: #646b7a;
+  --border: #262b36;
+  --accent: #7c8cf8;                /* プロジェクト色（indigo） */
+  --mono: "SF Mono", Menlo, monospace;
+  --shadow: 0 24px 80px rgba(0,0,0,.55);
+}
+[data-theme="light"] {
+  --desktop: #d8dce3;
+  --bg0: #f0f1f4; --bg1: #ffffff; --bg2: #ffffff; --bg3: #e7eaf0;
+  --fg0: #333845; --fg1: #5c6370; --fg2: #9aa1b2;
+  --border: #d8dce3;
+  --shadow: 0 24px 70px rgba(30,35,50,.28), 0 2px 8px rgba(30,35,50,.14);
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { background: var(--desktop); color: var(--fg0); font: 12.5px/1.5 -apple-system, "Hiragino Sans", sans-serif;
+  display: flex; flex-direction: column; overflow: hidden; }
+code, .mono { font-family: var(--mono); font-size: 11px; }
+
+/* ---- mockbar ---- */
+.mockbar { flex: none; display: flex; align-items: center; gap: 14px; padding: 8px 16px; font-size: 11px; color: var(--fg1);
+  border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.mockbar .grp { display: flex; align-items: center; gap: 4px; }
+.mockbar .grp > span { color: var(--fg2); margin-right: 4px; }
+.mockbar button { font: inherit; color: var(--fg1); background: var(--bg1); border: 1px solid var(--border); border-radius: 5px; padding: 3px 9px; cursor: pointer; }
+.mockbar button.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
+.mockbar .title { font-weight: 700; color: var(--fg0); margin-right: 8px; }
+
+/* ---- window ---- */
+.win { flex: 1; min-height: 0; margin: 12px 16px 14px; display: flex; flex-direction: column; border-radius: 10px; overflow: hidden;
+  border: 2px solid var(--accent); background: var(--bg0); box-shadow: var(--shadow); position: relative; }
+.titlebar { flex: none; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border);
+  font-size: 11.5px; background: color-mix(in srgb, var(--accent) 22%, var(--bg0)); }
+.lights { display: flex; gap: 7px; margin-right: 6px; }
+.lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+.pill { display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 6px; background: var(--bg1); border: 1px solid var(--border); border-left: 3px solid var(--accent); }
+.pill .dest { color: var(--fg2); }
+.body { flex: 1; min-height: 0; display: flex; }
+.rail { flex: none; width: 46px; border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding-top: 8px; gap: 8px; }
+.rail .pj { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; font-size: 12px; color: var(--fg0);
+  background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); }
+.rail .pj.on { border: 1px solid var(--c); box-shadow: 0 0 0 2px color-mix(in srgb, var(--c) 45%, transparent); }
+.rail .gear { margin-top: auto; margin-bottom: 10px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 6px; color: var(--accent); background: var(--bg2); }
+
+/* ---- 設定ホーム（2 ペイン） ---- */
+.settings { flex: 1; min-width: 0; display: flex; background: var(--bg1); }
+.nav { flex: none; width: 184px; border-right: 1px solid var(--border); padding: 24px 12px; display: flex; flex-direction: column; gap: 2px; }
+.nav .t { padding: 0 8px 10px; font-size: 18px; font-weight: 600; }
+.nav .search { margin-bottom: 8px; height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border-radius: 6px; background: var(--bg2); border: 1px solid var(--border); color: var(--fg2); font-size: 12px; }
+.nav .it { height: 30px; display: flex; align-items: center; padding: 0 8px; border-radius: 6px; border-left: 2px solid transparent; color: var(--fg1); font-size: 12.5px; }
+.nav .it.sel { background: var(--bg3); color: var(--fg0); border-left-color: var(--accent); }
+.nav .it .b { margin-left: auto; color: var(--fg2); font-size: 11px; }
+.page { flex: 1; min-width: 0; overflow-y: auto; }
+.col { max-width: 680px; margin: 0 auto; padding: 24px 28px 60px; display: flex; flex-direction: column; gap: 14px; }
+
+.h { display: flex; flex-direction: column; gap: 3px; }
+.h .t { font-size: 13px; font-weight: 600; color: var(--fg1); }
+.h .s { font-size: 11.5px; color: var(--fg2); }
+
+/* ホストの切り替え（チップ・選択 = bg3 + fg0・識別色は使わない） */
+.hosts { display: flex; flex-direction: column; gap: 4px; }
+.hosts .row { display: flex; align-items: center; gap: 4px; }
+.hosts .lbl { width: 56px; color: var(--fg2); font-size: 11px; }
+.chip { height: 22px; padding: 0 8px; display: inline-flex; align-items: center; gap: 5px; border-radius: 5px; font-size: 11px; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--border); color: var(--fg1); }
+.chip:hover { color: var(--fg0); }
+.chip.sel { background: var(--bg3); color: var(--fg0); border-color: transparent; }
+.chip .k { color: var(--fg2); font-size: 10px; }
+.hosts .recheck { margin-left: auto; color: var(--fg2); font-size: 11px; cursor: pointer; }
+.hosts .recheck:hover { color: var(--fg0); }
+.hosts .note { padding-left: 60px; color: var(--fg2); font-size: 10.5px; }
+
+/* 1 枚のカードに 1 列（行の間は 1px の罫線） */
+.list { border: 1px solid var(--border); border-radius: 9px; background: var(--bg2); overflow: hidden; }
+.arow + .arow { border-top: 1px solid var(--border); }
+.ahead { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; }
+.ahead:hover .chev { color: var(--fg0); }
+.logo { flex: none; width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-weight: 700; font-size: 11px; color: #fff; background: var(--b); }
+.logo.glyph { background: none; color: var(--b); font-size: 18px; }
+.arow.off .logo { opacity: .4; }
+.txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.l1 { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.nm { font-size: 13px; font-weight: 600; color: var(--fg0); }
+.kind { font-size: 10.5px; color: var(--fg2); }
+.badge { font-size: 10.5px; padding: 0 6px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.badge.cap { background: var(--bg3); color: var(--fg1); }
+.st { font-size: 11px; }
+.st.ready { color: var(--fg1); }
+.st.need { color: var(--fg0); }            /* 足りない物・確かめられなかった = 濃い文字（色相は使わない） */
+.st.need .lbl { color: var(--fg1); }
+.st.quiet { color: var(--fg2); }           /* 使わない・確かめています */
+.ver { font-size: 10.5px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+.act { flex: none; height: 22px; padding: 0 8px; display: inline-flex; align-items: center; border-radius: 5px; border: 1px solid var(--border); color: var(--fg1); font-size: 11px; white-space: nowrap; }
+.act:hover { background: var(--bg3); color: var(--fg0); }
+.chev { flex: none; width: 14px; text-align: center; color: var(--fg2); font-size: 13px; }
+.chev::before { content: "›"; }
+.arow.open .chev::before { content: "⌄"; }
+.sw { flex: none; width: 34px; height: 18px; border-radius: 9px; background: var(--bg3); position: relative; border: 1px solid var(--border); cursor: pointer; }
+.sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--fg2); transition: left .12s; }
+.sw.on { background: var(--accent); border-color: var(--accent); }
+.sw.on::after { left: 18px; background: #fff; }
+.sw.locked { opacity: .45; cursor: default; }
+
+/* 開いた行: 名前の左端に揃えて、行の続きとして出す（箱を作らない） */
+.det { display: none; padding: 0 12px 12px 48px; }
+.arow.open .det { display: grid; grid-template-columns: 70px 1fr; column-gap: 10px; row-gap: 7px; align-items: baseline; }
+.dl { color: var(--fg2); font-size: 10.5px; }
+.dv { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--fg1); min-width: 0; }
+.dv code { color: var(--fg0); background: var(--bg1); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link { color: var(--fg2); cursor: pointer; white-space: nowrap; }
+.link:hover { color: var(--fg0); }
+.link.locked { opacity: .45; }
+.btn { height: 20px; padding: 0 8px; display: inline-flex; align-items: center; border-radius: 5px; border: 1px solid var(--border); color: var(--fg1); white-space: nowrap; cursor: pointer; }
+.btn:hover { background: var(--bg3); color: var(--fg0); }
+.btn.chosen { background: var(--bg3); color: var(--fg0); border-color: transparent; }
+.dnote { grid-column: 2; color: var(--fg2); font-size: 10px; }
+
+.add { display: flex; align-items: center; gap: 10px; }
+.add .b { flex: none; height: 26px; padding: 0 10px; display: inline-flex; align-items: center; border-radius: 6px; border: 1px solid var(--border); color: var(--fg1); font-size: 11.5px; }
+.add .s { color: var(--fg2); font-size: 10.5px; }
+.pref { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 8px; background: var(--bg2); border: 1px solid var(--border); }
+.pref .l { flex: 1; min-width: 0; }
+.pref .l .a { font-size: 12.5px; }
+.pref .l .b { font-size: 10.5px; color: var(--fg2); }
+.sec { font-size: 13px; font-weight: 600; color: var(--fg1); margin-top: 6px; }
+
+.toast { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); display: none; max-width: 560px; padding: 8px 14px; border-radius: 8px;
+  background: var(--bg2); border: 1px solid var(--border); box-shadow: 0 8px 30px rgba(0,0,0,.4); font-size: 12px; color: var(--fg0); }
+.toast.show { display: block; }
+</style>
+</head>
+<body>
+<div class="mockbar">
+  <span class="title">設定 › AI エージェント（#38 H2 の見せ方）</span>
+  <div class="grp"><span>テーマ</span><button class="on" onclick="setTheme('dark', this)">Dark</button><button onclick="setTheme('light', this)">Light</button></div>
+  <div class="grp"><span>ホスト</span><button class="on" id="mb-local" onclick="setHost('local')">このマシン</button><button id="mb-dev" onclick="setHost('dev')">SSH 先 dev-box</button></div>
+  <div class="grp"><span>状態</span><button class="on" id="mb-normal" onclick="setLast(false)">いつも</button><button id="mb-last" onclick="setLast(true)">最後の 1 つ</button></div>
+</div>
+
+<div class="win">
+  <div class="titlebar">
+    <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <div class="pill"><b>necoder</b><span class="dest">⎇ main</span></div>
+  </div>
+  <div class="body">
+    <div class="rail">
+      <div class="pj on" style="--c:#7c8cf8">ね</div>
+      <div class="pj" style="--c:#34d3b6">D</div>
+      <div class="gear">⚙</div>
+    </div>
+    <div class="settings">
+      <nav class="nav">
+        <div class="t">設定</div>
+        <div class="search">⌕ 設定を検索</div>
+        <div class="it sel">AI エージェント</div>
+        <div class="it">MCP サーバ<span class="b">3/7</span></div>
+        <div class="it">外観</div>
+        <div class="it">リモート</div>
+        <div class="it">動作とエディタ</div>
+      </nav>
+      <main class="page"><div class="col">
+        <div class="h">
+          <div class="t">AI エージェント</div>
+          <div class="s">ホストごとに、エージェントが動くか・版・使う / 使わないを見ます。認証情報を necoder は保存しません。</div>
+        </div>
+
+        <div class="hosts">
+          <div class="row">
+            <span class="lbl">ホスト</span>
+            <span class="chip sel" id="host-local" onclick="setHost('local')">このマシン</span>
+            <span class="chip" id="host-dev" onclick="setHost('dev')">daichi@dev-box<span class="k">SSH</span></span>
+            <span class="recheck">確かめ直す</span>
+          </div>
+          <div class="note" id="host-note">使う / 使わない・既定・起動の変更はどのホストでも同じです。SSH のプロジェクトを開くと、その接続先もここで選べます。</div>
+        </div>
+
+        <div class="list" id="list"></div>
+
+        <div class="add"><span class="b">＋ エージェントを追加</span><span class="s">ACP レジストリの全件から選んで足す。一覧に無い物は settings.json の agent_servers に自分のコマンドを書いて足せます</span></div>
+
+        <div class="pref"><div class="l"><div class="a">権限の既定</div><div class="b">新しいスレッドを始めるモード…</div></div>
+          <span class="btn chosen">エージェントの既定</span><span class="btn">聞かずに進める（Yolo）</span></div>
+        <div class="sec">コマンドライン</div>
+        <div class="pref"><div class="l"><div class="a">ターミナルから necoder で開く（ne）</div><div class="b">/usr/local/bin/ne → necoder</div></div><span class="badge">インストール済み</span></div>
+        <div class="sec">Skills</div>
+        <div class="pref"><div class="l"><div class="a">necoder の skill</div><div class="b">~/.claude/skills/necoder · ~/.agents/skills/necoder</div></div><span class="badge">インストール済み</span></div>
+      </div></main>
+    </div>
+  </div>
+  <div class="toast" id="toast">外せません: 最後の 1 つは使うままにします（composer で選べるエージェントが無くなります）。先に別のエージェントを使うにしてください</div>
+</div>
+
+<script>
+// 行の中身。status: [class, text] / ver: 版の行 / action: 右の枠のボタン（このマシンだけ）
+const LOCAL = {
+  claude:  { st: ["ready", "使える"], ver: "0.84.0（レジストリと同じ）" },
+  codex:   { st: ["ready", "使える"], ver: "1.13.1 → 2.1.0（次の起動でレジストリの版にします）" },
+  copilot: { st: ["need", "<span class=lbl>足りない物:</span> CLI 本体（copilot）"], ver: "レジストリ 1.0.90（最初の起動で取得します）", action: "入れる" },
+  qwen:    { st: ["ready", "使える"], ver: "0.24.7（レジストリと同じ）" },
+  opencode:{ st: ["need", "ログインの跡があります（確かめられませんでした）"], ver: "PATH の opencode · レジストリ 1.18.34", action: "CLI を開く" },
+  kimi:    { st: ["need", "<span class=lbl>足りない物:</span> CLI 本体（kimi）"], ver: "レジストリ 1.52.0", action: "入れる" },
+  grok:    { st: ["ready", "使える"], ver: "1.0.46（レジストリと同じ）" },
+  pi:      { st: ["ready", "使える"], ver: "レジストリ 0.0.34（最初の起動で取得します）" },
+  amp:     { st: ["ready", "使える"], ver: "レジストリ 0.9.0（最初の起動で落として sha256 で照合します）" },
+  dsh:     { st: ["need", "<span class=lbl>足りない物:</span> コマンド（dsh-acp）"], ver: "自分のコマンドで起動（dsh-acp --acp）" },
+};
+const DEV = {
+  claude:  { st: ["need", "ログインの跡があります（SSH 先では確かめません）"], ver: "0.70.2 · レジストリ 0.84.0（PATH の claude-agent-acp を使います）" },
+  codex:   { st: ["need", "<span class=lbl>足りない物:</span> node・CLI 本体（codex）"], ver: "レジストリ 2.1.0" },
+  copilot: { st: ["need", "<span class=lbl>足りない物:</span> CLI 本体（copilot）"], ver: "レジストリ 1.0.90" },
+  qwen:    { st: ["need", "<span class=lbl>足りない物:</span> node・CLI 本体（qwen）"], ver: "レジストリ 0.24.7" },
+  opencode:{ st: ["ready", "使える"], ver: "PATH の opencode · レジストリ 1.18.34" },
+  kimi:    { st: ["need", "<span class=lbl>足りない物:</span> uv・CLI 本体（kimi）"], ver: "レジストリ 1.52.0" },
+  grok:    { st: ["need", "<span class=lbl>足りない物:</span> node・CLI 本体（grok）"], ver: "レジストリ 1.0.46" },
+  pi:      { st: ["need", "<span class=lbl>足りない物:</span> node"], ver: "レジストリ 0.0.34" },
+  amp:     { st: ["need", "binary の配布しか無いので、リモート（SSH）では起動できません"], ver: "" },
+  dsh:     { st: ["ready", "使える"], ver: "自分のコマンドで起動（dsh-acp --acp）" },
+};
+const AGENTS = [
+  { id: "claude", name: "Claude Code", kind: "組み込み", logo: ["glyph", "#d97757", "✳"], default: true,
+    login: "claude auth login", install: "npm i -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp", account: true },
+  { id: "codex", name: "Codex", kind: "組み込み", logo: ["mono", "#10a37f", ">_"], captain: true,
+    login: "codex login", install: "npm i -g @openai/codex @agentclientprotocol/codex-acp", account: true },
+  { id: "copilot", name: "GitHub Copilot", kind: "組み込み", logo: ["glyph", "#d0d5db", "◉"], login: "copilot login", install: "npm i -g @github/copilot" },
+  { id: "qwen", name: "Qwen Code", kind: "組み込み", logo: ["glyph", "#6950ef", "✦"], off: true, login: "qwen", install: "npm i -g @qwen-code/qwen-code" },
+  { id: "opencode", name: "OpenCode", kind: "組み込み", logo: ["glyph", "#d0d5db", "▣"], login: "opencode auth login", install: "npm i -g opencode-ai" },
+  { id: "kimi", name: "Kimi CLI", kind: "組み込み", logo: ["glyph", "#d0d5db", "K"], login: "kimi login", install: "uv tool install kimi-cli" },
+  { id: "grok", name: "Grok Build", kind: "組み込み", logo: ["mono", "#4b5563", "G"], off: true, login: "grok login", install: "curl -fsSL https://x.ai/cli/install.sh | bash" },
+  { id: "pi", name: "pi ACP", kind: "レジストリ · npx", logo: ["mono", "#4b5563", "PA"], dist: "npx · pi-acp@0.0.34（node が要ります）" },
+  { id: "amp", name: "Amp", kind: "レジストリ · binary", logo: ["mono", "#4b5563", "A"], dist: "binary · darwin-aarch64 · sha256 あり（落とした後に照合します）" },
+  { id: "dsh", name: "DeepSeek Harness", kind: "自分のコマンド", logo: ["mono", "#4b5563", "DH"], own: "dsh-acp --acp" },
+];
+let host = "local", last = false, open = "codex";
+
+function details(agent, state) {
+  const remote = host !== "local";
+  const rows = [];
+  if (!agent.off) {
+    const roles = [];
+    roles.push(agent.default ? '<span class="btn chosen">★ 既定</span>' : '<span class="btn">既定にする</span>');
+    roles.push(agent.captain ? '<span class="btn chosen">⚑ Captain（押すとやめる）</span>' : '<span class="btn">Captain にする</span>');
+    rows.push(["役割", roles.join("")]);
+  }
+  if (agent.own) {
+    rows.push(["起動", `自分のコマンドで起動（<code>${agent.own}</code>）<span class="link">変える…</span><span class="link">外す</span>`]);
+  } else if (agent.dist) {
+    rows.push(["起動", `起動は既定のまま（レジストリの版とコマンド）<span class="link">変える…</span><span class="link">外す</span>`]);
+    rows.push(["配布", agent.dist]);
+  } else {
+    rows.push(["起動", agent.id === "codex"
+      ? `起動: 既定 + 環境変数（CODEX_HOME）<span class="link">変える…</span><span class="link">既定に戻す</span>`
+      : `起動は既定のまま（レジストリの版とコマンド）<span class="link">変える…</span>`]);
+  }
+  if (agent.account && !remote) {
+    rows.push(["アカウント", `<span class="btn">既定</span><span class="btn chosen">account-2</span><span class="btn">＋ 新しいアカウント</span><span class="link">ログイン</span>`]);
+  }
+  if (agent.login) {
+    rows.push(["ログイン", remote
+      ? `<code>${agent.login}</code><span class="link">コピー</span>`
+      : `<code>${agent.login}</code><span class="link">ターミナルで開く</span><span class="link">コピー</span>`]);
+  }
+  if (agent.install) {
+    rows.push(["入れ方", remote
+      ? `<code>${agent.install}</code><span class="link">コピー</span>`
+      : `<code>${agent.install}</code><span class="link">ターミナルで流す</span><span class="link">コピー</span>`]);
+  }
+  let html = rows.map(([l, v]) => `<div class="dl">${l}</div><div class="dv">${v}</div>`).join("");
+  if (remote && (agent.login || agent.install)) html += `<div class="dnote">コマンドは SSH 先のターミナルで打ってください（ここからは手元でしか流せません）</div>`;
+  return html;
+}
+
+function render() {
+  const data = host === "local" ? LOCAL : DEV;
+  const list = document.getElementById("list");
+  list.innerHTML = AGENTS.map(agent => {
+    const off = last ? agent.id !== "claude" : agent.off;
+    const lockedOn = !off && (last || agent.default || agent.captain);
+    const state = data[agent.id];
+    const [cls, text] = off ? ["quiet", "使わない（composer に出しません）"] : state.st;
+    const [shape, brand, mark] = agent.logo;
+    const action = !off && host === "local" && state.action ? `<span class="act">${state.action}</span>` : "";
+    const badges = (agent.default ? '<span class="badge">★ 既定</span>' : "") + (agent.captain && !last ? '<span class="badge cap">⚑ Captain</span>' : "");
+    return `<div class="arow ${off ? "off" : ""} ${open === agent.id && !last ? "open" : ""}">
+      <div class="ahead" onclick="toggle('${agent.id}')">
+        <div class="logo ${shape === "glyph" ? "glyph" : ""}" style="--b:${brand}">${mark}</div>
+        <div class="txt">
+          <div class="l1"><span class="nm">${agent.name}</span><span class="kind">${agent.kind}</span>${badges}</div>
+          <div class="st ${cls}">${text}</div>
+          ${!off && state.ver ? `<div class="ver">${state.ver}</div>` : ""}
+        </div>
+        ${action}
+        <span class="chev"></span>
+        <span class="sw ${off ? "" : "on"} ${lockedOn && (last || agent.default || agent.captain) ? "locked" : ""}" onclick="event.stopPropagation(); flip('${agent.id}')"></span>
+      </div>
+      <div class="det">${details(agent, state)}</div>
+    </div>`;
+  }).join("");
+  document.getElementById("host-local").classList.toggle("sel", host === "local");
+  document.getElementById("host-dev").classList.toggle("sel", host !== "local");
+  document.getElementById("mb-local").classList.toggle("on", host === "local");
+  document.getElementById("mb-dev").classList.toggle("on", host !== "local");
+  document.getElementById("mb-normal").classList.toggle("on", !last);
+  document.getElementById("mb-last").classList.toggle("on", last);
+  document.getElementById("toast").classList.toggle("show", last);
+}
+function toggle(id) { open = open === id ? null : id; render(); }
+function flip(id) { const agent = AGENTS.find(a => a.id === id); if (!agent.default && !agent.captain && !last) { agent.off = !agent.off; render(); } }
+function setHost(next) { host = next; render(); }
+function setLast(value) { last = value; render(); }
+function setTheme(theme, button) {
+  document.documentElement.dataset.theme = theme;
+  document.querySelectorAll(".mockbar .grp:first-of-type button").forEach(b => b.classList.toggle("on", b === button));
+}
+const params = new URLSearchParams(location.search);
+if (params.get("host") === "dev") host = "dev";
+if (params.get("last") === "1") last = true;
+if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
+if (params.has("open")) open = params.get("open") || null;
+render();
+</script>
+</body>
+</html>
