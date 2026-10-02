@@ -13,6 +13,7 @@ pub mod history;
 mod install;
 pub mod mcp;
 pub mod preset;
+pub mod readiness;
 pub mod registry;
 pub mod usage;
 
@@ -679,6 +680,20 @@ pub struct AgentKind {
     pub monogram: &'static str,
 }
 
+/// ログインの跡（資格情報の中身は読まない・在るかだけを見る）。[`AgentKind::configured_auth_state`]
+/// （このマシン）と、設定の AI エージェントのページが SSH 先を見る時（[`readiness`]）が同じ表を使う。
+pub(crate) struct LoginTraces {
+    /// 値があればそのまま使える（API キー）。
+    pub(crate) ready_env: &'static [&'static str],
+    /// 値があればログインの跡（確かめていない）。
+    pub(crate) env: &'static [&'static str],
+    /// ホームから見て在ればログインの跡（確かめていない）。
+    pub(crate) files: &'static [&'static str],
+}
+
+/// OpenCode の資格情報（ホームから見た道）。このマシンでは `XDG_DATA_HOME` も見る（[`opencode_auth_exists`]）。
+const OPENCODE_AUTH: &str = ".local/share/opencode/auth.json";
+
 /// エージェントのローカル導入状況（設定画面のステータス表示）。認証状態は見ない（CLI 任せ）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
@@ -1127,6 +1142,12 @@ impl AgentKind {
         find_in_path(self.cli_bin).is_some()
     }
 
+    /// vendor CLI 本体の名前（PATH で探す名前）。設定の AI エージェントのページが、背景で読んだ事実
+    /// （[`readiness::HostFacts`]）と突き合わせる（描画中に PATH を歩かない）。
+    pub fn cli_command(&self) -> &'static str {
+        self.cli_bin
+    }
+
     /// 対話も子プロセス起動もしない軽量判定。composer の初回 render から呼ばれるため、
     /// ファイル存在と環境変数だけを見る。status/probe は明示的な背景 refresh に分離する。
     /// 設定画面の導入/ログイン後ポーリング（変化検知）もこの軽さを前提に毎秒呼ぶ。
@@ -1134,53 +1155,88 @@ impl AgentKind {
         if !self.cli_installed() {
             return AgentAuthState::SignedOut;
         }
-        let available = match self.id {
-            "claude" => env_has_any(&["ANTHROPIC_API_KEY"]),
-            "codex" => env_has_any(&["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"]),
-            _ => false,
-        };
-        if available {
-            return AgentAuthState::Available;
-        }
+        self.auth_state_from_traces(
+            |name| env_has_any(&[name]),
+            |file| {
+                if file == OPENCODE_AUTH {
+                    opencode_auth_exists()
+                } else {
+                    home_path_exists(file)
+                }
+            },
+        )
+    }
 
-        let configured = match self.id {
-            "claude" => home_path_exists(".claude/.credentials.json"),
-            "codex" => home_path_exists(".codex/auth.json"),
-            "copilot" => {
-                env_has_any(&[
+    /// ログインの跡の表（[`LoginTraces`]）。このマシンでも SSH 先でも同じ表を見る。
+    pub(crate) fn login_traces(&self) -> LoginTraces {
+        match self.id {
+            "claude" => LoginTraces {
+                ready_env: &["ANTHROPIC_API_KEY"],
+                env: &[],
+                files: &[".claude/.credentials.json"],
+            },
+            "codex" => LoginTraces {
+                ready_env: &["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"],
+                env: &[],
+                files: &[".codex/auth.json"],
+            },
+            "copilot" => LoginTraces {
+                ready_env: &[],
+                env: &[
                     "COPILOT_GITHUB_TOKEN",
                     "GH_TOKEN",
                     "GITHUB_TOKEN",
                     "COPILOT_PROVIDER_API_KEY",
-                ]) || home_path_exists(".copilot/config.json")
-                    || home_path_exists(".config/gh/hosts.yml")
-            }
-            "qwen" => {
-                env_has_any(&[
+                ],
+                files: &[".copilot/config.json", ".config/gh/hosts.yml"],
+            },
+            "qwen" => LoginTraces {
+                ready_env: &[],
+                env: &[
                     "DASHSCOPE_API_KEY",
                     "OPENAI_API_KEY",
                     "ANTHROPIC_API_KEY",
                     "GEMINI_API_KEY",
-                ]) || home_path_exists(".qwen/settings.json")
-                    || home_path_exists(".qwen/.env")
-            }
-            "opencode" => {
-                env_has_any(&["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"])
-                    || opencode_auth_exists()
-            }
-            "kimi" => {
-                env_has_any(&["KIMI_API_KEY"])
-                    || home_path_exists(".kimi-code/config.toml")
-                    || home_path_exists(".kimi-code/credentials.json")
-            }
-            "grok" => {
-                env_has_any(&["XAI_API_KEY"])
-                    || home_path_exists(".grok/config.toml")
-                    || home_path_exists(".grok/credentials.json")
-            }
-            _ => false,
-        };
-        if configured {
+                ],
+                files: &[".qwen/settings.json", ".qwen/.env"],
+            },
+            "opencode" => LoginTraces {
+                ready_env: &[],
+                env: &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+                files: &[OPENCODE_AUTH],
+            },
+            "kimi" => LoginTraces {
+                ready_env: &[],
+                env: &["KIMI_API_KEY"],
+                files: &[".kimi-code/config.toml", ".kimi-code/credentials.json"],
+            },
+            "grok" => LoginTraces {
+                ready_env: &[],
+                env: &["XAI_API_KEY"],
+                files: &[".grok/config.toml", ".grok/credentials.json"],
+            },
+            _ => LoginTraces {
+                ready_env: &[],
+                env: &[],
+                files: &[],
+            },
+        }
+    }
+
+    /// 跡からログインの状態を決める（CLI の有無は見ない）。環境変数とファイルの見方は呼び手が渡す
+    /// （このマシンは実物・SSH 先は [`readiness`] が読んだ事実）。
+    pub(crate) fn auth_state_from_traces(
+        &self,
+        has_env: impl Fn(&str) -> bool,
+        has_file: impl Fn(&str) -> bool,
+    ) -> AgentAuthState {
+        let traces = self.login_traces();
+        if traces.ready_env.iter().any(|name| has_env(name)) {
+            return AgentAuthState::Available;
+        }
+        if traces.env.iter().any(|name| has_env(name))
+            || traces.files.iter().any(|file| has_file(file))
+        {
             AgentAuthState::Configured
         } else {
             AgentAuthState::SignedOut

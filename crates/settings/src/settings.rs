@@ -22,9 +22,12 @@ use std::time::{Duration, SystemTime};
 use theme_core::Theme;
 mod add_agent;
 mod agent_launch;
+mod agents_page;
 mod remote;
 
 pub use agent_launch::set_agent_server;
+pub use agents_page::AgentHost;
+use agents_page::{disable_refusal, RemoteFacts};
 
 pub use settings_core::{
     persist_agent_config_default, persist_mcp_enabled, persist_user_value, persist_user_values,
@@ -555,8 +558,19 @@ fn themes_dir() -> Option<PathBuf> {
 pub struct SettingsView {
     theme: Theme,
     accent: Hsla,
-    cli_installed: Vec<bool>,
     auth_states: Vec<acp_client::AgentAuthState>,
+    /// このマシンの事実（PATH・入れてある版・ログインの跡・`acp_client::readiness`）。CLI の調査と一緒に
+    /// 背景で読む（`None` = まだ読んでいない）。
+    local_facts: Option<acp_client::readiness::HostFacts>,
+    /// AI エージェントのページで選べる SSH 先（この窓で開いている SSH のプロジェクトの接続先）。
+    agent_hosts: Vec<AgentHost>,
+    /// AI エージェントのページで見ているホストの id（`None` = このマシン・ビューのメモリ）。
+    agent_host: Option<SharedString>,
+    /// SSH 先ごとの事実（id → 読み具合）。
+    remote_facts: std::collections::HashMap<SharedString, RemoteFacts>,
+    agent_host_generation: u64,
+    /// AI エージェントのページで開いている行（エージェントの id・1 つだけ・ビューのメモリ）。
+    expanded_agent: Option<SharedString>,
     checking_agents: bool,
     availability_generation: u64,
     /// 導入/ログインボタン押下後の変化見張り中フラグ（agent ごと・多重起動防止）。
@@ -699,8 +713,13 @@ impl SettingsView {
         let mut view = Self {
             theme,
             accent,
-            cli_installed: vec![false; acp_client::AGENTS.len()],
             auth_states: vec![acp_client::AgentAuthState::SignedOut; acp_client::AGENTS.len()],
+            local_facts: None,
+            agent_hosts: Vec::new(),
+            agent_host: None,
+            remote_facts: std::collections::HashMap::new(),
+            agent_host_generation: 0,
+            expanded_agent: None,
             checking_agents: true,
             availability_generation: 0,
             watching_agents: vec![false; acp_client::AGENTS.len()],
@@ -872,36 +891,47 @@ impl SettingsView {
     }
 
     /// 予約済みの vendor CLI 調査を 1 回だけ走らせる（render から。最新世代だけを反映する）。
+    /// 同じ背景で、AI エージェントのページの「このマシンの事実」（PATH・入れてある版・ログインの跡）も読む。
+    /// SSH 先を見ていれば、それも読み直す（描かれた時だけ・開いていない設定のために繋がない）。
     fn probe_availability(&mut self, cx: &mut Context<Self>) {
         self.availability_pending = false;
         // skill の置き場も「描かれた」を合図に読み直す（開かれていない設定のために fs を歩かない）。
         self.refresh_skills(cx);
+        self.refresh_agent_host(cx);
         self.availability_generation = self.availability_generation.wrapping_add(1);
         let generation = self.availability_generation;
-        let disabled = get(cx).disabled_agents.clone();
+        let settings = get(cx);
+        let disabled = settings.disabled_agents.clone();
+        let agents = agent_catalog(cx).agents();
+        let overrides = agents_page::builtin_overrides(&settings);
+        let registry = self.registry.clone();
         cx.spawn(async move |view, cx| {
-            let agent_states = cx
+            let (auth_states, shim_target, facts) = cx
                 .background_executor()
                 .spawn(async move {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let auth_states = acp_client::refresh_agent_auth_states(cwd, &disabled).await;
-                    let installed = acp_client::AGENTS
-                        .iter()
-                        .map(acp_client::AgentKind::cli_installed)
-                        .collect::<Vec<_>>();
-                    (installed, auth_states, cli_shim::installed_target())
+                    let facts = acp_client::readiness::local_facts(
+                        &agents,
+                        &overrides,
+                        registry.as_deref(),
+                    );
+                    (auth_states, cli_shim::installed_target(), facts)
                 })
                 .await;
-            let _ = view.update(cx, |view, cx| {
+            let applied = view.update(cx, |view, cx| {
                 if view.availability_generation == generation {
-                    view.cli_installed = agent_states.0;
-                    view.auth_states = agent_states.1;
-                    view.cli_shim_target = agent_states.2;
+                    view.auth_states = auth_states;
+                    view.cli_shim_target = shim_target;
+                    view.local_facts = Some(facts);
                     view.checking_agents = false;
                     cx.notify();
                 }
             });
+            if let Err(error) = applied {
+                eprintln!("エージェントの状態を画面へ返せない: {error:#}");
+            }
         })
         .detach();
     }
@@ -962,9 +992,17 @@ impl SettingsView {
     }
 
     /// エージェントを使う / 使わない（O16）。使うに戻したら、その 1 つもログインを確かめ直す
-    /// （使わない間は確かめていない）。
+    /// （使わない間は確かめていない）。既定のエージェント・Captain・使う最後の 1 つは使わないにできない
+    /// （書く前に断って理由をトーストに出す・[`disable_refusal`]）。
     fn toggle_agent_enabled(&mut self, agent_id: &str, cx: &mut Context<Self>) {
-        let next = toggled_disabled_agents(&get(cx).disabled_agents, agent_id);
+        let settings = get(cx);
+        if let Some(refusal) = disable_refusal(&settings, &agent_catalog(cx), agent_id) {
+            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(
+                refusal.message(),
+            )));
+            return;
+        }
+        let next = toggled_disabled_agents(&settings.disabled_agents, agent_id);
         let enabling = !next.iter().any(|id| id == agent_id);
         let result = set_user_value(cx, "disabled_agents", serde_json::json!(next));
         self.report_save(result, cx);
@@ -972,33 +1010,6 @@ impl SettingsView {
             self.refresh_availability(cx);
         }
         cx.notify();
-    }
-
-    /// カードの右端の「使う」スイッチ。既定のエージェントと Captain は外せない（押すと理由を出す）。
-    fn agent_enabled_switch(
-        &self,
-        index: usize,
-        agent_id: SharedString,
-        enabled: bool,
-        locked: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        self.switch(("agent-enabled", index), enabled)
-            .flex_none()
-            .when(locked, |switch| switch.opacity(0.45).cursor_default())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, _, _window, cx| {
-                    if locked {
-                        cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(i18n::t!(
-                            "settings.agent_disable_locked"
-                        ))));
-                    } else {
-                        view.toggle_agent_enabled(&agent_id, cx);
-                    }
-                }),
-            )
-            .into_any_element()
     }
 
     /// Captain の任命 / 解任（FLEET-V2 §5.7）。同じエージェントをもう一度押すと解任（`null`）。
@@ -1019,38 +1030,6 @@ impl SettingsView {
         self.report_save(result, cx);
         cx.emit(SettingsViewEvent::OnboardingCompleted);
         cx.notify();
-    }
-
-    fn agent_action_button(
-        &self,
-        id: (&'static str, usize),
-        text: String,
-        command: &'static str,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let theme = self.theme.clone();
-        let agent_index = id.1;
-        div()
-            .id(id)
-            .px(px(8.))
-            .py(px(3.))
-            .rounded(px(5.))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(px(11.))
-            .text_color(theme.fg1)
-            .cursor_pointer()
-            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-            .child(SharedString::from(text))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, _, _window, cx| {
-                    // コマンド完了イベントは取れない（terminal はシェルに落ちる）ので、
-                    // 押した時点から変化見張りを開始して反映ラグを消す。
-                    view.watch_agent_progress(agent_index, cx);
-                    cx.emit(SettingsViewEvent::RunCommand(command.to_string()))
-                }),
-            )
     }
 
     // ── コマンドライン（`ne` シム・cli_shim crate）───────────────────────────────
@@ -2128,357 +2107,7 @@ impl SettingsView {
         self.pref_row_with_keywords(&[key, "font"], label, Some(sub), control)
     }
 
-    // ── AI エージェント（ページ「AI エージェント」）──────────────────────────
-
-    /// エージェント一覧の行。**ページとオンボーディングで共用する**（初回はナビ無しの
-    /// 1 枚スクロールに同じ行が出る・UI-SPEC §12）。
-    /// `show_captain` = Captain の任命ボタンを出すか（オンボーディングでは出さない＝初回に Fleet の概念を持ち込まない）。
-    /// 組み込みの 7 件の後に、設定で足したエージェント（H1）を同じカードで並べる。
-    fn agents_rows(&self, settings: &Settings, show_captain: bool, cx: &mut Context<Self>) -> Div {
-        let theme = self.theme.clone();
-        let default_agent = settings.default_agent.clone();
-        let captain_agent = settings.captain_agent.clone();
-        let mut rows = div().flex().flex_col().gap(px(6.));
-        for (index, agent) in acp_client::AGENTS.iter().enumerate() {
-            let is_default = agent.label == default_agent;
-            // 使わないエージェント（O16）は選べる所から外す。ログインの確かめも起こさない。
-            let enabled = settings.agent_enabled(agent.id);
-            let cli_installed = self.cli_installed.get(index).copied().unwrap_or(false);
-            let auth_state = self
-                .auth_states
-                .get(index)
-                .copied()
-                .unwrap_or(acp_client::AgentAuthState::SignedOut);
-            let available = enabled && auth_state == acp_client::AgentAuthState::Available;
-            let (dot_color, status_text) = if !enabled {
-                (theme.fg2, i18n::t!("settings.agent_disabled"))
-            } else if self.checking_agents {
-                (theme.fg2, i18n::t!("settings.agent_checking"))
-            } else {
-                match (cli_installed, auth_state) {
-                    (_, acp_client::AgentAuthState::Available) => {
-                        (theme.ok, i18n::t!("settings.agent_available"))
-                    }
-                    (true, acp_client::AgentAuthState::Configured) => {
-                        (theme.warn, i18n::t!("settings.agent_configured"))
-                    }
-                    (true, acp_client::AgentAuthState::SignedOut) => {
-                        (theme.fg2, i18n::t!("settings.agent_signed_out"))
-                    }
-                    (false, _) => (theme.fg2, i18n::t!("settings.not_installed")),
-                }
-            };
-            // 任命済みの行は利用不可（ログアウト等）でも出す＝解任の手段を消さない。
-            let is_captain = captain_agent.as_deref() == Some(agent.label);
-            let label = SharedString::from(agent.label);
-            let default_control =
-                self.default_control(index, label.clone(), is_default, available, cx);
-            let captain_control = self.captain_control(
-                index,
-                label.clone(),
-                is_captain,
-                show_captain && (available || is_captain),
-                captain_agent.clone(),
-                cx,
-            );
-            let (logo, mono, brand) = agent_brand(agent.id);
-            let card = self
-                .agent_card(
-                    is_default && available,
-                    enabled,
-                    agent_logo(logo, mono.to_string(), brand),
-                    label.clone(),
-                    dot_color,
-                    status_text,
-                )
-                .child(captain_control)
-                .child(default_control)
-                .child(if !enabled || self.checking_agents || available {
-                    div().into_any_element()
-                } else if cli_installed {
-                    self.agent_action_button(
-                        ("agent-login", index),
-                        if auth_state == acp_client::AgentAuthState::Configured {
-                            i18n::t!("settings.open_cli")
-                        } else {
-                            i18n::t!("settings.login")
-                        },
-                        agent.login_cmd,
-                        cx,
-                    )
-                    .into_any_element()
-                } else {
-                    div().into_any_element()
-                })
-                .when(
-                    enabled && !self.checking_agents && !cli_installed && !available,
-                    |row| {
-                        row.child(self.agent_action_button(
-                            ("agent-install", index),
-                            i18n::t!("settings.install"),
-                            agent.install_cmd,
-                            cx,
-                        ))
-                    },
-                )
-                .child(self.agent_enabled_switch(
-                    index,
-                    agent.id.into(),
-                    enabled,
-                    enabled && (is_default || is_captain),
-                    cx,
-                ));
-            rows = rows.child(card);
-            // アカウント切替（O14・Claude Code / Codex）。ログインは POSIX シェルで流すので Windows は未対応。
-            if let Some(var) = settings_core::account_env_var(agent.id)
-                .filter(|_| enabled && cli_installed && !cfg!(windows))
-            {
-                rows = rows.child(self.account_line(index, agent.id, var, settings, cx));
-            }
-            // 起動の上書き（O16・環境変数 / 自分のコマンド）。初回の案内には出さない。
-            if enabled && show_captain {
-                rows = rows.child(self.launch_line(
-                    index,
-                    agent.id.into(),
-                    label,
-                    false,
-                    false,
-                    settings,
-                    cx,
-                ));
-            }
-        }
-        let catalog = agent_catalog(cx);
-        for (position, custom) in catalog.customs().iter().enumerate() {
-            rows = rows.children(self.custom_agent_rows(
-                acp_client::AGENTS.len() + position,
-                custom,
-                settings,
-                show_captain,
-                cx,
-            ));
-        }
-        rows
-    }
-
-    /// 設定で足したエージェント（H1）の行: 組み込みと同じカードに、起動の状態（自分のコマンドが
-    /// 見つかるか）・既定 / Captain・使う / 使わない。下に起動の行（「変える…」「外す」）。
-    /// ログインと導入のボタンは無い（ログインはエージェント自身・導入は自分で書いたコマンドの側）。
-    fn custom_agent_rows(
-        &self,
-        index: usize,
-        custom: &acp_client::CustomAgent,
-        settings: &Settings,
-        show_captain: bool,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let theme = self.theme.clone();
-        let label = SharedString::from(custom.label.clone());
-        let id = SharedString::from(custom.id.clone());
-        let enabled = settings.agent_enabled(&custom.id);
-        let is_default = settings.default_agent == custom.label;
-        let is_captain = settings.captain_agent.as_deref() == Some(custom.label.as_str());
-        let status = custom_agent_status(custom, self.registry.as_deref());
-        let ready = status.tone != CustomStatusTone::Unavailable;
-        let available = enabled && ready;
-        let (dot_color, status_text) = if !enabled {
-            (theme.fg2, i18n::t!("settings.agent_disabled"))
-        } else {
-            let color = match status.tone {
-                CustomStatusTone::Ready => theme.ok,
-                // 使えるが注意の要る状態（検証の値が無い binary）は「利用可能」の色にしない。
-                CustomStatusTone::Caution => theme.fg1,
-                CustomStatusTone::Unavailable => theme.fg2,
-            };
-            (color, status.text)
-        };
-        let (logo, mono, brand) =
-            acp_client::Agent::Custom(std::sync::Arc::new(custom.clone())).brand();
-        let locked = enabled && (is_default || is_captain);
-        let card = self
-            .agent_card(
-                is_default && available,
-                enabled,
-                agent_logo(logo, mono, brand),
-                label.clone(),
-                dot_color,
-                status_text,
-            )
-            .child(self.captain_control(
-                index,
-                label.clone(),
-                is_captain,
-                show_captain && (available || is_captain),
-                settings.captain_agent.clone(),
-                cx,
-            ))
-            .child(self.default_control(index, label.clone(), is_default, available, cx))
-            .child(self.agent_enabled_switch(index, id.clone(), enabled, locked, cx));
-        let mut rows = vec![card.into_any_element()];
-        if show_captain {
-            rows.push(
-                self.launch_line(
-                    index,
-                    id,
-                    label,
-                    true,
-                    is_default || is_captain,
-                    settings,
-                    cx,
-                )
-                .into_any_element(),
-            );
-        }
-        rows
-    }
-
-    /// エージェントのカードの器（ロゴ・名前・状態の 1 行）。右のボタン群は呼び手が足す。
-    fn agent_card(
-        &self,
-        emphasized: bool,
-        enabled: bool,
-        logo: gpui::AnyElement,
-        label: SharedString,
-        status_color: Hsla,
-        status_text: String,
-    ) -> Div {
-        let theme = self.theme.clone();
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .px(px(12.))
-            .py(px(9.))
-            .rounded(px(8.))
-            .bg(theme.bg2)
-            .border_1()
-            .border_color(if emphasized {
-                self.accent.alpha(0.5)
-            } else {
-                theme.border
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .when(!enabled, |logo| logo.opacity(0.4))
-                    .child(logo),
-            )
-            // 名前の列だけが縮む（右のボタン群をカードの外へ押し出さない）。長い名前は折り返す。
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg0)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(status_color)
-                            .child(SharedString::from(status_text)),
-                    ),
-            )
-    }
-
-    /// 「★ 既定」（既定かつ利用可）/「既定にする」（利用可）/ 何も出さない。
-    fn default_control(
-        &self,
-        index: usize,
-        label: SharedString,
-        is_default: bool,
-        available: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let theme = self.theme.clone();
-        let accent = self.accent;
-        if is_default && available {
-            div()
-                .flex_none()
-                .whitespace_nowrap()
-                .px(px(8.))
-                .py(px(3.))
-                .rounded(px(5.))
-                .bg(accent.alpha(0.16))
-                .text_size(px(11.))
-                .text_color(accent)
-                .child(SharedString::from(i18n::t!("settings.is_default")))
-                .into_any_element()
-        } else if available {
-            div()
-                .id(("set-default", index))
-                .flex_none()
-                .whitespace_nowrap()
-                .px(px(8.))
-                .py(px(3.))
-                .rounded(px(5.))
-                .text_size(px(11.))
-                .text_color(theme.fg2)
-                .cursor_pointer()
-                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                .child(SharedString::from(i18n::t!("settings.make_default")))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |view, _, _window, cx| view.set_default_agent(&label, cx)),
-                )
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        }
-    }
-
-    /// 「⚑ Captain」/「Captain にする」（`show` の時だけ）。同じ行をもう一度押すと解任。
-    fn captain_control(
-        &self,
-        index: usize,
-        label: SharedString,
-        is_captain: bool,
-        show: bool,
-        current: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        if !show {
-            return div().into_any_element();
-        }
-        let theme = self.theme.clone();
-        let accent = self.accent;
-        div()
-            .id(("set-captain", index))
-            .flex_none()
-            .whitespace_nowrap()
-            .px(px(8.))
-            .py(px(3.))
-            .rounded(px(5.))
-            .text_size(px(11.))
-            .cursor_pointer()
-            .when(is_captain, |element| {
-                element.bg(accent.alpha(0.16)).text_color(accent)
-            })
-            .when(!is_captain, |element| {
-                element
-                    .text_color(theme.fg2)
-                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-            })
-            .child(SharedString::from(if is_captain {
-                i18n::t!("settings.is_captain")
-            } else {
-                i18n::t!("settings.make_captain")
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, _, _window, cx| {
-                    view.toggle_captain(&label, current.as_deref(), cx)
-                }),
-            )
-            .into_any_element()
-    }
+    // ── AI エージェント（ページ「AI エージェント」・一覧は agents_page）──────────────────────
 
     /// 権限モードの既定（O16）: 「エージェントの既定」/「聞かずに進める（Yolo）」の 2 択と、ピルで選んで
     /// 覚えているモードの一覧（押すと忘れる）。選ぶと覚えているモードを全部消して一括で揃える。
@@ -2611,133 +2240,6 @@ impl SettingsView {
         let result = forget_agent_config_default(cx, agent_id, "mode");
         self.report_save(result, cx);
         cx.notify();
-    }
-
-    /// 1 エージェント分のアカウントの行: 既定 / 作ったアカウント / ＋ 新しいアカウント / ログイン。
-    /// 選ぶと `agent_servers.<id>.env.<var>` を書く（資格情報は読まない・置き場を指すだけ）。
-    fn account_line(
-        &self,
-        index: usize,
-        agent_id: &'static str,
-        var: &'static str,
-        settings: &Settings,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = self.theme.clone();
-        let current = settings
-            .agent_servers
-            .get(agent_id)
-            .and_then(|server| server.env().get(var))
-            .cloned();
-        let root = settings_core::accounts_root(agent_id);
-        let accounts = self.accounts.get(index).cloned().unwrap_or_default();
-        let selected = current.as_deref().and_then(|path| {
-            let root = root.as_ref()?;
-            let name = Path::new(path)
-                .strip_prefix(root)
-                .ok()?
-                .to_str()?
-                .to_string();
-            accounts.contains(&name).then_some(name)
-        });
-        let chip = |id: (&'static str, usize), label: String, chosen: bool| {
-            div()
-                .id(id)
-                .px(px(8.))
-                .h(px(20.))
-                .flex()
-                .items_center()
-                .rounded(px(5.))
-                .text_size(px(11.))
-                .cursor_pointer()
-                .when(chosen, |chip| chip.bg(theme.bg3).text_color(theme.fg0))
-                .when(!chosen, |chip| {
-                    chip.border_1()
-                        .border_color(theme.border)
-                        .text_color(theme.fg1)
-                        .hover(|style| style.text_color(theme.fg0))
-                })
-                .child(SharedString::from(label))
-        };
-        let mut line = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(4.))
-            .pl(px(48.))
-            .child(
-                div()
-                    .text_size(px(10.5))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("settings.account_label"))),
-            )
-            .child(
-                chip(
-                    ("account-default", index),
-                    i18n::t!("settings.account_default"),
-                    current.is_none(),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |view, _, _window, cx| view.use_account(agent_id, None, cx)),
-                ),
-            );
-        for (position, name) in accounts.iter().enumerate() {
-            let chosen = selected.as_deref() == Some(name.as_str());
-            let account = name.clone();
-            line = line.child(
-                chip(("account", index * 100 + position), name.clone(), chosen).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |view, _, _window, cx| {
-                        view.use_account(agent_id, Some(account.clone()), cx)
-                    }),
-                ),
-            );
-        }
-        // settings.json で necoder の置き場の外を指している（手で書いた）: 選ばれていることだけ見せる。
-        if current.is_some() && selected.is_none() {
-            line = line.child(chip(
-                ("account-elsewhere", index),
-                i18n::t!("settings.account_elsewhere"),
-                true,
-            ));
-        }
-        line = line.child(
-            chip(
-                ("account-add", index),
-                i18n::t!("settings.account_add"),
-                false,
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, _, _window, cx| view.add_account(index, cx)),
-            ),
-        );
-        if let Some(path) = current.clone() {
-            line = line.child(
-                div()
-                    .id(("account-login", index))
-                    .px(px(6.))
-                    .text_size(px(11.))
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(theme.fg0))
-                    .child(SharedString::from(i18n::t!("settings.account_login")))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |view, _, _window, cx| {
-                            view.login_account(index, Path::new(&path), cx)
-                        }),
-                    ),
-            );
-        }
-        line.child(
-            div()
-                .w_full()
-                .text_size(px(10.))
-                .text_color(theme.fg2)
-                .child(SharedString::from(i18n::t!("settings.account_hint"))),
-        )
     }
 
     // ── ページの器（左ナビ + ページ面）──────────────────────────────────────────
@@ -2939,12 +2441,14 @@ impl SettingsView {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(6.))
+                        .gap(px(10.))
                         .child(self.section_heading(
                             i18n::t!("settings.agents_heading"),
                             Some(i18n::t!("settings.agents_sub")),
                         ))
-                        .child(self.agents_rows(settings, true, cx))
+                        // ホスト（このマシン / SSH 先）を切り替えて、その機械での状態を見る（#38 H2）。
+                        .child(self.agent_host_row(cx))
+                        .child(self.agents_list(settings, true, cx))
                         // レジストリの全件から足す（H2）。初回の案内には出さない。
                         .child(self.add_agent_row(cx))
                         .child(self.permission_default_rows(settings, cx)),
@@ -4113,7 +3617,7 @@ impl Render for SettingsView {
                     i18n::t!("settings.agents_heading"),
                     Some(i18n::t!("settings.agents_sub")),
                 ))
-                .child(self.agents_rows(&settings, false, cx))
+                .child(self.agents_list(&settings, false, cx))
                 // Ghostty を使っていれば、ターミナルの書体・配色をここで持ってこられる（O45・H14）。
                 .when(self.ghostty_config_present, |body| {
                     body.child(self.ghostty_import_row(cx))
@@ -4233,92 +3737,6 @@ fn agent_logo(icon: Option<&'static str>, monogram: String, brand: u32) -> gpui:
             .child(SharedString::from(monogram))
             .into_any_element(),
     }
-}
-
-/// 足したエージェントの状態の 1 行と、いま起動できる見込みがあるか（PATH を見るだけ・子プロセスは
-/// 起こさない）。
-/// 足したエージェントの状態の 1 行の調子（色の出し分け）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CustomStatusTone {
-    /// 起動できる見込み。
-    Ready,
-    /// 起動できるが注意が要る（検証の値が無い binary）。
-    Caution,
-    /// 起動できない（理由を出す）。
-    Unavailable,
-}
-
-/// 足したエージェントの状態の 1 行。
-struct CustomStatus {
-    tone: CustomStatusTone,
-    text: String,
-}
-
-/// 足したエージェントの状態の 1 行と、いま起動できる見込みがあるか（PATH とファイルを見るだけ・
-/// 子プロセスは起こさない）。
-fn custom_agent_status(
-    custom: &acp_client::CustomAgent,
-    registry: Option<&acp_client::registry::Registry>,
-) -> CustomStatus {
-    let command = match &custom.launch {
-        acp_client::CustomLaunch::Command { command, .. } => command.as_str(),
-        acp_client::CustomLaunch::Registry { .. } => "",
-    };
-    let (tone, text) = match custom.plan(registry) {
-        Ok(acp_client::LaunchPlan::Command { found: true }) => (
-            CustomStatusTone::Ready,
-            i18n::t!("settings.custom_command_ready", "command" => command),
-        ),
-        Ok(acp_client::LaunchPlan::Command { found: false }) => (
-            CustomStatusTone::Unavailable,
-            i18n::t!("settings.custom_command_missing", "command" => command),
-        ),
-        Ok(acp_client::LaunchPlan::Npx { version }) => (
-            CustomStatusTone::Ready,
-            i18n::t!("settings.custom_registry_npx", "version" => version),
-        ),
-        Ok(acp_client::LaunchPlan::Uvx { version }) => (
-            CustomStatusTone::Ready,
-            i18n::t!("settings.custom_registry_uvx", "version" => version),
-        ),
-        // キーは literal で並べる（動的に組むと locales の書き忘れに気づけない）。
-        Ok(acp_client::LaunchPlan::Binary {
-            version,
-            deployed,
-            verified,
-        }) => match (deployed, verified) {
-            (true, true) => (
-                CustomStatusTone::Ready,
-                i18n::t!("settings.custom_binary_ready", "version" => version),
-            ),
-            (true, false) => (
-                CustomStatusTone::Caution,
-                i18n::t!("settings.custom_binary_ready_unverified", "version" => version),
-            ),
-            (false, true) => (
-                CustomStatusTone::Ready,
-                i18n::t!("settings.custom_binary_download", "version" => version),
-            ),
-            (false, false) => (
-                CustomStatusTone::Caution,
-                i18n::t!("settings.custom_binary_download_unverified", "version" => version),
-            ),
-        },
-        Err(error) => (
-            CustomStatusTone::Unavailable,
-            add_agent::launch_problem_text(&error),
-        ),
-    };
-    CustomStatus { tone, text }
-}
-
-/// ブランド表示はカタログ（`acp_client::AgentKind`）が単一の出所。設定画面もタブも同じ値を引く。
-fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
-    acp_client::AGENTS
-        .iter()
-        .find(|agent| agent.id == id)
-        .map(|agent| agent.brand())
-        .unwrap_or((None, "?", 0x88_88_88))
 }
 
 #[cfg(test)]
@@ -4664,10 +4082,10 @@ mod tests {
 
             // 既定のエージェントは外せない。
             view.set_default_agent("DeepSeek Harness", cx);
-            view.remove_custom_agent("dsh", true, cx);
+            view.remove_custom_agent("dsh", cx);
             assert!(get(cx).agent_servers.contains_key("dsh"));
             view.set_default_agent("Claude Code", cx);
-            view.remove_custom_agent("dsh", false, cx);
+            view.remove_custom_agent("dsh", cx);
             assert!(!get(cx).agent_servers.contains_key("dsh"), "外すと消える");
             assert!(agent_catalog(cx).customs().is_empty());
             assert!(
@@ -4677,6 +4095,257 @@ mod tests {
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// #38 H2: 使う / 使わないは settings.json の `disabled_agents` に往復する（書いたファイルを読み直しても
+    /// 同じ）。使わない物は composer に出さない。使う最後の 1 つは、スイッチでも「外す」でも外せない
+    /// （書く前に断り、理由をトーストに出す）。
+    #[gpui::test]
+    fn disabled_agents_round_trip_and_the_last_agent_stays_on(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-last-agent-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{ "onboarded": true, "default_agent": "Claude Code",
+                "disabled_agents": ["claude", "codex", "copilot", "qwen", "opencode", "kimi", "grok"],
+                "agent_servers": {
+                    "dsh": { "name": "DeepSeek Harness", "command": "definitely-not-dsh-acp" } } }"#,
+        )
+        .expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        let refusals = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let record = refusals.clone();
+        let _subscription = cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_, event: &SettingsViewEvent, _| {
+                if let SettingsViewEvent::SaveFailed(message) = event {
+                    record.borrow_mut().push(message.to_string());
+                }
+            })
+        });
+        let on_disk = |path: &Path| {
+            SettingsStore::load(Some(path), None)
+                .settings()
+                .disabled_agents
+                .clone()
+        };
+        let all_builtins: Vec<String> = acp_client::AGENTS
+            .iter()
+            .map(|agent| agent.id.to_string())
+            .collect();
+        view.update(cx, |view, cx| {
+            // 既定のエージェント（Claude Code）も使わないにしてある＝使うのは dsh だけ。
+            view.toggle_agent_enabled("dsh", cx);
+            view.remove_custom_agent("dsh", cx);
+            assert_eq!(get(cx).disabled_agents, all_builtins, "書かない");
+            assert_eq!(on_disk(&path), all_builtins);
+            assert!(get(cx).agent_servers.contains_key("dsh"), "外さない");
+            assert!(selectable_agent_labels(cx)
+                .iter()
+                .any(|label| label.as_ref() == "DeepSeek Harness"));
+
+            // もう 1 つ使うにすれば、dsh を使わないにできる。
+            view.toggle_agent_enabled("kimi", cx);
+            view.availability_pending = false;
+            view.toggle_agent_enabled("dsh", cx);
+            let mut expected: Vec<String> = all_builtins
+                .iter()
+                .filter(|id| *id != "kimi")
+                .cloned()
+                .collect();
+            expected.push("dsh".to_string());
+            assert_eq!(get(cx).disabled_agents, expected);
+            assert_eq!(on_disk(&path), expected, "ファイルに書いて読み直しても同じ");
+            assert!(
+                !selectable_agent_labels(cx)
+                    .iter()
+                    .any(|label| label.as_ref() == "DeepSeek Harness"),
+                "使わない物は composer に出さない"
+            );
+            view.toggle_agent_enabled("dsh", cx);
+            view.availability_pending = false;
+            assert!(!on_disk(&path).contains(&"dsh".to_string()), "戻せる");
+        });
+        assert_eq!(
+            *refusals.borrow(),
+            vec![
+                i18n::t!("settings.agent_disable_last"),
+                i18n::t!("settings.agent_disable_last"),
+            ]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 既定のエージェント・Captain は「最後の 1 つ」より先に、その理由で断る。もう使わない物は断らない。
+    #[test]
+    fn the_refusal_names_the_reason() {
+        let mut settings = Settings {
+            default_agent: "Claude Code".to_string(),
+            captain_agent: Some("Codex".to_string()),
+            ..Settings::default()
+        };
+        let catalog = agent_catalog_for(&settings);
+        assert_eq!(
+            disable_refusal(&settings, &catalog, "claude"),
+            Some(agents_page::DisableRefusal::DefaultOrCaptain)
+        );
+        assert_eq!(
+            disable_refusal(&settings, &catalog, "codex"),
+            Some(agents_page::DisableRefusal::DefaultOrCaptain)
+        );
+        assert_eq!(disable_refusal(&settings, &catalog, "kimi"), None);
+        settings.disabled_agents = acp_client::AGENTS
+            .iter()
+            .filter(|agent| agent.id != "kimi")
+            .map(|agent| agent.id.to_string())
+            .collect();
+        assert_eq!(
+            disable_refusal(&settings, &catalog, "kimi"),
+            Some(agents_page::DisableRefusal::Last)
+        );
+        assert_eq!(
+            disable_refusal(&settings, &catalog, "claude"),
+            None,
+            "もう使わない物（使うにする）は断らない"
+        );
+    }
+
+    /// #38 H2: AI エージェントのページは、このマシン・行を開いた所・SSH 先（偽の SSH 先 = 一時フォルダの
+    /// 偽のホームで本物と同じ読み取りのシェルを流す）のどれでも描ける。SSH 先では、PATH のアダプタの版と
+    /// ログインの跡（確かめない）・npx のキャッシュの版・API キーの環境変数を読む。SSH 先が閉じたら
+    /// このマシンへ戻る。
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_agents_page_shows_this_machine_and_an_ssh_host(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-agent-hosts-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{ "onboarded": true, "disabled_agents": ["grok"],
+                "agent_servers": {
+                    "pi-acp": { "type": "registry", "name": "pi ACP" },
+                    "dsh": { "name": "DeepSeek Harness", "command": "dsh-acp", "args": ["--acp"] } } }"#,
+        )
+        .expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let registry = acp_client::registry::parse(
+            r#"{"version":"1.0.0","agents":[
+              {"id":"claude-acp","name":"Claude Agent","version":"0.84.0","description":"",
+               "distribution":{"npx":{"package":"@agentclientprotocol/claude-agent-acp@0.84.0"}}},
+              {"id":"codex-acp","name":"Codex","version":"2.1.0","description":"",
+               "distribution":{"npx":{"package":"@agentclientprotocol/codex-acp@2.1.0"}}},
+              {"id":"pi-acp","name":"pi ACP","version":"0.0.34","description":"",
+               "distribution":{"npx":{"package":"pi-acp@0.0.34"}}}
+            ]}"#,
+        )
+        .expect("見本を読める");
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        view.update(cx, |view, cx| {
+            view.registry = Some(std::sync::Arc::new(registry.clone()));
+            let mut facts = acp_client::readiness::HostFacts::default();
+            for name in ["node", "npx", "claude", "codex"] {
+                facts
+                    .commands
+                    .insert(name.to_string(), format!("/usr/local/bin/{name}"));
+            }
+            facts.npm_versions.insert(
+                "@agentclientprotocol/codex-acp".to_string(),
+                ["1.13.1".to_string()].into_iter().collect(),
+            );
+            view.local_facts = Some(facts);
+            view.auth_states[0] = acp_client::AgentAuthState::Available;
+            view.checking_agents = false;
+            view.debug_expand_agent("codex", cx);
+            assert_eq!(view.expanded_agent.as_deref(), Some("codex"));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        view.update(cx, |view, cx| view.debug_use_fake_host("fake@dev-box", cx));
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            assert_eq!(view.agent_host.as_deref(), Some("ssh://fake@dev-box"));
+            let Some(RemoteFacts::Ready(facts)) = view.remote_facts.get("ssh://fake@dev-box")
+            else {
+                panic!("偽の SSH 先を読めていない");
+            };
+            let catalog = agent_catalog(cx);
+            let judge = |label: &str| {
+                acp_client::readiness::assess(
+                    &catalog.by_label(label).expect("一覧に在る"),
+                    facts,
+                    None,
+                    None,
+                    Some(&registry),
+                )
+            };
+            let claude = judge("Claude Code");
+            assert_eq!(
+                claude.readiness,
+                acp_client::readiness::Readiness::Unverified,
+                "跡だけ（確かめない）"
+            );
+            assert_eq!(
+                agents_page::version_text(&claude.version),
+                Some(i18n::t!(
+                    "settings.agent_version_path_behind",
+                    "current" => "0.70.2",
+                    "registry" => "0.84.0",
+                    "command" => "claude-agent-acp"
+                ))
+            );
+            assert_eq!(
+                judge("Codex").readiness,
+                acp_client::readiness::Readiness::Ready,
+                "API キーの環境変数"
+            );
+            assert_eq!(
+                agents_page::version_text(&judge("pi ACP").version),
+                Some(i18n::t!(
+                    "settings.agent_version_update",
+                    "current" => "0.0.30",
+                    "target" => "0.0.34"
+                ))
+            );
+            assert_eq!(
+                judge("DeepSeek Harness").readiness,
+                acp_client::readiness::Readiness::Ready
+            );
+            view.debug_expand_agent("claude", cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            view.select_agent_host(None, cx);
+            view.select_agent_host(Some("ssh://fake@dev-box".into()), cx);
+            assert!(
+                matches!(
+                    view.remote_facts.get("ssh://fake@dev-box"),
+                    Some(RemoteFacts::Ready(_))
+                ),
+                "読めた SSH 先へ戻る時は読み直さない（確かめ直すで読む）"
+            );
+            view.set_agent_hosts(Vec::new());
+            assert_eq!(view.agent_host, None, "SSH 先が閉じたらこのマシンへ");
+            assert!(view.remote_facts.is_empty());
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(std::env::temp_dir().join(format!(
+            "necoder-fake-ssh-{}-fake-dev-box",
+            std::process::id()
+        )))
+        .ok();
     }
 
     /// 外す（H2-b）: 足したエージェントを外すと、落とした binary（`external_agents/binary/<id>`）を消す。
@@ -4734,8 +4403,8 @@ mod tests {
             view
         });
         view.update(cx, |view, cx| {
-            view.remove_custom_agent("amp-acp", false, cx);
-            view.remove_custom_agent("vtcode", false, cx);
+            view.remove_custom_agent("amp-acp", cx);
+            view.remove_custom_agent("vtcode", cx);
         });
         cx.run_until_parked();
         assert!(!binaries.join("amp-acp").exists(), "外すと落とした物を消す");

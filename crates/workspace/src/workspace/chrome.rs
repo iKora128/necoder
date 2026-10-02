@@ -2873,13 +2873,26 @@ impl Workspace {
 
     /// 設定を開く時の読み直し。Skills 節の一覧に、いま見ているローカルのプロジェクトの
     /// `.claude/skills` / `.agents/skills` も含める（リモートと Chat 中はプロジェクトなし）。
+    /// AI エージェントのページで選べる SSH 先として、この窓で開いている SSH のプロジェクトの接続先も渡す
+    /// （その接続とプロジェクトの根で状態を読む・新しく繋がない）。
     pub(crate) fn refresh_settings_view(&mut self, cx: &mut Context<Self>) {
         let project = self
             .active_slot()
             .filter(|slot| slot.remote_host.is_none())
             .map(|slot| slot.worktree.root().to_path_buf());
+        let hosts: Vec<settings::AgentHost> = self
+            .project_sessions
+            .projects
+            .iter()
+            .filter(|slot| slot.worktree.is_remote())
+            .map(|slot| settings::AgentHost {
+                host: slot.worktree.host().clone(),
+                root: slot.worktree.root().to_path_buf(),
+            })
+            .collect();
         self.chrome.settings_view.update(cx, |view, cx| {
             view.set_skills_project(project);
+            view.set_agent_hosts(hosts);
             view.refresh_availability(cx);
         });
     }

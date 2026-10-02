@@ -244,6 +244,22 @@ manifest の名前・版・`bin` を確かめてから rename で公開し、以
 - 設定の画面・追加の画面は**キャッシュを読むだけ**。取りに行くのは人が「取得する」「取り直す」を押した時と、
   既存の起動 12 秒後の背景の後追い（1 時間スロットル）だけ
 
+**状態と版を読むだけの層（#38 H2 の見せ方・2026-10-02・`acp_client::readiness`）**: 設定 › AI エージェントの行の
+「このホストで動くか（使える / 足りない物）」と「版（今の版とレジストリの版）」は、起動の解決と同じ順で**読むだけ**で決める
+（起動の振る舞いは変えない・CLI を子プロセスで起こさない・資格情報の中身は読まない）。
+
+- **事実**（`HostFacts`）と**見立て**（`assess`）を分ける。見立ては純関数で、このマシンでも SSH 先でも同じ
+- このマシンの事実 = `local_facts`（PATH・Zed の npx キャッシュ・`install` の置き場の版・npx のキャッシュの版・`deploy` の
+  印の版・ログインの跡のファイルと環境変数の名前）。読み取りの口は `install::installed_versions`・`deploy::deployed_versions`・
+  `registry::split_npm_spec` に足した（どれも読むだけ）。ログインの跡の表は `AgentKind::login_traces` 1 本で、
+  `configured_auth_state`（このマシン）と SSH 先の見立てが同じ表を見る
+- SSH 先の事実 = `probe_remote`。workspace が渡した「この窓で開いている SSH のプロジェクトの接続とその根」
+  （`settings::AgentHost`）で、`sh -lc` の読み取りだけのシェルを 1 回流す（`run_command_retry_safe`・
+  `command -v` / `readlink -f` で辿った `package.json` / npx のキャッシュ / `test -e` / `printenv`）。新しく SSH を
+  張らない。シェルは手元の `sh` と dash で本当に流すテストで固定している
+- 「使わない」にできない理由（既定・Captain・使う最後の 1 つ）は `settings::agents_page::disable_refusal` 1 本で、
+  スイッチと「外す」が書く前に確かめる
+
 **binary の配備（H2-b・`acp_client::deploy`）— 外から落とした実行ファイルを走らせるので、ここを固定する**:
 
 - **落とす元**: レジストリの JSON の `distribution.binary.<os>-<arch>.archive` の URL **だけ**。necoder は URL を

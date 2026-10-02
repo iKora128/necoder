@@ -738,35 +738,80 @@ settings:
   mcp_claude_connectors_sub: Connectors linked to your account (Figma, Google Calendar, …). Turning this off makes the first reply faster (measured 4.2 s → 1.8 s). Chat mode never loads them
   title: Settings
   agents_heading: AI Agents
-  agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
+  agents_sub: For each host, see whether each agent runs, its version, and whether it's on. necoder never stores credentials.
   permission_default: Default permissions
   permission_default_sub: The mode new threads start in. Choosing resets the modes remembered from the pill for every agent. "Don't ask" applies only to agents that offer such a mode (such as Claude Code's bypassPermissions). Chat is not affected
   permission_default_agent: Agent default
   permission_default_bypass: Don't ask (Yolo)
   permission_remembered: Modes chosen in the pill (click to forget)
-  installed: Installed
-  available_npx: Fetch on first use (npx)
-  not_installed: Not installed
-  agent_checking: Checking…
-  agent_available: Available
-  agent_configured: Configured · unverified
-  agent_signed_out: Signed out
-  agent_disabled: Off (hidden from choices)
   agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
   agent_remove: Remove
   agent_remove_binary_failed: "Couldn't delete the binary downloaded for %{agent}: %{reason}"
-  custom_command_ready: "Starts with your command (%{command})"
-  custom_command_missing: "Command not found (%{command}). Write a name on the PATH or an absolute path"
-  custom_registry_npx: "Registry %{version} · npx (fetched on first start)"
+  agent_host_label: "Host"
+  agent_host_local: "This machine"
+  agent_host_ssh: "SSH"
+  agent_host_recheck: "Check again"
+  agent_host_note: "On/off, the default, and launch changes are the same on every host. Open an SSH project to pick its host here too."
+  agent_host_failed: "Couldn't read the state on %{host}: %{reason}"
+  agent_kind_builtin: "Built in"
+  agent_kind_command: "Own command"
+  agent_kind_registry: "Registry"
+  agent_kind_registry_with: "Registry · %{kind}"
+  agent_status_ready: "Ready"
+  agent_status_unverified: "Sign-in found (couldn't confirm it)"
+  agent_status_unverified_remote: "Sign-in found (not confirmed over SSH)"
+  agent_status_checking: "Checking…"
+  agent_status_disabled: "Off (not offered in the composer)"
+  agent_status_unreachable: "Couldn't check"
+  agent_status_missing: "Missing:"
+  agent_missing_node: "node"
+  agent_missing_uv: "uv"
+  agent_missing_cli: "the CLI (%{name})"
+  agent_missing_command: "the command (%{command})"
+  agent_missing_login: "sign-in"
+  agent_missing_separator: ", "
+  agent_version_same: "%{version} (same as the registry)"
+  agent_version_update: "%{current} → %{target} (moves to the registry version on the next start)"
+  agent_version_fetch: "Registry %{version} (fetched on first start)"
+  agent_version_behind: "%{current} · registry %{target}"
+  agent_version_registry: "Registry %{version}"
+  agent_version_binary_same: "%{version} · checked against sha256"
+  agent_version_binary_same_unverified: "%{version} · no checksum to check"
+  agent_version_binary_update: "%{current} → %{target} (downloaded and checked against sha256 on the next start)"
+  agent_version_binary_update_unverified: "%{current} → %{target} (downloaded on the next start, no checksum to check)"
+  agent_version_binary_fetch: "Registry %{version} (downloaded and checked against sha256 on first start)"
+  agent_version_binary_fetch_unverified: "Registry %{version} (downloaded on first start, no checksum to check)"
+  agent_version_path_same: "%{version} (same as the registry, uses %{command} on the PATH)"
+  agent_version_path_behind: "%{current} · registry %{registry} (uses %{command} on the PATH)"
+  agent_version_path_current: "%{version} (uses %{command} on the PATH)"
+  agent_version_path_registry: "%{command} on the PATH · registry %{registry}"
+  agent_version_path: "%{command} on the PATH"
+  agent_version_own: "Starts with your command (%{command})"
+  agent_action_install: "Install"
+  agent_action_login: "Log in"
+  agent_action_open_cli: "Open CLI"
+  agent_detail_role: "Role"
+  agent_detail_launch: "Launch"
+  agent_detail_distribution: "Build"
+  agent_detail_account: "Account"
+  agent_detail_login: "Log in"
+  agent_detail_install: "Install"
+  agent_detail_run_login: "Open in terminal"
+  agent_detail_run_install: "Run in terminal"
+  agent_detail_copy: "Copy"
+  agent_detail_remote_note: "Run these in a terminal on the SSH host. From here they would run on this machine."
+  agent_copied: "Copied: %{command}"
+  agent_role_unusable: "Once it's ready on this machine, it can be the default or the Captain"
+  agent_distribution_npx: "npx · %{package}"
+  agent_distribution_uvx: "uvx · %{package}"
+  agent_distribution_binary: "binary · %{platform} · with sha256"
+  agent_distribution_binary_unverified: "binary · %{platform} · no sha256"
+  agent_disable_last: "Can't turn off: the last agent stays on (the composer would have nothing to pick). Turn another agent on first"
+  captain_dismiss: "⚑ Captain (click to dismiss)"
   custom_not_in_registry: "Not found in the registry (%{id}). Refresh it from Add agent"
   custom_no_distribution: "No build for this machine (%{platform})"
   custom_needs_node: Needs node (this build starts with npx)
   custom_needs_uv: Needs uv (this build starts with uvx). Install uv to use it (necoder doesn't install it)
-  custom_registry_uvx: "Registry %{version} · uvx (fetched on first start)"
-  custom_binary_ready: "Registry %{version} · binary (in place, checked against sha256)"
-  custom_binary_ready_unverified: "Registry %{version} · binary (in place, no checksum to check)"
-  custom_binary_download: "Registry %{version} · binary (downloaded and checked against sha256 on first start)"
-  custom_binary_download_unverified: "Registry %{version} · binary (downloaded on first start, no checksum to check)"
   custom_binary_on_remote: This agent only ships a binary, so it can't start over SSH
   custom_not_deployed: Not downloaded yet (downloaded on first start)
   custom_deploy_failed: "Couldn't put the binary in place: %{reason}"
@@ -808,16 +853,10 @@ settings:
   launch_command_missing: Enter a command
   launch_cancel: Cancel
   launch_save: Save
-  logged_in: Logged in
-  login_required: Login required
-  login_status_unknown: Check login status in the CLI
   make_default: Set as default
   is_default: ★ Default
   make_captain: Make Captain
   is_captain: ⚑ Captain
-  login: Log in
-  open_cli: Open CLI
-  install: Install
   welcome_title: Welcome 🎨
   welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.
   get_started: Get started →
@@ -902,7 +941,6 @@ settings:
   tabs_view_list: List
   pref_system_notifications: System notifications
   pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
-  account_label: "Account:"
   account_default: Default
   account_elsewhere: (elsewhere)
   account_add: + New account
