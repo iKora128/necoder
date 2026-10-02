@@ -35,6 +35,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: composer の設定のカード（UI-SPEC §6）を offscreen で撮る（`NECODER_CONFIG_CARD_PROBE`・
+    /// `;` 区切り）。エージェントは起こさず、見本の広告を本番と同じ道で流す。
+    #[cfg(debug_assertions)]
+    pub fn debug_config_card_probe(
+        &mut self,
+        commands: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| {
+            panel.debug_config_card_probe(commands, window, cx)
+        });
+        cx.notify();
+    }
+
     /// 開発用: composer の `!`（シェルモード・#37）を offscreen で確かめる（`NECODER_SHELL_PROBE`）。
     /// 本物の経路で見本のコマンドを走らせ、`!` の行・composer のヒント・添える予定のチップを写す。
     /// `expanded` = 長い出力を開いておく / `chat` = フォルダの無いチャット（走らせずに理由を出す）/

@@ -68,6 +68,21 @@ agent:
   pill_model: Model
   pill_effort: Reasoning effort
   pill_awaiting_agent: Available once the agent connects
+  card_chip_tip: Model, effort, Fast and other settings  ⌘/
+  card_tab_hint: to switch
+  card_agent_fixed: Fixed for this conversation
+  card_effort: Effort
+  card_effort_step: "%{position} of %{total}"
+  card_effort_default: Agent decides
+  card_no_options: Models and other settings appear once the agent sends them
+  card_key_models: model
+  card_key_effort: effort
+  card_key_close: close
+  card_key_select: select
+  card_key_choose: choose
+  card_key_back: back
+  card_list_models: Models
+  card_list_agents: Agents
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
   err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
@@ -1618,6 +1633,7 @@ key:
     super_key: Super key shortcuts
   section_editor: Editor
   section_agent: AI chat
+  section_composer: AI chat input
   section_control: Control
   section_global: Global
   section_explorer: Explorer
@@ -1674,6 +1690,7 @@ key:
   cancel: Cancel / clear selection
   submit_prompt: Send prompt
   close_active_thread: Close active thread
+  toggle_config_card: Settings card (model, effort, Fast)
   command_palette: Command palette
   control_next: "Control: next item"
   cleanup_task: "Task: Clean up the selected Tasks…"

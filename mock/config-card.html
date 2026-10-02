@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>necoder — composer の設定（ピルのまま / 1 枚のカード）</title>
+<style>
+/* ============================================================
+   composer の下の設定を「ピルのまま広げる」か「1 枚のカード（zeron 風）」にするかを
+   並べて決めるためのモック（2026-10-02）。依存ゼロ・file:// で開くだけ。
+   中身はエージェントが実際に広告している設定（claude-agent-acp 0.81.2 / codex-acp 1.13.1）。
+   色は識別だけ（UI-SPEC §1.3）: カードの中に色相は置かない。スレッド色は composer の枠と送信ボタンだけ。
+   ============================================================ */
+:root {
+  --desktop: #0c0d11;
+  --bg0: #16181e; --bg1: #1b1e25; --bg2: #232733; --bg3: #2b3040;
+  --fg0: #d7dae3; --fg1: #9aa1b2; --fg2: #646b7a; --border: #262b36;
+  --tc: #61afef;             /* スレッド色（巡回パレットの 1 色目） */
+  --terra: #d97757;          /* Claude のバレット / ブランド */
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --shadow-menu: 0 6px 16px rgba(0,0,0,.4);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--desktop); color: var(--fg0);
+  font: 12.5px/1.55 "IBM Plex Sans JP", -apple-system, "Hiragino Sans", sans-serif;
+  padding: 26px 30px 60px;
+}
+h1 { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+h2 { font-size: 14.5px; font-weight: 700; margin: 34px 0 10px; padding-top: 12px; border-top: 1px solid var(--border); }
+h3 { font-size: 12.5px; font-weight: 700; margin-bottom: 6px; color: var(--fg0); }
+p, li { color: var(--fg1); }
+.meta { color: var(--fg2); font-size: 11.5px; }
+.lead { margin: 14px 0 6px; padding: 10px 14px; background: var(--bg1); border: 1px solid var(--border); border-radius: 8px; max-width: 1180px; }
+.lead b { color: var(--fg0); }
+.lead ol { margin: 6px 0 0 18px; }
+.lead li { margin: 2px 0; }
+code, .kbd { font-family: var(--mono); font-size: 11px; background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--fg0); }
+.note { font-size: 11px; color: var(--fg2); margin-top: 8px; line-height: 1.6; }
+.note b { color: var(--fg1); }
+.rec { display: inline-block; font-size: 10px; font-weight: 700; color: var(--fg0); border: 1px solid var(--fg2); border-radius: 9px; padding: 0 7px; margin-left: 6px; vertical-align: 1px; }
+
+.row { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
+.col { width: 372px; flex: none; }
+.col h3 .sub { font-weight: 400; color: var(--fg2); font-size: 11px; margin-left: 6px; }
+.col ul { margin: 8px 0 0 16px; font-size: 11.5px; }
+.col li { margin: 2px 0; }
+.col li.minus::marker { content: "− "; color: var(--fg2); }
+.col li.plus::marker { content: "+ "; color: var(--fg2); }
+
+/* ---- Agent パネル（右ドック 340 幅相当）の下端だけを切り出した舞台 ---- */
+.stage {
+  position: relative; width: 372px; background: var(--bg0); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 12px 12px; display: flex; flex-direction: column; justify-content: flex-end;
+}
+.stage.h-tall { height: 470px; }
+.stage.h-mid { height: 400px; }
+.stage.h-short { height: 205px; }
+.stage .tr { position: absolute; top: 14px; left: 16px; right: 16px; display: flex; flex-direction: column; gap: 7px; opacity: .55; }
+.stage .tr i { display: block; height: 7px; border-radius: 4px; background: var(--bg2); }
+.stage .tr i:nth-child(2) { width: 82%; } .stage .tr i:nth-child(3) { width: 64%; } .stage .tr i:nth-child(4) { width: 76%; }
+
+.composer { position: relative; border: 1.5px solid color-mix(in srgb, var(--tc) 55%, var(--border)); border-radius: 9px; background: #17191e; padding: 7px 11px 8px; }
+.composer .grip { width: 28px; height: 2px; border-radius: 1px; background: var(--fg2); opacity: .5; margin: 0 auto 6px; }
+.composer .dest { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--fg0); }
+.composer .dest i { width: 8px; height: 8px; border-radius: 50%; background: var(--tc); opacity: .6; }
+.composer .dest .pj { margin-left: auto; color: var(--fg2); }
+.composer .ta { height: 40px; font-size: 12.5px; color: var(--fg2); padding-top: 8px; }
+.pillrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 6px; position: relative; }
+.sendrow { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
+.sendrow .enter { font-size: 10px; color: var(--fg2); padding: 2px 7px; }
+.sendrow .send { margin-left: auto; padding: 3px 12px; border-radius: 6px; background: var(--tc); color: var(--bg0); font-size: 11.5px; font-weight: 600; }
+
+/* 今のピル: 枠も塗りも無し・hover / open で薄い面（render_selector_pill） */
+.pill { position: relative; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; border-radius: 4px; font-size: 11px; color: var(--fg1); white-space: nowrap; cursor: pointer; }
+.pill:hover { background: var(--bg2); color: var(--fg0); }
+.pill .chev { font-size: 8px; color: var(--fg2); }
+.pill.open { background: var(--bg2); color: var(--tc); }
+.pill.dead { cursor: default; } .pill.dead:hover { background: none; color: var(--fg1); }
+.pill.toggle-off { color: var(--fg2); }
+.pill.toggle-on { color: var(--fg0); background: var(--bg3); }
+.badge { width: 12px; height: 12px; flex: none; display: inline-grid; place-items: center; }
+.badge svg { width: 100%; height: 100%; }
+.badge.claude { color: var(--terra); }
+.badge.codex { color: var(--fg0); }
+.bolt { width: 11px; height: 11px; flex: none; display: inline-block; vertical-align: -1px; }
+.bolt svg { width: 100%; height: 100%; display: block; }
+
+/* 今のメニュー（render_selector_menu）: 幅 180・bg2・枠・角 8・影 */
+.menu { position: absolute; bottom: 24px; width: 180px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-menu); padding: 4px; z-index: 5; }
+.menu.left { left: 0; } .menu.right { right: 0; }
+.menu .opt { display: flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 5px; font-size: 12px; color: var(--fg1); white-space: nowrap; overflow: hidden; }
+.menu .opt.sel { background: var(--bg3); color: var(--fg0); }
+
+/* ---- 案 C: チップ 1 つ ---- */
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px 2px 5px; border-radius: 5px; font-size: 11px; color: var(--fg1); white-space: nowrap; cursor: pointer; max-width: 250px; }
+.chip:hover { background: var(--bg2); color: var(--fg0); }
+.chip.open { background: var(--bg2); color: var(--fg0); }
+.chip .txt { overflow: hidden; text-overflow: ellipsis; }
+.chip .sep { color: var(--fg2); margin: 0 1px; }
+.chip .chev { font-size: 8px; color: var(--fg2); }
+.chip.dead { cursor: default; } .chip.dead:hover { background: none; color: var(--fg1); }
+
+/* ---- 案 C: カード ---- */
+.card { position: absolute; left: 0; bottom: 25px; width: 290px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-menu); z-index: 6; overflow: hidden; }
+.card .agent { display: flex; align-items: center; gap: 7px; padding: 9px 12px 0; font-size: 11px; color: var(--fg1); }
+.card .agent .badge { width: 14px; height: 14px; }
+.card .agent .slot { flex: 1; }
+.card .agent .tabhint { font-size: 10px; color: var(--fg2); display: flex; align-items: center; gap: 4px; }
+.card .agent .tabhint .kbd { font-size: 9.5px; padding: 0 4px; color: var(--fg1); }
+.card .agent .locked { font-size: 10px; color: var(--fg2); }
+.card .model { padding: 5px 12px 0; cursor: pointer; }
+.card .model .name { font-size: 14px; font-weight: 600; color: var(--fg0); display: flex; align-items: center; gap: 5px; }
+.card .model .name .go { font-size: 12px; color: var(--fg2); font-weight: 400; }
+.card .model .desc { font-size: 10.5px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .effort { padding: 10px 12px 11px; }
+.card .effort .head { display: flex; align-items: baseline; font-size: 10.5px; color: var(--fg2); }
+.card .effort .head b { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--fg0); }
+.track { position: relative; height: 18px; margin-top: 4px; }
+.track .line { position: absolute; left: 6px; right: 6px; top: 8px; height: 2px; border-radius: 1px; background: var(--bg3); }
+.track .fill { position: absolute; left: 6px; top: 8px; height: 2px; border-radius: 1px; background: var(--fg2); }
+.track .stop { position: absolute; top: 7px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--fg2); cursor: pointer; }
+.track .knob { position: absolute; top: 3px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--fg0); box-shadow: 0 0 0 2px var(--bg2); transition: left .12s ease-out; }
+.card .opts { border-top: 1px solid var(--border); padding: 3px 0; }
+.card .o { display: flex; align-items: center; gap: 10px; padding: 5px 12px; cursor: pointer; }
+.card .o:hover { background: var(--bg3); }
+.card .o .l { flex: 1; min-width: 0; }
+.card .o .l .n { font-size: 11.5px; color: var(--fg1); display: flex; align-items: center; gap: 5px; }
+.card .o .l .d { font-size: 10px; line-height: 1.45; color: var(--fg2); white-space: normal; }
+.card .o .v { font-size: 11.5px; color: var(--fg0); white-space: nowrap; }
+.card .o .v .go { color: var(--fg2); margin-left: 3px; }
+.sw { width: 26px; height: 15px; border-radius: 8px; background: var(--bg3); position: relative; flex: none; border: 1px solid var(--border); }
+.sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 9px; height: 9px; border-radius: 50%; background: var(--fg2); transition: left .12s; }
+.sw.on { background: var(--fg1); border-color: var(--fg1); }
+.sw.on::after { left: 13px; background: var(--bg2); }
+.card .foot { border-top: 1px solid var(--border); padding: 5px 12px 6px; font-size: 10px; color: var(--fg2); display: flex; flex-wrap: wrap; gap: 0 9px; }
+.card .foot b { color: var(--fg1); font-weight: 400; font-family: var(--mono); font-size: 10px; }
+
+/* カードの中の一覧ページ（モデル / エージェント / select） */
+.card .lhead { display: flex; align-items: center; gap: 6px; padding: 8px 10px 6px; border-bottom: 1px solid var(--border); font-size: 11.5px; color: var(--fg1); }
+.card .lhead .back { color: var(--fg2); font-size: 13px; line-height: 1; }
+.card .lhead .k { margin-left: auto; font-size: 10px; color: var(--fg2); }
+.card .list { padding: 4px; max-height: 236px; overflow: hidden; }
+.card .li { display: flex; align-items: baseline; gap: 7px; padding: 5px 8px; border-radius: 6px; font-size: 12px; color: var(--fg1); white-space: nowrap; cursor: pointer; }
+.card .li .d { font-size: 10.5px; color: var(--fg2); overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.card .li .cur { margin-left: auto; color: var(--fg1); font-size: 11px; }
+.card .li.hi { background: var(--bg3); color: var(--fg0); }
+.card .li.now { color: var(--fg0); }
+.card .li .badge { align-self: center; width: 14px; height: 14px; }
+
+/* 接続（#38 H4）の欄の予約を見せる時だけ */
+.card .agent .future { font-size: 10px; color: var(--fg2); border: 1px dashed var(--fg2); border-radius: 4px; padding: 0 5px; opacity: .8; }
+
+table { border-collapse: collapse; margin-top: 8px; font-size: 11.5px; max-width: 1180px; }
+th, td { border-bottom: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; color: var(--fg1); }
+th { color: var(--fg2); font-weight: 600; font-size: 11px; }
+td.ex { white-space: nowrap; }
+td.ex .chip { pointer-events: none; }
+.tag { display: inline-block; font-size: 10px; color: var(--fg1); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin-right: 4px; }
+.cap { font-size: 11px; color: var(--fg2); margin-top: 7px; line-height: 1.6; }
+.cap b { color: var(--fg1); }
+.try { font-size: 11px; color: var(--fg2); margin-top: 6px; }
+
+/* ============ 思考量のゲージ（2026-10-02・決定: M-3 デジタル・メーター）============ */
+.gauge-col { width: 300px; flex: none; }
+.gauge-col h3 .sub { font-weight: 400; color: var(--fg2); font-size: 11px; margin-left: 6px; }
+.gcard { position: relative; width: 290px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-menu); overflow: hidden; outline: none; }
+.gcard:focus { box-shadow: var(--shadow-menu), 0 0 0 1px var(--fg2); }
+.gcard .agent { display: flex; align-items: center; gap: 7px; padding: 9px 12px 0; font-size: 11px; color: var(--fg1); }
+.gcard .agent .badge { width: 14px; height: 14px; }
+.gcard .agent .slot { flex: 1; }
+.gcard .agent .tabhint { font-size: 10px; color: var(--fg2); display: flex; align-items: center; gap: 4px; }
+.gcard .agent .tabhint .kbd { font-size: 9.5px; padding: 0 4px; color: var(--fg1); }
+.gcard .model { padding: 5px 12px 0; }
+.gcard .model .name { font-size: 14px; font-weight: 600; color: var(--fg0); }
+.gcard .model .name .go { font-size: 12px; color: var(--fg2); font-weight: 400; margin-left: 4px; }
+.gcard .eff { padding: 8px 12px 10px; }
+.gcard .eff .head { font-size: 10.5px; color: var(--fg2); }
+.gcard .opts { border-top: 1px solid var(--border); padding: 3px 0; }
+.gcard .o { display: flex; align-items: center; gap: 10px; padding: 5px 12px; }
+.gcard .o .l { flex: 1; min-width: 0; }
+.gcard .o .n { font-size: 11.5px; color: var(--fg1); display: flex; align-items: center; gap: 5px; }
+.gcard .foot { border-top: 1px solid var(--border); padding: 5px 12px 6px; font-size: 10px; color: var(--fg2); display: flex; gap: 0 8px; }
+.gcard .foot b { color: var(--fg1); font-weight: 400; font-family: var(--mono); font-size: 10px; }
+.gfx { display: flex; align-items: center; gap: 14px; margin-top: 4px; min-height: 96px; }
+.gfx svg { flex: none; overflow: visible; cursor: pointer; }
+.gread { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gread .big { font-size: 21px; font-weight: 650; color: var(--fg0); letter-spacing: .01em; line-height: 1.1; }
+.gread .cap { font-size: 10px; color: var(--fg1); font-variant-numeric: tabular-nums; }
+.gread .rng { font-size: 9.5px; color: var(--fg2); }
+.gread .dflt { align-self: flex-start; margin-top: 3px; font-size: 9.5px; color: var(--fg2); border: 1px dashed var(--fg2); border-radius: 9px; padding: 0 7px; cursor: pointer; }
+.gread .dflt.on { color: var(--fg0); border-style: solid; border-color: var(--fg1); background: var(--bg3); }
+.gctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--fg2); }
+.gctl button, .gctl button:hover, .gctl button.on, .gctl button { all: unset; cursor: pointer; padding: 1px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg1); background: var(--bg1); font-size: 11px; }
+.gctl button:hover { color: var(--fg0); background: var(--bg3); }
+.gctl button.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
+.gctl .sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; }
+.gnote { font-size: 11px; color: var(--fg2); margin-top: 8px; line-height: 1.6; }
+.gnote li { margin: 2px 0 2px 14px; color: var(--fg1); }
+</style>
+</head>
+<body>
+
+<h1>composer の下の設定 — ピルのまま広げるか、1 枚のカードにするか</h1>
+<div class="meta">2026-10-02 · 中身はエージェントが実際に広告している設定（claude-agent-acp 0.81.2・codex-acp 1.13.1 の <code>configOptions</code>）。今は boolean を捨てているので Fast が選べない（<code>acp_client.rs</code> の <code>map_config_option</code>）。どちらの形でも boolean は出せる。</div>
+
+<div class="lead">
+  <b>思考量のゲージ（2026-10-02・本人）: M-3 デジタル・メーター</b> — 下の「0.」。光は白。<br><b>決定（2026-10-02・本人）: 案 C + C-1</b> — チップ 1 つ → カード 1 枚、権限モードはカードの外のピル。実装は <code>crates/agent_panel/src/config_card.rs</code>（UI-SPEC §6）。以下は決める時に並べた比較のまま残す。<br><br>
+  <b>決めたいこと 2 つ</b>
+  <ol>
+    <li><b>形</b>: 案 P「今のピルのまま、boolean と残りの select をピルとして足す」/ 案 C「チップ 1 つ → 開くとカード 1 枚（zeron 風）」。推しは <b>案 C</b>（理由は下）。</li>
+    <li><b>権限モードの置き場所</b>（案 C の場合）: C-1「カードの外にピルで残す」/ C-2「カードの中に入れる」。推しは <b>C-1</b>（安全に関わるので常に見えて 1 回で戻せる）。</li>
+  </ol>
+  <div class="note">どちらでも守る決まり: value_id で保存・比較・送信 / エージェントごとの sticky（<code>agent_config_defaults</code>）/ 広告が届くまで候補を捏造しない / 権限モード（O16）/ エージェントは会話を始める前だけ変えられる。色は識別だけ（カードの中に色相を置かない）。</div>
+</div>
+
+
+<!-- =========================================================== 0. 思考量のゲージ -->
+<h2>0. 思考量のゲージ（決定 2026-10-02: M-3 デジタル・メーター・光は白）</h2>
+<p class="meta" style="max-width:1180px">本人が光るメーター 4 案（M-1 グロウ・リング / M-2 チャージ・セル / M-3 デジタル・メーター / M-4 リキッド）から M-3 を選んだ（「めっちゃいい」）。光の色は色の原則（UI-SPEC §1.3）どおり白。ほかの案と比べた時の物は git の履歴（mock の 19944b6）に残る。弧に並んだ細い LED が段に合わせて灯り、値を変えると走って少し行き過ぎてから戻る（動くのは変えた時だけ）。段の数はエージェントのまま、Default は目盛りの外（LED が全部消え、横の札が灯る）、表示名は広告のまま。カードを押して <span class="kbd">←</span><span class="kbd">→</span>（<span class="kbd">Tab</span> でエージェント）。</p>
+<div class="row" id="gauge-row" style="gap:14px"></div>
+
+<!-- =========================================================== 1. 並べて比べる -->
+<h2>1. 並べて比べる（Claude Code・Opus 4.8・High・Fast on の同じ状態）</h2>
+<div class="row">
+
+  <div class="col">
+    <h3>今<span class="sub">Agent / Mode / Model / Effort のピル</span></h3>
+    <div class="stage h-tall">
+      <div class="tr"><i></i><i></i><i></i><i></i></div>
+      <div class="composer">
+        <div class="grip"></div>
+        <div class="dest"><i></i>スレッド1<span class="pj">project ⎇ main</span></div>
+        <div class="ta">メッセージ…</div>
+        <div class="pillrow">
+          <span class="pill"><span class="badge claude" data-badge="claude"></span>Claude Code<span class="chev">▾</span></span>
+          <span class="pill">Default<span class="chev">▾</span></span>
+          <span class="pill open">Opus 4.8<span class="chev">▾</span>
+            <div class="menu left">
+              <div class="opt">Default (recommended)</div>
+              <div class="opt">Fable 5.1</div>
+              <div class="opt">Fable 5</div>
+              <div class="opt">Opus 5.5</div>
+              <div class="opt sel">Opus 4.8</div>
+              <div class="opt">Opus 4.7</div>
+              <div class="opt">Sonnet 5</div>
+            </div>
+          </span>
+          <span class="pill">High<span class="chev">▾</span></span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <ul>
+      <li class="minus">Fast（boolean）はエージェントが広告していても出ない（捨てている）</li>
+      <li class="minus">Codex の Collaboration mode（Default / Plan）など、Model / Effort 以外の select も出ない</li>
+      <li class="minus">キーで操作できない（マウスだけ）</li>
+    </ul>
+  </div>
+
+  <div class="col">
+    <h3>案 P<span class="sub">ピルのまま広げる</span></h3>
+    <div class="stage h-tall">
+      <div class="tr"><i></i><i></i><i></i><i></i></div>
+      <div class="composer">
+        <div class="grip"></div>
+        <div class="dest"><i></i>スレッド1<span class="pj">project ⎇ main</span></div>
+        <div class="ta">メッセージ…</div>
+        <div class="pillrow">
+          <span class="pill"><span class="badge claude" data-badge="claude"></span>Claude Code<span class="chev">▾</span></span>
+          <span class="pill">Default<span class="chev">▾</span></span>
+          <span class="pill">Opus 4.8<span class="chev">▾</span></span>
+          <span class="pill">High<span class="chev">▾</span></span>
+          <span class="pill toggle-on" title="Fast mode — Faster responses on supported models"><span class="bolt" data-bolt></span>Fast</span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <div class="cap"><b>Codex だと</b>（Collaboration mode が足されて 2 段に折れる）:</div>
+    <div class="stage h-short" style="margin-top:6px">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="pill"><span class="badge codex" data-badge="codex"></span>Codex<span class="chev">▾</span></span>
+          <span class="pill">Agent<span class="chev">▾</span></span>
+          <span class="pill">GPT-5.6-Sol<span class="chev">▾</span></span>
+          <span class="pill">Medium<span class="chev">▾</span></span>
+          <span class="pill">Collaboration: Plan<span class="chev">▾</span></span>
+          <span class="pill toggle-off" title="Fast mode — 1.5x speed, increased usage"><span class="bolt" data-bolt></span>Fast</span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <ul>
+      <li class="plus">1 回押すだけで変わる。全部が常に見える</li>
+      <li class="plus">今の見た目と手の動きがそのまま</li>
+      <li class="minus">広告が増えるたびに列が伸びて折れる（未知のエージェントほど増える）</li>
+      <li class="minus">Fast が使えない理由（「無料プランでは使えません」等の説明）を置く場所が無い（ツールチップだけ）</li>
+      <li class="minus">キーは足しにくい（ピルごとにフォーカスを渡す必要がある）</li>
+    </ul>
+  </div>
+
+  <div class="col">
+    <h3>案 C<span class="sub">チップ 1 つ → カード 1 枚</span><span class="rec">推し</span></h3>
+    <div class="stage h-tall" id="live-stage">
+      <div class="tr"><i></i><i></i><i></i><i></i></div>
+      <div class="composer" tabindex="0" id="live-composer">
+        <div class="grip"></div>
+        <div class="dest"><i></i>スレッド1<span class="pj">project ⎇ main</span></div>
+        <div class="ta">メッセージ…（ここを押して ⌘/ ）</div>
+        <div class="pillrow" id="live-row"></div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <div class="try">さわれる: チップを押す / composer を押してから <span class="kbd">⌘/</span> → <span class="kbd">↑↓</span> モデル・<span class="kbd">←→</span> 思考量・<span class="kbd">Tab</span> エージェント・<span class="kbd">esc</span>。</div>
+    <ul>
+      <li class="plus">広告された設定（select も boolean も）が全部 1 か所に出る。未知のエージェントでも列が伸びない</li>
+      <li class="plus">チップは<b>既定から外れた値だけ</b>（<code>Opus 4.8 · High · <span class="bolt" data-bolt></span></code>）＝ Fast の入れっぱなしに気づける</li>
+      <li class="plus">説明（Fast が使えない理由）・キー操作・後で足す「接続」の欄が入る</li>
+      <li class="minus">モデルを変えるのは 2 回（開く → 選ぶ）。既定の値はチップから消える</li>
+    </ul>
+  </div>
+</div>
+
+<!-- =========================================================== 2. カードの中 -->
+<h2>2. 案 C のカードの状態</h2>
+<div class="row">
+  <div class="col">
+    <h3>↑↓ でモデルの一覧<span class="sub">隣のモデルに印・⏎ で決めてカードへ戻る</span></h3>
+    <div class="stage h-mid">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="chip open"><span class="badge claude" data-badge="claude"></span><span class="txt">Opus 4.8<span class="sep"> · </span>High<span class="sep"> · </span><span class="bolt" data-bolt></span></span><span class="chev">▾</span>
+            <div class="card">
+              <div class="lhead"><span class="back">‹</span>モデル<span class="k">↑↓ 選ぶ · ⏎ 決める · esc 戻る</span></div>
+              <div class="list">
+                <div class="li"><span>Default (recommended)</span><span class="d">Fable 5.1</span></div>
+                <div class="li"><span>Fable 5.1</span><span class="d">Most intelligent model for…</span></div>
+                <div class="li"><span>Fable 5</span><span class="d"></span></div>
+                <div class="li hi"><span>Opus 5.5</span><span class="d"></span></div>
+                <div class="li now"><span>Opus 4.8</span><span class="d"></span><span class="cur">✓</span></div>
+                <div class="li"><span>Opus 4.7</span><span class="d"></span></div>
+                <div class="li"><span>Sonnet 5</span><span class="d"></span></div>
+              </div>
+            </div>
+          </span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <div class="cap">印（キーで動く行）は <b>bg3</b>、今の値は <b>✓</b>。色相は使わない。説明はエージェントが付けた物だけ。</div>
+  </div>
+
+  <div class="col">
+    <h3>Codex<span class="sub">Fast も Collaboration mode も同じ所に並ぶ</span></h3>
+    <div class="stage h-mid">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="chip open"><span class="badge codex" data-badge="codex"></span><span class="txt">GPT-5.6-Sol<span class="sep"> · </span>Medium<span class="sep"> · </span>Plan</span><span class="chev">▾</span>
+            <div class="card">
+              <div class="agent"><span class="badge codex" data-badge="codex"></span>Codex<span class="slot"></span><span class="tabhint"><span class="kbd">Tab</span>で切り替え</span></div>
+              <div class="model"><div class="name">GPT-5.6-Sol<span class="go">›</span></div><div class="desc">Latest frontier agentic coding model.</div></div>
+              <div class="effort"><div class="head">思考量<b>Medium</b></div>
+                <div class="track" data-stops="4" data-at="1"></div></div>
+              <div class="opts">
+                <div class="o"><div class="l"><div class="n">Collaboration mode</div></div><div class="v">Plan<span class="go">›</span></div></div>
+                <div class="o"><div class="l"><div class="n"><span class="bolt" data-bolt></span>Fast mode</div><div class="d">1.5x speed, increased usage</div></div><span class="sw"></span></div>
+              </div>
+              <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
+            </div>
+          </span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <div class="cap">Codex は思考量に「Default」を持たないので、チップに<b>いつも出る</b>（既定かどうか分からない値を隠さない）。</div>
+  </div>
+
+  <div class="col">
+    <h3>会話を始めた後<span class="sub">エージェントは固定（Tab は効かない）</span></h3>
+    <div class="stage h-mid">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="chip open"><span class="badge claude" data-badge="claude"></span><span class="txt">Claude Code</span><span class="chev">▾</span>
+            <div class="card">
+              <div class="agent"><span class="badge claude" data-badge="claude"></span>Claude Code<span class="slot"></span><span class="locked">この会話では固定</span></div>
+              <div class="model"><div class="name">Default (recommended)<span class="go">›</span></div><div class="desc">Fable 5.1</div></div>
+              <div class="effort"><div class="head">思考量<b>Default</b></div>
+                <div class="track" data-stops="6" data-at="0"></div></div>
+              <div class="opts">
+                <div class="o"><div class="l"><div class="n"><span class="bolt" data-bolt></span>Fast mode</div><div class="d">Faster responses on supported models — not available on the free plan</div></div><span class="sw"></span></div>
+              </div>
+              <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
+            </div>
+          </span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <div class="cap">全部が既定 → チップは<b>エージェント名だけ</b>。Fast の説明にはエージェントが付けた「使えない理由」がそのまま出る。</div>
+  </div>
+</div>
+
+<div class="row" style="margin-top:18px">
+  <div class="col">
+    <h3>広告が届く前<span class="sub">候補を捏造しない（今の決まりのまま）</span></h3>
+    <div class="stage h-short">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="chip dead" title="エージェントが選択肢を送ってくるまで選べません"><span class="badge claude" data-badge="claude"></span><span class="txt">Claude Code</span></span>
+          <span class="pill dead">—</span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <div class="cap">シェブロン無し・押せない。同じエージェントが一度でも広告していれば在庫で開ける（起動直後の一瞬だけ）。<b>会話の前なら</b>エージェントの切り替えだけは在庫が無くても選べる（今のエージェントのピルと同じ）。</div>
+  </div>
+  <div class="col">
+    <h3>あとで「接続」が入る場所（#38 H4・今は作らない）</h3>
+    <div class="stage h-short" style="height:250px">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="chip open"><span class="badge claude" data-badge="claude"></span><span class="txt">Opus 4.8</span><span class="chev">▾</span>
+            <div class="card" style="bottom:22px">
+              <div class="agent"><span class="badge claude" data-badge="claude"></span>Claude Code<span class="future">· 接続（H4）›</span><span class="slot"></span><span class="tabhint"><span class="kbd">Tab</span>で切り替え</span></div>
+              <div class="model"><div class="name">Opus 4.8<span class="go">›</span></div><div class="desc">エージェント · 接続 · モデル · 思考量 の順に上から</div></div>
+              <div class="effort" style="padding-bottom:8px"><div class="head">思考量<b>Default</b></div><div class="track" data-stops="6" data-at="0"></div></div>
+            </div>
+          </span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <div class="cap">エージェントの行の名前の右が空いている（点線は今回は描かない）。チップは「バッジ · 接続 · モデル …」の順に足す。</div>
+  </div>
+</div>
+
+<!-- =========================================================== 3. 権限モード -->
+<h2>3. 権限モードの置き場所（案 C の場合・Bypass Permissions を選んでいる時）</h2>
+<div class="row">
+  <div class="col">
+    <h3>C-1 カードの外にピルで残す<span class="rec">推し</span></h3>
+    <div class="stage h-short">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="chip"><span class="badge claude" data-badge="claude"></span><span class="txt">Opus 4.8<span class="sep"> · </span>High<span class="sep"> · </span><span class="bolt" data-bolt></span></span><span class="chev">▾</span></span>
+          <span class="pill">Bypass Permissions<span class="chev">▾</span></span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <ul>
+      <li class="plus">「聞かずに進める」が常に文字で見え、1 回で戻せる（承認待ちの最中の切り替えもその場で効く・O16）</li>
+      <li class="plus">送り方が違う（<code>session/set_mode</code>・カードの設定は <code>session/set_config_option</code>）。Chat では同じ場所が「書ける範囲」の文に変わる・Captain の席では固定</li>
+      <li class="minus">composer の下に 2 つ並ぶ</li>
+    </ul>
+  </div>
+  <div class="col">
+    <h3>C-2 カードの中に入れる</h3>
+    <div class="stage h-mid">
+      <div class="composer">
+        <div class="pillrow" style="padding-top:0">
+          <span class="chip open"><span class="badge claude" data-badge="claude"></span><span class="txt">Opus 4.8<span class="sep"> · </span>High<span class="sep"> · </span><span class="bolt" data-bolt></span><span class="sep"> · </span>Bypass Permissions</span><span class="chev">▾</span>
+            <div class="card">
+              <div class="agent"><span class="badge claude" data-badge="claude"></span>Claude Code<span class="slot"></span><span class="tabhint"><span class="kbd">Tab</span>で切り替え</span></div>
+              <div class="model"><div class="name">Opus 4.8<span class="go">›</span></div></div>
+              <div class="effort"><div class="head">思考量<b>High</b></div><div class="track" data-stops="6" data-at="3"></div></div>
+              <div class="opts">
+                <div class="o"><div class="l"><div class="n">権限モード</div></div><div class="v">Bypass Permissions<span class="go">›</span></div></div>
+                <div class="o"><div class="l"><div class="n"><span class="bolt" data-bolt></span>Fast mode</div><div class="d">Faster responses on supported models</div></div><span class="sw on"></span></div>
+              </div>
+              <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
+            </div>
+          </span>
+        </div>
+        <div class="sendrow"><span class="enter">↵ 改行 / ⌘↵ 送信</span><span class="send">送信 ⌘↵</span></div>
+      </div>
+    </div>
+    <ul>
+      <li class="plus">composer の下はチップ 1 つだけ</li>
+      <li class="minus">既定でない時はチップに出るが、長くて省略されると「Bypass」が切れて見えなくなりうる</li>
+      <li class="minus">戻すのに 2 回（開く → 選ぶ）</li>
+    </ul>
+  </div>
+</div>
+
+<!-- =========================================================== 4. チップの要約 -->
+<h2>4. チップの要約（案 C）— 既定から外れた値だけ</h2>
+<table>
+  <tr><th>状態</th><th>チップ</th><th>どう決めるか</th></tr>
+  <tr><td>Claude Code・全部既定</td><td class="ex"><span class="chip"><span class="badge claude" data-badge="claude"></span><span class="txt">Claude Code</span><span class="chev">▾</span></span></td><td rowspan="4">
+    <span class="tag">バッジ</span>いつも出す（どのエージェントか）<br>
+    <span class="tag">select</span>エージェントが <code>default</code> という value_id を広告していて、それを選んでいる時は出さない（Claude の Model / Effort・Codex の Collaboration mode）。<code>default</code> を広告しない select（Codex の Model / Effort）は<b>いつも出す</b><br>
+    <span class="tag">boolean</span>on の時だけ。<code>fast</code> は <span class="bolt" data-bolt></span>（色の無い線の絵）、ほかは名前<br>
+    <span class="tag">順</span>モデル · 思考量 · その他の select · boolean。出す物が無ければエージェント名<br>
+    <span class="tag">長さ</span>250px で省略、全文はツールチップ。表示名は広告の物をそのまま（necoder は綴りを作らない）
+  </td></tr>
+  <tr><td>Claude Code・Opus 4.8・High・Fast</td><td class="ex"><span class="chip"><span class="badge claude" data-badge="claude"></span><span class="txt">Opus 4.8<span class="sep"> · </span>High<span class="sep"> · </span><span class="bolt" data-bolt></span></span><span class="chev">▾</span></span></td></tr>
+  <tr><td>Claude Code・思考量だけ Max</td><td class="ex"><span class="chip"><span class="badge claude" data-badge="claude"></span><span class="txt">Max</span><span class="chev">▾</span></span></td></tr>
+  <tr><td>Codex・Plan・Fast</td><td class="ex"><span class="chip"><span class="badge codex" data-badge="codex"></span><span class="txt">GPT-5.6-Sol<span class="sep"> · </span>Medium<span class="sep"> · </span>Plan<span class="sep"> · </span><span class="bolt" data-bolt></span></span><span class="chev">▾</span></span></td></tr>
+</table>
+
+<!-- =========================================================== 5. キー -->
+<h2>5. キー（衝突を確かめた結果）</h2>
+<table>
+  <tr><th>キー</th><th>どこで</th><th>動き</th><th>衝突</th></tr>
+  <tr><td><span class="kbd">⌘/</span>（Windows / Linux は <span class="kbd">Ctrl+/</span>）</td><td>composer の中</td><td>カードを開く / 閉じる</td><td>エディタの「コメントの切り替え」と同じキー（<code>Editor</code> 文脈）。composer にはファイルが無くコメントの記号が決まらないので<b>今は何も起きない</b>。割り当ては <code>AgentPanel &gt; Editor</code> の文脈にだけ置くので、コードのエディタの ⌘/ は変わらない。OS の既定のショートカットとも重ならない</td></tr>
+  <tr><td><code>/model</code></td><td>—</td><td><b>使わない</b></td><td>Claude Code 自身のコマンド（<code>/model opus</code> を送るとモデルが変わり、アダプタがピッカーへ映し返す）。necoder が取るとエージェントへ届かなくなる。<code>/</code> 補完はエージェントの物のまま</td></tr>
+  <tr><td>チップを押す</td><td>—</td><td>カードを開く / 閉じる</td><td>—</td></tr>
+  <tr><td><span class="kbd">↑</span> <span class="kbd">↓</span></td><td>カード</td><td>モデルの一覧へ（隣のモデルに印）。一覧では印を動かし <span class="kbd">⏎</span> で決めてカードへ戻る</td><td>カードがキーを持つ間だけ（composer の行の移動はカードを閉じれば元どおり）</td></tr>
+  <tr><td><span class="kbd">←</span> <span class="kbd">→</span></td><td>カード</td><td>思考量を 1 段ずつ（その場で送る）</td><td>同上</td></tr>
+  <tr><td><span class="kbd">Tab</span> / <span class="kbd">⇧Tab</span></td><td>カード</td><td>エージェントを次 / 前へ。<b>会話を始める前だけ</b>（後は何もしない・行に「この会話では固定」）</td><td>同上</td></tr>
+  <tr><td><span class="kbd">esc</span></td><td>カード / 一覧</td><td>一覧ならカードへ戻る・カードなら閉じて composer へ（ターンは止めない）</td><td>今の「esc でターンを止める」より先に取る（開いている間だけ）</td></tr>
+  <tr><td>押す</td><td>boolean の行</td><td>on / off（その場で送る）</td><td>キーは付けない</td></tr>
+</table>
+
+<!-- =========================================================== 6. 決まり -->
+<h2>6. 実装の決まり（どちらの形でも）</h2>
+<ul style="margin-left:18px; max-width:1100px">
+  <li><b>boolean を受け取る</b>: <code>map_config_option</code> が boolean も写す。送る値は select = value_id・boolean = true/false（<code>session/set_config_option</code> の <code>type: "boolean"</code>）。カテゴリ <code>mode</code> の設定は権限モード（<code>session/set_mode</code>）と二重なので出さない。</li>
+  <li><b>sticky</b>: 今の model / effort / mode に加えて、ほかの設定もエージェントごとに覚える（<code>agent_config_defaults.claude.fast = "true"</code>・キーは ACP の config_id）。次のスレッドはセッションを開いた直後・最初の送信より前に合わせる。エージェントが値を戻した時（使えない等）は言い返さずに従う。</li>
+  <li><b>捏造しない</b>: 広告が届く前は開けない。在庫（同じエージェントが一度広告した物）があればそれで開ける。広告に無い値は送らない。</li>
+  <li><b>色</b>: カードは bg2・枠 1px・角 10・影（最前面に描く）。選択と印は bg3、つまみは fg0、トラックは bg3 / fg2。稲妻は絵文字ではなく線の絵 <span class="bolt" data-bolt></span>（色相なし）。</li>
+</ul>
+
+<script>
+/* ---- 図版（ブランドの代わりの簡単な形・線の稲妻）---- */
+const CLAUDE = '<svg viewBox="0 0 24 24"><g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="12" y1="2.5" x2="12" y2="21.5"/><line x1="2.5" y1="12" x2="21.5" y2="12"/><line x1="5.3" y1="5.3" x2="18.7" y2="18.7"/><line x1="18.7" y1="5.3" x2="5.3" y2="18.7"/><line x1="8.4" y1="3.2" x2="15.6" y2="20.8"/><line x1="3.2" y1="15.6" x2="20.8" y2="8.4"/></g></svg>';
+const CODEX = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 9.5 10.5 12 8 14.5M12.5 15h3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const BOLT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>';
+function paint(root) {
+  root.querySelectorAll('[data-badge]').forEach(el => { el.innerHTML = el.dataset.badge === 'claude' ? CLAUDE : CODEX; });
+  root.querySelectorAll('[data-bolt]').forEach(el => { el.innerHTML = BOLT; });
+  root.querySelectorAll('.track[data-stops]').forEach(el => drawTrack(el, +el.dataset.stops, +el.dataset.at));
+}
+function drawTrack(el, stops, at) {
+  const pct = i => stops <= 1 ? 0 : (i / (stops - 1));
+  let html = '<div class="line"></div>';
+  html += `<div class="fill" style="width:calc((100% - 12px) * ${pct(at)})"></div>`;
+  for (let i = 0; i < stops; i++) html += `<div class="stop" data-i="${i}" style="left:calc(6px + (100% - 12px) * ${pct(i)})"></div>`;
+  html += `<div class="knob" style="left:calc(6px + (100% - 12px) * ${pct(at)})"></div>`;
+  el.innerHTML = html;
+}
+
+/* ---- さわれる案 C（Claude Code ⇄ Codex・会話の前）---- */
+const AGENTS = [
+  { id: 'claude', name: 'Claude Code',
+    models: [['default','Default (recommended)','Fable 5.1'],['fable-5.1','Fable 5.1','Most intelligent model for building agents'],['fable-5','Fable 5',''],['opus-5.5','Opus 5.5',''],['opus','Opus 4.8',''],['opus-4.7','Opus 4.7',''],['sonnet','Sonnet 5','']],
+    efforts: [['default','Default'],['low','Low'],['medium','Medium'],['high','High'],['xhigh','Xhigh'],['max','Max']],
+    selects: [], fast: 'Faster responses on supported models',
+    state: { model: 'opus', effort: 'high', fast: true, sel: {} } },
+  { id: 'codex', name: 'Codex',
+    models: [['gpt-5.6-sol','GPT-5.6-Sol','Latest frontier agentic coding model.'],['gpt-5.6','GPT-5.6',''],['gpt-5.5-codex','GPT-5.5-Codex','']],
+    efforts: [['low','Low'],['medium','Medium'],['high','High'],['xhigh','Xhigh']],
+    selects: [{ id: 'collaboration_mode', name: 'Collaboration mode', choices: [['default','Default'],['plan','Plan']] }],
+    fast: '1.5x speed, increased usage',
+    state: { model: 'gpt-5.6-sol', effort: 'medium', fast: false, sel: { collaboration_mode: 'default' } } },
+];
+let agentIndex = 0, open = false, page = 'card', cursor = 0;
+const row = document.getElementById('live-row');
+const composer = document.getElementById('live-composer');
+const label = (list, id) => (list.find(c => c[0] === id) || [id, id])[1];
+function summary(a) {
+  const s = a.state, parts = [];
+  const hasDefault = list => list.some(c => c[0] === 'default');
+  if (!(hasDefault(a.models) && s.model === 'default')) parts.push(label(a.models, s.model));
+  if (!(hasDefault(a.efforts) && s.effort === 'default')) parts.push(label(a.efforts, s.effort));
+  a.selects.forEach(o => { const v = s.sel[o.id]; if (o.choices.some(c => c[0] === 'default') && v !== 'default') parts.push(label(o.choices, v)); });
+  if (s.fast) parts.push('<span class="bolt">' + BOLT + '</span>');
+  return parts.length ? parts.join('<span class="sep"> · </span>') : a.name;
+}
+function render() {
+  const a = AGENTS[agentIndex], s = a.state;
+  let card = '';
+  if (open && page === 'card') {
+    const ei = a.efforts.findIndex(e => e[0] === s.effort);
+    const m = a.models.find(x => x[0] === s.model);
+    card = `<div class="card" onmousedown="event.stopPropagation()">
+      <div class="agent"><span class="badge ${a.id}" data-badge="${a.id}"></span>${a.name}<span class="slot"></span><span class="tabhint"><span class="kbd">Tab</span>で切り替え</span></div>
+      <div class="model" onmousedown="page='models';cursor=${a.models.findIndex(x => x[0] === s.model)};render()"><div class="name">${m[1]}<span class="go">›</span></div>${m[2] ? `<div class="desc">${m[2]}</div>` : ''}</div>
+      <div class="effort"><div class="head">思考量<b>${a.efforts[ei][1]}</b></div><div class="track" data-stops="${a.efforts.length}" data-at="${ei}"></div></div>
+      <div class="opts">
+        ${a.selects.map(o => `<div class="o"><div class="l"><div class="n">${o.name}</div></div><div class="v">${label(o.choices, s.sel[o.id])}<span class="go">›</span></div></div>`).join('')}
+        <div class="o" onmousedown="AGENTS[${agentIndex}].state.fast=!AGENTS[${agentIndex}].state.fast;render()"><div class="l"><div class="n"><span class="bolt">${BOLT}</span>Fast mode</div><div class="d">${a.fast}</div></div><span class="sw ${s.fast ? 'on' : ''}"></span></div>
+      </div>
+      <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
+    </div>`;
+  } else if (open && page === 'models') {
+    card = `<div class="card" onmousedown="event.stopPropagation()"><div class="lhead"><span class="back">‹</span>モデル<span class="k">↑↓ 選ぶ · ⏎ 決める · esc 戻る</span></div><div class="list">
+      ${a.models.map((m, i) => `<div class="li ${i === cursor ? 'hi' : ''} ${m[0] === s.model ? 'now' : ''}" onmousedown="AGENTS[${agentIndex}].state.model='${m[0]}';page='card';render()"><span>${m[1]}</span><span class="d">${m[2]}</span>${m[0] === s.model ? '<span class="cur">✓</span>' : ''}</div>`).join('')}
+    </div></div>`;
+  }
+  row.innerHTML = `<span class="chip ${open ? 'open' : ''}" id="live-chip"><span class="badge ${a.id}" data-badge="${a.id}"></span><span class="txt">${summary(a)}</span><span class="chev">▾</span>${card}</span><span class="pill">${a.id === 'claude' ? 'Default' : 'Agent'}<span class="chev">▾</span></span>`;
+  paint(row);
+  document.getElementById('live-chip').onmousedown = e => { if (e.target.closest('.card')) return; open = !open; page = 'card'; render(); composer.focus(); };
+  row.querySelectorAll('.track .stop').forEach(st => st.onmousedown = e => { e.stopPropagation(); a.state.effort = a.efforts[+st.dataset.i][0]; render(); });
+}
+composer.addEventListener('keydown', e => {
+  const a = AGENTS[agentIndex], s = a.state;
+  if (e.key === '/' && (e.metaKey || e.ctrlKey)) { open = !open; page = 'card'; render(); e.preventDefault(); return; }
+  if (!open) return;
+  const ei = a.efforts.findIndex(x => x[0] === s.effort);
+  const mi = a.models.findIndex(x => x[0] === s.model);
+  if (page === 'card') {
+    if (e.key === 'ArrowLeft') s.effort = a.efforts[Math.max(0, ei - 1)][0];
+    else if (e.key === 'ArrowRight') s.effort = a.efforts[Math.min(a.efforts.length - 1, ei + 1)][0];
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { page = 'models'; cursor = Math.max(0, Math.min(a.models.length - 1, mi + (e.key === 'ArrowUp' ? -1 : 1))); }
+    else if (e.key === 'Enter') { page = 'models'; cursor = mi; }
+    else if (e.key === 'Tab') agentIndex = (agentIndex + (e.shiftKey ? AGENTS.length - 1 : 1)) % AGENTS.length;
+    else if (e.key === 'Escape') open = false;
+    else return;
+  } else {
+    if (e.key === 'ArrowUp') cursor = Math.max(0, cursor - 1);
+    else if (e.key === 'ArrowDown') cursor = Math.min(a.models.length - 1, cursor + 1);
+    else if (e.key === 'Enter') { s.model = a.models[cursor][0]; page = 'card'; }
+    else if (e.key === 'Escape') page = 'card';
+    else return;
+  }
+  e.preventDefault(); render();
+});
+document.addEventListener('mousedown', e => { if (open && !e.target.closest('#live-chip')) { open = false; render(); } });
+paint(document);
+open = true; render();
+
+/* ============ 思考量のゲージ（M-3 デジタル・メーター）============ */
+const GA = {
+  claude: { label: 'Claude（Default + 5 段）', name: 'Claude Code', badge: 'claude', model: 'Opus 4.8',
+            choices: [['default','Default'],['low','Low'],['medium','Medium'],['high','High'],['xhigh','Xhigh'],['max','Max']] },
+  codex:  { label: 'Codex（4 段）', name: 'Codex', badge: 'codex', model: 'GPT-5.6-Sol',
+            choices: [['low','Low'],['medium','Medium'],['high','High'],['xhigh','Xhigh']] },
+  three:  { label: '3 段のモデル', name: 'OpenCode', badge: 'mono', model: 'GPT OSS 20B',
+            choices: [['low','Low'],['medium','Medium'],['high','High']] },
+};
+const GAUGES = [
+  { id: 'M-3', title: 'M-3 デジタル・メーター', sub: 'LED の目盛りが走る回転計（決定）', kind: 'digital',
+    notes: ['弧に並んだ細い LED が、値を上げるとエンジンを吹かしたように走って灯る（少し行き過ぎて戻る）', '段の区切りは弧の外の点。値の名前・何段目か・段の端の名前は右に', 'Default は LED が全部消え、右の「Default」の札が灯る'] },
+];
+const gstate = GAUGES.map(() => ({ agent: 'claude', value: 'high', frac: null, anim: null, lit: [] }));
+const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* 色: 光る所だけ・白（色の原則どおり） */
+const lit = a => `rgba(235,238,246,${a})`;
+const glass = a => `rgba(255,255,255,${a})`;
+
+function scaleOf(agentKey) {
+  const ch = GA[agentKey].choices;
+  return { off: ch.find(c => c[0] === 'default') || null, levels: ch.filter(c => c[0] !== 'default') };
+}
+const nameOf = (agentKey, v) => (GA[agentKey].choices.find(c => c[0] === v) || [v, v])[1];
+/* 段の位置 → 0..1（Default = 0・目盛りの外） */
+function fracOf(st) {
+  const sc = scaleOf(st.agent), i = sc.levels.findIndex(c => c[0] === st.value);
+  return i < 0 ? 0 : (i + 1) / sc.levels.length;
+}
+const rad = d => d * Math.PI / 180;
+const pt = (cx, cy, r, deg) => [cx + r * Math.cos(rad(deg)), cy - r * Math.sin(rad(deg))];
+function arc(cx, cy, r, from, to) {
+  const [x0, y0] = pt(cx, cy, r, from), [x1, y1] = pt(cx, cy, r, to);
+  return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${Math.abs(from - to) > 180 ? 1 : 0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+}
+
+/* ---- M-3 デジタル・メーター ---- */
+function drawDigital(st, frac, pulse) {
+  const cx = 56, cy = 54, r = 40, A0 = 215, SW = 250, SEG = 34, sc = scaleOf(st.agent), n = sc.levels.length;
+  const litCount = Math.round(SEG * frac);
+  let g = '';
+  for (let s = 0; s < SEG; s++) {
+    const a = A0 - SW * (s + 0.5) / SEG, [x0, y0] = pt(cx, cy, r - 6, a), [x1, y1] = pt(cx, cy, r + 4, a);
+    const on = s < litCount, head = on && s === litCount - 1;
+    if (head) g += `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="${lit(.10 + pulse * .08)}" stroke-width="14" stroke-linecap="round"/><line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="${lit(.20 + pulse * .1)}" stroke-width="8" stroke-linecap="round"/>`;
+    g += `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="${on ? lit(.3 + .7 * Math.pow((s + 1) / Math.max(1, litCount), 1.6)) : glass(.08)}" stroke-width="3" stroke-linecap="round"/>`;
+  }
+  for (let i = 0; i < n; i++) {
+    const [x, y] = pt(cx, cy, r + 10, A0 - SW * (i + 1) / n);
+    g += `<circle cx="${x}" cy="${y}" r="1.3" fill="${frac >= (i + 1) / n - 1e-6 ? lit(.7) : glass(.18)}"/>`;
+  }
+  g += `<circle cx="${cx}" cy="${cy}" r="${r - 13}" fill="${glass(.025)}" stroke="${glass(.05)}"/>`;
+  return `<svg width="112" height="100" viewBox="0 0 112 100">${g}</svg>`;
+}
+
+/* ---- 描き直し・動き ---- */
+function readHTML(k) {
+  const st = gstate[k], sc = scaleOf(st.agent), i = sc.levels.findIndex(c => c[0] === st.value), n = sc.levels.length;
+  return `<div class="gread"><div class="big">${nameOf(st.agent, st.value)}</div>
+    <div class="cap">${i < 0 ? 'エージェント任せ' : `${i + 1} / ${n} 段`}</div>
+    <div class="rng">${sc.levels[0][1]} → ${sc.levels[n - 1][1]}</div>
+    ${sc.off ? `<div class="dflt ${st.value === 'default' ? 'on' : ''}" data-v="default">${sc.off[1]}</div>` : ''}</div>`;
+}
+function paintGauge(k, frac, pulse) {
+  const g = GAUGES[k], st = gstate[k], host = document.querySelector(`#g${k} .gfx`);
+  let svg;
+  svg = drawDigital(st, frac, pulse);
+  host.innerHTML = svg + readHTML(k);
+}
+const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+function animateTo(k, animate) {
+  const g = GAUGES[k], st = gstate[k], target = fracOf(st);
+  if (st.anim) cancelAnimationFrame(st.anim);
+  const from = st.frac == null ? target : st.frac;
+  if (!animate || reduceMotion || from === target) { st.frac = target; paintGauge(k, target, 0); return; }
+  const t0 = performance.now(), dur = 560, ease = easeOutBack;
+  const step = now => {
+    const t = Math.min(1, (now - t0) / dur), f = from + (target - from) * ease(t);
+    st.frac = Math.max(0, Math.min(1, f));
+    const pulse = Math.sin(Math.PI * Math.min(1, t * 1.4));
+    paintGauge(k, st.frac, pulse);
+    if (t < 1) st.anim = requestAnimationFrame(step); else { st.anim = null; st.frac = target; paintGauge(k, target, 0); }
+  };
+  st.anim = requestAnimationFrame(step);
+}
+/* ---- カードと操作 ---- */
+function badgeHTML(kind) {
+  if (kind === 'mono') return '<span class="badge" style="display:inline-grid;place-items:center;border-radius:3px;background:#4b5563;color:#fff;font-size:7px;font-weight:700">OC</span>';
+  return `<span class="badge ${kind}" data-badge="${kind}"></span>`;
+}
+function buildGauge(k) {
+  const g = GAUGES[k], st = gstate[k], a = GA[st.agent];
+  const col = document.getElementById('gc' + k);
+  col.innerHTML = `<h3>${g.title}<span class="sub">${g.sub}</span><span class="rec">決定</span></h3>
+    <div class="gcard" id="g${k}" tabindex="0">
+      <div class="agent">${badgeHTML(a.badge)}${a.name}<span class="slot"></span><span class="tabhint"><span class="kbd">Tab</span>で切り替え</span></div>
+      <div class="model"><div class="name">${a.model}<span class="go">›</span></div></div>
+      <div class="eff"><div class="head">思考量</div><div class="gfx"></div></div>
+      <div class="opts"><div class="o"><div class="l"><div class="n"><span class="bolt" data-bolt></span>Fast mode</div></div><span class="sw"></span></div></div>
+      <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
+    </div>
+    <div class="gctl">${Object.keys(GA).map(key => `<button class="${key === st.agent ? 'on' : ''}" data-agent="${key}">${GA[key].label}</button>`).join('')}
+      <span class="sep"></span><button data-step="-1">←</button><button data-step="1">→</button><button data-play>▶ 動き</button></div>
+    <div class="gnote"><ul>${g.notes.map(x => `<li>${x}</li>`).join('')}</ul></div>`;
+  paint(col);
+  const card = document.getElementById('g' + k);
+  card.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') stepGauge(k, -1); else if (e.key === 'ArrowRight') stepGauge(k, 1);
+    else if (e.key === 'Tab') { const keys = Object.keys(GA); setAgent(k, keys[(keys.indexOf(st.agent) + (e.shiftKey ? keys.length - 1 : 1)) % keys.length]); document.getElementById('g' + k).focus(); }
+    else return;
+    e.preventDefault();
+  });
+  card.addEventListener('click', e => {
+    const v = e.target.closest('[data-v]');
+    if (v) return setValue(k, v.dataset.v);
+    if (e.target.closest('.gfx svg')) stepGauge(k, 1);
+  });
+  col.querySelectorAll('[data-agent]').forEach(b => b.onclick = () => setAgent(k, b.dataset.agent));
+  col.querySelectorAll('[data-step]').forEach(b => b.onclick = () => stepGauge(k, +b.dataset.step));
+  col.querySelector('[data-play]').onclick = () => playGauge(k);
+  st.frac = null; st.prevLevel = null;
+  animateTo(k, false);
+}
+function setValue(k, v) { gstate[k].value = v; animateTo(k, true); }
+function stepGauge(k, d) {
+  const st = gstate[k], all = GA[st.agent].choices.map(c => c[0]);
+  const i = all.indexOf(st.value), next = Math.max(0, Math.min(all.length - 1, i + d));
+  if (next !== i) setValue(k, all[next]);
+}
+function setAgent(k, key) {
+  const st = gstate[k]; st.agent = key;
+  const ch = GA[key].choices.map(c => c[0]);
+  if (!ch.includes(st.value)) st.value = ch.includes('high') ? 'high' : ch[ch.length - 1];
+  buildGauge(k);
+}
+function playGauge(k) {
+  const st = gstate[k], all = GA[st.agent].choices.map(c => c[0]);
+  const seq = [...all, ...all.slice(0, -1).reverse()];
+  seq.forEach((v, n) => setTimeout(() => setValue(k, v), n * 700));
+}
+
+const grow = document.getElementById('gauge-row');
+grow.innerHTML = GAUGES.map((g, k) => `<div class="gauge-col" id="gc${k}"></div>`).join('');
+GAUGES.forEach((g, k) => buildGauge(k));
+
+</script>
+</body>
+</html>

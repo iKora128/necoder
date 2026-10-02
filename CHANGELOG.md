@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Changed
+
+- **Settings card under the composer**: The Agent, Model and Effort pills under the composer are now one chip. Click it or press ⌘/ in the composer to open a card. The card shows every setting the agent advertises, including on/off settings such as Claude Code's and Codex's Fast mode, which you could not choose before. Press ↑↓ for the model list, ←→ to change the effort, Tab to switch the agent (before the conversation starts) and Esc to close. The effort is a digital meter whose LEDs light up to the chosen level; the agent's own default sits off the scale. The chip shows only values that differ from the agent's defaults, such as `Opus 4.8 · High · ⚡`. The permission mode stays as its own pill next to the chip. Fast mode and other settings are remembered per agent, like the model and effort.
+
+### 日本語
+
+#### 変更
+
+- **composer の下の設定のカード**：composer の下にあった Agent・Model・Effort のピルを、チップ 1 つにまとめました。チップを押すか、composer の中で ⌘/ を押すとカードが開きます。カードには、エージェントが送ってくる設定がすべて並びます。これまで選べなかった Claude Code と Codex の Fast mode のような on/off の設定も含みます。↑↓ でモデルの一覧、←→ で思考量、Tab でエージェントの切り替え（会話を始める前だけ）、Esc で閉じます。思考量は、選んだ段まで LED が灯るデジタルメーターで表します（エージェントに任せる Default は目盛りの外）。チップには、エージェントの既定から外れた値だけを `Opus 4.8 · High · ⚡` のように出します。権限モードはチップの右に、今までどおりピルで残します。Fast mode などの設定も、モデルや思考量と同じくエージェントごとに覚えます。
+
 ## [0.1.24] - 2026-10-01
 
 This is the first regular release since v0.1.20, delivered through auto-update. It includes everything from the test releases [v0.1.21](https://github.com/iKora128/necoder/releases/tag/v0.1.21), [v0.1.22](https://github.com/iKora128/necoder/releases/tag/v0.1.22) and [v0.1.23](https://github.com/iKora128/necoder/releases/tag/v0.1.23). If you are updating from v0.1.20, their notes list every change. If something does not work, please let us know in an Issue.
