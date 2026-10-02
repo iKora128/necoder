@@ -51,8 +51,8 @@ fn main() {
                 acp_client::AgentEvent::Configs(configs) => {
                     for config in configs {
                         println!(
-                            "Config[{:?}] current={} choices={:?}",
-                            config.category, config.current, config.choices
+                            "Config[{:?}] {} ({}) kind={:?}",
+                            config.category, config.name, config.config_id, config.kind
                         );
                     }
                     println!("--- 広告ここまで（prompt は 1 通も送っていない）");

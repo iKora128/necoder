@@ -21,8 +21,9 @@
 //! `min_w_0` のみ → **0px × 2540px** / `flex_1` + `min_w_0` → 1260px × 20px / 無指定 → 826px × 20px。
 
 use acp_client::{
-    AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
-    PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
+    AgentEvent, AgentKind, ConfigCategory, ConfigOption, ConfigValue, ElicitationField,
+    PermissionChoice, PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand,
+    ToolCallInfo, TurnEnd,
 };
 mod auto_prompt;
 mod chat;
@@ -62,7 +63,7 @@ use gpui::{
 };
 use host::{Host, LocalHost};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -1150,9 +1151,17 @@ struct Thread {
     /// エージェントが広告する権限モード `(mode_id, 表示名)` と現在の mode_id（セッション開始後に埋まる）。
     available_modes: Vec<(SharedString, SharedString)>,
     current_mode_id: SharedString,
-    /// エージェントが広告する設定オプション（モデル・思考レベル等）。あれば Model/Effort セレクタを
+    /// エージェントが広告する設定オプション（モデル・思考レベル・Fast mode 等）。あれば選択肢を
     /// 実選択肢に置き換え、選択で `session/set_config_option` を送る。
     configs: Vec<ConfigOption>,
+    /// モデル・思考量・権限モードの外の設定（Fast mode 等・[`ConfigCategory::Other`]）でこのスレッドが
+    /// 望む値（ACP の config_id → 保存形: select は value_id・boolean は `true` / `false`）。sticky から
+    /// 載せ、セッションを開いた直後に [`acp_client::SessionPreferences::options`] で合わせる。広告が
+    /// 届いた後はエージェントの値を写す（[`adopt_advertised_options`]・使えない等で戻されたら言い返さない）。
+    options: BTreeMap<String, String>,
+    /// 人が変えて、エージェントの返事（`Configs`）をまだ待っている設定の config_id。ターン中の変更は
+    /// ターンが終わるまで送られない（acp_client の deferred）ので、その間は古い値の広告で表示を戻さない。
+    options_in_flight: HashSet<String>,
     /// 承認待ちの権限リクエスト（あれば composer 上部にカードを出す）。
     pending_permission: Option<PendingPermission>,
     /// 回答待ちの Elicitation（選択肢付き質問。あれば composer 上部にカードを出す・単一選択のみ）。
@@ -1300,6 +1309,8 @@ impl Thread {
             available_modes: Vec::new(),
             current_mode_id: SharedString::default(),
             configs: Vec::new(),
+            options: BTreeMap::new(),
+            options_in_flight: HashSet::new(),
             pending_permission: None,
             pending_elicitation: None,
             persisted_entries: 0,
@@ -6041,6 +6052,59 @@ PYEOF"#;
             .unwrap_or_default()
     }
 
+    /// このスレッドに出す広告の全体。スレッド自身の広告があればそれ、まだなら同じ agent の在庫
+    /// （別タブ・先張りで受け取った物）。どちらも無ければ空＝何も出さない（捏造しない）。
+    fn stocked_configs<'a>(&'a self, thread: &'a Thread) -> &'a [ConfigOption] {
+        if !thread.configs.is_empty() {
+            return &thread.configs;
+        }
+        self.catalog
+            .get(&thread.agent)
+            .map(|stock| stock.configs.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// モデル・思考量の外の設定（Fast mode・Codex の Collaboration mode 等）を変える: このスレッドの
+    /// セッションへ `session/set_config_option` を送り、その agent の記憶（sticky）に書く。広告（スレッド
+    /// 自身か在庫）に無い設定・値は受けない。セッションがまだ無ければ、開いた直後に合わせる
+    /// （[`acp_client::SessionPreferences::options`]）。
+    fn set_config_option(&mut self, config_id: &str, value: ConfigValue, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        let offered = self.stocked_configs(thread).iter().any(|config| {
+            config.config_id == config_id
+                && config.category == ConfigCategory::Other
+                && config.offers(&value)
+        });
+        if !offered {
+            return;
+        }
+        let stored = value.to_stored();
+        // 区分の鍵（model / effort / mode）と同じ綴りの設定は区分の記憶を壊すので覚えない。
+        let agent_id = settings::agent_by_label(cx, thread.agent.as_ref())
+            .map(|agent| agent.id().to_string())
+            .filter(|_| !is_category_sticky_key(config_id));
+        if let Some(agent_id) = agent_id {
+            let result = settings::set_agent_config_default(cx, &agent_id, config_id, &stored);
+            self.report_settings_save(result, cx);
+        }
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            thread.options.insert(config_id.to_string(), stored);
+            // 広告がまだ届いていなくても送る（セッションは広告を流してからコマンドを読む）。
+            if let Some(command_tx) = &thread.command_tx {
+                thread.options_in_flight.insert(config_id.to_string());
+                command_tx
+                    .unbounded_send(SessionCommand::SetConfig {
+                        config_id: config_id.to_string(),
+                        value,
+                    })
+                    .ok();
+            }
+        }
+        cx.notify();
+    }
+
     /// 現在の選択を **value_id** で返す（未選択なら空）。比較・保存・送信はこの値だけを使う。
     fn selector_value(&self, selector: Selector) -> SharedString {
         self.threads
@@ -7199,6 +7263,12 @@ PYEOF"#;
                     }),
                 model: Some(thread.model.to_string()).filter(|model| !model.is_empty()),
                 effort: Some(thread.effort.to_string()).filter(|effort| !effort.is_empty()),
+                // Fast mode 等の覚えた値（モデルの後に合わせる・広告に無い物は送られない）。
+                options: thread
+                    .options
+                    .iter()
+                    .map(|(config_id, stored)| (config_id.clone(), stored.clone()))
+                    .collect(),
                 // 前回のセッション id。エージェントが loadSession を広告していれば会話を引き継ぐ。
                 resume: thread.acp_session_id.clone(),
                 mcp_servers,
@@ -7645,7 +7715,7 @@ PYEOF"#;
                     let desired = match category {
                         ConfigCategory::Model => thread.model.clone(),
                         ConfigCategory::ThoughtLevel => thread.effort.clone(),
-                        ConfigCategory::Other => continue,
+                        ConfigCategory::Mode | ConfigCategory::Other => continue,
                     };
                     // 借用を残さずに「desired は広告されているか / 広告 current は何か」を取り出す。
                     let Some((offered, advertised_current)) = thread
@@ -7654,11 +7724,8 @@ PYEOF"#;
                         .find(|config| config.category == category)
                         .map(|config| {
                             let offered = !desired.is_empty()
-                                && config
-                                    .choices
-                                    .iter()
-                                    .any(|(id, _)| id.as_str() == desired.as_ref());
-                            (offered, SharedString::from(config.current.clone()))
+                                && config.offers(&ConfigValue::Id(desired.to_string()));
+                            (offered, SharedString::from(config.current().to_stored()))
                         })
                     else {
                         continue;
@@ -7672,10 +7739,11 @@ PYEOF"#;
                         match category {
                             ConfigCategory::Model => thread.model = advertised_current,
                             ConfigCategory::ThoughtLevel => thread.effort = advertised_current,
-                            ConfigCategory::Other => {}
+                            ConfigCategory::Mode | ConfigCategory::Other => {}
                         }
                     }
                 }
+                adopt_advertised_options(thread);
             }
             AgentEvent::Plan(items) => {
                 // プランは毎回全量で届く（ACP 仕様）ので**置換**。常設チェックリストが追従する。
@@ -13315,11 +13383,11 @@ fn config_choices(configs: &[ConfigOption], category: ConfigCategory) -> Vec<Sel
         .find(|config| config.category == category)
         .map(|config| {
             config
-                .choices
+                .choices()
                 .iter()
-                .map(|(value, label)| SelectorChoice {
-                    value: SharedString::from(value.clone()),
-                    label: SharedString::from(label.clone()),
+                .map(|choice| SelectorChoice {
+                    value: SharedString::from(choice.value_id.clone()),
+                    label: SharedString::from(choice.name.clone()),
                 })
                 .collect()
         })
@@ -13341,7 +13409,7 @@ fn send_set_config(thread: &Thread, category: ConfigCategory, value_id: &SharedS
         command_tx
             .unbounded_send(SessionCommand::SetConfig {
                 config_id: config.config_id.clone(),
-                value_id: value_id.to_string(),
+                value: ConfigValue::Id(value_id.to_string()),
             })
             .ok();
     }
@@ -13712,6 +13780,67 @@ fn apply_agent_sticky(thread: &mut Thread, cx: &App) {
     thread.effort = agent_sticky_value(agent.as_ref(), "effort", cx);
     thread.permission_mode = agent_sticky_value(agent.as_ref(), "mode", cx);
     thread.current_mode_id = thread.permission_mode.clone();
+    thread.options = agent_sticky_options(agent.as_ref(), cx);
+    thread.options_in_flight.clear();
+}
+
+/// その agent で覚えた、モデル・思考量・権限モードの外の設定（Fast mode 等）。
+/// `agent_config_defaults[agent_id]` のうち necoder の区分の鍵（`model` / `effort` / `mode`）以外で、
+/// 鍵はエージェントの config_id（`fast`）、値は保存形（[`ConfigValue::to_stored`]）。
+fn agent_sticky_options(agent_label: &str, cx: &App) -> BTreeMap<String, String> {
+    let Some(agent) = settings::agent_by_label(cx, agent_label) else {
+        return BTreeMap::new();
+    };
+    settings::get(cx)
+        .agent_config_defaults
+        .get(agent.id())
+        .map(|defaults| {
+            defaults
+                .iter()
+                .filter(|(key, value)| !is_category_sticky_key(key) && !value.is_empty())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `agent_config_defaults` の鍵のうち、necoder の区分（[`Selector::config_id`]）の物か。
+/// その他の設定はエージェントの config_id を鍵にするので、同じ綴りの設定は区分の側が持つ。
+fn is_category_sticky_key(key: &str) -> bool {
+    [Selector::Mode, Selector::Model, Selector::Effort]
+        .iter()
+        .any(|selector| selector.config_id() == Some(key))
+}
+
+/// 広告の「その他の設定」（Fast mode 等）の今の値をスレッドへ写す。モデル・思考量と違い、食い違っても
+/// 送り直さない — エージェントが自分で戻した値（Fast mode が使えないプラン等）に言い返すと、知らせの
+/// たびに送り合いになる。人が変えて返事待ちの設定は、ターン中は写さない（ターン中の変更はターンが
+/// 終わってから送られる＝それまでの広告は変える前の値）。
+fn adopt_advertised_options(thread: &mut Thread) {
+    for config in thread
+        .configs
+        .iter()
+        .filter(|config| config.category == ConfigCategory::Other)
+    {
+        let advertised = config.current().to_stored();
+        if thread.options_in_flight.contains(&config.config_id) {
+            let confirmed = thread.options.get(&config.config_id) == Some(&advertised);
+            if !confirmed && thread.running {
+                continue;
+            }
+            thread.options_in_flight.remove(&config.config_id);
+        }
+        thread.options.insert(config.config_id.clone(), advertised);
+    }
+}
+
+/// 「その他の設定」の今の値（描画用）。このスレッドが望む値が広告に合えばそれ、無ければ広告の値。
+fn option_value(thread: &Thread, config: &ConfigOption) -> ConfigValue {
+    thread
+        .options
+        .get(&config.config_id)
+        .and_then(|stored| config.value_from_stored(stored))
+        .unwrap_or_else(|| config.current())
 }
 
 /// 新規スレッドへ「前回選んだ状態」を載せる（2026-07-27 ユーザー要望「前に設定した状態を保持して」）。
@@ -13859,6 +13988,8 @@ fn seed_threads() -> Vec<Thread> {
         available_modes: Vec::new(),
         current_mode_id: SharedString::default(),
         configs: Vec::new(),
+        options: BTreeMap::new(),
+        options_in_flight: HashSet::new(),
         pending_permission: None,
         pending_elicitation: None,
         // 遷移スナップショット（P1）の種: offscreen 検証で herd 行/セル帯に digest が写る。
@@ -16265,12 +16396,20 @@ PYEOF"#;
     fn config(category: ConfigCategory, current: &str, choices: &[(&str, &str)]) -> ConfigOption {
         ConfigOption {
             config_id: format!("{category:?}"),
+            name: format!("{category:?}"),
+            description: None,
             category,
-            current: current.to_string(),
-            choices: choices
-                .iter()
-                .map(|(id, name)| (id.to_string(), name.to_string()))
-                .collect(),
+            kind: acp_client::ConfigKind::Select {
+                current: current.to_string(),
+                choices: choices
+                    .iter()
+                    .map(|(id, name)| acp_client::ConfigChoice {
+                        value_id: id.to_string(),
+                        name: name.to_string(),
+                        description: None,
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -16335,7 +16474,10 @@ PYEOF"#;
 
             let sent: Vec<String> = std::iter::from_fn(|| command_rx.try_recv().ok())
                 .filter_map(|command| match command {
-                    SessionCommand::SetConfig { value_id, .. } => Some(value_id),
+                    SessionCommand::SetConfig {
+                        value: ConfigValue::Id(value_id),
+                        ..
+                    } => Some(value_id),
                     _ => None,
                 })
                 .collect();
@@ -16769,6 +16911,169 @@ PYEOF"#;
             assert_eq!(panel.open_menu, Some(Selector::Model));
         });
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 偽の ACP エージェント（Fast mode を boolean で広告する）。受けた `set_config_option` の params を
+    /// 1 行ずつ `argv[1]` のファイルへ書き、応答で更新後の一覧を返す。
+    const FAST_MODE_AGENT: &str = r#"
+import json, sys
+
+record = sys.argv[1]
+current = {"fast": False}
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def config_options():
+    return [
+        {"id": "model", "name": "Model", "category": "model", "type": "select",
+         "currentValue": "default",
+         "options": [{"value": "default", "name": "Default (recommended)"},
+                     {"value": "opus", "name": "Opus 4.8"}]},
+        {"id": "fast", "name": "Fast mode", "category": "model_config", "type": "boolean",
+         "currentValue": current["fast"],
+         "description": "Faster responses on supported models"},
+    ]
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"sessionId": "sess-1", "configOptions": config_options()}})
+    elif method == "session/set_config_option":
+        with open(record, "a") as out:
+            out.write(json.dumps({key: params[key] for key in ("configId", "type", "value")
+                                  if key in params}, sort_keys=True) + "\n")
+        current[params["configId"]] = params["value"]
+        send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": config_options()}})
+"#;
+
+    /// `Configs` が届くまで待つ（本物の `run_session` は別スレッドで動く）。
+    fn next_configs(
+        events: &mut futures::channel::mpsc::UnboundedReceiver<AgentEvent>,
+    ) -> AgentEvent {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(event @ AgentEvent::Configs(_)) => return event,
+                Ok(_) => {}
+                Err(futures::channel::mpsc::TryRecvError::Closed) => {
+                    panic!("セッションが先に終わった")
+                }
+                Err(futures::channel::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+            }
+        }
+        panic!("Configs が届かない");
+    }
+
+    /// Fast mode（boolean）を切り替えると、本物の `run_session` を通って偽の ACP エージェントに
+    /// `session/set_config_option` の `type: "boolean"` で届き、エージェントの返事（更新後の一覧）で
+    /// スレッドの値が追従する。その agent の記憶（sticky）には `true` で残り、次のスレッドに載る。
+    #[gpui::test]
+    fn toggling_fast_mode_reaches_a_fake_agent(cx: &mut gpui::TestAppContext) {
+        let Some(python) = acp_client::find_in_path("python3") else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let settings_path = init_test_settings(cx, "fast-mode");
+        let record = std::env::temp_dir().join(format!(
+            "necoder_agent_fast_mode_{}_{}.jsonl",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let command = acp_client::AgentCommand::new(
+            python,
+            vec![
+                "-c".into(),
+                FAST_MODE_AGENT.into(),
+                record.display().to_string(),
+            ],
+            std::env::temp_dir(),
+        );
+        let (command_tx, command_rx) = futures::channel::mpsc::unbounded();
+        let (event_tx, mut event_rx) = futures::channel::mpsc::unbounded();
+        let session = std::thread::spawn(move || {
+            futures::executor::block_on(acp_client::run_session(
+                command,
+                acp_client::SessionPreferences::default(),
+                command_rx,
+                event_tx,
+            ))
+        });
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let active = panel.update(cx, |panel, _cx| {
+            panel.threads[panel.active].command_tx = Some(command_tx);
+            panel.active
+        });
+        let advertised = next_configs(&mut event_rx);
+        panel.update(cx, |panel, cx| {
+            panel.on_event(active, advertised, cx);
+            let thread = &panel.threads[active];
+            let fast = thread
+                .configs
+                .iter()
+                .find(|config| config.config_id == "fast")
+                .expect("boolean の設定も届く（捨てない）");
+            assert_eq!(option_value(thread, fast), ConfigValue::Bool(false));
+            panel.set_config_option("fast", ConfigValue::Bool(true), cx);
+        });
+        let answered = next_configs(&mut event_rx);
+        panel.update(cx, |panel, cx| {
+            panel.on_event(active, answered, cx);
+            let thread = &panel.threads[active];
+            let fast = thread
+                .configs
+                .iter()
+                .find(|config| config.config_id == "fast")
+                .expect("返事の一覧にも在る");
+            assert_eq!(
+                fast.current(),
+                ConfigValue::Bool(true),
+                "エージェント側が on"
+            );
+            assert_eq!(option_value(thread, fast), ConfigValue::Bool(true));
+            assert!(thread.options_in_flight.is_empty(), "返事で確かめ終えた");
+            assert_eq!(
+                settings::get(cx).agent_config_defaults["claude"]["fast"],
+                "true",
+                "その agent の記憶に boolean のまま残る"
+            );
+            // 次のスレッドは覚えた値をセッションを開く時に合わせる（区分の鍵とは混ぜない）。
+            panel.add_thread(cx);
+            let fresh = &panel.threads[panel.active];
+            assert_eq!(fresh.options.get("fast").map(String::as_str), Some("true"));
+            assert!(!fresh.options.contains_key("model"));
+            // 広告に無い設定・種類の合わない値は送らない（捏造しない）。
+            panel.switch_thread(active, cx);
+            panel.set_config_option("context_window", ConfigValue::Id("1m".into()), cx);
+            panel.set_config_option("fast", ConfigValue::Id("on".into()), cx);
+            // セッションを閉じる（送信路を落とすと run_session が抜ける）。
+            panel.threads[active].command_tx = None;
+        });
+        session
+            .join()
+            .expect("セッションのスレッドが落ちない")
+            .expect("セッションは正常に終わる");
+        let received = std::fs::read_to_string(&record).expect("偽エージェントの記録を読める");
+        assert_eq!(
+            received.lines().collect::<Vec<_>>(),
+            vec![r#"{"configId": "fast", "type": "boolean", "value": true}"#],
+            "boolean のまま 1 回だけ届く"
+        );
+        let _ = std::fs::remove_file(record);
+        let _ = std::fs::remove_file(settings_path);
     }
 
     /// O16: 使わないと決めたエージェントはエージェントの選択肢に出さない。いまのスレッドの値だけは
