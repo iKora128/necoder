@@ -78,6 +78,7 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     ("agent::SubmitPrompt", "key.submit_prompt"),
     ("agent::CloseActiveThread", "key.close_active_thread"),
     ("agent::FindInTranscript", "key.find_in_transcript"),
+    ("agent::ToggleConfigCard", "key.toggle_config_card"),
     // ── ターミナル ──
     ("terminal::Copy", "key.terminal_copy"),
     ("terminal::Paste", "key.terminal_paste"),
@@ -127,11 +128,13 @@ fn label_for_action(action: &str) -> SharedString {
     SharedString::from(prettify_action(action))
 }
 
-/// keymap のコンテキスト述語 → セクション見出し（i18n）。既知 5 つ以外はコンテキスト名そのまま。
+/// keymap のコンテキスト述語 → セクション見出し（i18n）。既知の物以外はコンテキスト名そのまま。
 fn section_label(context: &str) -> SharedString {
     let key = match context {
         "Editor" => Some("key.section_editor"),
         "AgentPanel" => Some("key.section_agent"),
+        // composer と設定のカードの中だけで効くキー（⌘/）。
+        "AgentPanel > (Editor || ConfigCard)" => Some("key.section_composer"),
         "FleetControl" => Some("key.section_control"),
         keymap_core::TERMINAL_CONTEXT => Some("key.section_terminal"),
         "Explorer" => Some("key.section_explorer"),

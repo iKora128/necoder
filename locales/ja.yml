@@ -69,6 +69,19 @@ agent:
   pill_model: モデル
   pill_effort: 推論の深さ（effort）
   pill_awaiting_agent: 接続すると選べます（エージェントが候補を送ってきます）
+  card_chip_tip: モデル・思考量・Fast などの設定  ⌘/
+  card_tab_hint: で切り替え
+  card_agent_fixed: この会話では固定
+  card_effort: 思考量
+  card_no_options: モデルなどはエージェントが送ってきてから選べます
+  card_key_models: モデル
+  card_key_effort: 思考量
+  card_key_close: 閉じる
+  card_key_select: 選ぶ
+  card_key_choose: 決める
+  card_key_back: 戻る
+  card_list_models: モデル
+  card_list_agents: エージェント
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
   err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
@@ -1619,6 +1632,7 @@ key:
     super_key: Super キーの操作
   section_editor: エディタ
   section_agent: AI チャット
+  section_composer: AI チャットの入力欄
   section_control: 管制
   section_global: グローバル
   section_explorer: エクスプローラ
@@ -1675,6 +1689,7 @@ key:
   cancel: 選択解除・取消
   submit_prompt: プロンプトを送信
   close_active_thread: アクティブスレッドを閉じる
+  toggle_config_card: 設定のカード（モデル・思考量・Fast）
   command_palette: コマンドパレット
   control_next: "管制: 次の要対応へ"
   cleanup_task: "Task: 選んだ Task を片付ける…"

@@ -102,7 +102,7 @@ code, .kbd { font-family: var(--mono); font-size: 11px; background: var(--bg2); 
 .chip.dead { cursor: default; } .chip.dead:hover { background: none; color: var(--fg1); }
 
 /* ---- 案 C: カード ---- */
-.card { position: absolute; left: 0; bottom: 25px; width: 286px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-menu); z-index: 6; overflow: hidden; }
+.card { position: absolute; left: 0; bottom: 25px; width: 290px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-menu); z-index: 6; overflow: hidden; }
 .card .agent { display: flex; align-items: center; gap: 7px; padding: 9px 12px 0; font-size: 11px; color: var(--fg1); }
 .card .agent .badge { width: 14px; height: 14px; }
 .card .agent .slot { flex: 1; }
@@ -168,6 +168,7 @@ td.ex .chip { pointer-events: none; }
 <div class="meta">2026-10-02 · 中身はエージェントが実際に広告している設定（claude-agent-acp 0.81.2・codex-acp 1.13.1 の <code>configOptions</code>）。今は boolean を捨てているので Fast が選べない（<code>acp_client.rs</code> の <code>map_config_option</code>）。どちらの形でも boolean は出せる。</div>
 
 <div class="lead">
+  <b>決定（2026-10-02・本人）: 案 C + C-1</b> — チップ 1 つ → カード 1 枚、権限モードはカードの外のピル。実装は <code>crates/agent_panel/src/config_card.rs</code>（UI-SPEC §6）。以下は決める時に並べた比較のまま残す。<br><br>
   <b>決めたいこと 2 つ</b>
   <ol>
     <li><b>形</b>: 案 P「今のピルのまま、boolean と残りの select をピルとして足す」/ 案 C「チップ 1 つ → 開くとカード 1 枚（zeron 風）」。推しは <b>案 C</b>（理由は下）。</li>
@@ -321,7 +322,7 @@ td.ex .chip { pointer-events: none; }
                 <div class="o"><div class="l"><div class="n">Collaboration mode</div></div><div class="v">Plan<span class="go">›</span></div></div>
                 <div class="o"><div class="l"><div class="n"><span class="bolt" data-bolt></span>Fast mode</div><div class="d">1.5x speed, increased usage</div></div><span class="sw"></span></div>
               </div>
-              <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>Tab</b> エージェント</span><span><b>esc</b> 閉じる</span></div>
+              <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
             </div>
           </span>
         </div>
@@ -424,7 +425,7 @@ td.ex .chip { pointer-events: none; }
                 <div class="o"><div class="l"><div class="n">権限モード</div></div><div class="v">Bypass Permissions<span class="go">›</span></div></div>
                 <div class="o"><div class="l"><div class="n"><span class="bolt" data-bolt></span>Fast mode</div><div class="d">Faster responses on supported models</div></div><span class="sw on"></span></div>
               </div>
-              <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>Tab</b> エージェント</span><span><b>esc</b> 閉じる</span></div>
+              <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
             </div>
           </span>
         </div>
@@ -475,7 +476,7 @@ td.ex .chip { pointer-events: none; }
   <li><b>boolean を受け取る</b>: <code>map_config_option</code> が boolean も写す。送る値は select = value_id・boolean = true/false（<code>session/set_config_option</code> の <code>type: "boolean"</code>）。カテゴリ <code>mode</code> の設定は権限モード（<code>session/set_mode</code>）と二重なので出さない。</li>
   <li><b>sticky</b>: 今の model / effort / mode に加えて、ほかの設定もエージェントごとに覚える（<code>agent_config_defaults.claude.fast = "true"</code>・キーは ACP の config_id）。次のスレッドはセッションを開いた直後・最初の送信より前に合わせる。エージェントが値を戻した時（使えない等）は言い返さずに従う。</li>
   <li><b>捏造しない</b>: 広告が届く前は開けない。在庫（同じエージェントが一度広告した物）があればそれで開ける。広告に無い値は送らない。</li>
-  <li><b>色</b>: カードは bg2・枠 1px・角 10・影。選択と印は bg3、つまみは fg0、トラックは bg3 / fg2。稲妻は絵文字ではなく線の絵 <span class="bolt" data-bolt></span>（色相なし）。</li>
+  <li><b>色</b>: カードは bg2・枠 1px・角 10・影（最前面に描く）。選択と印は bg3、つまみは fg0、トラックは bg3 / fg2。稲妻は絵文字ではなく線の絵 <span class="bolt" data-bolt></span>（色相なし）。</li>
 </ul>
 
 <script>
@@ -538,7 +539,7 @@ function render() {
         ${a.selects.map(o => `<div class="o"><div class="l"><div class="n">${o.name}</div></div><div class="v">${label(o.choices, s.sel[o.id])}<span class="go">›</span></div></div>`).join('')}
         <div class="o" onmousedown="AGENTS[${agentIndex}].state.fast=!AGENTS[${agentIndex}].state.fast;render()"><div class="l"><div class="n"><span class="bolt">${BOLT}</span>Fast mode</div><div class="d">${a.fast}</div></div><span class="sw ${s.fast ? 'on' : ''}"></span></div>
       </div>
-      <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>Tab</b> エージェント</span><span><b>esc</b> 閉じる</span></div>
+      <div class="foot"><span><b>↑↓</b> モデル</span><span><b>←→</b> 思考量</span><span><b>esc</b> 閉じる</span></div>
     </div>`;
   } else if (open && page === 'models') {
     card = `<div class="card" onmousedown="event.stopPropagation()"><div class="lhead"><span class="back">‹</span>モデル<span class="k">↑↓ 選ぶ · ⏎ 決める · esc 戻る</span></div><div class="list">

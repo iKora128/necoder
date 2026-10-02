@@ -21,6 +21,8 @@ copyright notice and this permission notice appear in all copies.
 
 Web タブのツールバー（`arrow-left` / `arrow-right` / `code-xml` / `external-link` / `mouse-pointer-click`）も Lucide。
 
+composer の設定の Fast mode（`zap`）も Lucide。
+
 ## ブランドロゴ（`brand-*.svg`）
 
 AI エージェント識別用のブランドマーク（`brand-claude` / `brand-copilot` /
