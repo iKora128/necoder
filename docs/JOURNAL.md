@@ -3865,3 +3865,12 @@
   - Picker は別の Entity だが、Workspace の描画で `picker.read(cx)` を読めばよい（Picker の notify で窓ごと描き直され、ルートの Workspace はキャッシュしていないので毎回描かれる）。選択の変化をイベントで追う必要はない。
 - リリース: 本人「いったん新しいの本リリースしていいですよ」で、v0.1.20 以来の正式版（Pre-release にしない＝自動更新で届く）として v0.1.24 を出した。テスト版 v0.1.21〜v0.1.23 の中身を全部含むので、CHANGELOG の冒頭に「v0.1.20 からの主な変更」をまとめた（自動更新で来た人が最初に開くのは、この版の Release ページ＝更新後の最初の起動のトースト）。relay は v0.1.23 から変えていないので Worker のデプロイは不要。
 - 次: 本人の実機で見え方（棒の太さ・今いる枠との見分け）を確かめる。v0.1.20 から自動更新で上がる道（チップ → 差し替え → 再起動）も実機で見る。
+
+## 2026-10-03 — 開いた後に `git init` したフォルダでも Task が系譜に載るようにする
+
+- 発端（本人・ドッグフーディング）: engineer_education_tool の開発中に、Captain の分解案から切った Task が統合先の系譜から分離した。
+- 原因: 15:48 に git でないフォルダとして開き（リポジトリ ID は root の代用 `local:/…/engineer_education_tool`）、15:50 に `git init`、16:20 に最初のコミット。リポジトリ ID は開いた時に 1 回しか読まないので代用のまま残り、後で切った Task（`…/.git`）と食い違った。分解案の記録にも代用の ID が残っていた。DB に統合先の古い行は無いので、再起動すれば直る（PR #49 の「台帳の古い ID」とは別の経路）。
+- やったこと: `refresh_git_status_for`（ファイルの変更・切替・起動で走る背景の git 読み直し）で `project::git_repository_id_on` も読み、slot の値と違えば入れ替えて台帳にも書く（`update_repository_id`）。git でないフォルダは読み直さない（root の代用を上書きしない）。`repository_id_on` は `git_repository_id_on` + 代用に分けた。
+- 検証: `repository_id_follows_git_init_after_opening`（git でないフォルダを開く → `git init` → 読み直しで git の値に揃う）。直しを外すと落ちることを確かめた。最初は git でないフォルダでも読み直していて、偽の ID を手で入れる `task_rows_are_scoped_to_the_selected_repository` が落ちた → git だと確かめられた値だけ採るように絞った。
+- 次: 本人の実機で「新しいフォルダを開く → エージェントが `git init` → Captain の分解案から Task」を通して系譜に載るか。
+

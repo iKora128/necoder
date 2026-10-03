@@ -716,8 +716,14 @@ pub fn stable_worktree_id_on(host: &dyn Host, root: &Path) -> String {
 }
 
 pub fn repository_id_on(host: &dyn Host, root: &Path) -> String {
-    let repository_root = git_common_dir_on(host, root).unwrap_or_else(|| root.to_path_buf());
-    format!("{}:{}", host.id(), repository_root.display())
+    git_repository_id_on(host, root).unwrap_or_else(|| format!("{}:{}", host.id(), root.display()))
+}
+
+/// git リポジトリの中なら、その repository ID（[`repository_id_on`] と同じ値）。repo 外は `None`
+/// （root の代用を返さない＝「git だと確かめられた値」だけが欲しい読み直し用）。
+pub fn git_repository_id_on(host: &dyn Host, root: &Path) -> Option<String> {
+    let repository_root = git_common_dir_on(host, root)?;
+    Some(format!("{}:{}", host.id(), repository_root.display()))
 }
 
 /// 現在の HEAD commit。Task 作成時の base と review 時の head を別に保持するために使う。
