@@ -3878,4 +3878,5 @@
   - git の merge（ort）は index が HEAD と違うと、重なりに関係なく「Your local changes … would be overwritten」で始めない（`git add -N` の印も同じ）。作業ツリーだけの変更・未追跡のファイルは、merge が書くパスに当たる時だけ断る（ファイルとフォルダの取り合いも）。どれも `MERGE_HEAD` を作らずに止まるので、中止は要らない。
   - GUI の遷移（`transition_task_space`）の要約はニュースと台帳のイベントに載るだけで、`result_summary` には入らない。要対応のカードの要約は `result_summary`（エージェントの最後の発言）なので、統合の失敗は今まで要対応に出ていなかった。
   - Fleet の組み立て命令の `graph` は Fleet に入らない（入るのは `NECODER_CONTROL_PROBE` の仕込み）。本物の worktree の Task を撮る時は `fleet` を先頭に置く。
+  - 統合の merge コミットは necoder の git（`-c` を付けない）で作るので、試験の作者はコマンドごとの `-c user.email` ではなく一時リポジトリの設定（`git config user.email`）に書く。Windows のランナーには git の作者が無く「Committer identity unknown」で落ちた（mac は作者を推測するので手元では出ない）。手元で同じ条件にするには `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true` を付けて流す。
 - 次: 本人の main（手元の変更あり）で、重ならない Task を実際に統合して確かめる。

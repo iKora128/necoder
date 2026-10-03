@@ -3257,6 +3257,11 @@ mod tests {
         if !git(&repo, &["init", "-q", "-b", "main"]).status.success() {
             return;
         }
+        // 統合の merge コミットは necoder の git（`-c` を付けない）で作るので、作者と改行変換は
+        // リポジトリの設定に書く（git の作者が無い Windows のランナーでは、無いと merge が止まる）。
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("CLAUDE.md"), "# guide\n").expect("書ける");
         std::fs::write(repo.join("a.txt"), "base\n").expect("書ける");
         git(&repo, &["add", "-A"]);

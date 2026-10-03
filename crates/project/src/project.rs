@@ -4108,6 +4108,11 @@ mod tests {
         {
             return None;
         }
+        // 統合の merge コミットは necoder の git（`-c` を付けない）で作るので、作者と改行変換は
+        // リポジトリの設定に書く（git の作者が無い Windows のランナーでは、無いと merge が止まる）。
+        integration_git(&root, &["config", "user.email", "t@t"]);
+        integration_git(&root, &["config", "user.name", "t"]);
+        integration_git(&root, &["config", "core.autocrlf", "false"]);
         let write = |dir: &Path, path: &str, content: &[u8]| {
             let file = dir.join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
