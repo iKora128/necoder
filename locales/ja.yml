@@ -554,6 +554,12 @@ fleet:
   toast_merge_preview_failed: "merge preview に失敗: %{error}"
   toast_integrated: Task を IntegrationSpace へ統合しました
   toast_integrate_failed: "統合できません: %{error}"
+  toast_integrate_overlap: "統合先の手元の変更と重なるので、統合しませんでした。次のファイルをコミットするか退けてから、もう一度「統合」:"
+  toast_integrate_staged: "統合先にステージした変更があるので、統合しませんでした。コミットするかステージを解除してから、もう一度「統合」:"
+  integrate_overlap_summary: "統合先の手元の変更と重なる: %{paths}"
+  integrate_staged_summary: "統合先にステージした変更がある: %{paths}"
+  integrate_more_files: "他 %{count} ファイル"
+  integrate_blocked_title: 統合を止めた手元の変更
   space_closed: TaskSpace は閉じられています
   stage_one: 舞台 1 枚
   stage_two: 舞台 2 列

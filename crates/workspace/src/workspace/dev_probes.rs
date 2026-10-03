@@ -542,7 +542,8 @@ impl Workspace {
     /// 画面の組み立て（`;` 区切り）: `graph` / `formation` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
     /// `side:<diff|terminal|files>`（その Task カードのサイドペイン。diff = 変更レビュー）/ `columns:<n>` / `pin` / `captain` /
     /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `interrupted`（R09 の中断した行）/
-    /// `compare:<n>`（O23）/ `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）。
+    /// `compare:<n>`（O23）/ `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）/
+    /// `integrate`（選択中の Task の「統合」を押す）/ `fleet`（Fleet に入る）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -720,6 +721,13 @@ impl Workspace {
                     self.toggle_fleet_mode(&ToggleFleet, window, cx);
                 }
             }
+            // Editor から Fleet へ入る（⌘⇧M と同じ道）。CONTROL_PROBE の擬似 Task を使わず、本物の
+            // worktree の Task を撮る時に置く（2026-10-03）。
+            "fleet" => {
+                if !self.chrome.fleet_mode {
+                    self.toggle_fleet_mode(&ToggleFleet, window, cx);
+                }
+            }
             // レールの「AI スレッド一覧」を押す（左カラムの herd ⇄ エクスプローラ）。
             "threads" => self.toggle_herd_sidebar(cx),
             // Fleet サイドバーの絞り込み欄に語を入れる（O21・欄は Task が 6 本以上か語がある時だけ出る）。
@@ -771,6 +779,19 @@ impl Workspace {
                 if let Some(worktree) = external {
                     self.adopt_worktree(worktree.path, worktree.branch, None, cx);
                 }
+            }
+            // 選択中の Task の「統合」を押す（次へ・要対応カードと同じ入口）。phase を merge_ready にしてから
+            // 押す＝統合先の手元の変更で断る所・統合する所の見た目を撮る用（2026-10-03・本物の git merge が走る）。
+            "integrate" => {
+                let index = self.project_sessions.active;
+                let slot = &mut self.project_sessions.projects[index];
+                if slot.task_space.is_integration() {
+                    eprintln!("FLEET_PROBE: 統合先が選ばれている（先に task:<n> で Task を選ぶ）");
+                    return;
+                }
+                slot.task_space.phase = TaskPhase::MergeReady;
+                let space = slot.task_space.id.clone();
+                self.integrate_task(space, cx);
             }
             // ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない）。
             "creating" => self.debug_seed_task_creations(cx),

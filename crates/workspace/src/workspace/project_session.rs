@@ -899,6 +899,7 @@ impl Workspace {
                 pending_task_agents: HashMap::new(),
                 held_proposal_rows: HashMap::new(),
                 task_conflicts: HashMap::new(),
+                task_integration_blocked: HashMap::new(),
                 task_creations: Vec::new(),
                 next_task_creation_id: 0,
                 #[cfg(test)]
