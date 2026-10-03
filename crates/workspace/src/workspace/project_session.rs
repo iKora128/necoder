@@ -342,19 +342,22 @@ impl Workspace {
                     .into_iter()
                     .map(|record| (record.id.clone(), record))
                     .collect();
-                let mut missing = Vec::new();
+                let mut to_persist = Vec::new();
                 for slot in &mut workspace.project_sessions.projects {
                     if let Some(record) = by_id.get(slot.task_space.id.as_str()) {
-                        slot.task_space.overlay_stored(record);
+                        if slot.task_space.overlay_stored(record) {
+                            // 台帳の repository_id が古い。git の値で書き直す（次の起動でも食い違わない）。
+                            to_persist.push(slot.task_space.to_record(slot));
+                        }
                     } else {
-                        missing.push(slot.task_space.to_record(slot));
+                        to_persist.push(slot.task_space.to_record(slot));
                     }
                 }
-                if !missing.is_empty() {
+                if !to_persist.is_empty() {
                     let storage = storage.clone();
                     cx.background_executor()
                         .spawn(async move {
-                            for record in missing {
+                            for record in to_persist {
                                 if let Err(error) = storage.upsert_task_space(&record) {
                                     eprintln!("TaskSpace を永続化できない: {error:#}");
                                 }
