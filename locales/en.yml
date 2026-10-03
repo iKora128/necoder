@@ -1396,6 +1396,7 @@ ipc:
   err_task_not_open: Task is not open in the GUI
   err_bad_phase: Invalid phase
   err_record_id_required: record id is required
+  err_root_branch_required: The task root and branch are required
   err_unknown_method: "Unknown method: %{name}"
   err_bad_json: "Can't parse JSON: %{detail}"
   err_gui_timeout: GUI response timed out

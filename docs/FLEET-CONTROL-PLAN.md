@@ -33,6 +33,7 @@
 - phase 定義が 2 箇所: `fleet.rs::PHASES`（文字列・`integration` 無し）と `workspace::TaskPhase`（enum・`Integration` あり）。
 - TaskSpace の真実源が 2 箇所: `storage::TaskSpaceRecord`（永続）と `workspace::TaskSpace`（メモリ）。同期は `persist_task_space`/`to_record` の手動。
 - **spawn の断絶**: `fleet_create_task`（CLI/MCP）は worktree を作るがエージェントを起動しない。起動できるのは GUI の `add_worktree_agent` だけ。
+  *追記（2026-10-03）*: GUI 稼働中は `adopt_task` で画面に載せ、MCP の `prompt` があれば担当も起こす（FLEET-ARCHITECTURE の MCP 節）。
 
 ## 2. フェーズ計画
 

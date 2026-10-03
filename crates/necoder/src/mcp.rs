@@ -175,9 +175,10 @@ pub(crate) fn tool_schemas() -> Value {
         },
         {
             "name": "fleet_create_task",
-            "description": "IntegrationSpace から隔離 branch/worktree を作成し、永続 Task ledger に登録する。",
+            "description": "隔離 branch/worktree を作成し、永続 Task ledger に登録する。Task の中から呼ぶと、そのブランチを起点にした子 Task になる。necoder 起動中は Fleet に出し、prompt があれば担当を起こして最初の指示として送る。",
             "inputSchema": { "type": "object", "required": ["title"], "properties": {
-                "title": { "type": "string" }
+                "title": { "type": "string" },
+                "prompt": { "type": "string", "description": "担当への最初の指示（目的と完了条件）。省略すると担当は起こさない" }
             } }
         },
         {
@@ -501,7 +502,8 @@ fn tool_fleet_create(arguments: &Value, root: &Path) -> Result<String, String> {
         .get("title")
         .and_then(Value::as_str)
         .ok_or("title が必要")?;
-    super::fleet::create_task(root, title)
+    let prompt = arguments.get("prompt").and_then(Value::as_str);
+    super::fleet::create_task(root, title, prompt)
         .map(|task| task_json(&task))
         .map_err(|error| format!("{error:#}"))
 }

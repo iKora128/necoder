@@ -79,6 +79,11 @@ MCP にも `fleet_create_task`, `fleet_list_tasks`, `fleet_update_task`, `fleet_
 `fleet_review_task`, `fleet_integrate_task` を公開する。wait は GUI process の一時 state でなく永続 ledger を
 poll するため、Captain や UI が再起動しても継続できる。
 
+`fleet_create_task`（と `fleet create`）を **Task の中から**呼ぶと、そのブランチを起点に切り、呼んだ Task を親として
+台帳に書く（O21 の親子と同じ・系譜で親の下に出る）。worktree はメインの作業ツリー基準（`<repo>-worktrees/`）に置く。
+GUI 稼働中は台帳への登録を GUI の `adopt_task` に頼み、＋ Task の後半（`register_created_task`）と同じく slot・Fleet の
+セル・親子まで作る。MCP の `prompt` があれば担当を起こして最初の指示として送る（空なら起こさない）。
+
 ## Independent implementation and licensing boundary
 
 2026-07-23 の比較調査で herdr の公開 source code を閲覧済みのため、本機能を厳密な

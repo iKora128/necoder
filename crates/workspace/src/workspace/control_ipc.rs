@@ -609,6 +609,64 @@ impl Workspace {
                     cx,
                 );
             }
+            "adopt_task" => {
+                // headless `fleet create` で作った Task を、＋ Task と同じく画面に載せる（slot・Fleet のセル・
+                // 親子・担当の起動）。worktree と準備スクリプトは CLI 側で済んでいる。台帳への書き込みも
+                // ここ（GUI = 単一 writer）で `register_created_task` が行う。
+                let text = |key: &str| {
+                    params
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                };
+                let (Some(root), Some(branch)) = (text("root"), text("branch")) else {
+                    let _ = respond.send(err(i18n::t!("ipc.err_root_branch_required")));
+                    return;
+                };
+                let root = PathBuf::from(root);
+                let title = text("title").unwrap_or_default();
+                let prompt = text("prompt").unwrap_or_default();
+                let failure = (text("phase").as_deref() == Some(TaskPhase::Failed.as_str()))
+                    .then(|| text("result_summary"))
+                    .flatten();
+                let parent = text("parent").map(SpaceId);
+                let task = super::fleet_view::FanoutTask {
+                    slug_source: title.clone(),
+                    // 名前は CLI が決めた。スレッド名からの自動改名はしない（`auto_branch_plan`）。
+                    branch: Some(branch.clone()),
+                    agent: None,
+                    title_suffix: None,
+                };
+                let local: Arc<dyn host::Host> = host::LocalHost::shared();
+                let space = self.register_created_task(
+                    &local,
+                    root.clone(),
+                    branch,
+                    failure,
+                    &prompt,
+                    &task,
+                    parent,
+                    cx,
+                );
+                let Some(index) =
+                    space.and_then(|space| self.session_index_by_task(space.as_str()))
+                else {
+                    let _ = respond.send(err(i18n::t!(
+                        "ipc.err_open_worktree",
+                        "path" => root.display()
+                    )));
+                    return;
+                };
+                // 名前は呼び出し元の title（指示の 1 行目ではなく）。
+                if !title.trim().is_empty() {
+                    self.project_sessions.projects[index].task_space.title = title.into();
+                    self.persist_new_task_space(index, cx);
+                }
+                self.hint_fleet_mode_once(cx);
+                cx.notify();
+                let slot = &self.project_sessions.projects[index];
+                let _ = respond.send(ok(record_json(&slot.task_space.to_record(slot))));
+            }
             "record_task" => {
                 // headless `fleet create` の台帳登録（worktree は CLI 側で作成済み・GUI = 単一 writer）。
                 let record = storage::TaskSpaceRecord {
@@ -1787,5 +1845,79 @@ mod tests {
         assert_eq!(positions, vec![(file.clone(), 2, 1), (file, 0, 0)]);
         assert!(positions_from_params(&serde_json::json!({})).is_empty());
         std::fs::remove_dir_all(&directory).expect("片付けられる");
+    }
+
+    /// headless `fleet create` で作った Task（親付き）を `adopt_task` で画面に載せる: Task として slot に
+    /// なり（レールには出ない）、Fleet のセルが立ち、親と名前が残る。prompt が空なら担当は起こさない。
+    #[gpui::test]
+    fn adopt_task_puts_an_agent_created_task_on_the_fleet(cx: &mut gpui::TestAppContext) {
+        let directory = scratch("adopt");
+        let project = directory.join("project");
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&project, &["init", "-q", "-b", "main"])
+            .status
+            .success()
+        {
+            return; // git 無し環境はスキップ
+        }
+        git(&project, &["config", "user.email", "t@example.com"]);
+        git(&project, &["config", "user.name", "tester"]);
+        git(&project, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let child = directory.join("project-worktrees").join("child");
+        let child_arg = child.to_string_lossy().to_string();
+        git(
+            &project,
+            &["worktree", "add", "-q", "-b", "task/child", &child_arg],
+        );
+        let child = paths::canonicalize(&child).expect("worktree がある");
+
+        let (workspace, cx) = open_workspace(&directory, cx);
+        let response = request(
+            &workspace,
+            cx,
+            "adopt_task",
+            serde_json::json!({
+                "root": child,
+                "branch": "task/child",
+                "title": "子の作業",
+                "phase": "planned",
+                "parent": "space-parent",
+                "prompt": "",
+            }),
+        );
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["result"]["kind"], "task");
+        assert_eq!(response["result"]["title"], "子の作業");
+        assert_eq!(response["result"]["parent"], "space-parent");
+
+        workspace.read_with(cx, |workspace, _| {
+            let slot = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .find(|slot| slot.worktree.root() == child.as_path())
+                .expect("slot になった");
+            assert!(!slot.task_space.is_integration(), "レールには出ない Task");
+            let space = slot.task_space.id.clone();
+            assert!(
+                workspace
+                    .chrome
+                    .fleet_cells
+                    .iter()
+                    .any(|pane| matches!(pane, FleetPane::Task { space: cell } if *cell == space)),
+                "Fleet のセルが立つ"
+            );
+        });
+
+        let missing = request(&workspace, cx, "adopt_task", serde_json::json!({}));
+        assert_eq!(missing["ok"], false, "root と branch が無ければ断る");
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
