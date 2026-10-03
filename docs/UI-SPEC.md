@@ -398,6 +398,7 @@ Worktree は既存ブランチ・既存 worktree または新しいブランチ�
 - **linked worktree の判定は git に聞く**（2026-07-27）。「このセッションで worktree として開いたか」の記憶に頼っていたため、再起動すると worktree なのに削除メニューが消えていた
 - **履歴（前の会話の復元）**: スレッドは DB 永続なので、Fleet でも Agent パネルと同じ**スレッド履歴**（§7・**アクティブプロジェクトのスレッド**はアーカイブ含む・detail に Σトークン＋開始/最終入力の相対時刻。エージェントの過去の会話・全スレッドの本文検索も同じ画面）から復元できる（＋タイル「履歴から復元」/ ⌘⇧T は直近）。Fleet 中に確定した会話はその Task のカードのスレッドタブとして前面に出る。相対時刻は Fleet 表示中のみ 30 秒時計で更新（両方閉じたら自停止＝idle 予算）
 - **Task lifecycle / integration**: planned → working / blocked → review_ready → merge_ready → integrating → integrated。Review は read-only Conflict Radar、main への write は明示 Integrate のみ。
+- **統合先の手元の変更**（2026-10-03・FLEET-V2 §4.3）: main に手元の変更（未コミット・未追跡）があっても、統合が触るパスと重ならなければ統合し、手元の変更はそのまま残す。ステージした変更・重なり（未追跡のファイルは統合が足すパスとぶつかる時だけ）・競合は断る。断った時: **トースト**＝失敗の知らせ（12 秒）・1 行目に理由とどうすれば統合できるか（「…重なるので、統合しませんでした。次のファイルをコミットするか退けてから、もう一度「統合」:」）・続けて 1 行 1 ファイル（5 件まで + `他 N ファイル`・それより多ければ右に `全文 ›` で全部をタブに）。**要対応のカード**＝ merge_ready のピルの下に warn 色 10.5px の 1 行（`統合先の手元の変更と重なる: CLAUDE.md` / `統合先にステージした変更がある: …`・3 件まで + `他 N ファイル`・切らずに折り返す・サイドバー 256px ではファイル名が要約の行に収まらないため）。Task の要約の行は変えない。もう一度「統合」を押すと消える
 - **編隊操作 API**: `necoder fleet create/list/status/wait/review/integrate` と同等 MCP tools。stable Task ledger を真実にするため Captain/UI の再起動を跨いで wait/resume できる。詳細は `FLEET-ARCHITECTURE.md`。
 - 既存の**スレッド色貫通・宛先チップ・トークン常時表示**は Fleet 内でも不変。キーの正は FLEET-V2 §7（⌘⇧M 入る / ⌘N ＋ Task / ⌘⇧1/2/3 列数 / ⌘⇧G 編隊図 / ⌘0 Captain / ⏎・⌘⇧U 要対応の次）
 

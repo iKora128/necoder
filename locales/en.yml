@@ -553,6 +553,12 @@ fleet:
   toast_merge_preview_failed: "Merge preview failed: %{error}"
   toast_integrated: Task integrated into the IntegrationSpace
   toast_integrate_failed: "Cannot integrate: %{error}"
+  toast_integrate_overlap: "Not integrated: your local changes in the base touch the same files. Commit these files or move the changes aside, then integrate again:"
+  toast_integrate_staged: "Not integrated: the base has staged changes. Commit or unstage them, then integrate again:"
+  integrate_overlap_summary: "Overlaps local changes in the base: %{paths}"
+  integrate_staged_summary: "Staged changes in the base: %{paths}"
+  integrate_more_files: "%{count} more file(s)"
+  integrate_blocked_title: Local changes that stopped the integration
   space_closed: This TaskSpace is closed
   stage_one: Stage 1 card
   stage_two: Stage 2 columns

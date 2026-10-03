@@ -412,6 +412,8 @@ impl Workspace {
         let integration = &self.project_sessions.projects[integration_index];
         let host = integration.worktree.host().clone();
         let root = integration.worktree.root().to_path_buf();
+        // 前に手元の変更で断った理由は、統合し直すので外す（また断れば付け直す）。
+        self.chrome.task_integration_blocked.remove(&space);
         self.transition_task_space(
             task_index,
             TaskPhase::Integrating,
@@ -450,13 +452,28 @@ impl Workspace {
                     );
                 }
                 Err(error) => {
+                    // 統合先の手元の変更で断った時は、ファイルを名指しした自分の言葉で（要対応カードの
+                    // 1 行・ニュース・台帳のイベントにも同じ理由を残す・2026-10-03）。
+                    let blocking = error.downcast_ref::<project::BlockingLocalChanges>();
+                    let summary =
+                        blocking.map_or_else(|| format!("{error:#}"), blocked_integration_summary);
                     workspace.transition_task_space(
                         task_index,
                         TaskPhase::MergeReady,
                         "integration_failed",
-                        Some(&format!("{error:#}")),
+                        Some(&summary),
                         cx,
                     );
+                    if let Some(blocking) = blocking {
+                        workspace
+                            .chrome
+                            .task_integration_blocked
+                            .insert(space.clone(), SharedString::from(summary));
+                        // 名指ししたファイルを読む時間が要るので、失敗の知らせ（長め）で出す。
+                        let (text, details) = blocked_integration_toast(blocking);
+                        workspace.push_failure_toast(SharedString::from(text), details, cx);
+                        return;
+                    }
                     // 競合なら覚えて、「次へ」を「競合を直させる」にする（O19）。
                     let text = match error.downcast_ref::<project::MergeConflicts>() {
                         Some(conflicts) => {
@@ -2893,6 +2910,53 @@ pub(crate) fn conflict_prompt(base: &str, paths: &[String]) -> String {
     i18n::t!("fleet.conflict_prompt", "base" => base, "files" => files.trim_end())
 }
 
+/// 手元の変更で断った統合のトーストに並べるファイルの数。残りは数だけ出し、押すと全部を開ける。
+const BLOCKED_PATHS_IN_TOAST: usize = 5;
+/// 同じ理由の 1 行（要対応カード・ニュース・台帳のイベント）に並べるファイルの数。
+const BLOCKED_PATHS_IN_SUMMARY: usize = 3;
+
+/// `paths` の先頭 `shown` 件と、残りがあれば「他 N ファイル」。
+fn blocked_paths_head(paths: &[String], shown: usize) -> Vec<String> {
+    let mut head: Vec<String> = paths.iter().take(shown).cloned().collect();
+    let rest = paths.len().saturating_sub(shown);
+    if rest > 0 {
+        head.push(i18n::t!("fleet.integrate_more_files", "count" => rest));
+    }
+    head
+}
+
+/// 統合先の手元の変更で断った統合の知らせ（2026-10-03）: 見出し（理由と、どうすれば統合できるか）+
+/// 1 行に 1 ファイル。並べきれなければ、押すと全部の一覧を開ける。
+fn blocked_integration_toast(
+    blocking: &project::BlockingLocalChanges,
+) -> (String, Option<(SharedString, String)>) {
+    let headline = match blocking.reason {
+        project::BlockingReason::Staged => i18n::t!("fleet.toast_integrate_staged"),
+        project::BlockingReason::Overlapping => i18n::t!("fleet.toast_integrate_overlap"),
+    };
+    let lines = blocked_paths_head(&blocking.paths, BLOCKED_PATHS_IN_TOAST);
+    let details = (blocking.paths.len() > BLOCKED_PATHS_IN_TOAST).then(|| {
+        (
+            SharedString::from(i18n::t!("fleet.integrate_blocked_title")),
+            blocking.paths.join("\n"),
+        )
+    });
+    (format!("{headline}\n{}", lines.join("\n")), details)
+}
+
+/// 統合先の手元の変更で断った理由の 1 行（要対応カード・ニュース・台帳のイベント・2026-10-03）。
+fn blocked_integration_summary(blocking: &project::BlockingLocalChanges) -> String {
+    let paths = blocked_paths_head(&blocking.paths, BLOCKED_PATHS_IN_SUMMARY).join(", ");
+    match blocking.reason {
+        project::BlockingReason::Staged => {
+            i18n::t!("fleet.integrate_staged_summary", "paths" => paths)
+        }
+        project::BlockingReason::Overlapping => {
+            i18n::t!("fleet.integrate_overlap_summary", "paths" => paths)
+        }
+    }
+}
+
 /// fan-out で同時に切る Task の上限（O23）。
 pub(crate) const MAX_FANOUT: usize = 6;
 
@@ -3160,6 +3224,216 @@ mod tests {
             "統合先は触らない"
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 2026-10-03: 統合先に手元の変更（本人の main と同じ形: CLAUDE.md の変更 + 未追跡のフォルダ）があっても、
+    /// 重ならない Task は統合する。CLAUDE.md を触る Task は断り、トーストと要対応のカードでファイルを名指しする
+    /// （競合ではないので「競合を直させる」にはしない）。手元の変更はどちらの後も元のまま。
+    #[gpui::test]
+    fn integration_goes_through_unless_it_touches_local_changes(cx: &mut gpui::TestAppContext) {
+        let base =
+            std::env::temp_dir().join(format!("necoder_local_changes_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("repo")).expect("作業フォルダを作れる");
+        let base = paths::canonicalize(&base).expect("正規化できる");
+        let repo = base.join("repo");
+        let clean = base.join("repo-worktrees").join("clean");
+        let overlap = base.join("repo-worktrees").join("overlap");
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "core.autocrlf=false",
+                ])
+                .args(args)
+                .output()
+                .expect("git を起動できる")
+        };
+        if !git(&repo, &["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(repo.join("CLAUDE.md"), "# guide\n").expect("書ける");
+        std::fs::write(repo.join("a.txt"), "base\n").expect("書ける");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "base"]);
+        for (branch, worktree, file) in [
+            ("task/clean", &clean, "a.txt"),
+            ("task/overlap", &overlap, "CLAUDE.md"),
+        ] {
+            let added = git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    branch,
+                    worktree.to_str().expect("パス"),
+                ],
+            );
+            assert!(added.status.success(), "{added:?}");
+            std::fs::write(worktree.join(file), "task\n").expect("書ける");
+            git(worktree, &["commit", "-qam", "task"]);
+        }
+        let edited = "# guide\nlocal only\n";
+        std::fs::write(repo.join("CLAUDE.md"), edited).expect("書ける");
+        std::fs::create_dir_all(repo.join("reports")).expect("作れる");
+        std::fs::write(repo.join("reports/r.md"), "report\n").expect("書ける");
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(
+                vec![repo.clone(), clean.clone(), overlap.clone()],
+                Theme::dark(),
+                None,
+                cx,
+            )
+        });
+        let integrate = |root: &Path, cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, _window, cx| {
+                for session in &mut workspace.project_sessions.sessions {
+                    session._watch = None;
+                    session._watch_pump = None;
+                }
+                let index = workspace
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| slot.worktree.root() == root)
+                    .expect("Task がレールにある");
+                let slot = &mut workspace.project_sessions.projects[index];
+                slot.task_space.phase = TaskPhase::MergeReady;
+                let space = slot.task_space.id.clone();
+                workspace.integrate_task(space.clone(), cx);
+                space
+            })
+        };
+
+        let space = integrate(&clean, cx);
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            let index = workspace.session_index_for_space(&space).expect("Task");
+            assert_eq!(
+                workspace.project_sessions.projects[index].task_space.phase,
+                TaskPhase::Integrated,
+                "重ならない手元の変更では統合する"
+            );
+        });
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).expect("読める"),
+            "task\n"
+        );
+
+        let space = integrate(&overlap, cx);
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let index = workspace.session_index_for_space(&space).expect("Task");
+            let task_space = &workspace.project_sessions.projects[index].task_space;
+            assert_eq!(
+                task_space.phase,
+                TaskPhase::MergeReady,
+                "統合しないまま戻る"
+            );
+            assert_eq!(task_space.result_summary, None, "Task の要約は上書きしない");
+            let blocking = project::BlockingLocalChanges {
+                reason: project::BlockingReason::Overlapping,
+                paths: vec!["CLAUDE.md".to_string()],
+            };
+            let reasons: Vec<Option<String>> = workspace
+                .control_attention_queue(cx)
+                .into_iter()
+                .filter_map(|item| match item.kind {
+                    crate::workspace::control_view::AttentionKind::Review {
+                        phase: TaskPhase::MergeReady,
+                        blocked,
+                        ..
+                    } => Some(blocked.map(|blocked| blocked.to_string())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                reasons,
+                vec![Some(blocked_integration_summary(&blocking))],
+                "要対応のカードにファイルを名指しした理由を添える"
+            );
+            assert_eq!(workspace.task_conflicts(&space), None, "競合ではない");
+            let toast = workspace.notifications.toasts.last().expect("知らせ");
+            assert_eq!(
+                toast.text.to_string(),
+                format!("{}\nCLAUDE.md", i18n::t!("fleet.toast_integrate_overlap"))
+            );
+            assert!(toast.action.is_none(), "並べきれた時は全文を持たない");
+        });
+        assert_eq!(
+            std::fs::read_to_string(repo.join("CLAUDE.md")).expect("読める"),
+            edited,
+            "手元の変更は元のまま"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("reports/r.md")).expect("読める"),
+            "report\n"
+        );
+
+        // 手元の変更を退ければ（ここでは元に戻せば）、もう一度押して統合できる。断った理由は消える。
+        std::fs::write(repo.join("CLAUDE.md"), "# guide\n").expect("書ける");
+        let space = integrate(&overlap, cx);
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            let index = workspace.session_index_for_space(&space).expect("Task");
+            assert_eq!(
+                workspace.project_sessions.projects[index].task_space.phase,
+                TaskPhase::Integrated
+            );
+            assert!(workspace.chrome.task_integration_blocked.is_empty());
+        });
+        assert_eq!(
+            std::fs::read_to_string(repo.join("CLAUDE.md")).expect("読める"),
+            "task\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("reports/r.md")).expect("読める"),
+            "report\n",
+            "未追跡のフォルダは最後まで元のまま"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 2026-10-03: 手元の変更で断った統合の知らせは 5 ファイルまで並べ、残りは数だけ出して全部を開けるようにする。
+    /// 要対応の要約は 3 ファイルまで。
+    #[test]
+    fn blocked_integration_names_a_few_files_and_keeps_the_rest_behind_details() {
+        let blocking = project::BlockingLocalChanges {
+            reason: project::BlockingReason::Staged,
+            paths: (1..=7).map(|number| format!("f{number}.txt")).collect(),
+        };
+        let (text, details) = blocked_integration_toast(&blocking);
+        let more = i18n::t!("fleet.integrate_more_files", "count" => 2);
+        assert_eq!(
+            text,
+            format!(
+                "{}\nf1.txt\nf2.txt\nf3.txt\nf4.txt\nf5.txt\n{more}",
+                i18n::t!("fleet.toast_integrate_staged")
+            )
+        );
+        let (_, full) = details.expect("並べきれない時は全文を持つ");
+        assert_eq!(full.lines().count(), 7);
+        assert_eq!(
+            blocked_integration_summary(&blocking),
+            i18n::t!(
+                "fleet.integrate_staged_summary",
+                "paths" => format!("f1.txt, f2.txt, f3.txt, {}", i18n::t!("fleet.integrate_more_files", "count" => 4))
+            )
+        );
     }
 
     /// O23: 1 つの依頼から Task を 2 本切り、舞台に並べる（依頼は空＝エージェントは起こさない）。
