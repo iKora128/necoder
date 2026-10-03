@@ -3865,3 +3865,13 @@
   - Picker は別の Entity だが、Workspace の描画で `picker.read(cx)` を読めばよい（Picker の notify で窓ごと描き直され、ルートの Workspace はキャッシュしていないので毎回描かれる）。選択の変化をイベントで追う必要はない。
 - リリース: 本人「いったん新しいの本リリースしていいですよ」で、v0.1.20 以来の正式版（Pre-release にしない＝自動更新で届く）として v0.1.24 を出した。テスト版 v0.1.21〜v0.1.23 の中身を全部含むので、CHANGELOG の冒頭に「v0.1.20 からの主な変更」をまとめた（自動更新で来た人が最初に開くのは、この版の Release ページ＝更新後の最初の起動のトースト）。relay は v0.1.23 から変えていないので Worker のデプロイは不要。
 - 次: 本人の実機で見え方（棒の太さ・今いる枠との見分け）を確かめる。v0.1.20 から自動更新で上がる道（チップ → 差し替え → 再起動）も実機で見る。
+
+## 2026-10-03 — エージェントが切った Task を Fleet に載せる（`adopt_task`）
+
+- 発端（本人・ドッグフーディング）: 「task から task 切らせてもフリートで表示されるわけではないのね」。maxwell では担当（Claude Code）が自前のサブエージェントで `.claude/worktrees/agent-…` に worktree を作っていて、necoder は存在を知らなかった。necoder の `fleet_create_task` で切っても、worktree と台帳の 1 行だけで、slot・Fleet のセル・親子・担当が無かった（FLEET-CONTROL-PLAN の「spawn の断絶」の残り）。
+- やったこと:
+  - `necoder::fleet::create_task`: 呼び出し元が linked worktree（Task）なら `task_origin` でメインの作業ツリー基準・そのブランチを起点・その Task を親にする（以前は呼び出し元の隣に `<task>-worktrees/` を作り、起点はリポジトリの既定・親なし）。DB 直書きの時も `set_task_parent` で親を残す。
+  - GUI 稼働中は `record_task` の代わりに `adopt_task`（control IPC）。`register_created_task` に通して slot・Fleet のセル・親・台帳・`task_created` まで。名前は呼び出し元の title。
+  - MCP `fleet_create_task` に `prompt`（担当への最初の指示・空なら起こさない）。`project::main_worktree_root_on` を追加。
+- 検証: `adopt_task_puts_an_agent_created_task_on_the_fleet`（本物の git + worktree・Task の slot・Fleet のセル・親・名前・root/branch 無しは断る）・`task_origin_branches_from_the_calling_task`・`linked_worktree_is_distinguished_from_main_checkout` に main root の確認を追加。
+- 次: 本人の実機で、担当に `fleet_create_task`（prompt 付き）を呼ばせて Fleet に子 Task が出て担当が動くか確かめる。担当が Claude Code のサブエージェントを使うこと自体は止めていない（担当への案内は後続）。

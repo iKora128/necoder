@@ -1397,6 +1397,7 @@ ipc:
   err_task_not_open: Task が GUI に開かれていません
   err_bad_phase: 不正な phase です
   err_record_id_required: record の id が必要です
+  err_root_branch_required: Task の root と branch が必要です
   err_unknown_method: "未知の method: %{name}"
   err_bad_json: "JSON が読めない: %{detail}"
   err_gui_timeout: GUI の応答が timeout しました
