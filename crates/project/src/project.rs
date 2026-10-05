@@ -706,6 +706,16 @@ pub fn is_linked_worktree_on(host: &dyn Host, root: &Path) -> bool {
     canonical(&git_dir) != canonical(&common)
 }
 
+/// メインの作業ツリーの root（linked worktree から統合先を引く）。共通の git dir の親＝`<repo>/.git` の
+/// `<repo>`。bare リポジトリ（共通の git dir が `.git` でない）や repo 外は `None`。
+pub fn main_worktree_root_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
+    let common = git_common_dir_on(host, dir)?;
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    common.parent().map(Path::to_path_buf)
+}
+
 /// UI / CLI / MCP が同じ TaskSpace ID を生成するための共有実装。
 pub fn stable_worktree_id_on(host: &dyn Host, root: &Path) -> String {
     let identity = format!("{}\0{}", host.id(), root.display());
@@ -3086,6 +3096,15 @@ mod tests {
             !is_linked_worktree_on(&LocalHost, &base),
             "repo 外は false"
         );
+        // linked worktree からメインの作業ツリーを引ける（子 Task の置き場所の基準）。
+        let canonical_main = paths::canonicalize(&main).unwrap();
+        let from_linked = main_worktree_root_on(&LocalHost, &linked)
+            .map(|root| paths::canonicalize(&root).unwrap_or(root));
+        assert_eq!(from_linked, Some(canonical_main.clone()));
+        let from_main = main_worktree_root_on(&LocalHost, &main)
+            .map(|root| paths::canonicalize(&root).unwrap_or(root));
+        assert_eq!(from_main, Some(canonical_main));
+        assert_eq!(main_worktree_root_on(&LocalHost, &base), None);
 
         let _ = std::fs::remove_dir_all(&base);
     }
