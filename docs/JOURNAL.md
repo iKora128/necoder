@@ -3866,6 +3866,22 @@
 - リリース: 本人「いったん新しいの本リリースしていいですよ」で、v0.1.20 以来の正式版（Pre-release にしない＝自動更新で届く）として v0.1.24 を出した。テスト版 v0.1.21〜v0.1.23 の中身を全部含むので、CHANGELOG の冒頭に「v0.1.20 からの主な変更」をまとめた（自動更新で来た人が最初に開くのは、この版の Release ページ＝更新後の最初の起動のトースト）。relay は v0.1.23 から変えていないので Worker のデプロイは不要。
 - 次: 本人の実機で見え方（棒の太さ・今いる枠との見分け）を確かめる。v0.1.20 から自動更新で上がる道（チップ → 差し替え → 再起動）も実機で見る。
 
+## 2026-10-02 — composer の設定を 1 枚のカードに（Fast mode を選べるように）
+
+- 発端: composer の下のピル（Agent / Mode / Model / Effort）は Model と Effort の select しか出さず、boolean を捨てていた（`map_config_option`）＝Claude Code / codex-acp が広告する Fast mode が選べない。zeron の「チップ 1 つ → カード 1 枚」を参考に、本人は「zeron 風のカード」と「今の無機質なピル」で迷っていた。
+- 決め方: `mock/config-card.html` に今のピル・案 P（ピルのまま広げる）・案 C（カード）を同じ状態で並べ、権限モードをカードの外に残す C-1 と中に入れる C-2 も並べた。本人が C-1 に決めた（Captain のスレッドで「C-1 がいいですね」）。この会話は非対話で AskUserQuestion が使えず、決定は会話の文で受け取った。
+- やったこと:
+  - acp_client: `ConfigOption` を select / boolean の `ConfigKind` にし、選択肢の説明と設定の名前・説明も写す。カテゴリ `mode` は `ConfigCategory::Mode` で分ける（modes と二重の広告）。`SessionCommand::SetConfig` の値を `ConfigValue`（value_id / bool）に。`SessionPreferences::options` で、モデル・思考量の後にその他の設定（保存形の文字列）を最初の prompt より前に合わせる。
+  - agent_panel: `Thread.options`（その他の設定の望む値）を sticky（`agent_config_defaults.<agent>.<ACP の config_id>`）から載せる。広告が来たらエージェントの値を写し、言い返さない（Fast mode が使えないプランで戻されても送り合いにしない）。返事待ちの値はターン中は写さない（`options_in_flight`）。
+  - `config_card.rs`: チップ（既定から外れた値だけの要約）とカード（エージェント・モデル・思考量のトラック・その他の設定・一覧の面・キー）。⌘/ は `AgentPanel > (Editor || ConfigCard)`（`Editor` の ⌘/ より後ろ）。権限モードのピルはそのまま。撮影用 `NECODER_CONFIG_CARD_PROBE`。Fast mode の稲妻は Lucide の `zap.svg`（色付きの絵文字を使わない）。
+- 検証: 偽 ACP エージェントで boolean が `type: "boolean"` のまま届くこと（acp_client）と、カードで切り替えると本物の `run_session` を通って 1 回だけ届き sticky に残ること（agent_panel）。キーの試験（⌘/ → → → ↓ → ⏎ → esc・esc はカードだけ閉じてターンを止めない）・⌘/ がコードのエディタではコメントの切り替えのまま。既存の value_id / sticky / 捏造しないの試験は緑。隔離 offscreen で Claude（Opus · High · ⚡）・Codex（Collaboration mode が Plan）・会話後の固定・Fast が使えないプラン・全部既定のチップを撮って目視。
+- 学び/罠:
+  - **GPUI は枠線を子の後に描く**。composer の中から上へ開く浮かぶ面は、composer の枠と上の区切り線が上に透けて乗る（実画面で初めて見えた）。`gpui::deferred(...).with_priority(1)` で最前面に描く（位置はチップ基準のまま）。権限モードのピルのメニューも同じ作りで、4 行なら composer の中に収まって透けないが、背の低い composer（Fleet の埋め込み）では枠をまたぐので同じく `deferred` にした。
+  - Claude Code の `/model` は CLI のコマンド（`/model opus` を送るとアダプタが PostModelSwitch でピッカーへ映し返す）。necoder が取るとエージェントへ届かなくなるので取らない。
+  - claude-agent-acp は client が boolean の受け取りを広告すると Fast mode を `type: "boolean"`（無ければ on/off の select）で送る。使えない時は説明に理由を足し、SDK の知らせで値を戻してくる。
+- 追記（同じ日）: 本人「think のところ…ゲージよ。線と棒だけではつまらない」「もう少しモダンでかっこいいやつに」。mock に回転計・段の棒・リングを並べたが「線と棒だけでなく」と戻り、光とグラデーションで作り直した 4 案（グロウ・リング / チャージ・セル / デジタル・メーター / リキッド）から本人が M-3 デジタル・メーターを選んだ（「めっちゃいい」・光は色の原則どおり白）。`config_card/effort_meter.rs`: 250° の弧に LED 34 本、`default` は目盛りの外（LED を全部消して横の札）、値を変えた時だけ走って行き過ぎて戻る。GPUI の `with_animation` は easing の戻り値が 0..=1 を外れると debug ビルドで止まる（`debug_assert`）ので、行き過ぎは線形の delta から自分で計算する。`PathBuilder::stroke` は端が四角（lyon の `LineCap` を gpui が出していない）なので、丸い端の LED は多角形で塗る。
+- 次: #44（steer）と #47（在庫の鍵 `StockKey`・接続）が main に入ったら、カードの在庫を `StockKey` で引き、#47 がエージェントのピルに出していた接続名をカードのエージェントの行（H4 の欄の場所）とチップに移す。本人の実機で ⌘/ と Fast mode の体感を見る。
+
 ## 2026-10-03 — 開いた後に `git init` したフォルダでも Task が系譜に載るようにする
 
 - 発端（本人・ドッグフーディング）: engineer_education_tool の開発中に、Captain の分解案から切った Task が統合先の系譜から分離した。

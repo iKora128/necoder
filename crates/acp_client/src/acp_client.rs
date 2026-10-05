@@ -57,28 +57,120 @@ pub struct PermissionChoice {
     pub kind: PermissionKind,
 }
 
-/// セッション設定オプションの意味カテゴリ（UI が Model / Effort セレクタへ振り分ける）。
-/// ACP `SessionConfigOptionCategory` を簡約（Mode/ModelConfig/Other は今は `Other` に畳む）。
+/// セッション設定オプションの意味カテゴリ（UI がモデル・思考量・その他へ振り分ける）。
+/// ACP `SessionConfigOptionCategory` を簡約（ModelConfig と未知のカテゴリは `Other` に畳む）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigCategory {
     /// モデル選択。
     Model,
     /// 思考/推論レベル（effort 相当）。
     ThoughtLevel,
-    /// その他（今は UI で扱わない）。
+    /// 権限モード。Claude Code と codex-acp は `session/set_mode` の modes と**同じ物を二重に**広告する
+    /// ので、UI は出さない（権限モードは modes の側で扱う・O16）。
+    Mode,
+    /// その他（Fast mode・Codex の Collaboration mode など）。
     Other,
 }
 
-/// エージェントが広告する 1 つの選択式設定（モデル・思考レベル等）。
-/// ACP `SessionConfigOption` の Select を簡約。UI はこれでセレクタを実選択肢に置き換える。
-#[derive(Debug, Clone)]
+/// 設定の値。select は **value_id**、boolean は on / off（`session/set_config_option` の
+/// `type: "boolean"`）。保存・比較・送信はこの形だけを使い、表示名は描画にしか使わない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValue {
+    /// select の value_id（`opus[1m]` / `xhigh`）。
+    Id(String),
+    /// boolean の on / off。
+    Bool(bool),
+}
+
+impl ConfigValue {
+    /// 設定ファイル（`agent_config_defaults`）に書く形。select は value_id、boolean は `true` / `false`。
+    pub fn to_stored(&self) -> String {
+        match self {
+            ConfigValue::Id(value_id) => value_id.clone(),
+            ConfigValue::Bool(on) => on.to_string(),
+        }
+    }
+
+    fn to_acp(&self) -> v1::SessionConfigOptionValue {
+        match self {
+            ConfigValue::Id(value_id) => v1::SessionConfigOptionValue::value_id(value_id.clone()),
+            ConfigValue::Bool(on) => v1::SessionConfigOptionValue::boolean(*on),
+        }
+    }
+}
+
+/// select の 1 択。`value_id` が保存・比較・送信の鍵で、`name` / `description` は描画専用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigChoice {
+    pub value_id: String,
+    pub name: String,
+    /// エージェントが付けた説明（Claude Code の既定のモデルなら、実際に使うモデルの名前）。
+    pub description: Option<String>,
+}
+
+/// 設定の種類と今の値。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigKind {
+    /// 選択式（モデル・思考量・Collaboration mode 等）。`current` は value_id。
+    Select {
+        current: String,
+        choices: Vec<ConfigChoice>,
+    },
+    /// on / off（Fast mode 等）。
+    Boolean { current: bool },
+}
+
+/// エージェントが広告する 1 つの設定（モデル・思考レベル・Fast mode 等）。
+/// ACP `SessionConfigOption` を UI 非依存に簡約したもの。UI はこれだけを選択肢として出す（捏造しない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigOption {
     pub config_id: String,
+    /// 設定の表示名（`Fast mode`）。描画専用。
+    pub name: String,
+    /// 設定の説明。Claude Code の Fast mode は、使えない時にその理由もここへ足してくる。
+    pub description: Option<String>,
     pub category: ConfigCategory,
-    /// 現在の value_id。
-    pub current: String,
-    /// 選択肢 `(value_id, 表示名)`。
-    pub choices: Vec<(String, String)>,
+    pub kind: ConfigKind,
+}
+
+impl ConfigOption {
+    /// 今の値。
+    pub fn current(&self) -> ConfigValue {
+        match &self.kind {
+            ConfigKind::Select { current, .. } => ConfigValue::Id(current.clone()),
+            ConfigKind::Boolean { current } => ConfigValue::Bool(*current),
+        }
+    }
+
+    /// select の選択肢（boolean は空）。
+    pub fn choices(&self) -> &[ConfigChoice] {
+        match &self.kind {
+            ConfigKind::Select { choices, .. } => choices,
+            ConfigKind::Boolean { .. } => &[],
+        }
+    }
+
+    /// `value` をこの設定へ送れるか。select は**広告された value_id と完全一致**する時だけ
+    /// （表示名や似た綴りで当てにいかない）、boolean は on / off のどちらでも。
+    pub fn offers(&self, value: &ConfigValue) -> bool {
+        match (&self.kind, value) {
+            (ConfigKind::Select { choices, .. }, ConfigValue::Id(value_id)) => {
+                choices.iter().any(|choice| choice.value_id == *value_id)
+            }
+            (ConfigKind::Boolean { .. }, ConfigValue::Bool(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// 設定ファイルに書いた値（[`ConfigValue::to_stored`]）を、この設定の種類に合わせて読み戻す。
+    /// 種類が合わない・広告に無い値は `None`（＝送らずエージェントの今の値のまま）。
+    pub fn value_from_stored(&self, stored: &str) -> Option<ConfigValue> {
+        let value = match &self.kind {
+            ConfigKind::Select { .. } => ConfigValue::Id(stored.to_string()),
+            ConfigKind::Boolean { .. } => ConfigValue::Bool(stored.parse().ok()?),
+        };
+        self.offers(&value).then_some(value)
+    }
 }
 
 /// 権限リクエストに含まれるファイル編集の差分（accept/reject の diff レビュー用）。
@@ -607,8 +699,11 @@ pub enum SessionCommand {
     Cancel,
     /// 権限モードを変更する（`session/set_mode`。引数は mode_id）。
     SetMode(String),
-    /// 設定オプション（モデル・思考レベル等）を変更する（`session/set_config_option`）。
-    SetConfig { config_id: String, value_id: String },
+    /// 設定オプション（モデル・思考レベル・Fast mode 等）を変更する（`session/set_config_option`）。
+    SetConfig {
+        config_id: String,
+        value: ConfigValue,
+    },
     /// 目標を一時停止 / 再開 / 取り消す（エージェントが広告した拡張メソッド・O17）。
     /// ターン中でも待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
     Goal(GoalAction),
@@ -756,8 +851,8 @@ impl AgentCommand {
         AGENTS.first()?.command(cwd)
     }
 
-    /// env 無しで組む（既存経路の短縮形）。
-    fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
+    /// env 無しで組む（既存経路の短縮形・他の crate の試験が偽エージェントを起こす口）。
+    pub fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
         Self {
             managed_npm: None,
             path,
@@ -1682,7 +1777,7 @@ fn initialize_request() -> v1::InitializeRequest {
         )
 }
 
-/// ACP の `SessionConfigOption` 群を UI 非依存の [`ConfigOption`] へ簡約する（Select のみ扱う）。
+/// ACP の `SessionConfigOption` 群を UI 非依存の [`ConfigOption`] へ簡約する（select と boolean）。
 fn map_config_options(options: &[v1::SessionConfigOption]) -> Vec<ConfigOption> {
     options.iter().filter_map(map_config_option).collect()
 }
@@ -1691,41 +1786,57 @@ fn map_config_option(option: &v1::SessionConfigOption) -> Option<ConfigOption> {
     let category = match &option.category {
         Some(v1::SessionConfigOptionCategory::Model) => ConfigCategory::Model,
         Some(v1::SessionConfigOptionCategory::ThoughtLevel) => ConfigCategory::ThoughtLevel,
+        Some(v1::SessionConfigOptionCategory::Mode) => ConfigCategory::Mode,
         _ => ConfigCategory::Other,
     };
-    match &option.kind {
-        v1::SessionConfigKind::Select(select) => {
-            let choices = match &select.options {
-                v1::SessionConfigSelectOptions::Ungrouped(options) => options
-                    .iter()
-                    .map(|option| (option.value.to_string(), option.name.clone()))
-                    .collect(),
+    let choice = |option: &v1::SessionConfigSelectOption| ConfigChoice {
+        value_id: option.value.to_string(),
+        name: option.name.clone(),
+        description: option.description.clone(),
+    };
+    let kind = match &option.kind {
+        v1::SessionConfigKind::Select(select) => ConfigKind::Select {
+            current: select.current_value.to_string(),
+            choices: match &select.options {
+                v1::SessionConfigSelectOptions::Ungrouped(options) => {
+                    options.iter().map(choice).collect()
+                }
                 v1::SessionConfigSelectOptions::Grouped(groups) => groups
                     .iter()
-                    .flat_map(|group| {
-                        group
-                            .options
-                            .iter()
-                            .map(|option| (option.value.to_string(), option.name.clone()))
-                    })
+                    .flat_map(|group| group.options.iter().map(choice))
                     .collect(),
                 _ => Vec::new(),
-            };
-            Some(ConfigOption {
-                config_id: option.id.to_string(),
-                category,
-                current: select.current_value.to_string(),
-                choices,
-            })
-        }
-        _ => None, // Boolean は今は UI で扱わない
-    }
+            },
+        },
+        // initialize で boolean の受け取りを広告している（[`initialize_request`]）ので、Fast mode は
+        // select の on / off ではなく boolean で届く。
+        v1::SessionConfigKind::Boolean(boolean) => ConfigKind::Boolean {
+            current: boolean.current_value,
+        },
+        // まだ知らない種類（将来の自由入力など）は出さない＝送れない値を作らない。
+        _ => return None,
+    };
+    Some(ConfigOption {
+        config_id: option.id.to_string(),
+        name: option.name.clone(),
+        description: option.description.clone(),
+        category,
+        kind,
+    })
 }
 
-/// [`find_config_choice`] の結果: どの設定のどの値を送るか、既に current かどうか。
-struct ConfigChoice {
+/// セッションを開いた直後に合わせる希望 1 つ（[`SessionPreferences`]）。
+enum ConfigWish<'a> {
+    /// モデル・思考量（表示名 or value_id・大文字小文字無視）。
+    Category(ConfigCategory, &'a str),
+    /// その他の設定（ACP の config_id と保存した値）。
+    Stored(&'a str, &'a str),
+}
+
+/// [`find_config_choice`] / [`find_stored_config`] の結果: どの設定のどの値を送るか、既に current かどうか。
+struct PreferredConfig {
     config_id: String,
-    value_id: String,
+    value: ConfigValue,
     /// エージェントの current が既にこの値（＝送る必要が無い）。
     is_current: bool,
 }
@@ -1736,15 +1847,35 @@ fn find_config_choice(
     configs: &[ConfigOption],
     category: ConfigCategory,
     desired: &str,
-) -> Option<ConfigChoice> {
+) -> Option<PreferredConfig> {
     let config = configs.iter().find(|config| config.category == category)?;
-    let (value_id, _) = config.choices.iter().find(|(value_id, name)| {
-        name.eq_ignore_ascii_case(desired) || value_id.eq_ignore_ascii_case(desired)
+    let choice = config.choices().iter().find(|choice| {
+        choice.name.eq_ignore_ascii_case(desired) || choice.value_id.eq_ignore_ascii_case(desired)
     })?;
-    Some(ConfigChoice {
+    let value = ConfigValue::Id(choice.value_id.clone());
+    Some(PreferredConfig {
         config_id: config.config_id.clone(),
-        value_id: value_id.clone(),
-        is_current: *value_id == config.current,
+        is_current: value == config.current(),
+        value,
+    })
+}
+
+/// モデル・思考量・権限モードの外の設定（[`ConfigCategory::Other`]）の希望（ACP の config_id と保存した
+/// 値）を広告から引く。広告に無い設定・種類の合わない値（select に `true` 等）・選択肢に無い value_id は
+/// `None`（送らない）。
+fn find_stored_config(
+    configs: &[ConfigOption],
+    config_id: &str,
+    stored: &str,
+) -> Option<PreferredConfig> {
+    let config = configs
+        .iter()
+        .find(|config| config.config_id == config_id && config.category == ConfigCategory::Other)?;
+    let value = config.value_from_stored(stored)?;
+    Some(PreferredConfig {
+        config_id: config.config_id.clone(),
+        is_current: value == config.current(),
+        value,
     })
 }
 
@@ -1898,6 +2029,10 @@ pub struct SessionPreferences {
     pub model: Option<String>,
     /// 思考レベル / effort（`session/set_config_option`・category = ThoughtLevel）。
     pub effort: Option<String>,
+    /// モデル・思考量の外の設定（Fast mode 等・`session/set_config_option`）。`(ACP の config_id,
+    /// 保存した値)` で、値は select なら value_id・boolean なら `true` / `false`（[`ConfigValue::to_stored`]）。
+    /// モデルの後に合わせる（モデルを変えると Fast mode の有無が変わるため）。広告に無い物は送らない。
+    pub options: Vec<(String, String)>,
     /// 前回このスレッドが使っていた ACP セッション id（[`AgentEvent::SessionStarted`] で控えたもの）。
     /// エージェントが `loadSession` を広告していれば `session/load` で会話を引き継ぐ。広告が無い・
     /// 引き継ぎに失敗した場合は黙って新規セッションにする（SSH 切断・再起動からの復帰・2026-09-08）。
@@ -2187,24 +2322,40 @@ pub async fn run_session_on(
             // 適用後の一覧を UI へ流せば、UI 側の照合が一致して二重送信にならない。
             if let Some(options) = &config_options {
                 let mut configs = map_config_options(options);
-                for (category, desired) in [
-                    (ConfigCategory::Model, preferences.model.as_deref()),
-                    (ConfigCategory::ThoughtLevel, preferences.effort.as_deref()),
-                ] {
-                    let Some(desired) = desired else {
+                // モデル → 思考量 → その他の順。モデルを変えると思考量の段と Fast mode の有無が
+                // 変わるので、1 つ送るたびに応答の一覧で引き直す。
+                let wishes = [
+                    (preferences.model.as_deref())
+                        .map(|desired| ConfigWish::Category(ConfigCategory::Model, desired)),
+                    (preferences.effort.as_deref())
+                        .map(|desired| ConfigWish::Category(ConfigCategory::ThoughtLevel, desired)),
+                ]
+                .into_iter()
+                .flatten()
+                .chain(
+                    preferences
+                        .options
+                        .iter()
+                        .map(|(config_id, stored)| ConfigWish::Stored(config_id, stored)),
+                );
+                for wish in wishes {
+                    let preferred = match wish {
+                        ConfigWish::Category(category, desired) => {
+                            find_config_choice(&configs, category, desired)
+                        }
+                        ConfigWish::Stored(config_id, stored) => {
+                            find_stored_config(&configs, config_id, stored)
+                        }
+                    };
+                    let Some(preferred) = preferred.filter(|preferred| !preferred.is_current)
+                    else {
                         continue;
                     };
-                    let Some(choice) = find_config_choice(&configs, category, desired) else {
-                        continue;
-                    };
-                    if choice.is_current {
-                        continue;
-                    }
                     if let Ok(response) = connection
                         .send_request(v1::SetSessionConfigOptionRequest::new(
                             session.session_id().clone(),
-                            choice.config_id,
-                            v1::SessionConfigOptionValue::value_id(choice.value_id),
+                            preferred.config_id,
+                            preferred.value.to_acp(),
                         ))
                         .block_task()
                         .await
@@ -2327,16 +2478,13 @@ pub async fn run_session_on(
                             .ok();
                         continue;
                     }
-                    SessionCommand::SetConfig {
-                        config_id,
-                        value_id,
-                    } => {
-                        // モデル/思考レベル等を変更。応答は更新後の一覧なので UI へ反映する。
+                    SessionCommand::SetConfig { config_id, value } => {
+                        // モデル/思考レベル/Fast mode 等を変更。応答は更新後の一覧なので UI へ反映する。
                         if let Ok(response) = connection
                             .send_request(v1::SetSessionConfigOptionRequest::new(
                                 session.session_id().clone(),
                                 config_id,
-                                v1::SessionConfigOptionValue::value_id(value_id),
+                                value.to_acp(),
                             ))
                             .block_task()
                             .await
@@ -4716,21 +4864,43 @@ for line in sys.stdin:
         );
     }
 
+    fn select_config(
+        config_id: &str,
+        category: ConfigCategory,
+        current: &str,
+        choices: &[(&str, &str)],
+    ) -> ConfigOption {
+        ConfigOption {
+            config_id: config_id.into(),
+            name: config_id.into(),
+            description: None,
+            category,
+            kind: ConfigKind::Select {
+                current: current.into(),
+                choices: choices
+                    .iter()
+                    .map(|(value_id, name)| ConfigChoice {
+                        value_id: (*value_id).into(),
+                        name: (*name).into(),
+                        description: None,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
     #[test]
     fn config_choice_matches_name_or_id_case_insensitively() {
-        let configs = vec![ConfigOption {
-            config_id: "model".into(),
-            category: ConfigCategory::Model,
-            current: "claude-fable-5".into(),
-            choices: vec![
-                ("claude-opus-5".into(), "Opus".into()),
-                ("claude-fable-5".into(), "Fable".into()),
-            ],
-        }];
+        let configs = vec![select_config(
+            "model",
+            ConfigCategory::Model,
+            "claude-fable-5",
+            &[("claude-opus-5", "Opus"), ("claude-fable-5", "Fable")],
+        )];
         let by_name = find_config_choice(&configs, ConfigCategory::Model, "opus")
             .expect("表示名（大文字小文字無視）で引ける");
         assert_eq!(by_name.config_id, "model");
-        assert_eq!(by_name.value_id, "claude-opus-5");
+        assert_eq!(by_name.value, ConfigValue::Id("claude-opus-5".into()));
         assert!(!by_name.is_current, "current と違うので送る対象");
         let by_id = find_config_choice(&configs, ConfigCategory::Model, "CLAUDE-FABLE-5")
             .expect("value_id でも引ける");
@@ -4742,6 +4912,74 @@ for line in sys.stdin:
         assert!(
             find_config_choice(&configs, ConfigCategory::ThoughtLevel, "Opus").is_none(),
             "カテゴリ違いは None"
+        );
+    }
+
+    /// boolean の設定（Claude Code / codex-acp の Fast mode）を捨てずに写す。カテゴリ `mode` は
+    /// 権限モードの二重の広告なので印を付けて分ける（UI は出さない）。保存した値の読み戻しは
+    /// 種類と広告に合う物だけ。
+    #[test]
+    fn boolean_config_options_are_mapped_and_read_back() {
+        let advertised: Vec<v1::SessionConfigOption> = serde_json::from_value(serde_json::json!([
+            {"id": "mode", "name": "Mode", "category": "mode", "type": "select",
+             "currentValue": "default",
+             "options": [{"value": "default", "name": "Default"},
+                         {"value": "bypassPermissions", "name": "Bypass Permissions"}]},
+            {"id": "model", "name": "Model", "category": "model", "type": "select",
+             "currentValue": "default",
+             "options": [{"value": "default", "name": "Default (recommended)",
+                          "description": "Fable 5.1"},
+                         {"value": "opus", "name": "Opus 4.8"}]},
+            {"id": "fast", "name": "Fast mode", "category": "model_config", "type": "boolean",
+             "currentValue": false,
+             "description": "Faster responses on supported models — not available on the free plan"}
+        ]))
+        .expect("ACP の形で読める");
+        let configs = map_config_options(&advertised);
+        assert_eq!(configs.len(), 3, "boolean も捨てない: {configs:?}");
+        assert_eq!(configs[0].category, ConfigCategory::Mode);
+        assert_eq!(
+            configs[1].choices()[0].description.as_deref(),
+            Some("Fable 5.1"),
+            "選択肢の説明も写す（カードの一覧に出す）"
+        );
+        let fast = &configs[2];
+        assert_eq!(fast.category, ConfigCategory::Other);
+        assert_eq!(fast.kind, ConfigKind::Boolean { current: false });
+        assert_eq!(fast.name, "Fast mode");
+        assert!(fast
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("free plan")));
+
+        assert_eq!(
+            fast.value_from_stored("true"),
+            Some(ConfigValue::Bool(true))
+        );
+        assert_eq!(
+            fast.value_from_stored("opus"),
+            None,
+            "種類が合わない値は読まない"
+        );
+        assert_eq!(
+            configs[1].value_from_stored("opus"),
+            Some(ConfigValue::Id("opus".into()))
+        );
+        assert_eq!(
+            configs[1].value_from_stored("Opus 4.8"),
+            None,
+            "表示名では当てない（value_id だけ）"
+        );
+        assert_eq!(ConfigValue::Bool(true).to_stored(), "true");
+        assert_eq!(ConfigValue::Id("opus[1m]".into()).to_stored(), "opus[1m]");
+        // 送る形: boolean は `type: "boolean"`、select は value_id の文字列（`type` 無し）。
+        assert_eq!(
+            serde_json::to_value(ConfigValue::Bool(true).to_acp()).expect("書ける"),
+            serde_json::json!({"type": "boolean", "value": true})
+        );
+        assert_eq!(
+            serde_json::to_value(ConfigValue::Id("opus".into()).to_acp()).expect("書ける"),
+            serde_json::json!({"value": "opus"})
         );
     }
 
@@ -4817,6 +5055,7 @@ for line in sys.stdin:
             mode: None,
             model: Some("opus".into()),
             effort: Some("MAX".into()),
+            options: Vec::new(),
             resume: None,
             mcp_servers: Vec::new(),
             preset: preset::SessionPreset::default(),
@@ -4856,15 +5095,15 @@ for line in sys.stdin:
             configs
                 .iter()
                 .find(|config| config.category == category)
-                .map(|config| config.current.clone())
+                .map(|config| config.current())
         };
         assert_eq!(
-            current_of(ConfigCategory::Model).as_deref(),
-            Some("claude-opus-5")
+            current_of(ConfigCategory::Model),
+            Some(ConfigValue::Id("claude-opus-5".into()))
         );
         assert_eq!(
-            current_of(ConfigCategory::ThoughtLevel).as_deref(),
-            Some("max")
+            current_of(ConfigCategory::ThoughtLevel),
+            Some(ConfigValue::Id("max".into()))
         );
         // 初回ターンは希望モデル/思考量で走り、set_config_option は prompt より前に届いている。
         let chunk = events
@@ -5324,6 +5563,151 @@ for line in sys.stdin:
         ));
     }
 
+    /// Fast mode（boolean）とその他の select も、覚えた値をセッションを開いた直後・最初の prompt より
+    /// 前に合わせる。後から UI が送る切り替えは `type: "boolean"` の値で届く。広告に無い設定と種類の
+    /// 合わない値は送らない。偽エージェントは受けた `set_config_option` の params を prompt の応答で
+    /// そのまま返す。
+    #[test]
+    fn boolean_options_reach_the_agent_as_booleans() {
+        const FAKE_AGENT: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+current = {"fast": False, "collaboration_mode": "default"}
+sets = []
+
+def config_options():
+    return [
+        {"id": "collaboration_mode", "name": "Collaboration mode",
+         "category": "collaboration_mode", "type": "select",
+         "currentValue": current["collaboration_mode"],
+         "options": [{"value": "default", "name": "Default"},
+                     {"value": "plan", "name": "Plan"}]},
+        {"id": "fast", "name": "Fast mode", "category": "model_config", "type": "boolean",
+         "currentValue": current["fast"]},
+    ]
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"sessionId": "sess-1", "configOptions": config_options()}})
+    elif method == "session/set_config_option":
+        sets.append({key: params[key] for key in ("configId", "type", "value") if key in params})
+        current[params["configId"]] = params["value"]
+        send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": config_options()}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": "sess-1",
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(sets, sort_keys=True)}}}})
+        sets = []
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+"#;
+        let Some(python) = find_in_path("python3") else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let cwd = std::env::current_dir().expect("cwd");
+        let command = AgentCommand::new(python, vec!["-c".into(), FAKE_AGENT.into()], cwd);
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("初回".into()))
+            .expect("send");
+        let preferences = SessionPreferences {
+            options: vec![
+                ("fast".into(), "true".into()),
+                ("collaboration_mode".into(), "plan".into()),
+                // 広告に無い設定・種類の合わない値は送らない。
+                ("context_window".into(), "1m".into()),
+                ("collaboration_mode".into(), "true".into()),
+            ],
+            ..SessionPreferences::default()
+        };
+
+        let events = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let scenario = async move {
+                let mut seen = Vec::new();
+                let mut turns = 0;
+                loop {
+                    let event = event_rx.next().await.expect("イベントが途切れた");
+                    let ended = matches!(event, AgentEvent::TurnEnded { .. });
+                    seen.push(event);
+                    if !ended {
+                        continue;
+                    }
+                    turns += 1;
+                    if turns == 2 {
+                        break;
+                    }
+                    // 1 ターン目の後: カードで Fast を切ったのと同じ指示を送り、次の prompt で確かめる。
+                    command_tx
+                        .unbounded_send(SessionCommand::SetConfig {
+                            config_id: "fast".into(),
+                            value: ConfigValue::Bool(false),
+                        })
+                        .expect("send");
+                    command_tx
+                        .unbounded_send(SessionCommand::Prompt("2 回目".into()))
+                        .expect("send");
+                }
+                drop(command_tx);
+                seen
+            };
+            let (outcome, seen) = futures::join!(session, scenario);
+            outcome.expect("セッションは正常終了する");
+            seen
+        });
+
+        let chunks: Vec<serde_json::Value> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(serde_json::from_str(text).expect("JSON")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunks,
+            vec![
+                serde_json::json!([
+                    {"configId": "fast", "type": "boolean", "value": true},
+                    {"configId": "collaboration_mode", "value": "plan"},
+                ]),
+                serde_json::json!([{"configId": "fast", "type": "boolean", "value": false}]),
+            ],
+            "{events:?}"
+        );
+        // UI へ届く一覧は boolean も含み、最後は切った後の値。
+        let fast_values: Vec<ConfigValue> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Configs(configs) => configs
+                    .iter()
+                    .find(|config| config.config_id == "fast")
+                    .map(ConfigOption::current),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fast_values,
+            vec![ConfigValue::Bool(true), ConfigValue::Bool(false)]
+        );
+    }
+
     #[test]
     fn oneshot_maps_default_agent_to_its_cli() {
         // タイトル生成は「既定 Agent の CLI テンプレート」を使う（Claude 決め打ちをやめた）。
@@ -5505,14 +5889,14 @@ for line in sys.stdin:
                         AgentEvent::Configs(configs) => {
                             for config in &configs {
                                 eprintln!(
-                                    "[config] id={} category={:?} current={} choices={:?}",
+                                    "[config] id={} category={:?} current={:?} choices={:?}",
                                     config.config_id,
                                     config.category,
-                                    config.current,
+                                    config.current(),
                                     config
-                                        .choices
+                                        .choices()
                                         .iter()
-                                        .map(|(_, name)| name)
+                                        .map(|choice| &choice.name)
                                         .collect::<Vec<_>>()
                                 );
                             }

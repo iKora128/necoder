@@ -13,6 +13,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 - **Fleet: integrate when the base has unrelated local changes**: Integrate no longer stops just because the base (your main worktree) has uncommitted changes or untracked files. If the Task does not touch the files you changed, it integrates and leaves your changes exactly as they were. It still stops when the Task touches a file you changed, when a file the Task adds would land on an untracked file, or when the base has staged changes. The toast and the Attention card now name those files.
 - **"Now" on a queued message steers the running turn**: If the agent supports it (Claude Code and Codex), the button on a queued message is now **Steer now**. It hands the message to the running turn instead of interrupting it, so work in progress, such as a running command, is not thrown away. The command finishes, and then the agent reads your message. The message appears in the conversation where the agent took it, and the turn continues as one turn. Agents that do not support it keep **Interrupt & send**. Slash commands are always sent that way, because they only work at the start of a turn.
+- **Settings card under the composer**: The Agent, Model and Effort pills under the composer are now one chip. Click it or press ⌘/ in the composer to open a card. The card shows every setting the agent advertises, including on/off settings such as Claude Code's and Codex's Fast mode, which you could not choose before. Press ↑↓ for the model list, ←→ to change the effort, Tab to switch the agent (before the conversation starts) and Esc to close. The effort is a digital meter whose LEDs light up to the chosen level; the agent's own default sits off the scale. The chip shows only values that differ from the agent's defaults, such as `Opus 4.8 · High · ⚡`. The permission mode stays as its own pill next to the chip. Fast mode and other settings are remembered per agent, like the model and effort.
 
 ### 日本語
 
@@ -24,6 +25,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 - **Fleet：統合先の手元の変更と重ならなければ統合する**：統合先（main の作業ツリー）に未コミットの変更や未追跡のファイルがあるだけでは、統合を断らなくなりました。Task が手元の変更と同じファイルを触らなければ統合し、手元の変更はそのまま残ります。Task が手元で変えたファイルを触る時、Task が足すファイルの場所に未追跡のファイルがある時、統合先にステージした変更がある時は、今までどおり止まります。その時はトーストと要対応のカードでファイルを名指しします。
 - **送信待ちの「今すぐ」が実行中のターンに差し込むように**：エージェントが対応していれば（Claude Code と Codex）、送信待ちの行のボタンが **今すぐ差し込む** になります。ターンを中断せずに文を渡すので、走っているコマンドなどの途中の作業を捨てません。コマンドは最後まで走り、そのあとでエージェントが文を読みます。文はエージェントが受け取った位置で会話に入り、ターンは 1 つのまま続きます。対応していないエージェントは今までどおり **中断して今すぐ** です。スラッシュコマンドはターンの頭でしか効かないので、いつもこちらで送ります。
+- **composer の下の設定のカード**：composer の下にあった Agent・Model・Effort のピルを、チップ 1 つにまとめました。チップを押すか、composer の中で ⌘/ を押すとカードが開きます。カードには、エージェントが送ってくる設定がすべて並びます。これまで選べなかった Claude Code と Codex の Fast mode のような on/off の設定も含みます。↑↓ でモデルの一覧、←→ で思考量、Tab でエージェントの切り替え（会話を始める前だけ）、Esc で閉じます。思考量は、選んだ段まで LED が灯るデジタルメーターで表します（エージェントに任せる Default は目盛りの外）。チップには、エージェントの既定から外れた値だけを `Opus 4.8 · High · ⚡` のように出します。権限モードはチップの右に、今までどおりピルで残します。Fast mode などの設定も、モデルや思考量と同じくエージェントごとに覚えます。
 
 ## [0.1.24] - 2026-10-01
 

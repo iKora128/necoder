@@ -400,6 +400,8 @@ impl gpui::AssetSource for Assets {
             // statusbar の診断件数（エラー / 警告）。
             "icons/circle-x.svg" => icon!("circle-x.svg"),
             "icons/triangle-alert.svg" => icon!("triangle-alert.svg"),
+            // composer の設定の Fast mode（色付きの絵文字 ⚡ の代わり＝色相を持ち込まない）。
+            "icons/zap.svg" => icon!("zap.svg"),
             // AI エージェントのブランドロゴ（Simple Icons・CC0・設定画面の識別用）。
             "icons/brand-claude.svg" => icon!("brand-claude.svg"),
             "icons/brand-copilot.svg" => icon!("brand-copilot.svg"),
@@ -1503,6 +1505,24 @@ fn main() {
                                 workspace.debug_shell_probe(&mode, window, cx);
                             }) {
                                 eprintln!("NECODER_SHELL_PROBE: 窓が無い: {error:#}");
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_CONFIG_CARD_PROBE="claude;opus-high-fast;open" で composer の設定のカードを
+                // 組み立てる（2s 後・UI-SPEC §6）。エージェントは起こさず、見本の広告を流す。
+                #[cfg(debug_assertions)]
+                if let Ok(commands) = std::env::var("NECODER_CONFIG_CARD_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_config_card_probe(&commands, window, cx);
+                            }) {
+                                eprintln!("NECODER_CONFIG_CARD_PROBE: 窓が無い: {error:#}");
                             }
                         })
                         .detach();

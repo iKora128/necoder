@@ -128,11 +128,15 @@ fn main() {
                 }
                 AgentEvent::Configs(configs) => {
                     for config in configs {
-                        let choices: Vec<&str> =
-                            config.choices.iter().map(|(id, _)| id.as_str()).collect();
+                        let choices: Vec<&str> = config
+                            .choices()
+                            .iter()
+                            .map(|choice| choice.value_id.as_str())
+                            .collect();
                         println!(
-                            "[config {:?}] current={} choices={choices:?}",
-                            config.category, config.current
+                            "[config {:?}] current={:?} choices={choices:?}",
+                            config.category,
+                            config.current()
                         );
                     }
                 }
