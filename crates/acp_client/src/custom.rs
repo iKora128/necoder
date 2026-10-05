@@ -126,7 +126,7 @@ pub fn builtin_for_registry_id(id: &str) -> Option<&'static AgentKind> {
 }
 
 /// レジストリの項目と、`platform` で使う配布を引く。
-fn registry_launch<'a>(
+pub(crate) fn registry_launch<'a>(
     id: &str,
     registry: Option<&'a Registry>,
     platform: Option<&str>,

@@ -6417,11 +6417,13 @@ dependencies = [
  "editor_view",
  "gpui",
  "gpui_platform",
+ "host",
  "i18n",
  "paths",
  "serde_json",
  "settings_core",
  "theme_core",
+ "ui",
 ]
 
 [[package]]

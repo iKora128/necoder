@@ -155,6 +155,40 @@ fn remove_stale_versions(root: &Path, package: &str, keep: &Path) {
     }
 }
 
+/// necoder の置き場（`external_agents/npm`）に入れてある `name` の版（読むだけ・設定の AI エージェントの
+/// ページが「今の版」に使う）。完成した版（package.json の名前と版が置き場の名前と合う物）だけ。
+pub(super) fn installed_versions(name: &str) -> Vec<String> {
+    let Some(root) = paths::external_agents_dir().map(|dir| dir.join("npm")) else {
+        return Vec::new();
+    };
+    installed_versions_in(&root, name)
+}
+
+/// [`installed_versions`] の本体（置き場を渡せる）。
+fn installed_versions_in(root: &Path, name: &str) -> Vec<String> {
+    let prefix = format!("{}@", name.replace('/', "%2F"));
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let directory = entry.file_name().to_string_lossy().into_owned();
+            let version = directory.strip_prefix(&prefix)?;
+            let manifest = entry
+                .path()
+                .join("node_modules")
+                .join(name)
+                .join("package.json");
+            let manifest: serde_json::Value =
+                serde_json::from_reader(std::fs::File::open(manifest).ok()?).ok()?;
+            (manifest.get("name")?.as_str()? == name
+                && manifest.get("version")?.as_str()? == version)
+                .then(|| version.to_string())
+        })
+        .collect()
+}
+
 fn exact_package(package: &str) -> Option<(&str, &str)> {
     let (name, version) = package.rsplit_once('@')?;
     let valid_part = |part: &str| {
@@ -269,6 +303,33 @@ printf '%s' 'console.log("adapter")' > node_modules/adapter/index.js
         assert!(!old.exists());
         assert!(other_package.is_dir());
         assert!(similar_name.is_dir());
+    }
+
+    /// 置き場に入れてある版を読む（設定の「今の版」）。名前が似た別のパッケージと、中身の版が置き場の
+    /// 名前と合わない物（途中で止まった導入など）は数えない。
+    #[test]
+    fn installed_versions_are_read_from_completed_installs_only() {
+        let root = tempfile::tempdir().unwrap();
+        let install = |directory: &str, name: &str, version: &str| {
+            let package = root.path().join(directory).join("node_modules").join(name);
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(
+                package.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+            )
+            .unwrap();
+        };
+        install("@scope%2Fadapter@0.81.2", "@scope/adapter", "0.81.2");
+        install(
+            "@scope%2Fadapter-extra@1.0.0",
+            "@scope/adapter-extra",
+            "1.0.0",
+        );
+        install("@scope%2Fadapter@0.84.0", "@scope/adapter", "0.83.0");
+        let mut versions = installed_versions_in(root.path(), "@scope/adapter");
+        versions.sort();
+        assert_eq!(versions, vec!["0.81.2".to_string()]);
+        assert!(installed_versions_in(&root.path().join("missing"), "@scope/adapter").is_empty());
     }
 
     #[test]

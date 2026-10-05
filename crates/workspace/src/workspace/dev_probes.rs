@@ -1198,7 +1198,8 @@ impl Workspace {
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
     /// チャットの行 / `edit:<文字>` = 成果物を書き換える（本番と同じ合図を出す）/ `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
     /// `settings:<page>` / `settings-add:<語>` = 設定の「エージェントを追加」/
-    /// `settings-connection:<ひな形の id>` = 設定の「接続を追加」/ `find:<語>` /
+    /// `settings-connection:<ひな形の id>` = 設定の「接続を追加」/ `settings-open:<id>` = AI
+    /// エージェントのページで行を開く / `settings-host:<名前>` = 偽の SSH 先を足して選ぶ / `find:<語>` /
     /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1312,6 +1313,17 @@ impl Workspace {
                 view.update(cx, |view, cx| {
                     view.debug_open_connection_editor(argument, window, cx)
                 });
+            }
+            // AI エージェントのページで行を開く（`settings-open:codex`・空なら閉じる）。
+            "settings-open" => {
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_expand_agent(argument, cx));
+            }
+            // AI エージェントのページで偽の SSH 先を足して選ぶ（`settings-host:fake@dev-box`）。一時フォルダの
+            // 偽のホームで本物と同じ読み取りのシェルを流す（本物の SSH には繋がない）。
+            "settings-host" => {
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_use_fake_host(argument, cx));
             }
             // 設定画面をページ指定で開く（Chat の設定・MCP のコネクタの見た目を撮る）。
             "settings" => {
