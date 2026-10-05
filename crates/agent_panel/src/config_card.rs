@@ -30,8 +30,8 @@ const CHIP_SUMMARY_MAX_WIDTH: f32 = 250.0;
 const CARD_WIDTH: f32 = 290.0;
 /// 一覧の最大の高さ（印に合わせてスクロールする）。
 const CARD_LIST_MAX_HEIGHT: f32 = 236.0;
-/// カードのエージェントの行の名前の最大幅（右に接続の名前と `この会話では固定` が並んでも収まる）。
-const CARD_AGENT_NAME_MAX_WIDTH: f32 = 120.0;
+/// カードのエージェントの行で、接続の名前が名前より先に縮む割合（flex-shrink）。
+const CARD_CONNECTION_SHRINK: f32 = 50.0;
 
 /// 開いているカード（閉じている間は `AgentPanel::config_card` が `None`）。
 pub(crate) struct ConfigCard {
@@ -742,18 +742,13 @@ impl AgentPanel {
             .text_size(px(11.))
             .text_color(theme.fg1)
             .child(agent_badge(&thread.agent, 14.))
-            // 接続の名前と並ぶ時に名前の方を先に削らない（削るのは接続の名前・名前は幅の上限で省略）。
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(CARD_AGENT_NAME_MAX_WIDTH))
-                    .truncate()
-                    .child(thread.agent.clone()),
-            )
+            .child(div().min_w_0().truncate().child(thread.agent.clone()))
+            // 幅が足りなければ、名前より先に接続の名前を縮めて省略する（全文はチップとツールチップ）。
             .when_some(connection, |element, connection| {
                 element.child(
                     div()
                         .min_w_0()
+                        .flex_shrink(CARD_CONNECTION_SHRINK)
                         .truncate()
                         .text_size(px(10.))
                         .text_color(theme.fg2)
