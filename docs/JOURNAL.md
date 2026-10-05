@@ -3950,3 +3950,16 @@
   - Fleet の組み立て命令の `graph` は Fleet に入らない（入るのは `NECODER_CONTROL_PROBE` の仕込み）。本物の worktree の Task を撮る時は `fleet` を先頭に置く。
   - 統合の merge コミットは necoder の git（`-c` を付けない）で作るので、試験の作者はコマンドごとの `-c user.email` ではなく一時リポジトリの設定（`git config user.email`）に書く。Windows のランナーには git の作者が無く「Committer identity unknown」で落ちた（mac は作者を推測するので手元では出ない）。手元で同じ条件にするには `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true` を付けて流す。
 - 次: 本人の main（手元の変更あり）で、重ならない Task を実際に統合して確かめる。
+
+## 2026-10-05 — 開いている PR 10 本を dev ブランチで統合（#43〜#52）
+
+- 発端（本人・Captain 経由）: 10 本は単独では main と衝突しないが、acp_client.rs を 4 本・agent_panel.rs を 3 本・CHANGELOG を 6 本が書き換え、#49〜#52 は project / workspace / JOURNAL で重なる。衝突を 1 か所で解き、CI を 1 回で済ませ、main は確かめ済みの状態にだけ進める。
+- やったこと: origin/main（v0.1.24）から `dev/integration-2026-10-05` を切り、#45 → #43 → #49 → #52 → #50 → #51 → #44 → #48 → #47 → #46 の順に `--no-ff` で merge（どこをどう解いたかは各 merge コミットの本文）。統合で足した直し:
+  - 設定のカード（#48）の在庫を #47 の `StockKey` で引く（`stocked_configs`・接続やログインを替える前のセッションの広告は出さない）。#48 でエージェントのピルが無くなったので、#47 の `· 接続の名前` はチップ（エージェントの後・要約の前）とカードのエージェントの行（H4 の欄）へ移し、カードを開く時もログインを確かめ直す。
+  - #44 の差し込みの応答で接続が切れた時の `return Ok(())` を #47 の `Attempt::Finished` に。#44 の `probe_steering` を #48 の `ConfigOption::choices()` / `current()` に。
+  - ARCHITECTURE は #44 と #47 がどちらも §7.6 を足していた → 差し込みを §7.6、設定の層と接続を §7.7 にして参照を直した。
+- 検証: `cargo test --workspace`（使い捨て HOME・62 バイナリ・1247 passed）・`cargo deny check`・`scripts/check-license-boundary.sh`。隔離 offscreen で、composer（送信待ちの「今すぐ差し込む」・接続付きのチップ・カード）・設定 › 接続・設定 › AI エージェント・Fleet（擬似 Task と、本物の worktree の統合を手元の変更で断る所と通る所）を撮って目視。カードのエージェントの行が名前と接続の名前の両方で切れていたのを、この撮影で見つけて直した。
+- 学び/罠:
+  - #47 の在庫の鍵はログインの指紋を含み、指紋は一度確かめると 0 でなくなる。セッション無しで `on_event` に広告を流す撮影用の命令（`NECODER_CONFIG_CARD_PROBE`）は、流す前に指紋を確かめないと在庫が指紋 0 の鍵に入り、カードやピルのメニューを開いた時の確かめ直しで見えなくなる（本番はセッションを立てる時に確かめてから広告を受けるので起きない）。
+  - 同じ位置に試験を足した 2 本は、偽エージェントの python の共通行で git が縫い合わせて 3 hunk の衝突になる。各側の全文を組み立て直して並べ、各 PR の版と文字どおり一致するかで確かめた。
+- 次: dev → main の PR を本人が「Create a merge commit」で入れる（10 本が merged になる）。#48 の残り（MANUAL・UI-SPEC に「composer のエージェントのピル」の言い方が残る所）は別に直す。
