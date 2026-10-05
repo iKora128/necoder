@@ -1085,7 +1085,9 @@ impl Workspace {
     /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）/
     /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
     /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当 /
-    /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認 /
+    /// `menu:<path>` = 右クリックメニュー / `blank_menu[:<dir>[:bottom]]` = 余白の右クリックメニュー
+    /// （既定ルート・`bottom` で窓の下端の近く）/
+    /// `discard:<path>` = 変更の破棄の確認 /
     /// `search:<dir>:<クエリ>` = フォルダ内を検索 / `open:<path>` / `finder` = ⌘P /
     /// `finder_query:<語>` / `finder_confirm` = ⌘P の ⏎。
     #[cfg(debug_assertions)]
@@ -1147,6 +1149,16 @@ impl Workspace {
                     px(TITLEBAR_HEIGHT + 28. + (row as f32 + 1.) * ROW_HEIGHT),
                 );
                 self.show_context_menu(target, is_dir, position, cx);
+            }
+            // 余白の右クリックメニュー（`blank_menu` = ルート / `blank_menu:<dir>` = そのフォルダ /
+            // `blank_menu::bottom` = 窓の下端の近くで押した形＝窓の中へ押し戻す確認）。
+            "blank_menu" => {
+                let y = if value == "bottom" {
+                    window.viewport_size().height - px(60.)
+                } else {
+                    px(TITLEBAR_HEIGHT + 120.)
+                };
+                self.show_background_menu(target, gpui::point(px(RAIL_WIDTH + 140.), y), cx);
             }
             "discard" => {
                 let status = self

@@ -689,6 +689,7 @@ impl Workspace {
             projects.first().map(|slot| ExplorerContextMenu {
                 path: slot.worktree.root().to_path_buf(),
                 is_dir: true,
+                background: false,
                 position: point(px(120.0), px(210.0)),
             })
         });

@@ -256,12 +256,64 @@ impl Workspace {
                 ExplorerContextMenu {
                     path,
                     is_dir,
+                    background: false,
                     position,
                 },
                 cx,
             )
         });
         cx.notify();
+    }
+
+    /// 余白の右クリックのメニューを出す（`dir` = そのビューの文脈フォルダ）。
+    pub(crate) fn show_background_menu(
+        &mut self,
+        dir: PathBuf,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.explorer.update(cx, |explorer, cx| {
+            explorer.show_context_menu(
+                ExplorerContextMenu {
+                    path: dir,
+                    is_dir: true,
+                    background: true,
+                    position,
+                },
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    /// 行・セルの右クリック。外側の余白も右クリックを受ける（[`Self::right_click_background`]）ので、
+    /// 伝播を止めて行のメニューを余白のメニューで上書きさせない。止めるとドックのフォーカス移動
+    /// （メニューの「ゴミ箱に入れる」→ ⌘Z で戻す・H30）も届かないので、ここで移す。
+    pub(crate) fn right_click_entry(
+        &mut self,
+        path: PathBuf,
+        is_dir: bool,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        self.focus_explorer(window, cx);
+        self.show_context_menu(path, is_dir, event.position, cx);
+    }
+
+    /// 余白（行の外）の右クリック = そのビューの文脈フォルダのメニュー。空のフォルダには行が
+    /// 無いので、新規作成・Finder への入口はここだけになる（2026-10-05 本人要望）。
+    pub(crate) fn right_click_background(
+        &mut self,
+        dir: PathBuf,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        self.focus_explorer(window, cx);
+        self.show_background_menu(dir, event.position, cx);
     }
 
     /// 右クリックメニューを閉じる（外側クリック・アクション実行後）。
@@ -297,10 +349,16 @@ impl Workspace {
                 (parent, None, String::new())
             }
         };
-        // 親フォルダを展開しておく（入力行が見えるように）。
+        // 親フォルダを展開しておく（入力行が見えるように）。カラム/アイコンは見ているフォルダの中に
+        // しか入力を出せないので、新規は作る場所へ入ってから名前を打つ（Finder の新規フォルダと同じ）。
+        let enter_parent =
+            kind != NamingKind::Rename && self.explorer_mode(cx) != ExplorerView::Tree;
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.explorer.expanded.insert(parent.clone());
+            if enter_parent {
+                slot.explorer.current_dir = Some(parent.clone());
+            }
         }
         self.refresh_active_explorer(cx);
         let focus = cx.focus_handle();
@@ -1996,6 +2054,268 @@ mod tests {
         draw(cx);
         cx.simulate_keystrokes("cmd-alt-c");
         assert_eq!(clipboard(cx).as_deref(), Some("a.txt:1"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 空のプロジェクト（`name` の一時ディレクトリ）を開いた窓。監視は止め、1 回描いてある。
+    fn open_empty_project<'a>(
+        name: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        Entity<Workspace>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let root = std::env::temp_dir().join(format!("{name}_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("空のプロジェクト");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        draw_explorer(cx);
+        // Worktree は root を正規化する（/var → /private/var）ので、開いている物から組む。
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        (root, canonical_root, workspace, cx)
+    }
+
+    fn draw_explorer(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn right_click(position: Point<gpui::Pixels>, cx: &mut gpui::VisualTestContext) {
+        cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::none());
+        draw_explorer(cx);
+    }
+
+    /// 開いている右クリックメニューの (対象, 余白のメニューか)。
+    fn open_menu(
+        workspace: &Entity<Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<(PathBuf, bool)> {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .explorer_context_menu(cx)
+                .map(|menu| (menu.path, menu.background))
+        })
+    }
+
+    /// メニューの「新規フォルダ」をマウスで押し、`name` を打って ⏎（入力欄にフォーカスがあること）。
+    fn create_folder_from_menu(
+        workspace: &Entity<Workspace>,
+        name: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        let item = cx
+            .debug_bounds("ctx-new-dir")
+            .expect("メニューに「新規フォルダ」が出ている");
+        cx.simulate_click(item.center(), gpui::Modifiers::none());
+        draw_explorer(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.explorer_context_menu(cx).is_none(),
+                "項目を押したらメニューは閉じる"
+            );
+            let naming = workspace.explorer_naming(cx).expect("名前の入力が始まる");
+            assert_eq!(naming.kind, NamingKind::NewDir);
+            assert!(
+                naming.focus.is_focused(window),
+                "入力欄にフォーカスが無い＝打った名前が入らない"
+            );
+        });
+        cx.simulate_input(name);
+        cx.simulate_keystrokes("enter");
+        draw_explorer(cx);
+    }
+
+    /// 空のフォルダ（行が 1 つも無い）でも、ツリーの余白を右クリックするとルートのメニューが出て、
+    /// マウスだけで「新規フォルダ」→ 名前を打って ⏎ まで行ける（2026-10-05 本人要望）。行の右クリックは
+    /// 行のメニューのまま（外側の余白のメニューで上書きされない）。
+    #[gpui::test]
+    fn right_clicking_the_blank_of_an_empty_tree_offers_new_folder(cx: &mut gpui::TestAppContext) {
+        let (root, canonical_root, workspace, cx) =
+            open_empty_project("necoder_blank_menu_tree", cx);
+        let has_rows = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_slot()
+                .is_some_and(|slot| !slot.explorer.rows.is_empty())
+        });
+        assert!(!has_rows, "空のフォルダから始める");
+
+        let blank = gpui::point(px(RAIL_WIDTH + 60.), px(TITLEBAR_HEIGHT + 200.));
+        right_click(blank, cx);
+        assert_eq!(
+            open_menu(&workspace, cx),
+            Some((canonical_root.clone(), true)),
+            "余白の右クリックでルートのメニューが出る"
+        );
+        let explorer_focused = workspace.update_in(cx, |workspace, window, _cx| {
+            workspace.chrome.explorer_focus.is_focused(window)
+        });
+        assert!(
+            explorer_focused,
+            "右クリックでフォーカスがエクスプローラへ移る"
+        );
+        for item in ["ctx-new-file", "ctx-reveal", "ctx-copy"] {
+            assert!(
+                cx.debug_bounds(item).is_some(),
+                "余白のメニューに {item} が無い"
+            );
+        }
+        for item in ["ctx-rename", "ctx-duplicate", "ctx-trash", "ctx-open-here"] {
+            assert!(
+                cx.debug_bounds(item).is_none(),
+                "余白のメニューに項目そのものへの操作 {item} が出ている"
+            );
+        }
+
+        create_folder_from_menu(&workspace, "assets", cx);
+        let assets = canonical_root.join("assets");
+        assert!(assets.is_dir(), "打った名前でフォルダができる");
+        let rows = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_slot()
+                .map(|slot| {
+                    slot.explorer
+                        .rows
+                        .iter()
+                        .map(|row| row.path.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        assert_eq!(rows, vec![assets.clone()], "作ったフォルダがツリーに出る");
+
+        // 余白は下の方を押すことが多い。窓の下端の近くでも、メニューは窓の中へ押し戻される。
+        let viewport = cx.update(|window, _cx| window.viewport_size());
+        right_click(
+            gpui::point(px(RAIL_WIDTH + 60.), viewport.height - px(80.)),
+            cx,
+        );
+        assert_eq!(
+            open_menu(&workspace, cx),
+            Some((canonical_root.clone(), true))
+        );
+        let last_item = cx
+            .debug_bounds("ctx-copy")
+            .expect("余白のメニューに「パスをコピー」");
+        assert!(
+            last_item.bottom() <= viewport.height,
+            "メニューが窓の下で切れている: {last_item:?} / {viewport:?}"
+        );
+
+        // 行の右クリックは行のメニュー（余白のメニューに上書きされない）。
+        let first_row = gpui::point(
+            px(RAIL_WIDTH + 60.),
+            px(TITLEBAR_HEIGHT + 28. + ROW_HEIGHT / 2. + 2.),
+        );
+        right_click(first_row, cx);
+        assert_eq!(open_menu(&workspace, cx), Some((assets.clone(), false)));
+
+        // 行のメニューの「名前を変更…」もマウスで押して打てる（メニューの押下が下へ通らない）。
+        let rename = cx
+            .debug_bounds("ctx-rename")
+            .expect("行のメニューに「名前を変更…」");
+        cx.simulate_click(rename.center(), gpui::Modifiers::none());
+        draw_explorer(cx);
+        let rename_focused = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .explorer_naming(cx)
+                .is_some_and(|naming| naming.focus.is_focused(window))
+        });
+        assert!(rename_focused, "名前の変更の入力欄にフォーカスが無い");
+        cx.simulate_input("2");
+        cx.simulate_keystrokes("enter");
+        draw_explorer(cx);
+        assert!(
+            canonical_root.join("assets2").is_dir() && !assets.exists(),
+            "打った名前に変わる"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// アイコン表示・カラム表示でも余白の右クリックが効き、アイコン表示では名前の入力がセルに出て
+    /// 打てる（入力はツリーにしか無かった）。カラムの余白は、その段のフォルダが対象。
+    #[gpui::test]
+    fn icons_and_columns_offer_the_blank_menu_too(cx: &mut gpui::TestAppContext) {
+        let (root, canonical_root, workspace, cx) =
+            open_empty_project("necoder_blank_menu_views", cx);
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.set_explorer_view(ExplorerView::Icons, cx)
+        });
+        draw_explorer(cx);
+        let blank = gpui::point(px(RAIL_WIDTH + 60.), px(TITLEBAR_HEIGHT + 200.));
+        right_click(blank, cx);
+        assert_eq!(
+            open_menu(&workspace, cx),
+            Some((canonical_root.clone(), true)),
+            "アイコン表示の余白 = 現在フォルダのメニュー"
+        );
+        create_folder_from_menu(&workspace, "docs", cx);
+        let docs = canonical_root.join("docs");
+        assert!(
+            docs.is_dir(),
+            "アイコン表示でも打った名前でフォルダができる"
+        );
+
+        // カラム表示で docs に入る: [ルート | docs] の 2 段。docs の段の余白 = docs、段より右も docs。
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.set_explorer_view(ExplorerView::Columns, cx);
+            workspace.enter_dir(docs.clone(), cx);
+        });
+        draw_explorer(cx);
+        right_click(
+            gpui::point(px(RAIL_WIDTH + 150. + 60.), px(TITLEBAR_HEIGHT + 200.)),
+            cx,
+        );
+        assert_eq!(open_menu(&workspace, cx), Some((docs.clone(), true)));
+        right_click(
+            gpui::point(px(RAIL_WIDTH + 60.), px(TITLEBAR_HEIGHT + 200.)),
+            cx,
+        );
+        assert_eq!(
+            open_menu(&workspace, cx),
+            Some((canonical_root.clone(), true)),
+            "手前の段の余白はその段のフォルダ"
+        );
+        right_click(
+            gpui::point(px(RAIL_WIDTH + 300. + 60.), px(TITLEBAR_HEIGHT + 200.)),
+            cx,
+        );
+        assert_eq!(
+            open_menu(&workspace, cx),
+            Some((docs, true)),
+            "段より右は現在フォルダ"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

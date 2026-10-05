@@ -90,13 +90,10 @@ impl Workspace {
         let Some(naming) = self.explorer_naming(cx) else {
             return div().h(ui::row_height(cx, ROW_HEIGHT)).into_any_element();
         };
-        let theme = self.theme.clone();
-        let accent = self.accent();
         let icon = match naming.kind {
             NamingKind::NewDir => "▸",
             _ => " ",
         };
-        let display: SharedString = SharedString::from(naming.value.clone());
         div()
             .flex()
             .items_center()
@@ -109,27 +106,36 @@ impl Workspace {
                     .flex_none()
                     .w(px(12.))
                     .text_size(px(10.))
-                    .text_color(theme.fg2)
+                    .text_color(self.theme.fg2)
                     .child(icon),
             )
+            .child(self.render_naming_field(&naming.value).flex_1())
+            .into_any_element()
+    }
+
+    /// 命名の入力欄の見た目（アクセント枠 + 末尾のキャレットバー）。行・セル共通で、幅は置く側が決める。
+    fn render_naming_field(&self, value: &str) -> gpui::Div {
+        let theme = &self.theme;
+        let accent = self.accent();
+        div()
+            .flex()
+            .items_center()
+            .h(px(19.))
+            .px(px(6.))
+            .rounded(px(4.))
+            .bg(theme.bg1)
+            .border_1()
+            .border_color(accent)
+            .text_size(px(12.))
+            .text_color(theme.fg0)
+            .overflow_hidden()
             .child(
                 div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .h(px(19.))
-                    .px(px(6.))
-                    .rounded(px(4.))
-                    .bg(theme.bg1)
-                    .border_1()
-                    .border_color(accent)
-                    .text_size(px(12.))
-                    .text_color(theme.fg0)
+                    .whitespace_nowrap()
                     .overflow_hidden()
-                    .child(div().whitespace_nowrap().overflow_hidden().child(display))
-                    .child(div().flex_none().w(px(1.5)).h(px(13.)).bg(accent)),
+                    .child(SharedString::from(value.to_string())),
             )
-            .into_any_element()
+            .child(div().flex_none().w(px(1.5)).h(px(13.)).bg(accent))
     }
 
     /// D&D の受け面を付ける（エクスプローラ内の移動 = [`DraggedFile`] / Finder からの追加 =
@@ -204,6 +210,7 @@ impl Workspace {
         .track_scroll(&self.chrome.explorer_scroll)
         .size_full();
         let is_local = !slot.worktree.is_remote();
+        let menu_root = root.clone();
         div()
             // min_h_0 は flex_col 親の中で縦スクロールを成立させるため（あふれ許可）。
             .id("explorer-tree-area")
@@ -215,6 +222,14 @@ impl Workspace {
                     .track_focus(&focus)
                     .on_key_down(cx.listener(Self::on_naming_key_down))
             })
+            // 余白の右クリック = ルートのメニュー（空のフォルダでも新規作成・Finder へ行ける）。
+            // 行の右クリックは行の側で止まる（`right_click_entry`）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.right_click_background(menu_root.clone(), event, window, cx)
+                }),
+            )
             // D&D の受け（Finder 風・M10 / 接続先はアップロード・O37）: 行の外（余白）へ落とす =
             // ルート直下へ。行側のドロップが先に消費する（gpui の on_drop は最内から bubble・消費で停止）。
             .map(|element| Self::drop_into(element, root.clone(), color, false, is_local, cx))
@@ -424,8 +439,8 @@ impl Workspace {
                     MouseButton::Right,
                     cx.listener({
                         let path = row.path.clone();
-                        move |this, event: &MouseDownEvent, _window, cx| {
-                            this.show_context_menu(path.clone(), is_dir, event.position, cx)
+                        move |this, event: &MouseDownEvent, window, cx| {
+                            this.right_click_entry(path.clone(), is_dir, event, window, cx)
                         }
                     }),
                 )
@@ -451,6 +466,17 @@ impl Workspace {
         // controller refresh が事前構築した cache だけを読む。cache miss は空表示で、I/O はしない。
         let entries = slot.listed_dir(&dir);
         let selected = slot.explorer.selected.clone();
+        // インライン命名: 新規 = 先頭のセル・名前の変更 = 対象のセルの代わり（`start_naming` が
+        // 作る場所へ入ってから始めるので、新規の入力はいつもこのフォルダに出る）。
+        let naming = self.explorer_naming(cx);
+        let creating_here = naming
+            .as_ref()
+            .is_some_and(|naming| naming.kind != NamingKind::Rename && naming.parent == dir);
+        let renaming = naming
+            .as_ref()
+            .filter(|naming| naming.kind == NamingKind::Rename)
+            .and_then(|naming| naming.target.clone());
+        let menu_dir = dir.clone();
         div()
             .flex_1()
             .overflow_hidden()
@@ -459,9 +485,28 @@ impl Workspace {
             .content_start()
             .gap(px(2.))
             .p(px(6.))
+            // 命名の入力のキーはグリッドの外枠で受ける（ツリーと同じ）。
+            .when_some(naming.map(|naming| naming.focus), |element, focus| {
+                element
+                    .track_focus(&focus)
+                    .on_key_down(cx.listener(Self::on_naming_key_down))
+            })
+            // 余白の右クリック = 現在フォルダのメニュー（セルの右クリックはセルの側で止まる）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.right_click_background(menu_dir.clone(), event, window, cx)
+                }),
+            )
             // D&D の受け（Finder 風・接続先はアップロード）: セルの外（余白）へ落とす = 現在フォルダへ。
             .map(|element| Self::drop_into(element, dir.clone(), color, false, is_local, cx))
+            .when(creating_here, |element| {
+                element.child(self.render_naming_cell(None, cx))
+            })
             .children(entries.into_iter().enumerate().map(|(index, entry)| {
+                if renaming.as_ref() == Some(&entry.path) {
+                    return self.render_naming_cell(Some(entry.is_dir), cx);
+                }
                 let is_dir = entry.is_dir;
                 let is_ignored = entry.ignored;
                 let path = entry.path.clone();
@@ -536,12 +581,40 @@ impl Workspace {
                         MouseButton::Right,
                         cx.listener({
                             let path = entry.path.clone();
-                            move |this, event: &MouseDownEvent, _window, cx| {
-                                this.show_context_menu(path.clone(), is_dir, event.position, cx)
+                            move |this, event: &MouseDownEvent, window, cx| {
+                                this.right_click_entry(path.clone(), is_dir, event, window, cx)
                             }
                         }),
                     )
+                    .into_any_element()
             }))
+            .into_any_element()
+    }
+
+    /// アイコン表示のインライン命名のセル（`is_dir` = 名前を変える項目がフォルダか。新規は `None`
+    /// で、作る物から決める）。アイコンは打っている名前から引く（`.rs` まで打てば Rust の形になる）。
+    fn render_naming_cell(&self, is_dir: Option<bool>, cx: &App) -> gpui::AnyElement {
+        let Some(naming) = self.explorer_naming(cx) else {
+            return div().into_any_element();
+        };
+        let is_dir = is_dir.unwrap_or(naming.kind == NamingKind::NewDir);
+        div()
+            .w(px(84.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(4.))
+            .px(px(4.))
+            .py(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(30.))
+                    .child(icon_large(&naming.value, is_dir, &self.theme)),
+            )
+            .child(self.render_naming_field(&naming.value).w_full())
             .into_any_element()
     }
 
@@ -574,11 +647,38 @@ impl Workspace {
         chain.reverse();
         // 460px に収まるよう末尾 3 段（＝現在フォルダ + 親 2 つ）だけ見せる。
         let visible_start = chain.len().saturating_sub(3);
+        // インライン命名: 新規 = 作る段の先頭の行・名前の変更 = 対象の行の代わり（`start_naming` が
+        // 作る場所へ入ってから始めるので、新規の入力はいつも最後の段に出る）。
+        let naming = self.explorer_naming(cx);
+        let renaming = naming
+            .as_ref()
+            .filter(|naming| naming.kind == NamingKind::Rename)
+            .and_then(|naming| naming.target.clone());
+        let creating_in = naming
+            .as_ref()
+            .filter(|naming| naming.kind != NamingKind::Rename)
+            .map(|naming| naming.parent.clone());
 
         div()
             .flex_1()
             .flex()
             .overflow_hidden()
+            // 命名の入力のキーはカラム全体の外枠で受ける（ツリーと同じ）。
+            .when_some(naming.map(|naming| naming.focus), |element, focus| {
+                element
+                    .track_focus(&focus)
+                    .on_key_down(cx.listener(Self::on_naming_key_down))
+            })
+            // 段より右の余白の右クリック = 現在フォルダのメニュー（段の中は段の側で受ける）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let current = current.clone();
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        this.right_click_background(current.clone(), event, window, cx)
+                    }
+                }),
+            )
             .children(
                 chain
                     .iter()
@@ -591,6 +691,7 @@ impl Workspace {
                         let selected_child = chain.get(column_index + 1).cloned();
                         let is_local = !slot.worktree.is_remote();
                         let color = slot.color;
+                        let menu_dir = dir.clone();
                         div()
                             .w(px(150.))
                             .flex_none()
@@ -598,11 +699,24 @@ impl Workspace {
                             .overflow_hidden()
                             .border_r_1()
                             .border_color(theme.border)
+                            // 余白の右クリック = この段のフォルダのメニュー（行の右クリックは行の側で止まる）。
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.right_click_background(menu_dir.clone(), event, window, cx)
+                                }),
+                            )
                             // D&D の受け（Finder 風・接続先はアップロード）: 行の外（カラム余白）へ落とす = この段のフォルダへ。
                             .map(|element| {
                                 Self::drop_into(element, dir.clone(), color, false, is_local, cx)
                             })
+                            .when(creating_in.as_ref() == Some(dir), |element| {
+                                element.child(self.render_naming_row(0, cx))
+                            })
                             .children(entries.into_iter().enumerate().map(|(row_index, entry)| {
+                                if renaming.as_ref() == Some(&entry.path) {
+                                    return self.render_naming_row(0, cx);
+                                }
                                 let is_dir = entry.is_dir;
                                 let is_ignored = entry.ignored;
                                 let path = entry.path.clone();
@@ -690,16 +804,18 @@ impl Workspace {
                                         MouseButton::Right,
                                         cx.listener({
                                             let path = entry.path.clone();
-                                            move |this, event: &MouseDownEvent, _window, cx| {
-                                                this.show_context_menu(
+                                            move |this, event: &MouseDownEvent, window, cx| {
+                                                this.right_click_entry(
                                                     path.clone(),
                                                     is_dir,
-                                                    event.position,
+                                                    event,
+                                                    window,
                                                     cx,
                                                 )
                                             }
                                         }),
                                     )
+                                    .into_any_element()
                             }))
                     }),
             )
@@ -997,6 +1113,7 @@ impl Workspace {
         let item = move |id: &'static str, label: String| {
             div()
                 .id(id)
+                .debug_selector(move || id.to_string())
                 .flex()
                 .items_center()
                 .px(px(9.))
@@ -1010,9 +1127,6 @@ impl Workspace {
         };
 
         let mut menu_box = div()
-            .absolute()
-            .left(position.x)
-            .top(position.y)
             .w(px(210.))
             .bg(bg2)
             .border_1()
@@ -1030,6 +1144,76 @@ impl Workspace {
             .active_slot()
             .map(|slot| slot.remote_host.is_none())
             .unwrap_or(false);
+        // ── 余白の右クリック（2026-10-05 本人要望）: そのフォルダの中への操作だけを並べる。名前の変更・
+        // 複製・ゴミ箱・ダウンロードのような項目そのものへの操作は出さない（ツリーの余白 = ルートなので、
+        // プロジェクトごと消す入口を余白に置かない）。
+        if menu.background {
+            if is_local {
+                for (id, label, kind) in [
+                    (
+                        "ctx-new-file",
+                        i18n::t!("explorer.ctx_new_file"),
+                        NamingKind::NewFile,
+                    ),
+                    (
+                        "ctx-new-dir",
+                        i18n::t!("explorer.ctx_new_dir"),
+                        NamingKind::NewDir,
+                    ),
+                ] {
+                    let base = path.clone();
+                    menu_box = menu_box.child(item(id, label).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.start_naming(kind, base.clone(), true, window, cx)
+                        }),
+                    ));
+                }
+                let reveal_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-reveal", i18n::t!("explorer.ctx_reveal")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.reveal_in_finder(&reveal_path, cx)
+                        }),
+                    ),
+                );
+            }
+            let in_project = self
+                .active_worktree()
+                .is_some_and(|worktree| path.starts_with(worktree.root()));
+            if in_project {
+                let search_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-search-folder", i18n::t!("explorer.ctx_search_folder"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_folder_search(search_path.clone(), window, cx)
+                            }),
+                        ),
+                );
+            }
+            if !is_local {
+                let upload_dir = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-upload", i18n::t!("explorer.ctx_upload_into")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.upload_via_dialog(upload_dir.clone(), cx)
+                        }),
+                    ),
+                );
+            }
+            let copy_path = path.clone();
+            menu_box = menu_box.child(
+                item("ctx-copy", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| this.copy_path(&copy_path, cx)),
+                ),
+            );
+            return Some(self.explorer_menu_backdrop(menu_box, position, cx));
+        }
         if is_dir {
             // 「ここをプロジェクトとして開く」= 現在のレールに再ルート（remote は同じ接続を再利用）。
             // browse（home 接続）で辿ったフォルダを「開く」の主導線。新窓は下の項目で明示。
@@ -1236,24 +1420,46 @@ impl Workspace {
             ),
         );
 
-        // 透明バックドロップ（外側クリックで閉じる）。メニューはその子（最前面）。
-        Some(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
-                )
-                .child(menu_box)
-                .into_any_element(),
-        )
+        Some(self.explorer_menu_backdrop(menu_box, position, cx))
+    }
+
+    /// 右クリックメニューを押した位置（窓座標）に出し、透明バックドロップに載せる（外側クリックで
+    /// 閉じる）。メニューはその子（最前面）。
+    fn explorer_menu_backdrop(
+        &self,
+        menu_box: gpui::Div,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
+            )
+            .child(
+                // 窓の下端・右端で切れないよう押し戻す（余白は下の方を押すことが多い・端末のメニューと同じ）。
+                gpui::anchored()
+                    .position(position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        // メニューの中の押下は下（エクスプローラ・行）へ通さない。通すと、項目を押したのと
+                        // 同じ押下でドックがフォーカスを取り返し、「新規フォルダ」等の入力欄へ打った文字が
+                        // 入らない（下の行の click も走る）。項目を押した後に閉じるのはメニュー自身。
+                        menu_box.occlude().on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
+                        ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// 「変更を破棄」の確認（D16）。取り消せない操作なので押した後に一度だけ聞く。
