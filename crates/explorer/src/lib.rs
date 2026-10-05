@@ -24,6 +24,11 @@ pub struct TreeRow {
 pub struct ContextMenu {
     pub path: PathBuf,
     pub is_dir: bool,
+    /// 行の外（余白）を押した。`path` はそのビューの文脈フォルダ（ツリー = ルート / カラム =
+    /// その段 / アイコン = 現在フォルダ・D&D の余白と同じ）で、メニューにはフォルダの中への操作
+    /// （新規作成・Finder で表示 等）だけを出す。名前の変更・ゴミ箱のような項目そのものへの操作は
+    /// 出さない（ツリーの余白から根のフォルダを消させない）。
+    pub background: bool,
     pub position: Point<Pixels>,
 }
 
