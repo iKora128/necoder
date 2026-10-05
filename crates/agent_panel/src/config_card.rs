@@ -11,7 +11,8 @@
 //! - エージェントは会話を始める前だけ変えられる（Tab / 一覧）。Chat と席のスレッドでは変えない
 //! - 色相を使わない（選択と印は bg3・つまみは fg0・Fast mode の稲妻も線の絵）
 //!
-//! エージェントの行の名前の右は、issue #38 H4 の「接続」の欄が入る場所（今は何も描かない）。
+//! エージェントの行の名前の右は issue #38 H4 の「接続」の欄の場所で、今は使う接続の名前を出す（H3・
+//! チップにも出す。前はエージェントのピルに添えていた）。在庫は接続とログインごと（[`StockKey`]）。
 
 use super::*;
 use gpui::{Bounds, Div, MouseDownEvent, Pixels};
@@ -251,10 +252,10 @@ impl AgentPanel {
     }
 
     /// カードに出すこのスレッドの広告（スレッド自身か在庫・捏造しない）。
-    fn card_configs(&self) -> &[ConfigOption] {
+    fn card_configs(&self, cx: &App) -> &[ConfigOption] {
         self.threads
             .get(self.active)
-            .map(|thread| self.stocked_configs(thread))
+            .map(|thread| self.stocked_configs(thread, cx))
             .unwrap_or_default()
     }
 
@@ -271,13 +272,15 @@ impl AgentPanel {
 
     /// カードを開けるか: 選べる物が 1 つでもある（広告か、会話の前のエージェント）。無ければチップは
     /// 押せない（押せるのに何も出ない面を作らない）。
-    pub(crate) fn config_card_openable(&self) -> bool {
-        self.card_agent_switchable() || !self.card_configs().is_empty()
+    pub(crate) fn config_card_openable(&self, cx: &App) -> bool {
+        self.card_agent_switchable() || !self.card_configs(cx).is_empty()
     }
 
     /// カードを開いてキーをカードへ移す。ほかの浮かぶ面（ピルのメニュー・＋context）とは排他。
     pub(crate) fn open_config_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.config_card_openable() {
+        // 一覧を見ようとした時に、ログインを替えていないか確かめ直す（ピルのメニューと同じ・issue #38 H3）。
+        self.refresh_login_fingerprint(cx);
+        if !self.config_card_openable(cx) {
             return;
         }
         self.open_menu = None;
@@ -314,7 +317,7 @@ impl AgentPanel {
 
     /// 一覧の行（モデル / エージェント / select の選択肢）。
     fn card_rows(&self, page: &CardPage, cx: &App) -> Vec<ListRow> {
-        let configs = self.card_configs();
+        let configs = self.card_configs(cx);
         match page {
             CardPage::Main => Vec::new(),
             CardPage::Models => select_rows(
@@ -338,9 +341,9 @@ impl AgentPanel {
     }
 
     /// 一覧の今の値（✓ を付ける行の値）。
-    fn card_current(&self, page: &CardPage) -> Option<SharedString> {
+    fn card_current(&self, page: &CardPage, cx: &App) -> Option<SharedString> {
         let thread = self.threads.get(self.active)?;
-        let configs = self.stocked_configs(thread);
+        let configs = self.stocked_configs(thread, cx);
         match page {
             CardPage::Main => None,
             CardPage::Models => {
@@ -368,7 +371,7 @@ impl AgentPanel {
         if rows.is_empty() {
             return;
         }
-        let current = self.card_current(&page);
+        let current = self.card_current(&page, cx);
         let at = current
             .and_then(|current| rows.iter().position(|row| row.value == current))
             .unwrap_or(0);
@@ -412,7 +415,7 @@ impl AgentPanel {
                 return;
             };
             let Some(config) = self
-                .stocked_configs(thread)
+                .stocked_configs(thread, cx)
                 .iter()
                 .find(|config| config.category == ConfigCategory::ThoughtLevel)
             else {
@@ -442,7 +445,7 @@ impl AgentPanel {
     /// （sticky に value_id・セッションへ送る）で決める。
     fn set_card_effort(&mut self, value_id: SharedString, cx: &mut Context<Self>) {
         let to = self.threads.get(self.active).and_then(|thread| {
-            self.stocked_configs(thread)
+            self.stocked_configs(thread, cx)
                 .iter()
                 .find(|config| config.category == ConfigCategory::ThoughtLevel)
                 .map(|config| effort_meter::EffortScale::of(config, &value_id).fraction())
@@ -483,7 +486,7 @@ impl AgentPanel {
                 return;
             };
             let Some(config) = self
-                .stocked_configs(thread)
+                .stocked_configs(thread, cx)
                 .iter()
                 .find(|config| config.config_id == config_id)
             else {
@@ -560,20 +563,29 @@ impl AgentPanel {
         let Some(thread) = self.threads.get(self.active) else {
             return div().into_any_element();
         };
-        let configs = self.stocked_configs(thread);
+        let configs = self.stocked_configs(thread, cx);
         let parts = chip_summary(thread, configs);
         let open = self.config_card.is_some();
-        let openable = self.config_card_openable();
+        let openable = self.config_card_openable(cx);
         let text_color = if open { theme.fg0 } else { theme.fg1 };
         let tip = if openable {
             i18n::t!("agent.card_chip_tip")
         } else {
             i18n::t!("agent.pill_awaiting_agent")
         };
-        let tip = format!(
+        let mut tip = format!(
             "{}\n{tip}",
             summary_text(&parts, configs, thread.agent.as_ref())
         );
+        // 接続（issue #38 H3 / §5-2）: Claude Code に他社の接続を挿しても中身を隠さない。エージェントの
+        // 後・要約の前に薄い文字で出す（動いているセッションは立てた時の接続・まだなら今の設定で使う接続）。
+        let connection = self.active_connection_name(cx);
+        if let Some(connection) = &connection {
+            tip = format!(
+                "{tip}\n{}",
+                i18n::t!("agent.pill_connection", "connection" => connection.as_ref())
+            );
+        }
         let mut summary = div()
             .flex()
             .items_center()
@@ -584,8 +596,16 @@ impl AgentPanel {
         if parts.is_empty() {
             summary = summary.child(div().min_w_0().truncate().child(thread.agent.clone()));
         }
+        if let Some(connection) = &connection {
+            let text = if parts.is_empty() {
+                format!("· {connection}")
+            } else {
+                connection.to_string()
+            };
+            summary = summary.child(div().min_w_0().truncate().text_color(theme.fg2).child(text));
+        }
         for (index, part) in parts.into_iter().enumerate() {
-            if index > 0 {
+            if index > 0 || connection.is_some() {
                 summary = summary.child(div().flex_none().text_color(theme.fg2).child("·"));
             }
             summary = match part {
@@ -695,7 +715,7 @@ impl AgentPanel {
         let Some(thread) = self.threads.get(self.active) else {
             return div();
         };
-        let configs = self.stocked_configs(thread);
+        let configs = self.stocked_configs(thread, cx);
         let switchable = self.card_agent_switchable();
         let model = configs
             .iter()
@@ -708,7 +728,8 @@ impl AgentPanel {
             .filter(|config| config.category == ConfigCategory::Other)
             .collect();
 
-        // ① エージェント。名前の右は issue #38 H4 の「接続」の欄が入る場所（今は何も描かない）。
+        // ① エージェント。名前の右は issue #38 H4 の「接続」の欄の場所で、使う接続の名前を出す（H3）。
+        let connection = self.active_connection_name(cx);
         let mut agent_row = div()
             .id("card-agent")
             .flex()
@@ -720,6 +741,15 @@ impl AgentPanel {
             .text_color(theme.fg1)
             .child(agent_badge(&thread.agent, 14.))
             .child(div().min_w_0().truncate().child(thread.agent.clone()))
+            .when_some(connection, |element, connection| {
+                element.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(format!("· {connection}"))),
+                )
+            })
             .child(div().flex_1());
         if switchable {
             agent_row = agent_row
@@ -1167,13 +1197,13 @@ impl AgentPanel {
     ) -> impl IntoElement {
         let theme = self.theme.clone();
         let rows = self.card_rows(page, cx);
-        let current = self.card_current(page);
+        let current = self.card_current(page, cx);
         let title: SharedString = match page {
             CardPage::Main => SharedString::default(),
             CardPage::Models => i18n::t!("agent.card_list_models").into(),
             CardPage::Agents => i18n::t!("agent.card_list_agents").into(),
             CardPage::Choices(config_id) => self
-                .card_configs()
+                .card_configs(cx)
                 .iter()
                 .find(|config| config.config_id == *config_id)
                 .map(|config| SharedString::from(config.name.clone()))
@@ -1459,7 +1489,9 @@ mod probe {
 #[cfg(debug_assertions)]
 impl AgentPanel {
     /// 開発用（`NECODER_CONFIG_CARD_PROBE`・`;` 区切りで順に実行）: 設定のカードを offscreen で撮る。
-    /// エージェントは起こさず、見本の広告を本番と同じ `on_event` で流す。
+    /// エージェントは起こさず、見本の広告を本番と同じ `on_event` で流す。流す前にログインの指紋を確かめる
+    /// （本番はセッションを立てる時に確かめてから広告を受ける。確かめずに流すと在庫が指紋 0 の鍵に入り、
+    /// カードやピルのメニューを開いた時の確かめ直しで別の鍵になって見えなくなる・[`StockKey`]）。
     ///
     /// `claude` / `claude-free`（Fast が使えないプラン）/ `codex` = 広告を流す / `opus-high-fast` =
     /// Opus 4.8・High・Fast on を選ぶ / `plan` = Collaboration mode を Plan に / `fixed` = 会話を始めた
@@ -1474,6 +1506,7 @@ impl AgentPanel {
         for command in commands.split(';').map(str::trim) {
             match command {
                 "claude" | "claude-free" => {
+                    self.refresh_login_fingerprint(cx);
                     self.on_event(
                         active,
                         AgentEvent::Modes {
@@ -1500,6 +1533,7 @@ impl AgentPanel {
                         thread.effort = SharedString::default();
                         thread.options.clear();
                     }
+                    self.refresh_login_fingerprint(cx);
                     self.on_event(
                         active,
                         AgentEvent::Modes {

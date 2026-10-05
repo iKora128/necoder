@@ -94,6 +94,13 @@
 | ↳ **使用量の鍵**（レート制限の値を分ける単位 = エージェント + 動かしている場所 + 認証の置き場 + 認証に関わる env の指紋。鍵が違えば値を混ぜない・R08。指紋はハッシュだけで秘密の値は持たない。セッションを立てた時に決めてスレッドに持たせ、そのセッションの知らせはその鍵へ） | `agent_panel::usage::UsageKey`（`profile` / `credential_fingerprint`・範囲は `CREDENTIAL_WORDS`）/ `Thread.usage_key` / `AgentPanel::active_usage_key` | —（見出しに `dev-box` / 置き場のパス / `設定の env #1a2b3c` を添える） | —（`settings env #1a2b3c`） |
 | ↳ **窓**（レート制限の期間） | `LimitWindow::{FiveHour, Weekly, Named, Minutes}` | 5 時間枠 / 週枠 / 〈名前〉の週枠 | 5-hour window / Weekly window / Weekly (〈name〉) |
 | ↳ **使用量の統計**（日付 × エージェントの集計画面） | `usage_view::render_usage_stats` / `Storage::daily_usage` | 使用量の統計 | Usage statistics |
+| **接続**（エージェントがモデルの API を呼ぶ口と、その契約。issue #38 の「エージェント × 接続」の接続の側。宛先は settings.json の `connections`（**user の層だけ**）、キーは OS のキーチェーン） | `settings_core::ConnectionSetting` / `acp_client::connections::Connection` / 設定 `connections` / `agent_connections` / `settings::connections`（面） | 接続 / 接続を追加 / 自分のログイン | Connection / Add connection / Own login |
+| ↳ **ひな形**（各社の口と形式とキーの載せ方の組。GLM Coding Plan・Kimi Code・DeepSeek API … と汎用の OpenAI 互換 / Anthropic 互換。従量課金とコーディングプランで口とキーが別の会社は別のひな形） | `acp_client::connections::PRESETS` / `Preset` | ひな形 | Template |
+| ↳ **形式**（接続の API の話し方） | `connections::Protocol` / `settings_core::ConnectionProtocol` | 形式 / Anthropic 互換 / OpenAI 互換 | API format / Anthropic-compatible / OpenAI-compatible |
+| ↳ **キー**（接続の API キー。OS のキーチェーンの `necoder.connection.<id>`。settings.json に書かない・画面に出さない・入れ方はクリップボードから貼るだけ） | `connections::secrets::SecretStore` / `Keychain` / `settings::install_os_keychain` | API キー / クリップボードから貼る | API key / Paste from clipboard |
+| ↳ **渡し方**（接続をエージェントへ渡す方法。`providers/set` を広告する Claude Code のアダプタは `session/new` / `session/load` の前に送り、他は起動時の env。手元のエージェントだけ） | `connections::Harness` / `ConnectionLaunch` / `ProviderRoute` | （UI には出さない語） | — |
+| ↳ **在庫の鍵**（モデル・思考量・権限モードの在庫を分ける単位 = 使用量の鍵（接続を含む）+ ログインの指紋。別の接続・別のログインのモデルを出さない） | `agent_panel::StockKey` / `Thread.stock_key` / `connections::login_fingerprint` | — | — |
+| **リポジトリに決めさせないキー**（project 層 = リポジトリの `.necoder/settings.json` から読まない設定。接続・起動コマンド・MCP・権限の既定など） | `settings_core::USER_ONLY_KEYS` / `SettingsStore::ignored_project_keys` | — | — |
 | **遷移スナップショット**（状態遷移時の 1 行） | `digest` / `digest_tail` / `Thread.digest` | （文そのもの・ラベル無し） | （no label） |
 | **要対応**（Fleet サイドバー最上段・裁く列。← 管制の要対応キュー） | `AttentionItem` / `attention_queue` | 要対応 | Attention |
 | **統合パイプライン**（TaskPhase 列の帯） | `render_pipeline` | 統合パイプライン | Integration pipeline |

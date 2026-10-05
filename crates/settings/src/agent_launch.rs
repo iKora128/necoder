@@ -203,8 +203,9 @@ impl SettingsView {
     }
 
     /// 外したエージェントが落とした binary（`external_agents/binary/<id>`・H2-b）を背景で消す。
-    /// **消す直前に settings.json（user と project の層）を読み直し**、同じ id がまだどこかに書かれて
-    /// いれば消さない（書き直した・プロジェクトの設定で足している）。消すのは necoder が置いた物だけ
+    /// **消す直前に settings.json を読み直し**、同じ id がまだ書かれていれば消さない（書き直した）。
+    /// リポジトリの `.necoder/settings.json` の `agent_servers` は読まない（`USER_ONLY_KEYS`）ので、そこに
+    /// 書いてあっても使われていない。消すのは necoder が置いた物だけ
     /// （[`acp_client::deploy::remove_deployed`]・置き場の外や symlink の先は触らない）。消せなかった時は
     /// 知らせる（次に同じ版を足せば、置いてある物をそのまま使うだけ）。
     fn remove_agent_binaries(&mut self, agent_id: &str, cx: &mut Context<Self>) {

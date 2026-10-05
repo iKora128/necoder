@@ -8,24 +8,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 ### Added
 
 - **Manual: Pi and DeepSeek Harness**: The manual now explains how to add Pi and DeepSeek Harness, how to sign in to each, and what works differently from the built-in agents. The DeepSeek Harness example sets `DSH_MODEL`, the variable `dsh-acp` reads, instead of `DEEPSEEK_MODEL`.
+- **Connections**: Run an agent on another company's API or coding plan instead of its own login. In Settings › Connections, add a connection from a template (GLM Coding Plan, Kimi Code, Kimi API, MiniMax, Qwen Coding Plan, Qwen API, Xiaomi MiMo, DeepSeek API, OpenRouter, Ollama, or any other OpenAI- or Anthropic-compatible API), paste its API key from the clipboard, and choose which connection each agent uses. The key goes into the OS keychain and never into settings.json, and it is never shown on screen. necoder never calls an API with it; it only hands it to the agent it starts. Claude Code gets the connection through its adapter's `providers/set` (older adapters get environment variables), OpenCode through its built-in provider, and DeepSeek Harness through its DeepSeek route. The settings chip under the composer names the connection, for example "Claude Code · GLM Coding Plan". Connections are not passed to agents started over SSH, and Linux can't store keys yet.
 
 ### Changed
 
 - **Fleet: integrate when the base has unrelated local changes**: Integrate no longer stops just because the base (your main worktree) has uncommitted changes or untracked files. If the Task does not touch the files you changed, it integrates and leaves your changes exactly as they were. It still stops when the Task touches a file you changed, when a file the Task adds would land on an untracked file, or when the base has staged changes. The toast and the Attention card now name those files.
 - **"Now" on a queued message steers the running turn**: If the agent supports it (Claude Code and Codex), the button on a queued message is now **Steer now**. It hands the message to the running turn instead of interrupting it, so work in progress, such as a running command, is not thrown away. The command finishes, and then the agent reads your message. The message appears in the conversation where the agent took it, and the turn continues as one turn. Agents that do not support it keep **Interrupt & send**. Slash commands are always sent that way, because they only work at the start of a turn.
 - **Settings card under the composer**: The Agent, Model and Effort pills under the composer are now one chip. Click it or press ⌘/ in the composer to open a card. The card shows every setting the agent advertises, including on/off settings such as Claude Code's and Codex's Fast mode, which you could not choose before. Press ↑↓ for the model list, ←→ to change the effort, Tab to switch the agent (before the conversation starts) and Esc to close. The effort is a digital meter whose LEDs light up to the chosen level; the agent's own default sits off the scale. The chip shows only values that differ from the agent's defaults, such as `Opus 4.8 · High · ⚡`. The permission mode stays as its own pill next to the chip. Fast mode and other settings are remembered per agent, like the model and effort.
+- **Model lists follow the connection and the login**: The model, effort and mode choices shown before a session starts are kept per connection and per login. A new tab no longer offers another connection's models, or the models of an account you have logged out of.
+
+### Security
+
+- **A repository can no longer redirect your agents**: A project's `.necoder/settings.json` no longer sets `connections`, `agent_connections`, `agent_servers`, `mcp_servers`, `agent_permission_default`, `agent_config_defaults`, `allow_terminal_send`, `terminal_shell`, `terminal_shell_args`, `captain_agent`, `claude_ai_connectors` or `chat`. Only your user settings decide them. In a session that carries a connection's key, a project's `.necoder/task.env` can't set API endpoint, proxy, certificate or code-loading variables.
 
 ### 日本語
 
 #### 追加
 
 - **マニュアル：Pi と DeepSeek Harness**：Pi と DeepSeek Harness の足し方、それぞれのログインのしかた、組み込みのエージェントとの違いをマニュアルに書きました。DeepSeek Harness の例は、`dsh-acp` が読まない `DEEPSEEK_MODEL` をやめて `DSH_MODEL` にしました。
+- **接続**：エージェントを、自分のログインではなく各社の API やコーディングプランで動かせます。設定 › 接続 で、ひな形（GLM Coding Plan・Kimi Code・Kimi API・MiniMax・Qwen Coding Plan・Qwen API・Xiaomi MiMo・DeepSeek API・OpenRouter・Ollama・その他の OpenAI 互換 / Anthropic 互換）から接続を足し、API キーをクリップボードから貼って、エージェントごとに使う接続を選びます。キーは OS のキーチェーンに入り、settings.json には書かず、画面にも出しません。necoder はこのキーで API を呼ばず、起こすエージェントに渡すだけです。Claude Code にはアダプタの `providers/set`（古いアダプタには環境変数）、OpenCode には組み込みのプロバイダ、DeepSeek Harness には DeepSeek の経路で渡します。composer の下の設定のチップに「Claude Code · GLM Coding Plan」のように接続の名前が出ます。SSH 先で起こすエージェントには渡しません。Linux はまだキーを保存できません。
 
 #### 変更
 
 - **Fleet：統合先の手元の変更と重ならなければ統合する**：統合先（main の作業ツリー）に未コミットの変更や未追跡のファイルがあるだけでは、統合を断らなくなりました。Task が手元の変更と同じファイルを触らなければ統合し、手元の変更はそのまま残ります。Task が手元で変えたファイルを触る時、Task が足すファイルの場所に未追跡のファイルがある時、統合先にステージした変更がある時は、今までどおり止まります。その時はトーストと要対応のカードでファイルを名指しします。
 - **送信待ちの「今すぐ」が実行中のターンに差し込むように**：エージェントが対応していれば（Claude Code と Codex）、送信待ちの行のボタンが **今すぐ差し込む** になります。ターンを中断せずに文を渡すので、走っているコマンドなどの途中の作業を捨てません。コマンドは最後まで走り、そのあとでエージェントが文を読みます。文はエージェントが受け取った位置で会話に入り、ターンは 1 つのまま続きます。対応していないエージェントは今までどおり **中断して今すぐ** です。スラッシュコマンドはターンの頭でしか効かないので、いつもこちらで送ります。
 - **composer の下の設定のカード**：composer の下にあった Agent・Model・Effort のピルを、チップ 1 つにまとめました。チップを押すか、composer の中で ⌘/ を押すとカードが開きます。カードには、エージェントが送ってくる設定がすべて並びます。これまで選べなかった Claude Code と Codex の Fast mode のような on/off の設定も含みます。↑↓ でモデルの一覧、←→ で思考量、Tab でエージェントの切り替え（会話を始める前だけ）、Esc で閉じます。思考量は、選んだ段まで LED が灯るデジタルメーターで表します（エージェントに任せる Default は目盛りの外）。チップには、エージェントの既定から外れた値だけを `Opus 4.8 · High · ⚡` のように出します。権限モードはチップの右に、今までどおりピルで残します。Fast mode などの設定も、モデルや思考量と同じくエージェントごとに覚えます。
+- **モデルの一覧は接続とログインごと**：セッションを開く前に出すモデル・思考量・モードの選択肢を、接続ごと・ログインごとに分けて覚えます。新しいタブに、別の接続のモデルや、ログアウトしたアカウントのモデルを出しません。
+
+#### セキュリティ
+
+- **リポジトリがエージェントの行き先を変えられなくなりました**：プロジェクトの `.necoder/settings.json` の `connections`・`agent_connections`・`agent_servers`・`mcp_servers`・`agent_permission_default`・`agent_config_defaults`・`allow_terminal_send`・`terminal_shell`・`terminal_shell_args`・`captain_agent`・`claude_ai_connectors`・`chat` は読みません。決めるのはユーザー設定だけです。接続のキーを渡すセッションでは、プロジェクトの `.necoder/task.env` で API の宛先・プロキシ・証明書・読み込むコードの変数を変えられません。
 
 ## [0.1.24] - 2026-10-01
 

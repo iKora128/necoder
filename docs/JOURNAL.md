@@ -3882,6 +3882,25 @@
 - 追記（同じ日）: 本人「think のところ…ゲージよ。線と棒だけではつまらない」「もう少しモダンでかっこいいやつに」。mock に回転計・段の棒・リングを並べたが「線と棒だけでなく」と戻り、光とグラデーションで作り直した 4 案（グロウ・リング / チャージ・セル / デジタル・メーター / リキッド）から本人が M-3 デジタル・メーターを選んだ（「めっちゃいい」・光は色の原則どおり白）。`config_card/effort_meter.rs`: 250° の弧に LED 34 本、`default` は目盛りの外（LED を全部消して横の札）、値を変えた時だけ走って行き過ぎて戻る。GPUI の `with_animation` は easing の戻り値が 0..=1 を外れると debug ビルドで止まる（`debug_assert`）ので、行き過ぎは線形の delta から自分で計算する。`PathBuilder::stroke` は端が四角（lyon の `LineCap` を gpui が出していない）なので、丸い端の LED は多角形で塗る。
 - 次: #44（steer）と #47（在庫の鍵 `StockKey`・接続）が main に入ったら、カードの在庫を `StockKey` で引き、#47 がエージェントのピルに出していた接続名をカードのエージェントの行（H4 の欄の場所）とチップに移す。本人の実機で ⌘/ と Fast mode の体感を見る。
 
+## 2026-10-02 — 接続（issue #38 H3）: providers/set・キーチェーン・モデル在庫の鍵・project 層から読まないキー
+
+- 発端（本人）: #38 H3 を進める。設計の正は issue の §2.2・§3.2・§5、背景は zeron の調べ（`/tmp/zeron-report`）の §2 の 3・5 と §4。
+- やったこと:
+  - 安全の土台: `settings_core::USER_ONLY_KEYS`（接続・`agent_servers`・`mcp_servers`・権限の既定と記憶・`allow_terminal_send`・`terminal_shell(_args)`・`captain_agent`・`claude_ai_connectors`・`chat`）を `SettingsStore::load` が project 層から外して重ねる。接続のキーを渡すセッションでは task.env の宛先・プロキシ・証明書・差し込むコードの変数を読まない（`connections::guarded_from_task_env`）。
+  - 接続: 型は `settings_core::ConnectionSetting`（user の層だけ）、キーは `acp_client::connections::secrets`（keyring 3.6・macOS / Windows。macOS の有無は security-framework の属性だけの検索で、許可のダイアログを出さない）。ひな形 12 種（`PRESETS`・各社の手順で確かめた URL）。
+  - 注入（`connections::Harness`）: Claude Code は `initialize` の `agentCapabilities.providers` を見て `session/new` / `session/load` の前に `providers/set`、広告しなければセッションを開かずに畳んで env で 1 回だけ起こし直す（`run_session_on` → `run_session_attempt` の 2 回）。DeepSeek Harness は `DSH_PROVIDER` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`、OpenCode はプロバイダの env + `OPENCODE_CONFIG_CONTENT` の `enabled_providers`。
+  - 在庫: `AgentPanel::catalog` の鍵を `StockKey`（使用量の鍵 + 接続 + ログインの指紋）に。slash コマンドと会話名は `HarnessStock`（表示名のまま）。使用量の鍵（R08）にも接続を足した。設定が変わったら、まだ使っていない先張りを畳んで張り直す。
+  - 設定 › 接続（`crates/settings/src/connections.rs`）とピルの `· 接続の名前`。
+- 検証: settings_core（project 層の 12 キーが効かない・キーを書かない）・acp_client（偽エージェント: 広告する相手は `initialize → providers/set → session/new|load`・キーは env に無い / 広告しない相手は env で起こし直す / task.env で宛先を変えられない）・settings（面で足すとキーはキーチェーンだけ・settings.json に出ない）・agent_panel（接続を替えると在庫が分かれる・戻すと戻る）。実アダプタ: `cargo run -p acp_client --example probe_providers` で claude-agent-acp 0.81.2 と 0.84.0 に `providers/set`（`example.invalid`・偽のキー・prompt なし）→ `providers/list` の current に反映。隔離 offscreen（`NECODER_SECRET_STORE=memory:glm`・`NECODER_CHAT_PROBE="settings:connections"` / `"settings-connection:kimi-code"`）で面とダイアログを目視。
+- 学び/罠:
+  - claude-agent-acp の `providers/set` は**プロセス単位**（`sessionId` を持たない・`providerId` は `main` だけ・`apiType` は anthropic / bedrock / vertex で openai は断る）。キーの欄は無く、ヘッダで渡す。アダプタは `Authorization: Bearer acp-proxy` を必ず付けるので、キーは `Authorization` に載せて置き換える。セッションの設定の env にも入れるので、`.claude/settings.json` の env より強い。
+  - Claude Code は `ANTHROPIC_BASE_URL` だけを足すと**保存済みの claude.ai ログインのまま**他社へ送る。env で渡す時は必ずトークンと一緒に、手元の `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` を空にしてから。
+  - Kimi Code は `x-api-key`（`ANTHROPIC_API_KEY`）の口。従量課金とコーディングプランで口とキーが別（Kimi・Qwen は混ぜると 401）なので、別のひな形にした。
+  - DeepSeek Harness の DeepSeek の経路は Anthropic Messages（`DEEPSEEK_BASE_URL` は Messages の根）。`OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` は読まない。dsh は手元に無いので実機は未確認。
+  - Rust の ACP crate 1.3 は `unstable_llm_providers` を持たない。スキーマ crate の feature を開けば `agentCapabilities.providers` と要求の型は使える（送るのは `UntypedMessage`）。
+  - `cargo fmt --all` は main の fmt していないファイル（fleet_stage.rs など）まで整形する。触っていないファイルは戻した（並行の作業と衝突させない）。
+- 次: H4（コンポーザの 2 軸チップと `session/load` による途中切り替え・`providers/set` はプロセス単位なので同じプロセスで切り替えられる）。dsh・OpenCode の実機での確かめ。Linux のキーチェーン（Secret Service）。
+
 ## 2026-10-03 — 開いた後に `git init` したフォルダでも Task が系譜に載るようにする
 
 - 発端（本人・ドッグフーディング）: engineer_education_tool の開発中に、Captain の分解案から切った Task が統合先の系譜から分離した。
