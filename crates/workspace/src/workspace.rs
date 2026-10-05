@@ -1243,11 +1243,18 @@ impl TaskSpace {
     /// 台帳（`task_spaces`）の中身を重ねる。lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
     /// ただし Fleet で取り込んだ linked worktree（`task/` でないブランチ）は台帳の Task を正にする（O21・再起動で
     /// 統合先扱いへ戻さない）。メインの作業ツリーは Task にしない。
-    fn overlay_stored(&mut self, record: &storage::TaskSpaceRecord) {
+    /// repository_id も worktree の現実（git の common dir）が正。台帳の値は git にまだ聞いていない
+    /// （空の）間だけ使う。古い形式（`.git` 無し）の値が台帳に残ると、本体と Task が別リポジトリに
+    /// 分かれて系譜に載らなくなる（2026-10-03 ユーザー報告）。返り値 = 台帳を書き直すべきか。
+    fn overlay_stored(&mut self, record: &storage::TaskSpaceRecord) -> bool {
         if record.kind == SpaceKind::Task && self.linked {
             self.kind = SpaceKind::Task;
         }
-        self.repository_id = record.repository_id.clone();
+        let stale_repository =
+            !self.repository_id.is_empty() && self.repository_id != record.repository_id;
+        if self.repository_id.is_empty() {
+            self.repository_id = record.repository_id.clone();
+        }
         self.title = SharedString::from(record.title.clone());
         self.phase = record.phase;
         self.base_oid = record.base_oid.clone();
@@ -1255,6 +1262,7 @@ impl TaskSpace {
         self.result_summary = record.result_summary.clone().map(SharedString::from);
         self.created_at_ms = record.created_at;
         self.parent = record.parent.clone().map(SpaceId);
+        stale_repository
     }
 
     fn to_record(&self, slot: &ProjectSlot) -> storage::TaskSpaceRecord {
@@ -2754,6 +2762,63 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// 台帳に古い形式の repository_id が残っていても、git に聞いた値を上書きしない（系譜が分かれない）。
+    /// まだ聞いていない（空の）間だけ台帳の値を使う。
+    #[test]
+    fn stored_repository_id_does_not_override_git() {
+        let space = |repository_id: &str| TaskSpace {
+            id: SpaceId("space-main".to_string()),
+            repository_id: repository_id.to_string(),
+            title: SharedString::from("maxwell"),
+            kind: SpaceKind::Integration,
+            phase: TaskPhase::Planned,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            created_at_ms: 0,
+            linked: false,
+            parent: None,
+            captain_origin: false,
+        };
+        let record = storage::TaskSpaceRecord {
+            id: "space-main".to_string(),
+            repository_id: "local:/work/maxwell".to_string(),
+            root: PathBuf::from("/work/maxwell"),
+            branch: Some("main".to_string()),
+            title: "maxwell".to_string(),
+            kind: SpaceKind::Task,
+            phase: TaskPhase::ReviewReady,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            parent: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let mut hydrated = space("local:/work/maxwell/.git");
+        assert!(
+            hydrated.overlay_stored(&record),
+            "食い違いは台帳の書き直しを求める"
+        );
+        assert_eq!(hydrated.repository_id, "local:/work/maxwell/.git");
+        assert!(
+            hydrated.is_integration(),
+            "メインの作業ツリーは Task にしない"
+        );
+
+        let mut restored = space("");
+        assert!(
+            !restored.overlay_stored(&record),
+            "git 未確認なら書き直さない"
+        );
+        assert_eq!(restored.repository_id, "local:/work/maxwell");
+
+        let mut same = space("local:/work/maxwell");
+        assert!(!same.overlay_stored(&record), "一致していれば書き直さない");
+    }
 
     /// Render 中の Host trait 呼び出しを local / remote の両方で検出する wrapper。
     /// 手元のファイルを「接続先」として見せる用途で、ほかの module のテストも使う。
