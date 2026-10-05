@@ -2820,6 +2820,65 @@ mod tests {
         assert!(!same.overlay_stored(&record), "一致していれば書き直さない");
     }
 
+    /// 開いた後に `git init` されたフォルダ: git の状態を読み直すとリポジトリ ID が git の値に揃う
+    /// （root の代用のままだと、後で切った Task が別リポジトリ扱いになり系譜から外れる）。
+    #[gpui::test]
+    fn repository_id_follows_git_init_after_opening(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!(
+            "necoder_repository_after_init_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        let before = workspace.read_with(cx, |workspace, _| {
+            workspace.project_sessions.projects[0]
+                .task_space
+                .repository_id
+                .clone()
+        });
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&project)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        let expected = workspace.read_with(cx, |workspace, _| {
+            let worktree = &workspace.project_sessions.projects[0].worktree;
+            project::repository_id_on(worktree.host().as_ref(), worktree.root())
+        });
+        assert_ne!(before, expected, "開いた時は git の値ではない");
+
+        workspace.update(cx, |workspace, cx| workspace.refresh_git_status_for(0, cx));
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.project_sessions.projects[0]
+                    .task_space
+                    .repository_id,
+                expected
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Render 中の Host trait 呼び出しを local / remote の両方で検出する wrapper。
     /// 手元のファイルを「接続先」として見せる用途で、ほかの module のテストも使う。
     pub(super) struct RenderAuditHost {
