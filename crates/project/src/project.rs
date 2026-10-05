@@ -17,6 +17,7 @@ use anyhow::{Context as _, Result};
 use host::{CommandOutput, CommandSpec, Host, LocalHost};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -1122,18 +1123,257 @@ fn merge_tree_conflicts(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-/// 明示的に merge-ready となった Task を IntegrationSpace へ統合する。
-/// dirty integration / preview conflict は拒否し、merge 自体が失敗した場合も自動 abort して戻す。
-/// 競合した時のエラーは [`MergeConflicts`] を持つ（競合したファイルが分かった時だけ）。
+/// 統合先の手元の変更のために断った統合（2026-10-03）。[`integrate_branch_on`] がこれを入れたエラーを
+/// 返し、UI は `downcast_ref` で見分けて、ファイルを名指しした自分の言葉の文を出す（この crate は i18n を
+/// 知らない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockingLocalChanges {
+    pub reason: BlockingReason,
+    /// 断る理由になったファイル（リポジトリの根からの相対パス・git の綴り・名前順）。
+    pub paths: Vec<String>,
+}
+
+/// 統合先の手元の変更で統合を断った理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockingReason {
+    /// ステージした変更がある。重なりに関係なく断る: 統合が途中で失敗した時の中止（`git merge --abort`
+    /// = `reset --merge` 相当）は、ステージした変更を元に戻せないことがある。git の merge（ort）も
+    /// index が HEAD と同じでなければ始めない。
+    Staged,
+    /// 統合が触るファイルを手元で変えている。または、統合がファイルを足すパスに未追跡のファイルがある。
+    Overlapping,
+}
+
+/// [`BlockingLocalChanges`] の文（CLI・MCP・台帳に出る）に並べるファイルの数。残りは数だけ出す。
+const BLOCKING_PATHS_SHOWN: usize = 10;
+
+impl std::fmt::Display for BlockingLocalChanges {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headline = match self.reason {
+            BlockingReason::Staged => {
+                "統合先にステージした変更があるため統合できません（コミットするかステージを解除してください）"
+            }
+            BlockingReason::Overlapping => {
+                "統合先の手元の変更が統合と重なるため統合できません（コミットするか退けてください）"
+            }
+        };
+        let shown: Vec<&str> = self
+            .paths
+            .iter()
+            .take(BLOCKING_PATHS_SHOWN)
+            .map(String::as_str)
+            .collect();
+        write!(formatter, "{headline}: {}", shown.join(", "))?;
+        let rest = self.paths.len().saturating_sub(BLOCKING_PATHS_SHOWN);
+        if rest > 0 {
+            write!(formatter, ", 他 {rest} ファイル")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BlockingLocalChanges {}
+
+/// 統合先の手元の変更（`git status`・パスはリポジトリの根からの相対・git の綴り）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LocalChanges {
+    /// ステージした変更（index が HEAD と違う。競合中と `git add -N` も含む）。
+    staged: Vec<String>,
+    /// 追跡しているファイルの、作業ツリーだけの変更（変更・削除・種類の変更）。
+    unstaged: Vec<String>,
+    /// 未追跡のファイル（`--untracked-files=all` なのでフォルダではなく 1 ファイルずつ）。
+    untracked: Vec<String>,
+}
+
+impl LocalChanges {
+    fn is_empty(&self) -> bool {
+        self.staged.is_empty() && self.unstaged.is_empty() && self.untracked.is_empty()
+    }
+}
+
+/// 統合先の手元の変更を読む。読めなければエラー（統合を止める側に倒す。[`git_status_on`] は読めないと
+/// 空＝変更なしを返すので、統合の判定には使わない）。
+fn local_changes_on(host: &dyn Host, dir: &Path) -> Result<LocalChanges> {
+    let output = run_git(
+        host,
+        dir,
+        [
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--no-renames",
+            "-z",
+        ],
+    )
+    .context("git status の実行に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "統合先の変更を読めない: {}",
+        git_fail_message(&output)
+    );
+    Ok(parse_local_changes(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+/// `git status --porcelain=v1 -z --no-renames` を [`LocalChanges`] に分ける。XY の X = index・Y = 作業ツリー。
+fn parse_local_changes(stdout: &str) -> LocalChanges {
+    let mut changes = LocalChanges::default();
+    for entry in stdout.split('\0') {
+        // レイアウト: XY + ' ' + path（`-z` は path をクォートしない）。
+        let bytes = entry.as_bytes();
+        if bytes.len() < 4 || bytes[2] != b' ' {
+            continue;
+        }
+        let path = entry[3..].to_string();
+        match (bytes[0], bytes[1]) {
+            (b'?', b'?') => changes.untracked.push(path),
+            (b'!', b'!') => {}
+            // `git add -N`（中身の無い印だけを index に置いた）は ` A`。index が HEAD と違い、git の merge も断る。
+            (b' ', b'A') => changes.staged.push(path),
+            (b' ', _) => changes.unstaged.push(path),
+            _ => changes.staged.push(path),
+        }
+    }
+    changes
+}
+
+/// 統合が触るパス（2026-10-03）: 統合先の HEAD と `branch` の分岐点から `branch` までの差分。分岐点が
+/// 複数ある（criss-cross）時は全部の和。merge が作業ツリーに書くのはこの内側だけ（統合先も同じ変更を
+/// 持っていれば書かないので、git の線より少し広い）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct IntegrationTouches {
+    /// 統合が変える・消す・足すパスの全部。
+    paths: BTreeSet<String>,
+    /// そのうち `branch` が足したパス（未追跡のファイルとの重なりはこれだけで見る）。
+    added: BTreeSet<String>,
+}
+
+fn integration_touches_on(
+    host: &dyn Host,
+    integration_dir: &Path,
+    branch: &str,
+) -> Result<IntegrationTouches> {
+    let output = run_git(
+        host,
+        integration_dir,
+        ["merge-base", "--all", "HEAD", branch],
+    )
+    .context("git merge-base の実行に失敗")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let bases: Vec<&str> = stdout.split_whitespace().collect();
+    anyhow::ensure!(
+        output.success() && !bases.is_empty(),
+        "統合が触るファイルを調べられません（統合先と {branch} の分岐点が無い）: {}",
+        git_fail_message(&output)
+    );
+    let mut touches = IntegrationTouches::default();
+    for base in bases {
+        let output = run_git(
+            host,
+            integration_dir,
+            [
+                "--no-optional-locks",
+                "diff",
+                "--name-status",
+                "--no-renames",
+                "-z",
+                base,
+                branch,
+                "--",
+            ],
+        )
+        .context("git diff の実行に失敗")?;
+        anyhow::ensure!(
+            output.success(),
+            "統合が触るファイルを調べられません: {}",
+            git_fail_message(&output)
+        );
+        for (kind, path) in parse_name_status(&String::from_utf8_lossy(&output.stdout)) {
+            if kind == StatusKind::Added {
+                touches.added.insert(path.clone());
+            }
+            touches.paths.insert(path);
+        }
+    }
+    Ok(touches)
+}
+
+/// 統合と重なる手元の変更（名前順）: 統合が触るファイルの作業ツリーだけの変更と、統合が足すパスと
+/// ぶつかる未追跡のファイル。git の merge が「上書きされる」と断る所と同じ線に引く。
+fn overlapping_local_changes(local: &LocalChanges, touches: &IntegrationTouches) -> Vec<String> {
+    let unstaged = local
+        .unstaged
+        .iter()
+        .filter(|path| touches.paths.contains(path.as_str()));
+    let untracked = local
+        .untracked
+        .iter()
+        .filter(|path| untracked_collides(path, &touches.added));
+    unstaged
+        .chain(untracked)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// 未追跡のファイル `path` と、統合が足すパスがぶつかるか: 同じパス・`path/…` を足す（ファイルの場所に
+/// フォルダを作る）・`path` の上のフォルダの場所にファイルを足す。後の 2 つも git の merge は断る。
+/// `--untracked-files=all` でも入れ子の git リポジトリは `dir/` とフォルダで出るので、フォルダとして比べる
+/// （その中に統合がファイルを足すなら重なり。git は同じ名前が無ければ黙って書き込むが、人の別の
+/// リポジトリの中へは書かない側に倒す）。
+fn untracked_collides(path: &str, added: &BTreeSet<String>) -> bool {
+    let path = path.trim_end_matches('/');
+    if added.contains(path) {
+        return true;
+    }
+    let folder = format!("{path}/");
+    if added
+        .range(folder.clone()..)
+        .next()
+        .is_some_and(|next| next.starts_with(&folder))
+    {
+        return true;
+    }
+    path.match_indices('/')
+        .any(|(index, _)| added.contains(&path[..index]))
+}
+
+/// 始まった merge を中止する（`git merge --abort`）。git が始める前に断った時（`MERGE_HEAD` が無い）は
+/// 戻す物が無いので何もしない。
+fn abort_started_merge_on(host: &dyn Host, dir: &Path) -> Result<()> {
+    let merging = run_git(host, dir, ["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .context("git rev-parse の実行に失敗")?;
+    if !merging.success() {
+        return Ok(());
+    }
+    let output =
+        run_git(host, dir, ["merge", "--abort"]).context("git merge --abort の実行に失敗")?;
+    anyhow::ensure!(output.success(), "{}", git_fail_message(&output));
+    Ok(())
+}
+
+/// 明示的に merge-ready となった Task を IntegrationSpace へ統合する。統合先に手元の変更があっても、
+/// 統合が触るファイルと重ならなければ統合し、手元の変更はそのまま残す（git の merge は統合が触らない
+/// ファイルを書かない・stash は使わない・2026-10-03）。断るのは、ステージした変更がある時・下見
+/// （[`preview_merge_on`]）で競合する時・手元の変更が統合と重なる時（未追跡のファイルは、統合が同じ
+/// パスにファイルを足す時だけ）。merge 自体が失敗したら、始まった merge を中止して戻す。
+/// 競合した時のエラーは [`MergeConflicts`]（競合したファイルが分かった時だけ）、手元の変更で断った時は
+/// [`BlockingLocalChanges`] を持つ。
 pub fn integrate_branch_on(
     host: &dyn Host,
     integration_dir: &Path,
     branch: &str,
 ) -> Result<String> {
-    anyhow::ensure!(
-        git_status_on(host, integration_dir).is_empty(),
-        "IntegrationSpace に未コミット変更があります。統合前に clean にしてください"
-    );
+    let local = local_changes_on(host, integration_dir)?;
+    if !local.staged.is_empty() {
+        return Err(anyhow::Error::new(BlockingLocalChanges {
+            reason: BlockingReason::Staged,
+            paths: local.staged,
+        }));
+    }
     let preview = preview_merge_on(host, integration_dir, branch)?;
     if !preview.clean {
         let paths = merge_conflict_paths_on(host, integration_dir, branch);
@@ -1147,6 +1387,16 @@ pub fn integrate_branch_on(
             detail: preview.detail,
         }));
     }
+    if !local.is_empty() {
+        let touches = integration_touches_on(host, integration_dir, branch)?;
+        let paths = overlapping_local_changes(&local, &touches);
+        if !paths.is_empty() {
+            return Err(anyhow::Error::new(BlockingLocalChanges {
+                reason: BlockingReason::Overlapping,
+                paths,
+            }));
+        }
+    }
     let message = format!("Integrate {branch}");
     let output = run_git(
         host,
@@ -1156,7 +1406,8 @@ pub fn integrate_branch_on(
     .context("git merge の実行に失敗")?;
     if !output.success() {
         let detail = git_fail_message(&output);
-        let _ = run_git(host, integration_dir, ["merge", "--abort"]);
+        abort_started_merge_on(host, integration_dir)
+            .with_context(|| format!("統合に失敗し、merge の中止にも失敗しました: {detail}"))?;
         anyhow::bail!("統合に失敗したため merge を中止しました: {detail}");
     }
     git_head_oid_on(host, integration_dir).context("統合後の HEAD を取得できない")
@@ -3847,6 +4098,325 @@ mod tests {
         assert_eq!(merge_tree_conflicts(stdout), vec!["a.txt", "src/lib.rs"]);
         assert!(merge_tree_conflicts("4b825dc642cb6eb9a060e54bf8d69288fbee4904\n").is_empty());
         assert!(merge_tree_conflicts("").is_empty());
+    }
+
+    /// 統合の試験で使う git（作者と改行変換を固定する）。
+    fn integration_git(dir: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "core.autocrlf=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git 実行")
+    }
+
+    /// 統合の試験の土台: 統合先 `root`（`base` の中身で 1 コミット）と、そこから切った Task の worktree
+    /// （ブランチ `task/<tag>`）。`task` を Task 側に書いて（`None` は消す）コミットする。git が無ければ `None`。
+    fn integration_fixture(
+        tag: &str,
+        base: &[(&str, &[u8])],
+        task: &[(&str, Option<&[u8]>)],
+    ) -> Option<(PathBuf, PathBuf, String)> {
+        let root = scratch(&format!("{tag}_main"));
+        let worktree = scratch(&format!("{tag}_wt"));
+        std::fs::create_dir_all(&root).unwrap();
+        if !integration_git(&root, &["init", "-q", "-b", "main"])
+            .status
+            .success()
+        {
+            return None;
+        }
+        // 統合の merge コミットは necoder の git（`-c` を付けない）で作るので、作者と改行変換は
+        // リポジトリの設定に書く（git の作者が無い Windows のランナーでは、無いと merge が止まる）。
+        integration_git(&root, &["config", "user.email", "t@t"]);
+        integration_git(&root, &["config", "user.name", "t"]);
+        integration_git(&root, &["config", "core.autocrlf", "false"]);
+        let write = |dir: &Path, path: &str, content: &[u8]| {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, content).unwrap();
+        };
+        for (path, content) in base {
+            write(&root, path, content);
+        }
+        integration_git(&root, &["add", "-A"]);
+        integration_git(&root, &["commit", "-qm", "base"]);
+        let branch = format!("task/{tag}");
+        create_task_worktree_on(&LocalHost, &root, &worktree, &branch).unwrap();
+        for (path, content) in task {
+            match content {
+                Some(content) => write(&worktree, path, content),
+                None => std::fs::remove_file(worktree.join(path)).unwrap(),
+            }
+        }
+        integration_git(&worktree, &["add", "-A"]);
+        integration_git(&worktree, &["commit", "-qm", "task"]);
+        Some((root, worktree, branch))
+    }
+
+    fn integration_cleanup(root: &Path, worktree: &Path) {
+        remove_worktree(root, worktree, true).unwrap();
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(worktree).ok();
+    }
+
+    /// 統合先の手元の変更を今の `git status` から読み直す（試験の前後の比較用）。
+    fn local_changes_now(root: &Path) -> LocalChanges {
+        local_changes_on(&LocalHost, root).unwrap()
+    }
+
+    /// 2026-10-03: 統合先に、統合と重ならない手元の変更（追跡しているファイルの作業ツリーだけの変更）と
+    /// 未追跡のファイル・フォルダがあっても統合する。統合の後も、どちらもバイト単位で元のまま残り、
+    /// merge のコミットには入らない（本人の main と同じ形: CLAUDE.md の変更 + 公開しない未追跡のフォルダ）。
+    #[test]
+    fn integration_keeps_local_changes_that_do_not_overlap() {
+        let Some((root, worktree, branch)) = integration_fixture(
+            "keep_local",
+            &[
+                ("CLAUDE.md", b"# guide\n"),
+                ("a.txt", b"base\n"),
+                ("docs/x.md", b"x\n"),
+            ],
+            &[
+                ("a.txt", Some(b"task\n")),
+                ("src/new.rs", Some(b"fn new() {}\n")),
+            ],
+        ) else {
+            return;
+        };
+        // CRLF・日本語・UTF-8 でないバイト・末尾の改行なし（どこかで読み書きし直したら崩れる中身）。
+        let edited: &[u8] = b"# guide\r\nlocal line \xe6\x97\xa5\r\n\xff\xfe";
+        std::fs::write(root.join("CLAUDE.md"), edited).unwrap();
+        let untracked: [(&str, &[u8]); 4] = [
+            ("docs/necoder-router.md", b"router\r\n"),
+            ("reports/2026-10.md", b"report \xe2\x9c\x93"),
+            ("research_notes/deep/notes.txt", b"\x00\x01binary"),
+            ("promo/banner.svg", b"<svg/>"),
+        ];
+        for (path, content) in untracked {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, content).unwrap();
+        }
+        let local_before = local_changes_now(&root);
+        assert_eq!(local_before.unstaged, vec!["CLAUDE.md".to_string()]);
+        assert_eq!(local_before.untracked.len(), 4, "{local_before:?}");
+        let before = git_head_oid_on(&LocalHost, &root).unwrap();
+
+        let after = integrate_branch_on(&LocalHost, &root, &branch)
+            .unwrap_or_else(|error| panic!("重ならない手元の変更では統合する: {error:#}"));
+
+        assert_ne!(before, after);
+        let parent = |spec: &str| {
+            String::from_utf8(integration_git(&root, &["rev-parse", spec]).stdout)
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(parent("HEAD^1"), before, "統合先の前の HEAD が 1 本目の親");
+        assert_eq!(
+            parent("HEAD^2"),
+            parent(&branch),
+            "Task の先端が 2 本目の親"
+        );
+        assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"task\n");
+        assert_eq!(
+            std::fs::read(root.join("src/new.rs")).unwrap(),
+            b"fn new() {}\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join("CLAUDE.md")).unwrap(),
+            edited,
+            "手元の変更はバイト単位で元のまま"
+        );
+        for (path, content) in untracked {
+            assert_eq!(
+                std::fs::read(root.join(path)).unwrap(),
+                content,
+                "未追跡のファイルはバイト単位で元のまま: {path}"
+            );
+        }
+        assert_eq!(
+            integration_git(&root, &["show", "HEAD:CLAUDE.md"]).stdout,
+            b"# guide\n",
+            "手元の変更は merge のコミットに入らない"
+        );
+        assert_eq!(
+            local_changes_now(&root),
+            local_before,
+            "統合の後も手元の変更は同じ形で残る"
+        );
+
+        integration_cleanup(&root, &worktree);
+    }
+
+    /// 2026-10-03: 統合が触るファイルを手元で変えて（消して）いたら断り、そのファイルだけを名指しする。
+    /// 統合先は HEAD も手元の変更も触らない。
+    #[test]
+    fn integration_refuses_local_edits_to_files_it_touches() {
+        let Some((root, worktree, branch)) = integration_fixture(
+            "overlap",
+            &[("a.txt", b"base\n"), ("b.txt", b"b\n"), ("d.txt", b"d\n")],
+            &[
+                ("a.txt", Some(b"task\n")),
+                ("d.txt", Some(b"task d\n")),
+                ("c.txt", Some(b"new\n")),
+            ],
+        ) else {
+            return;
+        };
+        std::fs::write(root.join("a.txt"), b"mine\r\n").unwrap();
+        std::fs::write(root.join("b.txt"), b"unrelated\n").unwrap();
+        std::fs::remove_file(root.join("d.txt")).unwrap();
+        std::fs::write(root.join("notes.md"), b"memo\n").unwrap();
+        let local_before = local_changes_now(&root);
+        let before = git_head_oid_on(&LocalHost, &root).unwrap();
+
+        let error = integrate_branch_on(&LocalHost, &root, &branch).unwrap_err();
+        let blocking = error
+            .downcast_ref::<BlockingLocalChanges>()
+            .unwrap_or_else(|| panic!("手元の変更として返る: {error:#}"));
+        assert_eq!(blocking.reason, BlockingReason::Overlapping);
+        assert_eq!(
+            blocking.paths,
+            vec!["a.txt".to_string(), "d.txt".to_string()],
+            "統合が触るファイルの変更・削除だけ（b.txt と notes.md は統合と関係ない）"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("a.txt") && message.contains("d.txt"),
+            "{message}"
+        );
+        assert_eq!(git_head_oid_on(&LocalHost, &root).unwrap(), before);
+        assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"mine\r\n");
+        assert!(!root.join("c.txt").exists(), "統合しない");
+        assert_eq!(local_changes_now(&root), local_before);
+
+        integration_cleanup(&root, &worktree);
+    }
+
+    /// 2026-10-03: 統合がファイルを足すパスに未追跡のファイルがあれば断る。同じフォルダの別のファイルや、
+    /// 統合と関係ない未追跡のファイルは名指ししない。
+    #[test]
+    fn integration_refuses_untracked_files_where_it_adds_one() {
+        let Some((root, worktree, branch)) = integration_fixture(
+            "untracked",
+            &[("a.txt", b"base\n")],
+            &[
+                ("new.txt", Some(b"task\n")),
+                ("dir/added.txt", Some(b"task\n")),
+            ],
+        ) else {
+            return;
+        };
+        std::fs::write(root.join("new.txt"), b"mine\n").unwrap();
+        std::fs::create_dir_all(root.join("dir")).unwrap();
+        std::fs::write(root.join("dir/mine.txt"), b"mine\n").unwrap();
+        std::fs::write(root.join("other.txt"), b"other\n").unwrap();
+        let before = git_head_oid_on(&LocalHost, &root).unwrap();
+
+        let error = integrate_branch_on(&LocalHost, &root, &branch).unwrap_err();
+        let blocking = error
+            .downcast_ref::<BlockingLocalChanges>()
+            .unwrap_or_else(|| panic!("手元の変更として返る: {error:#}"));
+        assert_eq!(blocking.reason, BlockingReason::Overlapping);
+        assert_eq!(blocking.paths, vec!["new.txt".to_string()]);
+        assert!(error.to_string().contains("new.txt"));
+        assert_eq!(git_head_oid_on(&LocalHost, &root).unwrap(), before);
+        assert_eq!(std::fs::read(root.join("new.txt")).unwrap(), b"mine\n");
+        assert!(!root.join("dir/added.txt").exists(), "統合しない");
+
+        integration_cleanup(&root, &worktree);
+    }
+
+    /// 2026-10-03: ステージした変更があれば、統合と重ならなくても断る（統合が途中で失敗した時の中止で
+    /// 戻せないことがあるため）。ステージした中身もそのまま残す。
+    #[test]
+    fn integration_refuses_staged_changes() {
+        let Some((root, worktree, branch)) = integration_fixture(
+            "staged",
+            &[("a.txt", b"base\n"), ("b.txt", b"b\n")],
+            &[("a.txt", Some(b"task\n"))],
+        ) else {
+            return;
+        };
+        std::fs::write(root.join("b.txt"), b"staged\n").unwrap();
+        integration_git(&root, &["add", "b.txt"]);
+        let local_before = local_changes_now(&root);
+        assert_eq!(local_before.staged, vec!["b.txt".to_string()]);
+        let before = git_head_oid_on(&LocalHost, &root).unwrap();
+
+        let error = integrate_branch_on(&LocalHost, &root, &branch).unwrap_err();
+        let blocking = error
+            .downcast_ref::<BlockingLocalChanges>()
+            .unwrap_or_else(|| panic!("手元の変更として返る: {error:#}"));
+        assert_eq!(blocking.reason, BlockingReason::Staged);
+        assert_eq!(blocking.paths, vec!["b.txt".to_string()]);
+        assert!(error.to_string().contains("b.txt"));
+        assert_eq!(git_head_oid_on(&LocalHost, &root).unwrap(), before);
+        assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"base\n");
+        assert_eq!(local_changes_now(&root), local_before, "ステージもそのまま");
+        assert_eq!(
+            integration_git(&root, &["show", ":b.txt"]).stdout,
+            b"staged\n"
+        );
+
+        integration_cleanup(&root, &worktree);
+    }
+
+    /// 重なりの線（2026-10-03）: status の XY の分け方と、未追跡のファイルは「統合が足すパス」とだけ
+    /// 比べること（同じパス・ファイルとフォルダの取り合い）。
+    #[test]
+    fn overlap_is_drawn_where_git_merge_refuses() {
+        let local = parse_local_changes(
+            "?? u.txt\0 M m.txt\0 D d.txt\0 T t.txt\0M  s.txt\0MM both.txt\0 A ita.txt\0UU c.txt\0!! ignored\0",
+        );
+        assert_eq!(local.staged, ["s.txt", "both.txt", "ita.txt", "c.txt"]);
+        assert_eq!(local.unstaged, ["m.txt", "d.txt", "t.txt"]);
+        assert_eq!(local.untracked, ["u.txt"]);
+
+        let touches = IntegrationTouches {
+            paths: [
+                "m.txt",
+                "modified.txt",
+                "added.txt",
+                "dir/new.txt",
+                "file",
+                "nested/README.md",
+            ]
+            .map(String::from)
+            .into(),
+            added: ["added.txt", "dir/new.txt", "file", "nested/README.md"]
+                .map(String::from)
+                .into(),
+        };
+        let local = LocalChanges {
+            staged: Vec::new(),
+            unstaged: vec!["m.txt".into(), "d.txt".into()],
+            untracked: [
+                "added.txt",      // 統合が同じパスにファイルを足す
+                "dir",            // 統合が `dir/` を作る場所にファイルがある
+                "file/inner.txt", // 統合がファイルを足す場所にフォルダがある
+                "nested/",        // 入れ子のリポジトリ（フォルダで出る）の中に統合がファイルを足す
+                "dir/mine.txt",   // 同じフォルダの別のファイル
+                "di",             // 名前の頭が同じだけ
+                "other-nested/",  // 統合と関係ない入れ子のリポジトリ
+                "modified.txt",   // 統合が足すのではなく変えるパス
+            ]
+            .map(String::from)
+            .into(),
+        };
+        assert_eq!(
+            overlapping_local_changes(&local, &touches),
+            ["added.txt", "dir", "file/inner.txt", "m.txt", "nested/"]
+        );
     }
 
     #[test]

@@ -3883,3 +3883,18 @@
   - MCP `fleet_create_task` に `prompt`（担当への最初の指示・空なら起こさない）。`project::main_worktree_root_on` を追加。
 - 検証: `adopt_task_puts_an_agent_created_task_on_the_fleet`（本物の git + worktree・Task の slot・Fleet のセル・親・名前・root/branch 無しは断る）・`task_origin_branches_from_the_calling_task`・`linked_worktree_is_distinguished_from_main_checkout` に main root の確認を追加。
 - 次: 本人の実機で、担当に `fleet_create_task`（prompt 付き）を呼ばせて Fleet に子 Task が出て担当が動くか確かめる。担当が Claude Code のサブエージェントを使うこと自体は止めていない（担当への案内は後続）。
+
+## 2026-10-03 — Fleet の統合: 統合先の手元の変更と重ならなければ統合する
+
+- 発端（本人・2026-10-02）: Fleet から統合を 9 回押して、9 回とも「IntegrationSpace に未コミット変更があります。統合前に clean にしてください」で止まった。本人の main にはいつも公開しない変更（CLAUDE.md の 1 行・`docs/necoder-router.md`・`reports/`・`research_notes/`・`promo/`）がある。判定は `git_status_on`（`--untracked-files=all`）が空かどうかだったので、未追跡のファイル 1 つでも断り、どのファイルのせいかも出なかった。
+- やったこと:
+  - `project::integrate_branch_on`: 順に ①ステージした変更（`git add -N`・競合中も）があれば断る ②下見（`preview_merge_on`）で競合なら `MergeConflicts`（O19 のまま）③統合が触るパス（`merge-base --all` から branch までの `diff --name-status --no-renames`・分岐点が複数なら和）と、作業ツリーだけの変更 + 統合が足すパスとぶつかる未追跡のファイル（同じパス・ファイルとフォルダの取り合い）が重なれば断る ④ merge。断る時は `BlockingLocalChanges { reason: Staged | Overlapping, paths }`。手元の変更は `git status` を自前で読み、読めなければ止める（`git_status_on` は読めないと空＝変更なしを返すので、門には使えなかった）。merge が失敗した時の中止は `MERGE_HEAD` がある時だけにし、`let _ =` で捨てていた中止の失敗を返すようにした。
+  - `workspace`: 統合の呼び口で `BlockingLocalChanges` を見分け、失敗の知らせ（理由 + 1 行 1 ファイル 5 件まで・残りは全文）、要対応のカードに warn 色の 1 行（3 件まで・折り返す・もう一度押すまで・`chrome.task_integration_blocked`）、ニュースと台帳のイベントにも同じ 1 行。Task の要約は上書きしない。開発用の組み立て命令 `fleet`（Fleet に入る）・`integrate`（選択中の Task の「統合」を押す）。
+  - docs: FLEET-V2 §4.3（統合と統合先の手元の変更）・§8・§10.5、FLEET-ARCHITECTURE、UI-SPEC、CHANGELOG（Unreleased）。
+- 検証: project の新テスト 5 本（重ならない変更と未追跡のフォルダが統合の後もバイト単位で残り merge のコミットに入らない / 統合が触るファイルの変更・削除を名指しで断る / 統合が足すパスの未追跡のファイルで断る / ステージで断る / 重なりの線の単体）。workspace の新テスト 2 本（本人の main と同じ形の統合先で、重ならない Task は統合・CLAUDE.md を触る Task はトーストと要対応で名指し・退けて押し直せば統合 / 知らせの件数の上限）。既存の下見・競合・中止のテストは緑。隔離 offscreen（ja / en・7 ファイル）で断る所と通る所を目視。`ne fleet create / review / integrate` を一時ディレクトリ（CLAUDE.md の変更 + 未追跡のフォルダ）で流し、重なる Task は終了コード 1 で名指し、重ならない Task は統合されて手元の 5 ファイルのハッシュが一致した。
+- 学び/罠:
+  - git の merge（ort）は index が HEAD と違うと、重なりに関係なく「Your local changes … would be overwritten」で始めない（`git add -N` の印も同じ）。作業ツリーだけの変更・未追跡のファイルは、merge が書くパスに当たる時だけ断る（ファイルとフォルダの取り合いも）。どれも `MERGE_HEAD` を作らずに止まるので、中止は要らない。
+  - GUI の遷移（`transition_task_space`）の要約はニュースと台帳のイベントに載るだけで、`result_summary` には入らない。要対応のカードの要約は `result_summary`（エージェントの最後の発言）なので、統合の失敗は今まで要対応に出ていなかった。
+  - Fleet の組み立て命令の `graph` は Fleet に入らない（入るのは `NECODER_CONTROL_PROBE` の仕込み）。本物の worktree の Task を撮る時は `fleet` を先頭に置く。
+  - 統合の merge コミットは necoder の git（`-c` を付けない）で作るので、試験の作者はコマンドごとの `-c user.email` ではなく一時リポジトリの設定（`git config user.email`）に書く。Windows のランナーには git の作者が無く「Committer identity unknown」で落ちた（mac は作者を推測するので手元では出ない）。手元で同じ条件にするには `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true` を付けて流す。
+- 次: 本人の main（手元の変更あり）で、重ならない Task を実際に統合して確かめる。

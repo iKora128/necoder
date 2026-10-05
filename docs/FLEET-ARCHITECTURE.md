@@ -45,7 +45,8 @@ planned → working → blocked ─┐
 
 Agent の permission wait は `blocked`、turn end は `review_ready` へ写像する。Review は worktree を
 変更しない `git merge-tree --write-tree`（Conflict Radar）で判定する。Integration は `merge_ready` の
-明示操作だけで、dirty main と conflict を拒否する。merge が失敗した場合は自動 `merge --abort` する。
+明示操作だけで、main のステージした変更・統合が触るパスと重なる main の手元の変更・conflict を拒否する（重ならない
+手元の変更は残したまま統合する・2026-10-03・FLEET-V2 §4.3）。merge が途中で失敗した場合は、始まった merge を自動で `merge --abort` する。
 
 ## Persistence and orchestration
 

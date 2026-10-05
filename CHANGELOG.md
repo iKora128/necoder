@@ -9,11 +9,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 - **Manual: Pi and DeepSeek Harness**: The manual now explains how to add Pi and DeepSeek Harness, how to sign in to each, and what works differently from the built-in agents. The DeepSeek Harness example sets `DSH_MODEL`, the variable `dsh-acp` reads, instead of `DEEPSEEK_MODEL`.
 
+### Changed
+
+- **Fleet: integrate when the base has unrelated local changes**: Integrate no longer stops just because the base (your main worktree) has uncommitted changes or untracked files. If the Task does not touch the files you changed, it integrates and leaves your changes exactly as they were. It still stops when the Task touches a file you changed, when a file the Task adds would land on an untracked file, or when the base has staged changes. The toast and the Attention card now name those files.
+
 ### 日本語
 
 #### 追加
 
 - **マニュアル：Pi と DeepSeek Harness**：Pi と DeepSeek Harness の足し方、それぞれのログインのしかた、組み込みのエージェントとの違いをマニュアルに書きました。DeepSeek Harness の例は、`dsh-acp` が読まない `DEEPSEEK_MODEL` をやめて `DSH_MODEL` にしました。
+
+#### 変更
+
+- **Fleet：統合先の手元の変更と重ならなければ統合する**：統合先（main の作業ツリー）に未コミットの変更や未追跡のファイルがあるだけでは、統合を断らなくなりました。Task が手元の変更と同じファイルを触らなければ統合し、手元の変更はそのまま残ります。Task が手元で変えたファイルを触る時、Task が足すファイルの場所に未追跡のファイルがある時、統合先にステージした変更がある時は、今までどおり止まります。その時はトーストと要対応のカードでファイルを名指しします。
 
 ## [0.1.24] - 2026-10-01
 

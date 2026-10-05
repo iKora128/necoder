@@ -1460,6 +1460,9 @@ struct ChromeState {
     /// 統合の下見で競合した Task と、競合したファイル（O19）。Task の「次へ」が「競合を直させる」に
     /// なる。頼んだら外す（直った後の「統合」でまた下見する）。起動している間だけ。
     task_conflicts: HashMap<SpaceId, Vec<String>>,
+    /// 統合先の手元の変更で統合を断った Task と、その理由の 1 行（ファイルの名指し・2026-10-03）。
+    /// merge_ready の間、要対応カードに warn の行で出す。もう一度「統合」を押したら外す。起動している間だけ。
+    task_integration_blocked: HashMap<SpaceId, SharedString>,
     /// 作成中の Task（worktree・準備スクリプトを流している間の行・O20）。作れなかった物は
     /// やり直すか閉じるまで残る。起動している間だけ。
     task_creations: Vec<task_creation::TaskCreation>,
