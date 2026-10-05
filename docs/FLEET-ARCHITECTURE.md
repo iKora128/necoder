@@ -45,7 +45,8 @@ planned → working → blocked ─┐
 
 Agent の permission wait は `blocked`、turn end は `review_ready` へ写像する。Review は worktree を
 変更しない `git merge-tree --write-tree`（Conflict Radar）で判定する。Integration は `merge_ready` の
-明示操作だけで、dirty main と conflict を拒否する。merge が失敗した場合は自動 `merge --abort` する。
+明示操作だけで、main のステージした変更・統合が触るパスと重なる main の手元の変更・conflict を拒否する（重ならない
+手元の変更は残したまま統合する・2026-10-03・FLEET-V2 §4.3）。merge が途中で失敗した場合は、始まった merge を自動で `merge --abort` する。
 
 ## Persistence and orchestration
 
@@ -78,6 +79,11 @@ id → ブランチ → 名前の順。ブランチと名前は今いるリポ�
 MCP にも `fleet_create_task`, `fleet_list_tasks`, `fleet_update_task`, `fleet_wait_task`,
 `fleet_review_task`, `fleet_integrate_task` を公開する。wait は GUI process の一時 state でなく永続 ledger を
 poll するため、Captain や UI が再起動しても継続できる。
+
+`fleet_create_task`（と `fleet create`）を **Task の中から**呼ぶと、そのブランチを起点に切り、呼んだ Task を親として
+台帳に書く（O21 の親子と同じ・系譜で親の下に出る）。worktree はメインの作業ツリー基準（`<repo>-worktrees/`）に置く。
+GUI 稼働中は台帳への登録を GUI の `adopt_task` に頼み、＋ Task の後半（`register_created_task`）と同じく slot・Fleet の
+セル・親子まで作る。MCP の `prompt` があれば担当を起こして最初の指示として送る（空なら起こさない）。
 
 ## Independent implementation and licensing boundary
 

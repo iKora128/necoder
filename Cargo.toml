@@ -83,6 +83,17 @@ tree-sitter-md = "=0.5.1"
 # unstable_elicitation: エージェントが「選択肢付きの質問（4択等）」を出す仕組み（Elicitation）を
 # 使うため。**まだ unstable な API**（`cargo update` の 1.x 内でも変わりうる）＝追従はセットで見る。
 agent-client-protocol = { version = "1.3", features = ["unstable_elicitation"] }
+# 接続（issue #38 H3）: ACP の `providers/list|set|disable` と `agentCapabilities.providers` の型。Rust の
+# ACP crate 1.3 はこの feature を持たない（要求の型を送る口が無い）ので、型だけをスキーマ crate から引き、
+# 送るのは `UntypedMessage`。agent-client-protocol 1.3 が引いている版と同じ物を feature で開く（版を割らない）。
+agent-client-protocol-schema = { version = "1.4", features = ["unstable_llm_providers"] }
+# 接続の API キーを OS のキーチェーンへ置く（issue #38 H3・MIT OR Apache-2.0）。feature は OS ごとに
+# acp_client 側で開く（macOS = Keychain・Windows = 資格情報マネージャ）。Linux は持続するキーチェーン
+# （Secret Service）が D-Bus のビルド依存を要るので、まだ繋がない（接続のキーを保存できない旨を出す）。
+keyring = { version = "3.6", default-features = false }
+# 同上（macOS だけ）: キーの有無を**中身を読まずに**引く（項目の属性だけの検索＝キーチェーンの許可の
+# ダイアログを出さない）。keyring が引いている版を共有する（MIT OR Apache-2.0）。
+security-framework = "3"
 blocking = "1"
 futures = "0.3"
 async-io = "2"

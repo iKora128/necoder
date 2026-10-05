@@ -7,12 +7,14 @@
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
 pub mod codex_limits;
+pub mod connections;
 pub mod custom;
 pub mod deploy;
 pub mod history;
 mod install;
 pub mod mcp;
 pub mod preset;
+pub mod readiness;
 pub mod registry;
 pub mod usage;
 
@@ -57,28 +59,120 @@ pub struct PermissionChoice {
     pub kind: PermissionKind,
 }
 
-/// セッション設定オプションの意味カテゴリ（UI が Model / Effort セレクタへ振り分ける）。
-/// ACP `SessionConfigOptionCategory` を簡約（Mode/ModelConfig/Other は今は `Other` に畳む）。
+/// セッション設定オプションの意味カテゴリ（UI がモデル・思考量・その他へ振り分ける）。
+/// ACP `SessionConfigOptionCategory` を簡約（ModelConfig と未知のカテゴリは `Other` に畳む）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigCategory {
     /// モデル選択。
     Model,
     /// 思考/推論レベル（effort 相当）。
     ThoughtLevel,
-    /// その他（今は UI で扱わない）。
+    /// 権限モード。Claude Code と codex-acp は `session/set_mode` の modes と**同じ物を二重に**広告する
+    /// ので、UI は出さない（権限モードは modes の側で扱う・O16）。
+    Mode,
+    /// その他（Fast mode・Codex の Collaboration mode など）。
     Other,
 }
 
-/// エージェントが広告する 1 つの選択式設定（モデル・思考レベル等）。
-/// ACP `SessionConfigOption` の Select を簡約。UI はこれでセレクタを実選択肢に置き換える。
-#[derive(Debug, Clone)]
+/// 設定の値。select は **value_id**、boolean は on / off（`session/set_config_option` の
+/// `type: "boolean"`）。保存・比較・送信はこの形だけを使い、表示名は描画にしか使わない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValue {
+    /// select の value_id（`opus[1m]` / `xhigh`）。
+    Id(String),
+    /// boolean の on / off。
+    Bool(bool),
+}
+
+impl ConfigValue {
+    /// 設定ファイル（`agent_config_defaults`）に書く形。select は value_id、boolean は `true` / `false`。
+    pub fn to_stored(&self) -> String {
+        match self {
+            ConfigValue::Id(value_id) => value_id.clone(),
+            ConfigValue::Bool(on) => on.to_string(),
+        }
+    }
+
+    fn to_acp(&self) -> v1::SessionConfigOptionValue {
+        match self {
+            ConfigValue::Id(value_id) => v1::SessionConfigOptionValue::value_id(value_id.clone()),
+            ConfigValue::Bool(on) => v1::SessionConfigOptionValue::boolean(*on),
+        }
+    }
+}
+
+/// select の 1 択。`value_id` が保存・比較・送信の鍵で、`name` / `description` は描画専用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigChoice {
+    pub value_id: String,
+    pub name: String,
+    /// エージェントが付けた説明（Claude Code の既定のモデルなら、実際に使うモデルの名前）。
+    pub description: Option<String>,
+}
+
+/// 設定の種類と今の値。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigKind {
+    /// 選択式（モデル・思考量・Collaboration mode 等）。`current` は value_id。
+    Select {
+        current: String,
+        choices: Vec<ConfigChoice>,
+    },
+    /// on / off（Fast mode 等）。
+    Boolean { current: bool },
+}
+
+/// エージェントが広告する 1 つの設定（モデル・思考レベル・Fast mode 等）。
+/// ACP `SessionConfigOption` を UI 非依存に簡約したもの。UI はこれだけを選択肢として出す（捏造しない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigOption {
     pub config_id: String,
+    /// 設定の表示名（`Fast mode`）。描画専用。
+    pub name: String,
+    /// 設定の説明。Claude Code の Fast mode は、使えない時にその理由もここへ足してくる。
+    pub description: Option<String>,
     pub category: ConfigCategory,
-    /// 現在の value_id。
-    pub current: String,
-    /// 選択肢 `(value_id, 表示名)`。
-    pub choices: Vec<(String, String)>,
+    pub kind: ConfigKind,
+}
+
+impl ConfigOption {
+    /// 今の値。
+    pub fn current(&self) -> ConfigValue {
+        match &self.kind {
+            ConfigKind::Select { current, .. } => ConfigValue::Id(current.clone()),
+            ConfigKind::Boolean { current } => ConfigValue::Bool(*current),
+        }
+    }
+
+    /// select の選択肢（boolean は空）。
+    pub fn choices(&self) -> &[ConfigChoice] {
+        match &self.kind {
+            ConfigKind::Select { choices, .. } => choices,
+            ConfigKind::Boolean { .. } => &[],
+        }
+    }
+
+    /// `value` をこの設定へ送れるか。select は**広告された value_id と完全一致**する時だけ
+    /// （表示名や似た綴りで当てにいかない）、boolean は on / off のどちらでも。
+    pub fn offers(&self, value: &ConfigValue) -> bool {
+        match (&self.kind, value) {
+            (ConfigKind::Select { choices, .. }, ConfigValue::Id(value_id)) => {
+                choices.iter().any(|choice| choice.value_id == *value_id)
+            }
+            (ConfigKind::Boolean { .. }, ConfigValue::Bool(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// 設定ファイルに書いた値（[`ConfigValue::to_stored`]）を、この設定の種類に合わせて読み戻す。
+    /// 種類が合わない・広告に無い値は `None`（＝送らずエージェントの今の値のまま）。
+    pub fn value_from_stored(&self, stored: &str) -> Option<ConfigValue> {
+        let value = match &self.kind {
+            ConfigKind::Select { .. } => ConfigValue::Id(stored.to_string()),
+            ConfigKind::Boolean { .. } => ConfigValue::Bool(stored.parse().ok()?),
+        };
+        self.offers(&value).then_some(value)
+    }
 }
 
 /// 権限リクエストに含まれるファイル編集の差分（accept/reject の diff レビュー用）。
@@ -349,6 +443,9 @@ pub enum AgentEvent {
     /// 失敗ではないが黙って進めたくない知らせ（MCP サーバを渡せなかった等）。transcript に 1 行
     /// 出すだけで、ターン状態（running / auth_required）には触らない。
     Notice(String),
+    /// 接続のキーを渡すセッションなので、リポジトリの `.necoder/task.env` から読まなかった変数の名前
+    /// （名前の順・issue #38 H3・[`connections::guarded_from_task_env`]）。言葉にするのは UI（transcript に 1 行）。
+    TaskEnvSkipped(Vec<String>),
     /// `session/load` が再生した履歴（O15）。[`SessionPreferences::replay_history`] の時だけ、load が
     /// 成功したら [`AgentEvent::SessionStarted`] の直前に 1 回流す。`items` は古い順・最大
     /// [`history::REPLAY_KEEP`] 件で、`omitted` はそれより前に捨てた項目の数。
@@ -367,7 +464,15 @@ pub enum AgentEvent {
         /// 会話を引き継げる。UI はこれが `true` のスレッドだけ、使っていないエージェントを止めてよい
         /// （広告しないエージェントを止めると会話の文脈が失われる）。
         resumable: bool,
+        /// エージェントが実行中のターンへの差し込み（`_session/steering`）を広告している
+        /// （[`steering_supported`]）。UI はこれが `true` のスレッドだけ [`SessionCommand::Steer`] を送り、
+        /// それ以外は「中断 → 送り直し」にする。
+        steerable: bool,
     },
+    /// 差し込み（[`SessionCommand::Steer`]）の結果。送った `Steer` 1 つにつき必ず 1 回（セッションが
+    /// 終わった時を除く）。実行中のターンの間にも、ターンが閉じた後にも届く（ターンの終わり際に
+    /// 送った分は、エージェントの答えがターンの後になる）。
+    Steered { id: u64, outcome: SteerOutcome },
     /// エージェントとの transport が閉じた（プロセス終了・SSH 切断）。**この後セッションは終わる**
     /// （[`run_session_on`] が戻り、イベントチャネルも閉じる）。ターン中なら UI はそのターンを
     /// 畳み、以後の送信は新しいセッションを立ち上げる。待機中にも届く（EOF を待機中も見張るため）。
@@ -556,6 +661,23 @@ pub enum TurnEnd {
     Interrupted,
 }
 
+/// 差し込み（`_session/steering`）の結果。エージェントの応答の `outcome` を簡約したもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerOutcome {
+    /// 実行中のターンに入った（`injected`）。返事は同じターンの続きとして流れる。
+    Injected,
+    /// エージェントが**自分で新しいターン**を始めた（`startedNewTurn`）。文は届いたが、necoder が
+    /// 送った `session/prompt` のターンではない＝そのターンの終わりは知らされない。
+    /// `idleBehavior: promptRequired` を読まないアダプタ（codex-acp 1.13.1）が、ターンの閉じた直後に
+    /// 差し込みを受けた時だけ起きる（ARCHITECTURE §7.6）。
+    StartedTurn,
+    /// 走っているターンが無かった（`promptRequired`・または待機中に届いた差し込み）。文は**届いていない**
+    /// ＝普通の送信として送り直す。
+    TurnOver,
+    /// 差し込めなかった（広告が無い・エラー応答・知らない outcome）。文は届いていない。理由つき。
+    Refused(String),
+}
+
 /// prompt に添える画像 1 枚（ACP の image ブロック）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptImage {
@@ -582,31 +704,140 @@ pub enum SessionCommand {
     Cancel,
     /// 権限モードを変更する（`session/set_mode`。引数は mode_id）。
     SetMode(String),
-    /// 設定オプション（モデル・思考レベル等）を変更する（`session/set_config_option`）。
-    SetConfig { config_id: String, value_id: String },
+    /// 設定オプション（モデル・思考レベル・Fast mode 等）を変更する（`session/set_config_option`）。
+    SetConfig {
+        config_id: String,
+        value: ConfigValue,
+    },
     /// 目標を一時停止 / 再開 / 取り消す（エージェントが広告した拡張メソッド・O17）。
     /// ターン中でも待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
     Goal(GoalAction),
+    /// 実行中のターンへ文を差し込む（ACP 拡張 `_session/steering`・ARCHITECTURE §7.6）。ターンを
+    /// 止めない。結果は同じ `id` の [`AgentEvent::Steered`] で返る。`TurnOver` / `Refused` の時は
+    /// 文は届いていないので、送り直すのは UI の役目（この層は勝手に `session/prompt` にしない）。
+    /// 待機中に届いた分は送らずに `TurnOver`。
+    Steer {
+        id: u64,
+        text: String,
+        images: Vec<PromptImage>,
+    },
 }
 
-/// ターンループが待つ 3 系統（エージェントからの更新 / UI からのコマンド / prompt 応答）。
-/// `select!` の戻り値を所有型にして、`session` と `command_rx` の借用をブロック内で閉じる。
+/// ターンループが待つ 4 系統（エージェントからの更新 / 差し込みの応答 / prompt 応答 / UI からの
+/// コマンド）。`select!` の戻り値を所有型にして、`session` と `command_rx` の借用をブロック内で閉じる。
 enum TurnEvent {
     Update(Result<acp::SessionMessage, acp::Error>),
     Command(Option<SessionCommand>),
+    /// `_session/steering` の応答（[`Steering`]）。
+    Steered(Result<serde_json::Value, acp::Error>),
     /// `session/prompt` の応答＝ターンの終端。`Ok` は StopReason、`Err` は API/エージェント側の
     /// 失敗（例: ストリーミング切断）。どちらでもセッション自体は生きている。
     PromptFinished(Result<v1::PromptResponse, acp::Error>),
 }
 
-/// 待機中（ターンとターンの間）に待つ 3 系統。エージェントは待機中にも更新を送ってくる
+/// 待機中（ターンとターンの間）に待つ 4 系統。エージェントは待機中にも更新を送ってくる
 /// （`session/new` 直後のコマンド一覧・ターン後に非同期で付く会話名・自走する目標のターン）。
 /// 読まずにおくと SDK のチャネルに溜まり、次の prompt の頭でまとめて流れて遅れる。
 enum IdleEvent {
     Update(Result<acp::SessionMessage, acp::Error>),
     Command(Option<SessionCommand>),
+    /// ターンの終わり際に送った差し込みの応答（ターンの後に届くことがある）。
+    Steered(Result<serde_json::Value, acp::Error>),
     /// transport が閉じた（プロセス終了・SSH 切断）。
     Closed,
+}
+
+/// 実行中のターンへの差し込みの拡張メソッド（claude-agent-acp・codex-acp の `STEER_METHOD` /
+/// `SESSION_STEERING_METHOD`）。広告は [`steering_supported`]。
+const STEER_METHOD: &str = "_session/steering";
+
+/// initialize の**最上位**の `_meta.steering.supported` が `true` か（`agentCapabilities` の中ではない）。
+/// claude-agent-acp 0.81.2 / codex-acp 1.13.1 がこの形で広告する。無い・`true` 以外は広告なし。
+fn steering_supported(meta: Option<&v1::Meta>) -> bool {
+    meta.and_then(|meta| meta.get("steering"))
+        .and_then(|steering| steering.get("supported"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// `_session/steering` の params。`idleBehavior: promptRequired` は「走っているターンが無ければ
+/// 自分でターンを始めず、文を返せ」の頼み（claude-agent-acp は従い、codex-acp 1.13.1 は読まない）。
+/// これが無いと、ターンの閉じ際に送った差し込みが necoder の知らないターンになる。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SteerParams {
+    session_id: String,
+    prompt: Vec<v1::ContentBlock>,
+    #[serde(rename = "_meta")]
+    meta: serde_json::Value,
+}
+
+/// `_session/steering` の応答を [`SteerOutcome`] へ。知らない outcome（codex-acp の `failed` など）と
+/// エラー応答は「届いていない」として扱う（送り直す側に倒す＝文を失わない）。
+fn steer_outcome(response: Result<serde_json::Value, acp::Error>) -> SteerOutcome {
+    match response {
+        Ok(response) => match response.get("outcome").and_then(serde_json::Value::as_str) {
+            Some("injected") => SteerOutcome::Injected,
+            Some("startedNewTurn") => SteerOutcome::StartedTurn,
+            Some("promptRequired") => SteerOutcome::TurnOver,
+            Some(other) => SteerOutcome::Refused(format!("outcome: {other}")),
+            None => SteerOutcome::Refused("outcome がありません".to_string()),
+        },
+        Err(error) => SteerOutcome::Refused(error.to_string()),
+    }
+}
+
+/// 応答を待っている差し込み。1 セッション 1 本ずつ送り（codex-acp もセッションごとに 1 本ずつ捌く）、
+/// 待っている間に来た分は `waiting` に並べる。応答の future はターンでも待機中でも同じ物を見張る
+/// （ターンの閉じ際に送った分の応答はターンの後に届く）。
+struct Steering {
+    /// 応答を待っている差し込みの id（`response` が生きている間だけ `Some`）。
+    in_flight: Option<u64>,
+    response: futures::future::Fuse<
+        futures::future::BoxFuture<'static, Result<serde_json::Value, acp::Error>>,
+    >,
+    waiting: std::collections::VecDeque<(u64, String, Vec<PromptImage>)>,
+}
+
+impl Steering {
+    fn new() -> Self {
+        Self {
+            in_flight: None,
+            response: futures::future::Fuse::terminated(),
+            waiting: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 応答を受けた: 結果を UI へ流す。待っていた次の分は呼び手が [`Self::waiting`] から取る
+    /// （ターン中なら送り、待機中なら [`Self::release_waiting`]）。
+    fn settle(
+        &mut self,
+        response: Result<serde_json::Value, acp::Error>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        if let Some(id) = self.in_flight.take() {
+            let outcome = steer_outcome(response);
+            if let SteerOutcome::Refused(reason) = &outcome {
+                eprintln!("差し込みが受け取られなかった: {reason}");
+            }
+            event_tx
+                .unbounded_send(AgentEvent::Steered { id, outcome })
+                .ok();
+        }
+    }
+
+    /// ターンが閉じた: 待っていた（まだ送っていない）分は送らずに「ターンが無かった」で返す。
+    /// 応答を待っている分はそのまま（待機中に届く）。
+    fn release_waiting(&mut self, event_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        for (id, _, _) in self.waiting.drain(..) {
+            event_tx
+                .unbounded_send(AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::TurnOver,
+                })
+                .ok();
+        }
+    }
 }
 
 /// ACP エージェント（claude-agent-acp）の起動設定。
@@ -625,8 +856,8 @@ impl AgentCommand {
         AGENTS.first()?.command(cwd)
     }
 
-    /// env 無しで組む（既存経路の短縮形）。
-    fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
+    /// env 無しで組む（既存経路の短縮形・他の crate の試験が偽エージェントを起こす口）。
+    pub fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
         Self {
             managed_npm: None,
             path,
@@ -678,6 +909,20 @@ pub struct AgentKind {
     /// アイコンが無い時に出す短いモノグラム（例 codex=">_"）。
     pub monogram: &'static str,
 }
+
+/// ログインの跡（資格情報の中身は読まない・在るかだけを見る）。[`AgentKind::configured_auth_state`]
+/// （このマシン）と、設定の AI エージェントのページが SSH 先を見る時（[`readiness`]）が同じ表を使う。
+pub(crate) struct LoginTraces {
+    /// 値があればそのまま使える（API キー）。
+    pub(crate) ready_env: &'static [&'static str],
+    /// 値があればログインの跡（確かめていない）。
+    pub(crate) env: &'static [&'static str],
+    /// ホームから見て在ればログインの跡（確かめていない）。
+    pub(crate) files: &'static [&'static str],
+}
+
+/// OpenCode の資格情報（ホームから見た道）。このマシンでは `XDG_DATA_HOME` も見る（[`opencode_auth_exists`]）。
+const OPENCODE_AUTH: &str = ".local/share/opencode/auth.json";
 
 /// エージェントのローカル導入状況（設定画面のステータス表示）。認証状態は見ない（CLI 任せ）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1127,6 +1372,12 @@ impl AgentKind {
         find_in_path(self.cli_bin).is_some()
     }
 
+    /// vendor CLI 本体の名前（PATH で探す名前）。設定の AI エージェントのページが、背景で読んだ事実
+    /// （[`readiness::HostFacts`]）と突き合わせる（描画中に PATH を歩かない）。
+    pub fn cli_command(&self) -> &'static str {
+        self.cli_bin
+    }
+
     /// 対話も子プロセス起動もしない軽量判定。composer の初回 render から呼ばれるため、
     /// ファイル存在と環境変数だけを見る。status/probe は明示的な背景 refresh に分離する。
     /// 設定画面の導入/ログイン後ポーリング（変化検知）もこの軽さを前提に毎秒呼ぶ。
@@ -1134,53 +1385,88 @@ impl AgentKind {
         if !self.cli_installed() {
             return AgentAuthState::SignedOut;
         }
-        let available = match self.id {
-            "claude" => env_has_any(&["ANTHROPIC_API_KEY"]),
-            "codex" => env_has_any(&["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"]),
-            _ => false,
-        };
-        if available {
-            return AgentAuthState::Available;
-        }
+        self.auth_state_from_traces(
+            |name| env_has_any(&[name]),
+            |file| {
+                if file == OPENCODE_AUTH {
+                    opencode_auth_exists()
+                } else {
+                    home_path_exists(file)
+                }
+            },
+        )
+    }
 
-        let configured = match self.id {
-            "claude" => home_path_exists(".claude/.credentials.json"),
-            "codex" => home_path_exists(".codex/auth.json"),
-            "copilot" => {
-                env_has_any(&[
+    /// ログインの跡の表（[`LoginTraces`]）。このマシンでも SSH 先でも同じ表を見る。
+    pub(crate) fn login_traces(&self) -> LoginTraces {
+        match self.id {
+            "claude" => LoginTraces {
+                ready_env: &["ANTHROPIC_API_KEY"],
+                env: &[],
+                files: &[".claude/.credentials.json"],
+            },
+            "codex" => LoginTraces {
+                ready_env: &["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"],
+                env: &[],
+                files: &[".codex/auth.json"],
+            },
+            "copilot" => LoginTraces {
+                ready_env: &[],
+                env: &[
                     "COPILOT_GITHUB_TOKEN",
                     "GH_TOKEN",
                     "GITHUB_TOKEN",
                     "COPILOT_PROVIDER_API_KEY",
-                ]) || home_path_exists(".copilot/config.json")
-                    || home_path_exists(".config/gh/hosts.yml")
-            }
-            "qwen" => {
-                env_has_any(&[
+                ],
+                files: &[".copilot/config.json", ".config/gh/hosts.yml"],
+            },
+            "qwen" => LoginTraces {
+                ready_env: &[],
+                env: &[
                     "DASHSCOPE_API_KEY",
                     "OPENAI_API_KEY",
                     "ANTHROPIC_API_KEY",
                     "GEMINI_API_KEY",
-                ]) || home_path_exists(".qwen/settings.json")
-                    || home_path_exists(".qwen/.env")
-            }
-            "opencode" => {
-                env_has_any(&["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"])
-                    || opencode_auth_exists()
-            }
-            "kimi" => {
-                env_has_any(&["KIMI_API_KEY"])
-                    || home_path_exists(".kimi-code/config.toml")
-                    || home_path_exists(".kimi-code/credentials.json")
-            }
-            "grok" => {
-                env_has_any(&["XAI_API_KEY"])
-                    || home_path_exists(".grok/config.toml")
-                    || home_path_exists(".grok/credentials.json")
-            }
-            _ => false,
-        };
-        if configured {
+                ],
+                files: &[".qwen/settings.json", ".qwen/.env"],
+            },
+            "opencode" => LoginTraces {
+                ready_env: &[],
+                env: &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+                files: &[OPENCODE_AUTH],
+            },
+            "kimi" => LoginTraces {
+                ready_env: &[],
+                env: &["KIMI_API_KEY"],
+                files: &[".kimi-code/config.toml", ".kimi-code/credentials.json"],
+            },
+            "grok" => LoginTraces {
+                ready_env: &[],
+                env: &["XAI_API_KEY"],
+                files: &[".grok/config.toml", ".grok/credentials.json"],
+            },
+            _ => LoginTraces {
+                ready_env: &[],
+                env: &[],
+                files: &[],
+            },
+        }
+    }
+
+    /// 跡からログインの状態を決める（CLI の有無は見ない）。環境変数とファイルの見方は呼び手が渡す
+    /// （このマシンは実物・SSH 先は [`readiness`] が読んだ事実）。
+    pub(crate) fn auth_state_from_traces(
+        &self,
+        has_env: impl Fn(&str) -> bool,
+        has_file: impl Fn(&str) -> bool,
+    ) -> AgentAuthState {
+        let traces = self.login_traces();
+        if traces.ready_env.iter().any(|name| has_env(name)) {
+            return AgentAuthState::Available;
+        }
+        if traces.env.iter().any(|name| has_env(name))
+            || traces.files.iter().any(|file| has_file(file))
+        {
             AgentAuthState::Configured
         } else {
             AgentAuthState::SignedOut
@@ -1551,7 +1837,7 @@ fn initialize_request() -> v1::InitializeRequest {
         )
 }
 
-/// ACP の `SessionConfigOption` 群を UI 非依存の [`ConfigOption`] へ簡約する（Select のみ扱う）。
+/// ACP の `SessionConfigOption` 群を UI 非依存の [`ConfigOption`] へ簡約する（select と boolean）。
 fn map_config_options(options: &[v1::SessionConfigOption]) -> Vec<ConfigOption> {
     options.iter().filter_map(map_config_option).collect()
 }
@@ -1560,41 +1846,57 @@ fn map_config_option(option: &v1::SessionConfigOption) -> Option<ConfigOption> {
     let category = match &option.category {
         Some(v1::SessionConfigOptionCategory::Model) => ConfigCategory::Model,
         Some(v1::SessionConfigOptionCategory::ThoughtLevel) => ConfigCategory::ThoughtLevel,
+        Some(v1::SessionConfigOptionCategory::Mode) => ConfigCategory::Mode,
         _ => ConfigCategory::Other,
     };
-    match &option.kind {
-        v1::SessionConfigKind::Select(select) => {
-            let choices = match &select.options {
-                v1::SessionConfigSelectOptions::Ungrouped(options) => options
-                    .iter()
-                    .map(|option| (option.value.to_string(), option.name.clone()))
-                    .collect(),
+    let choice = |option: &v1::SessionConfigSelectOption| ConfigChoice {
+        value_id: option.value.to_string(),
+        name: option.name.clone(),
+        description: option.description.clone(),
+    };
+    let kind = match &option.kind {
+        v1::SessionConfigKind::Select(select) => ConfigKind::Select {
+            current: select.current_value.to_string(),
+            choices: match &select.options {
+                v1::SessionConfigSelectOptions::Ungrouped(options) => {
+                    options.iter().map(choice).collect()
+                }
                 v1::SessionConfigSelectOptions::Grouped(groups) => groups
                     .iter()
-                    .flat_map(|group| {
-                        group
-                            .options
-                            .iter()
-                            .map(|option| (option.value.to_string(), option.name.clone()))
-                    })
+                    .flat_map(|group| group.options.iter().map(choice))
                     .collect(),
                 _ => Vec::new(),
-            };
-            Some(ConfigOption {
-                config_id: option.id.to_string(),
-                category,
-                current: select.current_value.to_string(),
-                choices,
-            })
-        }
-        _ => None, // Boolean は今は UI で扱わない
-    }
+            },
+        },
+        // initialize で boolean の受け取りを広告している（[`initialize_request`]）ので、Fast mode は
+        // select の on / off ではなく boolean で届く。
+        v1::SessionConfigKind::Boolean(boolean) => ConfigKind::Boolean {
+            current: boolean.current_value,
+        },
+        // まだ知らない種類（将来の自由入力など）は出さない＝送れない値を作らない。
+        _ => return None,
+    };
+    Some(ConfigOption {
+        config_id: option.id.to_string(),
+        name: option.name.clone(),
+        description: option.description.clone(),
+        category,
+        kind,
+    })
 }
 
-/// [`find_config_choice`] の結果: どの設定のどの値を送るか、既に current かどうか。
-struct ConfigChoice {
+/// セッションを開いた直後に合わせる希望 1 つ（[`SessionPreferences`]）。
+enum ConfigWish<'a> {
+    /// モデル・思考量（表示名 or value_id・大文字小文字無視）。
+    Category(ConfigCategory, &'a str),
+    /// その他の設定（ACP の config_id と保存した値）。
+    Stored(&'a str, &'a str),
+}
+
+/// [`find_config_choice`] / [`find_stored_config`] の結果: どの設定のどの値を送るか、既に current かどうか。
+struct PreferredConfig {
     config_id: String,
-    value_id: String,
+    value: ConfigValue,
     /// エージェントの current が既にこの値（＝送る必要が無い）。
     is_current: bool,
 }
@@ -1605,15 +1907,35 @@ fn find_config_choice(
     configs: &[ConfigOption],
     category: ConfigCategory,
     desired: &str,
-) -> Option<ConfigChoice> {
+) -> Option<PreferredConfig> {
     let config = configs.iter().find(|config| config.category == category)?;
-    let (value_id, _) = config.choices.iter().find(|(value_id, name)| {
-        name.eq_ignore_ascii_case(desired) || value_id.eq_ignore_ascii_case(desired)
+    let choice = config.choices().iter().find(|choice| {
+        choice.name.eq_ignore_ascii_case(desired) || choice.value_id.eq_ignore_ascii_case(desired)
     })?;
-    Some(ConfigChoice {
+    let value = ConfigValue::Id(choice.value_id.clone());
+    Some(PreferredConfig {
         config_id: config.config_id.clone(),
-        value_id: value_id.clone(),
-        is_current: *value_id == config.current,
+        is_current: value == config.current(),
+        value,
+    })
+}
+
+/// モデル・思考量・権限モードの外の設定（[`ConfigCategory::Other`]）の希望（ACP の config_id と保存した
+/// 値）を広告から引く。広告に無い設定・種類の合わない値（select に `true` 等）・選択肢に無い value_id は
+/// `None`（送らない）。
+fn find_stored_config(
+    configs: &[ConfigOption],
+    config_id: &str,
+    stored: &str,
+) -> Option<PreferredConfig> {
+    let config = configs
+        .iter()
+        .find(|config| config.config_id == config_id && config.category == ConfigCategory::Other)?;
+    let value = config.value_from_stored(stored)?;
+    Some(PreferredConfig {
+        config_id: config.config_id.clone(),
+        is_current: value == config.current(),
+        value,
     })
 }
 
@@ -1655,6 +1977,76 @@ async fn with_timeout<T>(
             ),
         )),
     }
+}
+
+/// [`probe_providers`] の結果（`providers/list` の応答をそのまま持つ）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProvidersProbe {
+    /// `agentCapabilities.providers` を広告したか（`false` なら list / set は送っていない）。
+    pub advertised: bool,
+    /// `providers/set` の前の `providers/list`。
+    pub before: serde_json::Value,
+    /// `providers/set` の後の `providers/list`。
+    pub after: serde_json::Value,
+}
+
+/// 実アダプタの確かめ（issue #38 H3）: initialize → `providers/list` → `providers/set` → `providers/list`
+/// だけを送る。**セッションは開かず prompt も送らない**（API へは何も行かない）。手元だけ。
+pub async fn probe_providers(
+    command: &AgentCommand,
+    route: &connections::ProviderRoute,
+) -> Result<ProvidersProbe> {
+    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
+        .args(command.args.clone())
+        .envs(command.env.clone());
+    let mut process = LocalHost::shared()
+        .spawn_process(&spec)
+        .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
+    let transport = acp::ByteStreams::new(
+        blocking::Unblock::new(process.take_stdin()?),
+        blocking::Unblock::new(process.take_stdout()?),
+    );
+    let route = route.clone();
+    let probe = acp::Client
+        .builder()
+        .connect_with(transport, async move |connection| {
+            let initialized = with_handshake_timeout(
+                "ACP initialize",
+                connection.send_request(initialize_request()).block_task(),
+            )
+            .await?;
+            if initialized.agent_capabilities.providers.is_none() {
+                return Ok(ProvidersProbe {
+                    advertised: false,
+                    before: serde_json::Value::Null,
+                    after: serde_json::Value::Null,
+                });
+            }
+            let list = async || {
+                with_handshake_timeout(
+                    "ACP providers/list",
+                    connection
+                        .send_request(acp::UntypedMessage::new(
+                            "providers/list",
+                            v1::ListProvidersRequest::new(),
+                        )?)
+                        .block_task(),
+                )
+                .await
+            };
+            let before = list().await?;
+            set_provider(&connection, &route).await?;
+            let after = list().await?;
+            Ok(ProvidersProbe {
+                advertised: true,
+                before,
+                after,
+            })
+        })
+        .await
+        .context("providers/* の確かめに失敗");
+    drop(process);
+    probe
 }
 
 /// エージェントを起動し、ACP の initialize ハンドシェイクまで行う。
@@ -1767,6 +2159,10 @@ pub struct SessionPreferences {
     pub model: Option<String>,
     /// 思考レベル / effort（`session/set_config_option`・category = ThoughtLevel）。
     pub effort: Option<String>,
+    /// モデル・思考量の外の設定（Fast mode 等・`session/set_config_option`）。`(ACP の config_id,
+    /// 保存した値)` で、値は select なら value_id・boolean なら `true` / `false`（[`ConfigValue::to_stored`]）。
+    /// モデルの後に合わせる（モデルを変えると Fast mode の有無が変わるため）。広告に無い物は送らない。
+    pub options: Vec<(String, String)>,
     /// 前回このスレッドが使っていた ACP セッション id（[`AgentEvent::SessionStarted`] で控えたもの）。
     /// エージェントが `loadSession` を広告していれば `session/load` で会話を引き継ぐ。広告が無い・
     /// 引き継ぎに失敗した場合は黙って新規セッションにする（SSH 切断・再起動からの復帰・2026-09-08）。
@@ -1782,6 +2178,10 @@ pub struct SessionPreferences {
     /// エージェント側の過去の会話（CLI で作った物など）を necoder で開いた時だけ立てる。普段の再開は
     /// transcript が DB に在るので、再生は捨てる（二重に載せない）。
     pub replay_history: bool,
+    /// このセッションに渡す接続（issue #38 H3・[`connections`]）。`providers/set` で渡せる物は
+    /// `session/new` / `session/load` の前に送り、それ以外は起動時の env で渡す。`None` = エージェント
+    /// 自身のログインのまま。
+    pub connection: Option<connections::ConnectionLaunch>,
 }
 
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
@@ -1823,14 +2223,131 @@ pub async fn run_session_on(
     } else {
         command
     };
+    // リポジトリの `.necoder/task.env`。接続のキーを渡すセッションでは、宛先・通信路・差し込むコードを
+    // 変える変数を読まない（読むとキーを横取りできる・`connections::guarded_from_task_env`）。
+    let mut task_env = host::task_environment(host.as_ref(), &command.cwd)?;
+    if preferences.connection.is_some() {
+        let mut dropped: Vec<String> = task_env
+            .keys()
+            .filter(|name| connections::guarded_from_task_env(name))
+            .cloned()
+            .collect();
+        dropped.sort();
+        for name in &dropped {
+            task_env.remove(name);
+        }
+        if !dropped.is_empty() {
+            event_tx
+                .unbounded_send(AgentEvent::TaskEnvSkipped(dropped))
+                .ok();
+        }
+    }
+    // 接続の渡し方（issue #38 H3）。`providers/set` で渡せる接続は、まず env 無しで起こす（アダプタの
+    // プロセスの env にキーを置かない。アダプタは受け取った宛先とキーを Claude Code 本体の env と設定へ
+    // 入れるので、リポジトリの `.claude/settings.json` の env より強い）。広告しない古いアダプタだったら、
+    // env を足して 1 回だけ起こし直す。
+    let mut route = match &preferences.connection {
+        Some(connection) if connection.provider.is_some() => ConnectionRoute::Providers,
+        Some(_) => ConnectionRoute::Env,
+        None => ConnectionRoute::None,
+    };
+    loop {
+        let attempt = run_session_attempt(
+            &host,
+            &command,
+            &task_env,
+            &preferences,
+            route,
+            &mut command_rx,
+            &event_tx,
+        )
+        .await?;
+        match attempt {
+            Attempt::Finished => return Ok(()),
+            Attempt::NeedsEnv => {
+                eprintln!(
+                    "{} は providers/set を広告しない。接続を環境変数で渡して起こし直す",
+                    command.path.display()
+                );
+                route = ConnectionRoute::Env;
+            }
+        }
+    }
+}
+
+/// 接続の渡し方（[`run_session_on`] の 1 回の起動ごと）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionRoute {
+    /// 接続なし（エージェント自身のログイン）。
+    None,
+    /// `providers/set`（広告しなければ [`Attempt::NeedsEnv`] で戻る）。
+    Providers,
+    /// 起動時の環境変数。
+    Env,
+}
+
+/// 1 回の起動の終わり方。
+enum Attempt {
+    /// セッションが終わった（UI が送信路を捨てた・切れた）。
+    Finished,
+    /// `providers/set` を広告しないエージェントだった（セッションは開いていない）。env で起こし直す。
+    NeedsEnv,
+}
+
+/// `providers/set` を送る（`session/new` / `session/load` の前・issue #38 H3）。Rust の ACP crate が
+/// 要求の型を持たないので、スキーマの型で組んだ params を `UntypedMessage` で送る。断られたら、呼び手は
+/// セッションを開かずに [`connections::ProviderRejected`] で戻る（黙ってエージェント自身のログインで
+/// 走らせない）。
+async fn set_provider(
+    connection: &acp::ConnectionTo<acp::Agent>,
+    route: &connections::ProviderRoute,
+) -> std::result::Result<(), acp::Error> {
+    let message = acp::UntypedMessage::new("providers/set", route.set_request())?;
+    with_handshake_timeout(
+        "ACP providers/set",
+        connection.send_request(message).block_task(),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// [`run_session_on`] の 1 回の起動（プロセスを起こして、セッションが終わるまで）。
+async fn run_session_attempt(
+    host: &Arc<dyn Host>,
+    command: &AgentCommand,
+    task_env: &std::collections::HashMap<String, String>,
+    preferences: &SessionPreferences,
+    route: ConnectionRoute,
+    command_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Result<Attempt> {
+    let connection_env = preferences
+        .connection
+        .as_ref()
+        .filter(|_| route == ConnectionRoute::Env)
+        .map(|connection| connection.env.clone())
+        .unwrap_or_default();
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
-        .envs(host::task_environment(host.as_ref(), &command.cwd)?)
+        .envs(task_env.clone())
         .envs(command.env.clone())
-        // プリセットの環境変数が最後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
-        .envs(preferences.preset.env.clone());
+        // プリセットの環境変数が後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
+        .envs(preferences.preset.env.clone())
+        // 接続の変数が最後（task.env・agent_servers・プリセットのどれにも上書きさせない）。
+        .envs(connection_env);
+    // 起動してすぐ落ちた時の stderr から伏せる値（env に加え、`providers/set` のヘッダ＝キー）。
+    let mut secret_env = spec.env.clone();
+    if let Some(provider) = preferences
+        .connection
+        .as_ref()
+        .and_then(|connection| connection.provider.as_ref())
+    {
+        for (name, value) in &provider.headers {
+            secret_env.insert(format!("CONNECTION_HEADER_{name}"), value.clone());
+        }
+    }
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
-    // 渡しても意味がない。判定はここで取る（下の接続クロージャは `move` で `host` を持ち込まない）。
+    // 渡しても意味がない。判定はここで取る。
     let is_remote = host.is_remote();
     let mut process = host
         .spawn_process(&spec)
@@ -1847,14 +2364,37 @@ pub async fn run_session_on(
     let session_opened = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let opened = session_opened.clone();
     let exit_events = event_tx.clone();
+    // `providers/set` を断られた（セッションは開いていない・UI が言葉にする）。
+    let mut provider_rejected: Option<connections::ProviderRejected> = None;
     let outcome = acp::Client
         .builder()
-        .connect_with(transport, async move |connection| {
+        .connect_with(transport, async |connection| {
             let initialized = with_handshake_timeout(
                 "ACP initialize",
                 connection.send_request(initialize_request()).block_task(),
             )
             .await?;
+            // 接続（issue #38 H3）: `providers/set` を `session/new` / `session/load` より前に送る。
+            // 広告しないエージェントにはセッションを開かずに戻り、env で起こし直してもらう。
+            if route == ConnectionRoute::Providers {
+                if initialized.agent_capabilities.providers.is_none() {
+                    return Ok(Attempt::NeedsEnv);
+                }
+                if let Some((name, provider)) = preferences.connection.as_ref().and_then(|launch| {
+                    launch
+                        .provider
+                        .as_ref()
+                        .map(|provider| (launch.name.as_str(), provider))
+                }) {
+                    if let Err(error) = set_provider(&connection, provider).await {
+                        provider_rejected = Some(connections::ProviderRejected {
+                            connection: name.to_string(),
+                            reason: error.to_string(),
+                        });
+                        return Err(error);
+                    }
+                }
+            }
             // 前回のセッション id があり、エージェントが `loadSession` を広告していれば `session/load`
             // で会話を引き継ぐ（SSH 切断・再起動のあとも同じスレッドで続きが話せる）。
             //
@@ -1964,11 +2504,14 @@ pub async fn run_session_on(
                 }
             };
             opened.store(true, std::sync::atomic::Ordering::SeqCst);
+            // 実行中のターンへの差し込み（`_session/steering`）を受けるか。initialize の実物で決める。
+            let steerable = steering_supported(initialized.meta.as_ref());
             event_tx
                 .unbounded_send(AgentEvent::SessionStarted {
                     session_id: session.session_id().to_string(),
                     resumed,
                     resumable: can_load,
+                    steerable,
                 })
                 .ok();
             // 目標への操作の入口（Codex の `_meta.goal`・O17）。広告した時だけ流す（UI は
@@ -1993,6 +2536,20 @@ pub async fn run_session_on(
                     Ok(message) => connection.send_request(message).detach(),
                     Err(error) => eprintln!("目標の操作を組めない: {error}"),
                 }
+            };
+            // 差し込みを送り、応答の future を返す（応答はターン・待機中の select で待つ）。
+            let send_steer = |text: String, images: Vec<PromptImage>| {
+                use futures::future::FutureExt as _;
+                let params = SteerParams {
+                    session_id: session_id_text.clone(),
+                    prompt: prompt_blocks(text, images, accepts_images, &event_tx),
+                    meta: serde_json::json!({"steering": {"idleBehavior": "promptRequired"}}),
+                };
+                match acp::UntypedMessage::new(STEER_METHOD, params) {
+                    Ok(message) => connection.send_request(message).block_task().boxed(),
+                    Err(error) => futures::future::ready(Err(error)).boxed(),
+                }
+                .fuse()
             };
 
             // エージェントが広告する権限モード一覧 + 現在モードを UI へ（セレクタを実モードで組む）。
@@ -2039,24 +2596,40 @@ pub async fn run_session_on(
             // 適用後の一覧を UI へ流せば、UI 側の照合が一致して二重送信にならない。
             if let Some(options) = &config_options {
                 let mut configs = map_config_options(options);
-                for (category, desired) in [
-                    (ConfigCategory::Model, preferences.model.as_deref()),
-                    (ConfigCategory::ThoughtLevel, preferences.effort.as_deref()),
-                ] {
-                    let Some(desired) = desired else {
+                // モデル → 思考量 → その他の順。モデルを変えると思考量の段と Fast mode の有無が
+                // 変わるので、1 つ送るたびに応答の一覧で引き直す。
+                let wishes = [
+                    (preferences.model.as_deref())
+                        .map(|desired| ConfigWish::Category(ConfigCategory::Model, desired)),
+                    (preferences.effort.as_deref())
+                        .map(|desired| ConfigWish::Category(ConfigCategory::ThoughtLevel, desired)),
+                ]
+                .into_iter()
+                .flatten()
+                .chain(
+                    preferences
+                        .options
+                        .iter()
+                        .map(|(config_id, stored)| ConfigWish::Stored(config_id, stored)),
+                );
+                for wish in wishes {
+                    let preferred = match wish {
+                        ConfigWish::Category(category, desired) => {
+                            find_config_choice(&configs, category, desired)
+                        }
+                        ConfigWish::Stored(config_id, stored) => {
+                            find_stored_config(&configs, config_id, stored)
+                        }
+                    };
+                    let Some(preferred) = preferred.filter(|preferred| !preferred.is_current)
+                    else {
                         continue;
                     };
-                    let Some(choice) = find_config_choice(&configs, category, desired) else {
-                        continue;
-                    };
-                    if choice.is_current {
-                        continue;
-                    }
                     if let Ok(response) = connection
                         .send_request(v1::SetSessionConfigOptionRequest::new(
                             session.session_id().clone(),
-                            choice.config_id,
-                            v1::SessionConfigOptionValue::value_id(choice.value_id),
+                            preferred.config_id,
+                            preferred.value.to_acp(),
                         ))
                         .block_task()
                         .await
@@ -2074,6 +2647,8 @@ pub async fn run_session_on(
             // ターンが畳まれてから順に処理する。
             let mut deferred: std::collections::VecDeque<SessionCommand> =
                 std::collections::VecDeque::new();
+            // 応答を待っている差し込み（ターンを跨いで見張る）。
+            let mut steering = Steering::new();
 
             // UI からの指示（prompt / モード変更）を単一チャネルで捌く。
             loop {
@@ -2096,6 +2671,7 @@ pub async fn run_session_on(
                             futures::pin_mut!(update, next_command, closed);
                             futures::select_biased! {
                                 update = update => IdleEvent::Update(update),
+                                response = &mut steering.response => IdleEvent::Steered(response),
                                 command = next_command => IdleEvent::Command(command),
                                 _ = closed => IdleEvent::Closed,
                             }
@@ -2103,6 +2679,20 @@ pub async fn run_session_on(
                         match idle_event {
                             IdleEvent::Update(Ok(message)) => {
                                 handle_session_message(message, &event_tx).await?;
+                                continue;
+                            }
+                            // ターンの閉じ際に送った差し込みの応答。待っている分があっても、もう
+                            // ターンが無いので送らずに返す。
+                            IdleEvent::Steered(response) => {
+                                if response
+                                    .as_ref()
+                                    .is_err_and(acp::is_incoming_transport_closed)
+                                {
+                                    event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                    break;
+                                }
+                                steering.settle(response, &event_tx);
+                                steering.release_waiting(&event_tx);
                                 continue;
                             }
                             IdleEvent::Update(Err(error)) => {
@@ -2137,6 +2727,16 @@ pub async fn run_session_on(
                     SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
+                    // 差し込む先のターンが無い。送らずに返す（UI が普通の送信として送り直す）。
+                    SessionCommand::Steer { id, .. } => {
+                        event_tx
+                            .unbounded_send(AgentEvent::Steered {
+                                id,
+                                outcome: SteerOutcome::TurnOver,
+                            })
+                            .ok();
+                        continue;
+                    }
                     SessionCommand::Goal(action) => {
                         send_goal_action(action);
                         continue;
@@ -2152,16 +2752,13 @@ pub async fn run_session_on(
                             .ok();
                         continue;
                     }
-                    SessionCommand::SetConfig {
-                        config_id,
-                        value_id,
-                    } => {
-                        // モデル/思考レベル等を変更。応答は更新後の一覧なので UI へ反映する。
+                    SessionCommand::SetConfig { config_id, value } => {
+                        // モデル/思考レベル/Fast mode 等を変更。応答は更新後の一覧なので UI へ反映する。
                         if let Ok(response) = connection
                             .send_request(v1::SetSessionConfigOptionRequest::new(
                                 session.session_id().clone(),
                                 config_id,
-                                v1::SessionConfigOptionValue::value_id(value_id),
+                                value.to_acp(),
                             ))
                             .block_task()
                             .await
@@ -2192,13 +2789,17 @@ pub async fn run_session_on(
                 // running を立てさせる（楽観 UI の取りこぼしを塞ぐ）。TurnEnded と対になる。
                 event_tx.unbounded_send(AgentEvent::TurnStarted).ok();
                 loop {
-                    // エージェントの更新・UI のコマンド・prompt 応答を**同時に**待つ。こうしないと
-                    // ターン中（`read_update` で待っている間）に cancel を受け取れない。
+                    // エージェントの更新・差し込みの応答・prompt 応答・UI のコマンドを**同時に**
+                    // 待つ。こうしないとターン中（`read_update` で待っている間）に cancel を受け取れない。
                     // `read_update` はチャネル受信なので途中で future を捨てても取りこぼさない。
-                    // `select_biased!` で更新をコマンド・応答より先に読む: 応答（終端）が届いた
-                    // 時点で未処理の update がチャネルに残っていることがあり（応答は stream 上
-                    // 最後だが、両者が同時に ready になる）、公平 select だと末尾のチャンクを
-                    // 取りこぼす。
+                    // `select_biased!` の順（ARCHITECTURE §7.6）:
+                    // - 更新が最初: 応答（終端）が届いた時点で未処理の update がチャネルに残って
+                    //   いることがあり（応答は stream 上最後だが、両者が同時に ready になる）、
+                    //   公平 select だと末尾のチャンクを取りこぼす。
+                    // - 差し込みの応答を prompt 応答より先に: 同時に届いたら、差し込んだ文を
+                    //   ターンの終わりより前に置く（UI はそこで transcript に入れる）。
+                    // - prompt 応答をコマンドより先に: 終端が手元に届いているのに、`Steer` を
+                    //   終わったターンへ送らない（codex-acp はそれを自分のターンにしてしまう）。
                     let turn_event = {
                         use futures::future::FutureExt as _;
                         let update = session.read_update().fuse();
@@ -2206,8 +2807,9 @@ pub async fn run_session_on(
                         futures::pin_mut!(update, command);
                         futures::select_biased! {
                             update = update => TurnEvent::Update(update),
-                            command = command => TurnEvent::Command(command),
+                            response = &mut steering.response => TurnEvent::Steered(response),
                             result = prompt_response => TurnEvent::PromptFinished(result),
+                            command = command => TurnEvent::Command(command),
                         }
                     };
                     let update = match turn_event {
@@ -2224,6 +2826,43 @@ pub async fn run_session_on(
                             send_goal_action(action);
                             continue;
                         }
+                        // 実行中のターンへの差し込み。後回し（deferred）にしない — 待つとターンが
+                        // 閉じてから届き、差し込む意味が無くなる。広告の無いエージェントには送らない。
+                        TurnEvent::Command(Some(SessionCommand::Steer { id, text, images })) => {
+                            if !steerable {
+                                event_tx
+                                    .unbounded_send(AgentEvent::Steered {
+                                        id,
+                                        outcome: SteerOutcome::Refused(
+                                            "このエージェントは差し込みを広告していない"
+                                                .to_string(),
+                                        ),
+                                    })
+                                    .ok();
+                            } else if steering.in_flight.is_some() {
+                                steering.waiting.push_back((id, text, images));
+                            } else {
+                                steering.in_flight = Some(id);
+                                steering.response = send_steer(text, images);
+                            }
+                            continue;
+                        }
+                        TurnEvent::Steered(response) => {
+                            if response
+                                .as_ref()
+                                .is_err_and(acp::is_incoming_transport_closed)
+                            {
+                                event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                return Ok(Attempt::Finished);
+                            }
+                            steering.settle(response, &event_tx);
+                            // 待っていた次の分を送る（まだターン中）。
+                            if let Some((id, text, images)) = steering.waiting.pop_front() {
+                                steering.in_flight = Some(id);
+                                steering.response = send_steer(text, images);
+                            }
+                            continue;
+                        }
                         // ターン中のモデル変更等は畳んでから処理する（取りこぼさない）。
                         TurnEvent::Command(Some(other)) => {
                             deferred.push_back(other);
@@ -2235,8 +2874,9 @@ pub async fn run_session_on(
                         TurnEvent::Update(Err(error)) => {
                             if acp::is_incoming_transport_closed(&error) {
                                 event_tx.unbounded_send(AgentEvent::SessionLost).ok();
-                                return Ok(());
+                                return Ok(Attempt::Finished);
                             }
+                            steering.release_waiting(&event_tx);
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
@@ -2259,6 +2899,9 @@ pub async fn run_session_on(
                             {
                                 event_tx.unbounded_send(AgentEvent::TurnUsage(tokens)).ok();
                             }
+                            // まだ送っていない差し込みは、閉じたターンには送らない（UI が送り直す）。
+                            // 応答を待っている分は待機中に届く。
+                            steering.release_waiting(&event_tx);
                             event_tx
                                 .unbounded_send(AgentEvent::TurnEnded { reason: end })
                                 .ok();
@@ -2277,8 +2920,9 @@ pub async fn run_session_on(
                                 // （2026-09-08 の報告）。UI は SessionLost で送信路を捨て、
                                 // 次の送信で立ち上げ直す。
                                 event_tx.unbounded_send(AgentEvent::SessionLost).ok();
-                                return Ok(());
+                                return Ok(Attempt::Finished);
                             }
+                            steering.release_waiting(&event_tx);
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
@@ -2290,13 +2934,17 @@ pub async fn run_session_on(
                     handle_session_message(update, &event_tx).await?;
                 }
             }
-            Ok::<(), acp::Error>(())
+            Ok::<Attempt, acp::Error>(Attempt::Finished)
         })
         .await;
     // 開く前に落ちた（initialize の前後でプロセスが終わった）なら、ACP の「Broken pipe」ではなく
     // 終わり方と stderr の末尾を理由にする（何が悪いかはエージェントしか知らない）。
+    if let Some(rejected) = provider_rejected {
+        drop(process);
+        return Err(anyhow::Error::new(rejected));
+    }
     if outcome.is_err() && !session_opened.load(std::sync::atomic::Ordering::SeqCst) {
-        if let Some(exited) = startup_exit(&mut process, &spec.env).await {
+        if let Some(exited) = startup_exit(&mut process, &secret_env).await {
             drop(process);
             exit_events
                 .unbounded_send(AgentEvent::ExitedAtStartup(exited.clone()))
@@ -4181,6 +4829,329 @@ for line in sys.stdin:
         assert_eq!(received["has_meta"], false, "{received}");
     }
 
+    /// 偽エージェント（`PROVIDERS_CAP` を置換して使う）: 受け取った method の順、`providers/set` の
+    /// params、プロセスの env（接続に関わる名前だけ）を prompt 応答に載せる（issue #38 H3）。
+    const AGENT_THAT_REPORTS_CONNECTION: &str = r#"
+import json, os, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+NAMES = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "HTTPS_PROXY",
+         "NODE_OPTIONS", "CARGO_TARGET_DIR", "ZHIPU_API_KEY", "OPENCODE_CONFIG_CONTENT"]
+seen = []
+provider = None
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method:
+        seen.append(method)
+    if method == "initialize":
+        caps = {"loadSession": True}
+        if PROVIDERS_CAP:
+            caps["providers"] = {}
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": caps}})
+    elif method == "providers/set":
+        provider = params
+        if REJECT_SET:
+            send({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32602,
+                            "message": "Invalid params: baseUrl must be a non-empty absolute http(s) URL."}})
+        else:
+            send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    elif method in ("session/new", "session/load"):
+        result = {} if method == "session/load" else {"sessionId": "fresh"}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    elif method == "session/prompt":
+        report = {"seen": seen, "provider": provider,
+                  "env": {name: os.environ.get(name) for name in NAMES}}
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(report, sort_keys=True)}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    /// GLM の接続を Claude Code に渡す時の形（`providers/set` の宛先と、広告しない時の env）。
+    fn glm_for_claude_code() -> connections::ConnectionLaunch {
+        let connection = connections::Connection {
+            id: "glm".into(),
+            name: "GLM".into(),
+            preset: "zai-coding-plan".into(),
+            protocol: connections::Protocol::Anthropic,
+            base_url: "https://api.z.ai/api/anthropic".into(),
+        };
+        connections::Harness::ClaudeCode
+            .launch(&connection, Some("sk-connection-key"))
+            .expect("渡せる")
+    }
+
+    /// 偽エージェントを `cwd` で走らせ、エージェントが prompt 応答に載せた報告と全イベントを返す。
+    fn connection_report(
+        providers_advertised: bool,
+        preferences: SessionPreferences,
+        cwd: Option<&Path>,
+    ) -> Option<(serde_json::Value, Vec<AgentEvent>)> {
+        let script = AGENT_THAT_REPORTS_CONNECTION
+            .replace(
+                "PROVIDERS_CAP",
+                if providers_advertised {
+                    "True"
+                } else {
+                    "False"
+                },
+            )
+            .replace("REJECT_SET", "False");
+        let mut command = fake_agent_command(&script)?;
+        if let Some(cwd) = cwd {
+            command.cwd = cwd.to_path_buf();
+        }
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("やあ".into()))
+            .expect("send");
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                drop(command_tx);
+                seen
+            };
+            futures::join!(session, collect)
+        });
+        outcome.expect("セッションは正常終了する");
+        let report = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("エージェントの報告が返る");
+        Some((serde_json::from_str(&report).expect("JSON"), events))
+    }
+
+    /// issue #38 H3: `providers` を広告するエージェントには、`session/new` / `session/load` より**前に**
+    /// `providers/set` が届く。キーはヘッダに載り、エージェントの env には置かない。
+    #[test]
+    fn providers_set_reaches_an_advertising_agent_before_the_session() {
+        let fresh = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            ..SessionPreferences::default()
+        };
+        let Some((report, _)) = connection_report(true, fresh, None) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            report["seen"],
+            serde_json::json!([
+                "initialize",
+                "providers/set",
+                "session/new",
+                "session/prompt"
+            ]),
+            "{report}"
+        );
+        assert_eq!(
+            report["provider"],
+            serde_json::json!({ "providerId": "main", "apiType": "anthropic",
+                                "baseUrl": "https://api.z.ai/api/anthropic",
+                                "headers": { "Authorization": "Bearer sk-connection-key" } }),
+            "{report}"
+        );
+        for name in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+        ] {
+            assert_ne!(
+                report["env"][name], "sk-connection-key",
+                "キーを env に置かない: {report}"
+            );
+        }
+        assert_ne!(
+            report["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.z.ai/api/anthropic"
+        );
+
+        // 会話を引き継ぐ時も、`session/load` の前に送る。
+        let resumed = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            resume: Some("prev-1".into()),
+            ..SessionPreferences::default()
+        };
+        let (report, _) = connection_report(true, resumed, None).expect("python3 は上で確認済み");
+        assert_eq!(
+            report["seen"],
+            serde_json::json!([
+                "initialize",
+                "providers/set",
+                "session/load",
+                "session/prompt"
+            ]),
+            "{report}"
+        );
+    }
+
+    /// エージェントが `providers/set` を断ったら、セッションを開かずに（`session/new` を送らずに）
+    /// [`connections::ProviderRejected`] で戻る — 黙ってエージェント自身のログインで走らせない。
+    #[test]
+    fn a_rejected_provider_keeps_the_session_closed() {
+        let script = AGENT_THAT_REPORTS_CONNECTION
+            .replace("PROVIDERS_CAP", "True")
+            .replace("REJECT_SET", "True");
+        let Some(command) = fake_agent_command(&script) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let preferences = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            ..SessionPreferences::default()
+        };
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("やあ".into()))
+            .expect("send");
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                drop(command_tx);
+                seen
+            };
+            futures::join!(session, collect)
+        });
+        let error = outcome.expect_err("断られたら起こさない");
+        let rejected = error
+            .downcast_ref::<connections::ProviderRejected>()
+            .expect("理由を型で返す（UI が言葉にする）");
+        assert_eq!(rejected.connection, "GLM");
+        assert!(rejected.reason.contains("baseUrl"), "{}", rejected.reason);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SessionStarted { .. } | AgentEvent::AgentChunk(_)
+            )),
+            "セッションは開かない: {events:?}"
+        );
+    }
+
+    /// 広告しないエージェント（古いアダプタ）には `providers/set` を送らず、env を足して起こし直す。
+    /// 他の宛先と資格情報は空にしてから入れる（手元の `ANTHROPIC_API_KEY` を別の会社へ送らない）。
+    #[test]
+    fn an_agent_without_providers_gets_the_connection_in_its_env() {
+        let preferences = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            ..SessionPreferences::default()
+        };
+        let Some((report, _)) = connection_report(false, preferences, None) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            report["seen"],
+            serde_json::json!(["initialize", "session/new", "session/prompt"]),
+            "起こし直したプロセスは providers/set を受けない: {report}"
+        );
+        assert_eq!(report["provider"], serde_json::Value::Null);
+        assert_eq!(
+            report["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.z.ai/api/anthropic"
+        );
+        assert_eq!(report["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-connection-key");
+        assert_eq!(report["env"]["ANTHROPIC_API_KEY"], "");
+
+        // env だけで渡すエージェント（OpenCode）は最初から env で起こす。
+        let connection = connections::Connection {
+            id: "glm".into(),
+            name: "GLM".into(),
+            preset: "zai-coding-plan".into(),
+            protocol: connections::Protocol::Anthropic,
+            base_url: "https://api.z.ai/api/anthropic".into(),
+        };
+        let opencode = SessionPreferences {
+            connection: Some(
+                connections::Harness::OpenCode
+                    .launch(&connection, Some("zk"))
+                    .expect("渡せる"),
+            ),
+            ..SessionPreferences::default()
+        };
+        let (report, _) = connection_report(true, opencode, None).expect("python3 は上で確認済み");
+        assert_eq!(
+            report["seen"],
+            serde_json::json!(["initialize", "session/new", "session/prompt"]),
+            "{report}"
+        );
+        assert_eq!(report["env"]["ZHIPU_API_KEY"], "zk");
+        assert_eq!(
+            report["env"]["OPENCODE_CONFIG_CONTENT"],
+            r#"{"enabled_providers":["zai-coding-plan"]}"#
+        );
+    }
+
+    /// リポジトリの `.necoder/task.env` は、接続を渡すセッションの宛先・プロキシ・差し込むコードを
+    /// 変えられない（読まなかった名前は知らせる）。関係の無い変数は今までどおり入る。
+    #[test]
+    fn task_env_cannot_reroute_a_connection_session() {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_task_env_connection_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(root.join(".necoder")).expect("mkdir");
+        std::fs::write(
+            root.join(".necoder/task.env"),
+            "ANTHROPIC_BASE_URL=https://evil.example\nHTTPS_PROXY=http://evil.example:8080\n\
+             NODE_OPTIONS=--require ./steal.js\nCARGO_TARGET_DIR=/shared/target\n",
+        )
+        .expect("task.env");
+        let mut launch = glm_for_claude_code();
+        launch.provider = None; // env で渡す経路（OpenCode・DeepSeek Harness・古いアダプタと同じ）
+        let preferences = SessionPreferences {
+            connection: Some(launch),
+            ..SessionPreferences::default()
+        };
+        let Some((report, events)) = connection_report(false, preferences, Some(&root)) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            report["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.z.ai/api/anthropic"
+        );
+        assert_eq!(report["env"]["HTTPS_PROXY"], serde_json::Value::Null);
+        assert_eq!(report["env"]["NODE_OPTIONS"], serde_json::Value::Null);
+        assert_eq!(report["env"]["CARGO_TARGET_DIR"], "/shared/target");
+        assert!(
+            events.iter().any(|event| matches!(event,
+                AgentEvent::TaskEnvSkipped(names)
+                    if names == &["ANTHROPIC_BASE_URL", "HTTPS_PROXY", "NODE_OPTIONS"])),
+            "{events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// npx のキャッシュに**指定と同じ版**が在る時だけ、そこを直接起こす。
     #[cfg(not(windows))]
     #[test]
@@ -4494,21 +5465,43 @@ for line in sys.stdin:
         );
     }
 
+    fn select_config(
+        config_id: &str,
+        category: ConfigCategory,
+        current: &str,
+        choices: &[(&str, &str)],
+    ) -> ConfigOption {
+        ConfigOption {
+            config_id: config_id.into(),
+            name: config_id.into(),
+            description: None,
+            category,
+            kind: ConfigKind::Select {
+                current: current.into(),
+                choices: choices
+                    .iter()
+                    .map(|(value_id, name)| ConfigChoice {
+                        value_id: (*value_id).into(),
+                        name: (*name).into(),
+                        description: None,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
     #[test]
     fn config_choice_matches_name_or_id_case_insensitively() {
-        let configs = vec![ConfigOption {
-            config_id: "model".into(),
-            category: ConfigCategory::Model,
-            current: "claude-fable-5".into(),
-            choices: vec![
-                ("claude-opus-5".into(), "Opus".into()),
-                ("claude-fable-5".into(), "Fable".into()),
-            ],
-        }];
+        let configs = vec![select_config(
+            "model",
+            ConfigCategory::Model,
+            "claude-fable-5",
+            &[("claude-opus-5", "Opus"), ("claude-fable-5", "Fable")],
+        )];
         let by_name = find_config_choice(&configs, ConfigCategory::Model, "opus")
             .expect("表示名（大文字小文字無視）で引ける");
         assert_eq!(by_name.config_id, "model");
-        assert_eq!(by_name.value_id, "claude-opus-5");
+        assert_eq!(by_name.value, ConfigValue::Id("claude-opus-5".into()));
         assert!(!by_name.is_current, "current と違うので送る対象");
         let by_id = find_config_choice(&configs, ConfigCategory::Model, "CLAUDE-FABLE-5")
             .expect("value_id でも引ける");
@@ -4520,6 +5513,74 @@ for line in sys.stdin:
         assert!(
             find_config_choice(&configs, ConfigCategory::ThoughtLevel, "Opus").is_none(),
             "カテゴリ違いは None"
+        );
+    }
+
+    /// boolean の設定（Claude Code / codex-acp の Fast mode）を捨てずに写す。カテゴリ `mode` は
+    /// 権限モードの二重の広告なので印を付けて分ける（UI は出さない）。保存した値の読み戻しは
+    /// 種類と広告に合う物だけ。
+    #[test]
+    fn boolean_config_options_are_mapped_and_read_back() {
+        let advertised: Vec<v1::SessionConfigOption> = serde_json::from_value(serde_json::json!([
+            {"id": "mode", "name": "Mode", "category": "mode", "type": "select",
+             "currentValue": "default",
+             "options": [{"value": "default", "name": "Default"},
+                         {"value": "bypassPermissions", "name": "Bypass Permissions"}]},
+            {"id": "model", "name": "Model", "category": "model", "type": "select",
+             "currentValue": "default",
+             "options": [{"value": "default", "name": "Default (recommended)",
+                          "description": "Fable 5.1"},
+                         {"value": "opus", "name": "Opus 4.8"}]},
+            {"id": "fast", "name": "Fast mode", "category": "model_config", "type": "boolean",
+             "currentValue": false,
+             "description": "Faster responses on supported models — not available on the free plan"}
+        ]))
+        .expect("ACP の形で読める");
+        let configs = map_config_options(&advertised);
+        assert_eq!(configs.len(), 3, "boolean も捨てない: {configs:?}");
+        assert_eq!(configs[0].category, ConfigCategory::Mode);
+        assert_eq!(
+            configs[1].choices()[0].description.as_deref(),
+            Some("Fable 5.1"),
+            "選択肢の説明も写す（カードの一覧に出す）"
+        );
+        let fast = &configs[2];
+        assert_eq!(fast.category, ConfigCategory::Other);
+        assert_eq!(fast.kind, ConfigKind::Boolean { current: false });
+        assert_eq!(fast.name, "Fast mode");
+        assert!(fast
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("free plan")));
+
+        assert_eq!(
+            fast.value_from_stored("true"),
+            Some(ConfigValue::Bool(true))
+        );
+        assert_eq!(
+            fast.value_from_stored("opus"),
+            None,
+            "種類が合わない値は読まない"
+        );
+        assert_eq!(
+            configs[1].value_from_stored("opus"),
+            Some(ConfigValue::Id("opus".into()))
+        );
+        assert_eq!(
+            configs[1].value_from_stored("Opus 4.8"),
+            None,
+            "表示名では当てない（value_id だけ）"
+        );
+        assert_eq!(ConfigValue::Bool(true).to_stored(), "true");
+        assert_eq!(ConfigValue::Id("opus[1m]".into()).to_stored(), "opus[1m]");
+        // 送る形: boolean は `type: "boolean"`、select は value_id の文字列（`type` 無し）。
+        assert_eq!(
+            serde_json::to_value(ConfigValue::Bool(true).to_acp()).expect("書ける"),
+            serde_json::json!({"type": "boolean", "value": true})
+        );
+        assert_eq!(
+            serde_json::to_value(ConfigValue::Id("opus".into()).to_acp()).expect("書ける"),
+            serde_json::json!({"value": "opus"})
         );
     }
 
@@ -4595,10 +5656,12 @@ for line in sys.stdin:
             mode: None,
             model: Some("opus".into()),
             effort: Some("MAX".into()),
+            options: Vec::new(),
             resume: None,
             mcp_servers: Vec::new(),
             preset: preset::SessionPreset::default(),
             replay_history: false,
+            connection: None,
         };
 
         let events = futures::executor::block_on(async move {
@@ -4634,15 +5697,15 @@ for line in sys.stdin:
             configs
                 .iter()
                 .find(|config| config.category == category)
-                .map(|config| config.current.clone())
+                .map(|config| config.current())
         };
         assert_eq!(
-            current_of(ConfigCategory::Model).as_deref(),
-            Some("claude-opus-5")
+            current_of(ConfigCategory::Model),
+            Some(ConfigValue::Id("claude-opus-5".into()))
         );
         assert_eq!(
-            current_of(ConfigCategory::ThoughtLevel).as_deref(),
-            Some("max")
+            current_of(ConfigCategory::ThoughtLevel),
+            Some(ConfigValue::Id("max".into()))
         );
         // 初回ターンは希望モデル/思考量で走り、set_config_option は prompt より前に届いている。
         let chunk = events
@@ -4665,6 +5728,585 @@ for line in sys.stdin:
                 })
             ),
             "{events:?}"
+        );
+    }
+
+    /// 差し込みの偽エージェント。`__ADVERTISE__` = initialize の最上位 `_meta.steering.supported` を出すか、
+    /// `__ON_STEER__` = `_session/steering` への答え方（`inject` = 走っているターンに入れて、その文に
+    /// 答えてから prompt 応答を返す / `turn_over` = 先に prompt 応答を返してから `promptRequired`＝
+    /// ターンの閉じ際に着いた差し込み）。最初の `session/prompt` は応答を保留して `working` を流し、
+    /// 2 通目以降の prompt には「ここまでに届いた method」を返す（cancel が出ていないかを線で確かめる）。
+    const STEERING_AGENT: &str = r#"
+import json, sys
+
+ADVERTISE = __ADVERTISE__
+ON_STEER = "__ON_STEER__"
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+def chunk(text):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": "steer-1",
+                     "update": {"sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": text}}}})
+
+seen = []
+prompts = 0
+pending = None
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method:
+        seen.append(method)
+    if method == "initialize":
+        result = {"protocolVersion": params.get("protocolVersion", 1)}
+        if ADVERTISE:
+            result["_meta"] = {"steering": {"supported": True}}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "steer-1"}})
+    elif method == "session/prompt":
+        prompts += 1
+        if prompts == 1:
+            pending = rid
+            chunk("working")
+        else:
+            chunk("seen:" + ",".join(seen))
+            send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+    elif method == "_session/steering":
+        steer = {"text": params["prompt"][-1]["text"], "meta": params.get("_meta")}
+        if ON_STEER == "inject" and pending is not None:
+            send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": "injected"}})
+            chunk("steered:" + json.dumps(steer, ensure_ascii=False, sort_keys=True))
+            send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "end_turn"}})
+        else:
+            if pending is not None:
+                send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "end_turn"}})
+            send({"jsonrpc": "2.0", "id": rid,
+                  "result": {"outcome": "promptRequired", "reason": "noRunningTurn"}})
+        pending = None
+    elif method == "session/cancel":
+        if pending is not None:
+            send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "cancelled"}})
+            pending = None
+"#;
+
+    fn steering_agent(advertise: bool, on_steer: &str) -> String {
+        STEERING_AGENT
+            .replace("__ADVERTISE__", if advertise { "True" } else { "False" })
+            .replace("__ON_STEER__", on_steer)
+    }
+
+    /// UI の代役: 偽エージェントのセッションを回し、`script`（届いたイベントを見て次のコマンドを送る）が
+    /// 終わったら送信路を閉じる。返り値は届いた全イベント。
+    fn run_steering_scenario(
+        agent: &str,
+        first_prompt: &str,
+        script: impl AsyncFnOnce(
+            &mpsc::UnboundedSender<SessionCommand>,
+            &mut mpsc::UnboundedReceiver<AgentEvent>,
+            &mut Vec<AgentEvent>,
+        ),
+    ) -> Option<Vec<AgentEvent>> {
+        let command = fake_agent_command(agent)?;
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt(first_prompt.into()))
+            .expect("send");
+        Some(futures::executor::block_on(async move {
+            let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
+            let scenario = async move {
+                let mut seen = Vec::new();
+                script(&command_tx, &mut event_rx, &mut seen).await;
+                // command_tx はシナリオを終えてから drop する（ターン中に閉じるとループが畳まれる）。
+                drop(command_tx);
+                seen
+            };
+            let (outcome, seen) = futures::join!(session, scenario);
+            outcome.expect("セッションは正常終了する");
+            seen
+        }))
+    }
+
+    /// `until` に当たるイベントまで読み進め、読んだ分を `seen` に積む。
+    async fn read_until(
+        event_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
+        seen: &mut Vec<AgentEvent>,
+        until: impl Fn(&AgentEvent) -> bool,
+    ) {
+        loop {
+            let event = event_rx.next().await.expect("イベントが途切れた");
+            let done = until(&event);
+            seen.push(event);
+            if done {
+                return;
+            }
+        }
+    }
+
+    fn is_turn_end(event: &AgentEvent) -> bool {
+        matches!(event, AgentEvent::TurnEnded { .. })
+    }
+
+    fn is_working(event: &AgentEvent) -> bool {
+        matches!(event, AgentEvent::AgentChunk(text) if text == "working")
+    }
+
+    fn steerable_of(events: &[AgentEvent]) -> bool {
+        events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::SessionStarted { steerable, .. } => Some(*steerable),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("SessionStarted を期待: {events:?}"))
+    }
+
+    fn chunk_starting_with<'a>(events: &'a [AgentEvent], prefix: &str) -> &'a str {
+        events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => text.strip_prefix(prefix),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{prefix}` のチャンクを期待: {events:?}"))
+    }
+
+    fn position_of(events: &[AgentEvent], wanted: impl Fn(&AgentEvent) -> bool) -> usize {
+        events
+            .iter()
+            .position(wanted)
+            .unwrap_or_else(|| panic!("期待したイベントが無い: {events:?}"))
+    }
+
+    /// 広告あり（initialize の `_meta.steering.supported`）: ターン中の `Steer` は `_session/steering` として
+    /// **そのターンの間に**届き、`session/cancel` は出ず、ターンは 1 本のまま `end_turn` で閉じる。
+    /// 差し込みの結果（`Injected`）はターンの終わりより先に UI へ届く。
+    #[test]
+    fn steering_reaches_the_running_turn_without_cancelling_it() {
+        let agent = steering_agent(true, "inject");
+        let Some(events) = run_steering_scenario(
+            &agent,
+            "最初の依頼",
+            async |command_tx, event_rx, seen| {
+                read_until(event_rx, seen, is_working).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 7,
+                        text: "やっぱり README も直して".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("steer");
+                read_until(event_rx, seen, is_turn_end).await;
+                // 線に何が出たか（cancel が無いこと）を、次の prompt の答えで受け取る。
+                command_tx
+                    .unbounded_send(SessionCommand::Prompt("確認".into()))
+                    .expect("prompt");
+                read_until(event_rx, seen, is_turn_end).await;
+            },
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+
+        assert!(steerable_of(&events), "広告を読めていない: {events:?}");
+        let steered = position_of(&events, |event| {
+            matches!(
+                event,
+                AgentEvent::Steered {
+                    id: 7,
+                    outcome: SteerOutcome::Injected
+                }
+            )
+        });
+        let first_end = position_of(&events, is_turn_end);
+        assert!(
+            steered < first_end,
+            "差し込みの結果はターンの終わりより先: {events:?}"
+        );
+        assert!(
+            matches!(
+                events[first_end],
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed
+                }
+            ),
+            "{events:?}"
+        );
+        let turns_started = events[..first_end]
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::TurnStarted))
+            .count();
+        assert_eq!(
+            turns_started, 1,
+            "差し込みは新しいターンを作らない: {events:?}"
+        );
+        // 差し込んだ文と、ターンの閉じ際の頼み（`promptRequired`）がそのまま線に乗った。
+        let steer: serde_json::Value =
+            serde_json::from_str(chunk_starting_with(&events, "steered:")).expect("JSON");
+        assert_eq!(steer["text"], "やっぱり README も直して");
+        assert_eq!(
+            steer["meta"],
+            serde_json::json!({"steering": {"idleBehavior": "promptRequired"}})
+        );
+        assert_eq!(
+            chunk_starting_with(&events, "seen:"),
+            "initialize,session/new,session/prompt,_session/steering,session/prompt",
+            "session/cancel は出ていない"
+        );
+    }
+
+    /// 広告なし: `Steer` は線に出さずに `Refused` で返り、UI は今までどおり中断 → 送り直しに落ちる
+    /// （`session/cancel` → `Cancelled` でターンが閉じる → 同じ文を新しいターンとして送る）。
+    #[test]
+    fn without_the_advertisement_now_means_cancel_then_resend() {
+        let agent = steering_agent(false, "inject");
+        let Some(events) = run_steering_scenario(
+            &agent,
+            "最初の依頼",
+            async |command_tx, event_rx, seen| {
+                read_until(event_rx, seen, is_working).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 8,
+                        text: "やっぱり README も直して".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("steer");
+                read_until(event_rx, seen, |event| {
+                    matches!(event, AgentEvent::Steered { id: 8, .. })
+                })
+                .await;
+                // UI の後始末（agent_panel の send_queued_now / on_steered と同じ手順）。
+                command_tx
+                    .unbounded_send(SessionCommand::Cancel)
+                    .expect("cancel");
+                read_until(event_rx, seen, is_turn_end).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Prompt("やっぱり README も直して".into()))
+                    .expect("resend");
+                read_until(event_rx, seen, is_turn_end).await;
+            },
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+
+        assert!(
+            !steerable_of(&events),
+            "広告が無いのに差し込める扱い: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Steered {
+                    id: 8,
+                    outcome: SteerOutcome::Refused(_)
+                }
+            )),
+            "{events:?}"
+        );
+        let first_end = position_of(&events, is_turn_end);
+        assert!(
+            matches!(
+                events[first_end],
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Interrupted
+                }
+            ),
+            "中断で閉じる: {events:?}"
+        );
+        assert_eq!(
+            chunk_starting_with(&events, "seen:"),
+            "initialize,session/new,session/prompt,session/cancel,session/prompt",
+            "広告の無いエージェントには `_session/steering` を送らない"
+        );
+    }
+
+    /// ターンの閉じ際に着いた差し込み（エージェントが先に prompt 応答を返し、`promptRequired` で
+    /// 文を返す）: 結果は `TurnOver`（届いていない）で、この層は勝手に `session/prompt` にしない
+    /// （送り直しは UI の役目）。待機中に届いた `Steer` は線に出さずに `TurnOver`。
+    #[test]
+    fn a_steer_that_misses_the_turn_is_handed_back_unsent() {
+        let agent = steering_agent(true, "turn_over");
+        let Some(events) = run_steering_scenario(
+            &agent,
+            "最初の依頼",
+            async |command_tx, event_rx, seen| {
+                read_until(event_rx, seen, is_working).await;
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 9,
+                        text: "間に合わなかった文".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("steer");
+                // 終わりと差し込みの結果はどちらが先でもよい（UI はどちらの順でも送信待ちへ戻す）。
+                let mut ended = false;
+                let mut steered = false;
+                while !(ended && steered) {
+                    let event = event_rx.next().await.expect("イベントが途切れた");
+                    ended |= is_turn_end(&event);
+                    steered |= matches!(event, AgentEvent::Steered { id: 9, .. });
+                    seen.push(event);
+                }
+                // 待機中の差し込みは送らない。
+                command_tx
+                    .unbounded_send(SessionCommand::Steer {
+                        id: 10,
+                        text: "待機中の文".into(),
+                        images: Vec::new(),
+                    })
+                    .expect("idle steer");
+                read_until(event_rx, seen, |event| {
+                    matches!(event, AgentEvent::Steered { id: 10, .. })
+                })
+                .await;
+                command_tx
+                    .unbounded_send(SessionCommand::Prompt("間に合わなかった文".into()))
+                    .expect("resend");
+                read_until(event_rx, seen, is_turn_end).await;
+            },
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+
+        for wanted in [9, 10] {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::Steered {
+                        id,
+                        outcome: SteerOutcome::TurnOver
+                    } if *id == wanted
+                )),
+                "id {wanted} は TurnOver: {events:?}"
+            );
+        }
+        assert_eq!(
+            chunk_starting_with(&events, "seen:"),
+            "initialize,session/new,session/prompt,_session/steering,session/prompt",
+            "cancel も、勝手な session/prompt も、待機中の差し込みも線に出ていない"
+        );
+    }
+
+    /// 広告は initialize の**最上位**の `_meta.steering.supported` だけを読む（`agentCapabilities` の中の
+    /// 同名や、`true` 以外の値は広告なし）。
+    #[test]
+    fn steering_advertisement_is_read_from_the_top_level_meta() {
+        let meta =
+            |value: serde_json::Value| -> v1::Meta { serde_json::from_value(value).expect("meta") };
+        assert!(steering_supported(Some(&meta(
+            json!({"steering": {"supported": true}, "goal": {}})
+        ))));
+        assert!(!steering_supported(Some(&meta(
+            json!({"steering": {"supported": false}})
+        ))));
+        assert!(!steering_supported(Some(&meta(
+            json!({"steering": {"supported": "yes"}})
+        ))));
+        assert!(!steering_supported(Some(&meta(json!({"goal": {}})))));
+        assert!(!steering_supported(None));
+        // 実アダプタの initialize 応答の形（claude-agent-acp 0.81.2 / codex-acp 1.13.1）。
+        let response: v1::InitializeResponse = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {"loadSession": true, "_meta": {"steering": {"supported": true}}},
+            "_meta": {"steering": {"supported": true}}
+        }))
+        .expect("initialize 応答");
+        assert!(steering_supported(response.meta.as_ref()));
+        let nested_only: v1::InitializeResponse = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {"_meta": {"steering": {"supported": true}}}
+        }))
+        .expect("initialize 応答");
+        assert!(!steering_supported(nested_only.meta.as_ref()));
+    }
+
+    /// 応答の `outcome` の読み方。知らない値・無い・エラーは「届いていない」（送り直す側に倒す）。
+    #[test]
+    fn steer_outcomes_map_to_delivered_or_not() {
+        assert_eq!(
+            steer_outcome(Ok(json!({"outcome": "injected"}))),
+            SteerOutcome::Injected
+        );
+        assert_eq!(
+            steer_outcome(Ok(json!({"outcome": "startedNewTurn"}))),
+            SteerOutcome::StartedTurn
+        );
+        assert_eq!(
+            steer_outcome(Ok(
+                json!({"outcome": "promptRequired", "reason": "noRunningTurn"})
+            )),
+            SteerOutcome::TurnOver
+        );
+        assert!(matches!(
+            steer_outcome(Ok(json!({"outcome": "failed"}))),
+            SteerOutcome::Refused(reason) if reason.contains("failed")
+        ));
+        assert!(matches!(
+            steer_outcome(Ok(json!({}))),
+            SteerOutcome::Refused(_)
+        ));
+        assert!(matches!(
+            steer_outcome(Err(acp::Error::new(
+                i32::from(acp::ErrorCode::InvalidParams),
+                "steer params require a non-empty prompt array"
+            ))),
+            SteerOutcome::Refused(reason) if reason.contains("non-empty prompt")
+        ));
+    }
+
+    /// Fast mode（boolean）とその他の select も、覚えた値をセッションを開いた直後・最初の prompt より
+    /// 前に合わせる。後から UI が送る切り替えは `type: "boolean"` の値で届く。広告に無い設定と種類の
+    /// 合わない値は送らない。偽エージェントは受けた `set_config_option` の params を prompt の応答で
+    /// そのまま返す。
+    #[test]
+    fn boolean_options_reach_the_agent_as_booleans() {
+        const FAKE_AGENT: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+current = {"fast": False, "collaboration_mode": "default"}
+sets = []
+
+def config_options():
+    return [
+        {"id": "collaboration_mode", "name": "Collaboration mode",
+         "category": "collaboration_mode", "type": "select",
+         "currentValue": current["collaboration_mode"],
+         "options": [{"value": "default", "name": "Default"},
+                     {"value": "plan", "name": "Plan"}]},
+        {"id": "fast", "name": "Fast mode", "category": "model_config", "type": "boolean",
+         "currentValue": current["fast"]},
+    ]
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"sessionId": "sess-1", "configOptions": config_options()}})
+    elif method == "session/set_config_option":
+        sets.append({key: params[key] for key in ("configId", "type", "value") if key in params})
+        current[params["configId"]] = params["value"]
+        send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": config_options()}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": "sess-1",
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(sets, sort_keys=True)}}}})
+        sets = []
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+"#;
+        let Some(python) = find_in_path("python3") else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let cwd = std::env::current_dir().expect("cwd");
+        let command = AgentCommand::new(python, vec!["-c".into(), FAKE_AGENT.into()], cwd);
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("初回".into()))
+            .expect("send");
+        let preferences = SessionPreferences {
+            options: vec![
+                ("fast".into(), "true".into()),
+                ("collaboration_mode".into(), "plan".into()),
+                // 広告に無い設定・種類の合わない値は送らない。
+                ("context_window".into(), "1m".into()),
+                ("collaboration_mode".into(), "true".into()),
+            ],
+            ..SessionPreferences::default()
+        };
+
+        let events = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let scenario = async move {
+                let mut seen = Vec::new();
+                let mut turns = 0;
+                loop {
+                    let event = event_rx.next().await.expect("イベントが途切れた");
+                    let ended = matches!(event, AgentEvent::TurnEnded { .. });
+                    seen.push(event);
+                    if !ended {
+                        continue;
+                    }
+                    turns += 1;
+                    if turns == 2 {
+                        break;
+                    }
+                    // 1 ターン目の後: カードで Fast を切ったのと同じ指示を送り、次の prompt で確かめる。
+                    command_tx
+                        .unbounded_send(SessionCommand::SetConfig {
+                            config_id: "fast".into(),
+                            value: ConfigValue::Bool(false),
+                        })
+                        .expect("send");
+                    command_tx
+                        .unbounded_send(SessionCommand::Prompt("2 回目".into()))
+                        .expect("send");
+                }
+                drop(command_tx);
+                seen
+            };
+            let (outcome, seen) = futures::join!(session, scenario);
+            outcome.expect("セッションは正常終了する");
+            seen
+        });
+
+        let chunks: Vec<serde_json::Value> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(serde_json::from_str(text).expect("JSON")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunks,
+            vec![
+                serde_json::json!([
+                    {"configId": "fast", "type": "boolean", "value": true},
+                    {"configId": "collaboration_mode", "value": "plan"},
+                ]),
+                serde_json::json!([{"configId": "fast", "type": "boolean", "value": false}]),
+            ],
+            "{events:?}"
+        );
+        // UI へ届く一覧は boolean も含み、最後は切った後の値。
+        let fast_values: Vec<ConfigValue> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Configs(configs) => configs
+                    .iter()
+                    .find(|config| config.config_id == "fast")
+                    .map(ConfigOption::current),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fast_values,
+            vec![ConfigValue::Bool(true), ConfigValue::Bool(false)]
         );
     }
 
@@ -4849,14 +6491,14 @@ for line in sys.stdin:
                         AgentEvent::Configs(configs) => {
                             for config in &configs {
                                 eprintln!(
-                                    "[config] id={} category={:?} current={} choices={:?}",
+                                    "[config] id={} category={:?} current={:?} choices={:?}",
                                     config.config_id,
                                     config.category,
-                                    config.current,
+                                    config.current(),
                                     config
-                                        .choices
+                                        .choices()
                                         .iter()
-                                        .map(|(_, name)| name)
+                                        .map(|choice| &choice.name)
                                         .collect::<Vec<_>>()
                                 );
                             }
@@ -4891,14 +6533,23 @@ for line in sys.stdin:
                         }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
                         AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
+                        AgentEvent::TaskEnvSkipped(names) => {
+                            eprintln!("[task.env skipped] {}", names.join(", "))
+                        }
                         AgentEvent::HistoryReplayed { items, omitted } => {
                             eprintln!("[history] {} items, {omitted} omitted", items.len())
                         }
                         AgentEvent::SessionStarted {
                             session_id,
                             resumed,
+                            steerable,
                             ..
-                        } => eprintln!("[session started] {session_id} resumed={resumed}"),
+                        } => eprintln!(
+                            "[session started] {session_id} resumed={resumed} steerable={steerable}"
+                        ),
+                        AgentEvent::Steered { id, outcome } => {
+                            eprintln!("[steered] {id} {outcome:?}")
+                        }
                         AgentEvent::SessionLost => eprintln!("[session lost]"),
                         // stderr は画面だけの物なので、ここでも終わり方だけを出す。
                         AgentEvent::ExitedAtStartup(exited) => eprintln!("[exited] {exited}"),

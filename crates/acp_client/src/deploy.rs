@@ -346,6 +346,14 @@ pub fn latest_other_installed(
     found.into_iter().next().map(|(_, deployed)| deployed)
 }
 
+/// 置いてある版の全部（読むだけ・設定の AI エージェントのページが「今の版」に使う）。完了の印がある物だけ。
+pub fn deployed_versions(root: &Path, id: &str, platform: &str) -> Vec<Deployed> {
+    installed_versions(root, id, platform)
+        .into_iter()
+        .filter_map(|(_, directory)| read_marker(&directory))
+        .collect()
+}
+
 /// `<root>/<id>/*/<platform>` のうち完了の印がある物（版の名前と置き場）。
 fn installed_versions(root: &Path, id: &str, platform: &str) -> Vec<(String, PathBuf)> {
     let (Ok(id), Ok(platform)) = (safe_component(id), safe_component(platform)) else {
@@ -1095,6 +1103,18 @@ mod tests {
             "1 つ前は残す"
         );
         assert!(root.join("sigit/1.2.0/linux-x86_64").exists());
+        // 設定の「今の版」: 置いてある版を印から読む（照合したかも印のとおり）。
+        let mut deployed: Vec<(String, bool)> = deployed_versions(&root, "sigit", "linux-x86_64")
+            .into_iter()
+            .map(|deployed| (deployed.version, deployed.verified))
+            .collect();
+        deployed.sort();
+        assert_eq!(
+            deployed,
+            vec![("1.1.0".to_string(), false), ("1.2.0".to_string(), false)]
+        );
+        assert!(deployed_versions(&root, "sigit", "darwin-aarch64").is_empty());
+        assert!(deployed_versions(&root, "../sigit", "linux-x86_64").is_empty());
     }
 
     /// 本物の確かめ（**ネットワークへ出る・手で流す**）: レジストリの写し（`NECODER_ACP_REGISTRY_CACHE`）

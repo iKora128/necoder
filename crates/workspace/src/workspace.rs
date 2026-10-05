@@ -1243,11 +1243,18 @@ impl TaskSpace {
     /// 台帳（`task_spaces`）の中身を重ねる。lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
     /// ただし Fleet で取り込んだ linked worktree（`task/` でないブランチ）は台帳の Task を正にする（O21・再起動で
     /// 統合先扱いへ戻さない）。メインの作業ツリーは Task にしない。
-    fn overlay_stored(&mut self, record: &storage::TaskSpaceRecord) {
+    /// repository_id も worktree の現実（git の common dir）が正。台帳の値は git にまだ聞いていない
+    /// （空の）間だけ使う。古い形式（`.git` 無し）の値が台帳に残ると、本体と Task が別リポジトリに
+    /// 分かれて系譜に載らなくなる（2026-10-03 ユーザー報告）。返り値 = 台帳を書き直すべきか。
+    fn overlay_stored(&mut self, record: &storage::TaskSpaceRecord) -> bool {
         if record.kind == SpaceKind::Task && self.linked {
             self.kind = SpaceKind::Task;
         }
-        self.repository_id = record.repository_id.clone();
+        let stale_repository =
+            !self.repository_id.is_empty() && self.repository_id != record.repository_id;
+        if self.repository_id.is_empty() {
+            self.repository_id = record.repository_id.clone();
+        }
         self.title = SharedString::from(record.title.clone());
         self.phase = record.phase;
         self.base_oid = record.base_oid.clone();
@@ -1255,6 +1262,7 @@ impl TaskSpace {
         self.result_summary = record.result_summary.clone().map(SharedString::from);
         self.created_at_ms = record.created_at;
         self.parent = record.parent.clone().map(SpaceId);
+        stale_repository
     }
 
     fn to_record(&self, slot: &ProjectSlot) -> storage::TaskSpaceRecord {
@@ -1452,6 +1460,9 @@ struct ChromeState {
     /// 統合の下見で競合した Task と、競合したファイル（O19）。Task の「次へ」が「競合を直させる」に
     /// なる。頼んだら外す（直った後の「統合」でまた下見する）。起動している間だけ。
     task_conflicts: HashMap<SpaceId, Vec<String>>,
+    /// 統合先の手元の変更で統合を断った Task と、その理由の 1 行（ファイルの名指し・2026-10-03）。
+    /// merge_ready の間、要対応カードに warn の行で出す。もう一度「統合」を押したら外す。起動している間だけ。
+    task_integration_blocked: HashMap<SpaceId, SharedString>,
     /// 作成中の Task（worktree・準備スクリプトを流している間の行・O20）。作れなかった物は
     /// やり直すか閉じるまで残る。起動している間だけ。
     task_creations: Vec<task_creation::TaskCreation>,
@@ -2754,6 +2765,122 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// 台帳に古い形式の repository_id が残っていても、git に聞いた値を上書きしない（系譜が分かれない）。
+    /// まだ聞いていない（空の）間だけ台帳の値を使う。
+    #[test]
+    fn stored_repository_id_does_not_override_git() {
+        let space = |repository_id: &str| TaskSpace {
+            id: SpaceId("space-main".to_string()),
+            repository_id: repository_id.to_string(),
+            title: SharedString::from("maxwell"),
+            kind: SpaceKind::Integration,
+            phase: TaskPhase::Planned,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            created_at_ms: 0,
+            linked: false,
+            parent: None,
+            captain_origin: false,
+        };
+        let record = storage::TaskSpaceRecord {
+            id: "space-main".to_string(),
+            repository_id: "local:/work/maxwell".to_string(),
+            root: PathBuf::from("/work/maxwell"),
+            branch: Some("main".to_string()),
+            title: "maxwell".to_string(),
+            kind: SpaceKind::Task,
+            phase: TaskPhase::ReviewReady,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            parent: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let mut hydrated = space("local:/work/maxwell/.git");
+        assert!(
+            hydrated.overlay_stored(&record),
+            "食い違いは台帳の書き直しを求める"
+        );
+        assert_eq!(hydrated.repository_id, "local:/work/maxwell/.git");
+        assert!(
+            hydrated.is_integration(),
+            "メインの作業ツリーは Task にしない"
+        );
+
+        let mut restored = space("");
+        assert!(
+            !restored.overlay_stored(&record),
+            "git 未確認なら書き直さない"
+        );
+        assert_eq!(restored.repository_id, "local:/work/maxwell");
+
+        let mut same = space("local:/work/maxwell");
+        assert!(!same.overlay_stored(&record), "一致していれば書き直さない");
+    }
+
+    /// 開いた後に `git init` されたフォルダ: git の状態を読み直すとリポジトリ ID が git の値に揃う
+    /// （root の代用のままだと、後で切った Task が別リポジトリ扱いになり系譜から外れる）。
+    #[gpui::test]
+    fn repository_id_follows_git_init_after_opening(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!(
+            "necoder_repository_after_init_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        let before = workspace.read_with(cx, |workspace, _| {
+            workspace.project_sessions.projects[0]
+                .task_space
+                .repository_id
+                .clone()
+        });
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&project)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        let expected = workspace.read_with(cx, |workspace, _| {
+            let worktree = &workspace.project_sessions.projects[0].worktree;
+            project::repository_id_on(worktree.host().as_ref(), worktree.root())
+        });
+        assert_ne!(before, expected, "開いた時は git の値ではない");
+
+        workspace.update(cx, |workspace, cx| workspace.refresh_git_status_for(0, cx));
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.project_sessions.projects[0]
+                    .task_space
+                    .repository_id,
+                expected
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// Render 中の Host trait 呼び出しを local / remote の両方で検出する wrapper。
     /// 手元のファイルを「接続先」として見せる用途で、ほかの module のテストも使う。

@@ -35,6 +35,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: composer の設定のカード（UI-SPEC §6）を offscreen で撮る（`NECODER_CONFIG_CARD_PROBE`・
+    /// `;` 区切り）。エージェントは起こさず、見本の広告を本番と同じ道で流す。
+    #[cfg(debug_assertions)]
+    pub fn debug_config_card_probe(
+        &mut self,
+        commands: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| {
+            panel.debug_config_card_probe(commands, window, cx)
+        });
+        cx.notify();
+    }
+
     /// 開発用: composer の `!`（シェルモード・#37）を offscreen で確かめる（`NECODER_SHELL_PROBE`）。
     /// 本物の経路で見本のコマンドを走らせ、`!` の行・composer のヒント・添える予定のチップを写す。
     /// `expanded` = 長い出力を開いておく / `chat` = フォルダの無いチャット（走らせずに理由を出す）/
@@ -542,7 +560,8 @@ impl Workspace {
     /// 画面の組み立て（`;` 区切り）: `graph` / `formation` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
     /// `side:<diff|terminal|files>`（その Task カードのサイドペイン。diff = 変更レビュー）/ `columns:<n>` / `pin` / `captain` /
     /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `interrupted`（R09 の中断した行）/
-    /// `compare:<n>`（O23）/ `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）。
+    /// `compare:<n>`（O23）/ `recommend[:allow|deny|ask_human]`（承認待ちのカードの Captain の推薦・§5.5）/
+    /// `integrate`（選択中の Task の「統合」を押す）/ `fleet`（Fleet に入る）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -720,6 +739,13 @@ impl Workspace {
                     self.toggle_fleet_mode(&ToggleFleet, window, cx);
                 }
             }
+            // Editor から Fleet へ入る（⌘⇧M と同じ道）。CONTROL_PROBE の擬似 Task を使わず、本物の
+            // worktree の Task を撮る時に置く（2026-10-03）。
+            "fleet" => {
+                if !self.chrome.fleet_mode {
+                    self.toggle_fleet_mode(&ToggleFleet, window, cx);
+                }
+            }
             // レールの「AI スレッド一覧」を押す（左カラムの herd ⇄ エクスプローラ）。
             "threads" => self.toggle_herd_sidebar(cx),
             // Fleet サイドバーの絞り込み欄に語を入れる（O21・欄は Task が 6 本以上か語がある時だけ出る）。
@@ -771,6 +797,19 @@ impl Workspace {
                 if let Some(worktree) = external {
                     self.adopt_worktree(worktree.path, worktree.branch, None, cx);
                 }
+            }
+            // 選択中の Task の「統合」を押す（次へ・要対応カードと同じ入口）。phase を merge_ready にしてから
+            // 押す＝統合先の手元の変更で断る所・統合する所の見た目を撮る用（2026-10-03・本物の git merge が走る）。
+            "integrate" => {
+                let index = self.project_sessions.active;
+                let slot = &mut self.project_sessions.projects[index];
+                if slot.task_space.is_integration() {
+                    eprintln!("FLEET_PROBE: 統合先が選ばれている（先に task:<n> で Task を選ぶ）");
+                    return;
+                }
+                slot.task_space.phase = TaskPhase::MergeReady;
+                let space = slot.task_space.id.clone();
+                self.integrate_task(space, cx);
             }
             // ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない）。
             "creating" => self.debug_seed_task_creations(cx),
@@ -1170,7 +1209,9 @@ impl Workspace {
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
     /// チャットの行 / `edit:<文字>` = 成果物を書き換える（本番と同じ合図を出す）/ `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
-    /// `settings:<page>` / `settings-add:<語>` = 設定の「エージェントを追加」/ `find:<語>` /
+    /// `settings:<page>` / `settings-add:<語>` = 設定の「エージェントを追加」/
+    /// `settings-connection:<ひな形の id>` = 設定の「接続を追加」/ `settings-open:<id>` = AI
+    /// エージェントのページで行を開く / `settings-host:<名前>` = 偽の SSH 先を足して選ぶ / `find:<語>` /
     /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1274,6 +1315,27 @@ impl Workspace {
                 view.update(cx, |view, cx| {
                     view.debug_open_add_agent(argument, window, cx)
                 });
+            }
+            // 設定の「接続を追加」をひな形を選んだ状態で開く（issue #38 H3 の見た目を撮る）。
+            "settings-connection" => {
+                self.set_chat_mode(false, window, cx);
+                self.chrome.show_settings = true;
+                self.refresh_settings_view(cx);
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| {
+                    view.debug_open_connection_editor(argument, window, cx)
+                });
+            }
+            // AI エージェントのページで行を開く（`settings-open:codex`・空なら閉じる）。
+            "settings-open" => {
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_expand_agent(argument, cx));
+            }
+            // AI エージェントのページで偽の SSH 先を足して選ぶ（`settings-host:fake@dev-box`）。一時フォルダの
+            // 偽のホームで本物と同じ読み取りのシェルを流す（本物の SSH には繋がない）。
+            "settings-host" => {
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_use_fake_host(argument, cx));
             }
             // 設定画面をページ指定で開く（Chat の設定・MCP のコネクタの見た目を撮る）。
             "settings" => {

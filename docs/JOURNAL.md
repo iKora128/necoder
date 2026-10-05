@@ -3866,6 +3866,104 @@
 - リリース: 本人「いったん新しいの本リリースしていいですよ」で、v0.1.20 以来の正式版（Pre-release にしない＝自動更新で届く）として v0.1.24 を出した。テスト版 v0.1.21〜v0.1.23 の中身を全部含むので、CHANGELOG の冒頭に「v0.1.20 からの主な変更」をまとめた（自動更新で来た人が最初に開くのは、この版の Release ページ＝更新後の最初の起動のトースト）。relay は v0.1.23 から変えていないので Worker のデプロイは不要。
 - 次: 本人の実機で見え方（棒の太さ・今いる枠との見分け）を確かめる。v0.1.20 から自動更新で上がる道（チップ → 差し替え → 再起動）も実機で見る。
 
+## 2026-10-02 — composer の設定を 1 枚のカードに（Fast mode を選べるように）
+
+- 発端: composer の下のピル（Agent / Mode / Model / Effort）は Model と Effort の select しか出さず、boolean を捨てていた（`map_config_option`）＝Claude Code / codex-acp が広告する Fast mode が選べない。zeron の「チップ 1 つ → カード 1 枚」を参考に、本人は「zeron 風のカード」と「今の無機質なピル」で迷っていた。
+- 決め方: `mock/config-card.html` に今のピル・案 P（ピルのまま広げる）・案 C（カード）を同じ状態で並べ、権限モードをカードの外に残す C-1 と中に入れる C-2 も並べた。本人が C-1 に決めた（Captain のスレッドで「C-1 がいいですね」）。この会話は非対話で AskUserQuestion が使えず、決定は会話の文で受け取った。
+- やったこと:
+  - acp_client: `ConfigOption` を select / boolean の `ConfigKind` にし、選択肢の説明と設定の名前・説明も写す。カテゴリ `mode` は `ConfigCategory::Mode` で分ける（modes と二重の広告）。`SessionCommand::SetConfig` の値を `ConfigValue`（value_id / bool）に。`SessionPreferences::options` で、モデル・思考量の後にその他の設定（保存形の文字列）を最初の prompt より前に合わせる。
+  - agent_panel: `Thread.options`（その他の設定の望む値）を sticky（`agent_config_defaults.<agent>.<ACP の config_id>`）から載せる。広告が来たらエージェントの値を写し、言い返さない（Fast mode が使えないプランで戻されても送り合いにしない）。返事待ちの値はターン中は写さない（`options_in_flight`）。
+  - `config_card.rs`: チップ（既定から外れた値だけの要約）とカード（エージェント・モデル・思考量のトラック・その他の設定・一覧の面・キー）。⌘/ は `AgentPanel > (Editor || ConfigCard)`（`Editor` の ⌘/ より後ろ）。権限モードのピルはそのまま。撮影用 `NECODER_CONFIG_CARD_PROBE`。Fast mode の稲妻は Lucide の `zap.svg`（色付きの絵文字を使わない）。
+- 検証: 偽 ACP エージェントで boolean が `type: "boolean"` のまま届くこと（acp_client）と、カードで切り替えると本物の `run_session` を通って 1 回だけ届き sticky に残ること（agent_panel）。キーの試験（⌘/ → → → ↓ → ⏎ → esc・esc はカードだけ閉じてターンを止めない）・⌘/ がコードのエディタではコメントの切り替えのまま。既存の value_id / sticky / 捏造しないの試験は緑。隔離 offscreen で Claude（Opus · High · ⚡）・Codex（Collaboration mode が Plan）・会話後の固定・Fast が使えないプラン・全部既定のチップを撮って目視。
+- 学び/罠:
+  - **GPUI は枠線を子の後に描く**。composer の中から上へ開く浮かぶ面は、composer の枠と上の区切り線が上に透けて乗る（実画面で初めて見えた）。`gpui::deferred(...).with_priority(1)` で最前面に描く（位置はチップ基準のまま）。権限モードのピルのメニューも同じ作りで、4 行なら composer の中に収まって透けないが、背の低い composer（Fleet の埋め込み）では枠をまたぐので同じく `deferred` にした。
+  - Claude Code の `/model` は CLI のコマンド（`/model opus` を送るとアダプタが PostModelSwitch でピッカーへ映し返す）。necoder が取るとエージェントへ届かなくなるので取らない。
+  - claude-agent-acp は client が boolean の受け取りを広告すると Fast mode を `type: "boolean"`（無ければ on/off の select）で送る。使えない時は説明に理由を足し、SDK の知らせで値を戻してくる。
+- 追記（同じ日）: 本人「think のところ…ゲージよ。線と棒だけではつまらない」「もう少しモダンでかっこいいやつに」。mock に回転計・段の棒・リングを並べたが「線と棒だけでなく」と戻り、光とグラデーションで作り直した 4 案（グロウ・リング / チャージ・セル / デジタル・メーター / リキッド）から本人が M-3 デジタル・メーターを選んだ（「めっちゃいい」・光は色の原則どおり白）。`config_card/effort_meter.rs`: 250° の弧に LED 34 本、`default` は目盛りの外（LED を全部消して横の札）、値を変えた時だけ走って行き過ぎて戻る。GPUI の `with_animation` は easing の戻り値が 0..=1 を外れると debug ビルドで止まる（`debug_assert`）ので、行き過ぎは線形の delta から自分で計算する。`PathBuilder::stroke` は端が四角（lyon の `LineCap` を gpui が出していない）なので、丸い端の LED は多角形で塗る。
+- 次: #44（steer）と #47（在庫の鍵 `StockKey`・接続）が main に入ったら、カードの在庫を `StockKey` で引き、#47 がエージェントのピルに出していた接続名をカードのエージェントの行（H4 の欄の場所）とチップに移す。本人の実機で ⌘/ と Fast mode の体感を見る。
+
+## 2026-10-02 — 接続（issue #38 H3）: providers/set・キーチェーン・モデル在庫の鍵・project 層から読まないキー
+
+- 発端（本人）: #38 H3 を進める。設計の正は issue の §2.2・§3.2・§5、背景は zeron の調べ（`/tmp/zeron-report`）の §2 の 3・5 と §4。
+- やったこと:
+  - 安全の土台: `settings_core::USER_ONLY_KEYS`（接続・`agent_servers`・`mcp_servers`・権限の既定と記憶・`allow_terminal_send`・`terminal_shell(_args)`・`captain_agent`・`claude_ai_connectors`・`chat`）を `SettingsStore::load` が project 層から外して重ねる。接続のキーを渡すセッションでは task.env の宛先・プロキシ・証明書・差し込むコードの変数を読まない（`connections::guarded_from_task_env`）。
+  - 接続: 型は `settings_core::ConnectionSetting`（user の層だけ）、キーは `acp_client::connections::secrets`（keyring 3.6・macOS / Windows。macOS の有無は security-framework の属性だけの検索で、許可のダイアログを出さない）。ひな形 12 種（`PRESETS`・各社の手順で確かめた URL）。
+  - 注入（`connections::Harness`）: Claude Code は `initialize` の `agentCapabilities.providers` を見て `session/new` / `session/load` の前に `providers/set`、広告しなければセッションを開かずに畳んで env で 1 回だけ起こし直す（`run_session_on` → `run_session_attempt` の 2 回）。DeepSeek Harness は `DSH_PROVIDER` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY`、OpenCode はプロバイダの env + `OPENCODE_CONFIG_CONTENT` の `enabled_providers`。
+  - 在庫: `AgentPanel::catalog` の鍵を `StockKey`（使用量の鍵 + 接続 + ログインの指紋）に。slash コマンドと会話名は `HarnessStock`（表示名のまま）。使用量の鍵（R08）にも接続を足した。設定が変わったら、まだ使っていない先張りを畳んで張り直す。
+  - 設定 › 接続（`crates/settings/src/connections.rs`）とピルの `· 接続の名前`。
+- 検証: settings_core（project 層の 12 キーが効かない・キーを書かない）・acp_client（偽エージェント: 広告する相手は `initialize → providers/set → session/new|load`・キーは env に無い / 広告しない相手は env で起こし直す / task.env で宛先を変えられない）・settings（面で足すとキーはキーチェーンだけ・settings.json に出ない）・agent_panel（接続を替えると在庫が分かれる・戻すと戻る）。実アダプタ: `cargo run -p acp_client --example probe_providers` で claude-agent-acp 0.81.2 と 0.84.0 に `providers/set`（`example.invalid`・偽のキー・prompt なし）→ `providers/list` の current に反映。隔離 offscreen（`NECODER_SECRET_STORE=memory:glm`・`NECODER_CHAT_PROBE="settings:connections"` / `"settings-connection:kimi-code"`）で面とダイアログを目視。
+- 学び/罠:
+  - claude-agent-acp の `providers/set` は**プロセス単位**（`sessionId` を持たない・`providerId` は `main` だけ・`apiType` は anthropic / bedrock / vertex で openai は断る）。キーの欄は無く、ヘッダで渡す。アダプタは `Authorization: Bearer acp-proxy` を必ず付けるので、キーは `Authorization` に載せて置き換える。セッションの設定の env にも入れるので、`.claude/settings.json` の env より強い。
+  - Claude Code は `ANTHROPIC_BASE_URL` だけを足すと**保存済みの claude.ai ログインのまま**他社へ送る。env で渡す時は必ずトークンと一緒に、手元の `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` を空にしてから。
+  - Kimi Code は `x-api-key`（`ANTHROPIC_API_KEY`）の口。従量課金とコーディングプランで口とキーが別（Kimi・Qwen は混ぜると 401）なので、別のひな形にした。
+  - DeepSeek Harness の DeepSeek の経路は Anthropic Messages（`DEEPSEEK_BASE_URL` は Messages の根）。`OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` は読まない。dsh は手元に無いので実機は未確認。
+  - Rust の ACP crate 1.3 は `unstable_llm_providers` を持たない。スキーマ crate の feature を開けば `agentCapabilities.providers` と要求の型は使える（送るのは `UntypedMessage`）。
+  - `cargo fmt --all` は main の fmt していないファイル（fleet_stage.rs など）まで整形する。触っていないファイルは戻した（並行の作業と衝突させない）。
+- 次: H4（コンポーザの 2 軸チップと `session/load` による途中切り替え・`providers/set` はプロセス単位なので同じプロセスで切り替えられる）。dsh・OpenCode の実機での確かめ。Linux のキーチェーン（Secret Service）。
+
+## 2026-10-02 — 設定 › AI エージェントを「導入・版・使う / 使わない」の 1 列に（#38 H2 の見せ方）
+
+- 発端（本人の Task）: zeron の Providers 画面（`/tmp/zeron-report/index.html` §1 ⑤・`zeron/crates/ui/src/settings/harnesses.rs`）の型に寄せる。レジストリ・カスタム・binary / uvx の配備はもう入っているので、足すのは見せ方だけ。CLI 本体の自動更新と、他アプリの認証情報に触る機能（zeron の Accounts）は入れない。
+- やったこと:
+  - mock を先に: `mock/settings-agents.html`（このマシン / SSH 先 / 最後の 1 つ を mockbar で切り替え）→ UI-SPEC §12 に「AI エージェントのページ」の節（ホストの行・1 枚のカード・行の頭・状態の文・足りない物の決め方・版の行・行を開く・最後の 1 つ・初回の案内）を書いてから実装。
+  - `acp_client::readiness`（新・読むだけ）: 事実（`HostFacts`: PATH・`package.json` の版・npx のキャッシュ・necoder の置き場・置いた binary の印・ログインの跡）と見立て（`assess` → `Readiness` / `Missing` / `VersionInfo`）。このマシンは `local_facts`、SSH 先は `probe_remote`（開いているプロジェクトの接続で `sh -lc` の読み取りだけのシェルを 1 回）。読み取りの口を `install::installed_versions`・`deploy::deployed_versions`・`registry::split_npm_spec`・`AgentKind::cli_command` に足し、ログインの跡は `AgentKind::login_traces` の表 1 本にして `configured_auth_state` と共有した（振る舞いは同じ）。
+  - `settings::agents_page`（新）: ホストのチップ（このマシン + この窓の SSH のプロジェクトの接続先・workspace が `set_agent_hosts` で渡す）・1 枚のカード・行の頭（状態は fg0 / fg1 / fg2 の濃さだけ・右に 入れる / ログイン / CLI を開く）・行を開いた中（役割・起動・配布・アカウント・ログイン・入れ方・コピー）。「使わない」にできない理由は `disable_refusal` 1 本（既定・Captain・使う最後の 1 つ）で、スイッチと「外す」が書く前に確かめる。旧来の行（`agents_rows` / `custom_agent_rows` / `agent_card` / 足した物の状態の関数）は消し、使われなくなった訳語（`agent_available` 等・前から孤立していた `logged_in` 等も）を ja / en から外した。
+  - 開発用: `NECODER_CHAT_PROBE` に `settings-open:<id>`（行を開く）と `settings-host:<名前>`（偽の SSH 先 = 一時フォルダの偽のホームに、SSH 先へ流すのと同じシェルを流す・本物の SSH には繋がない）。
+  - docs: UI-SPEC §12・MANUAL §8 / §9・FLEET-V2 §5.7（Captain にするは行を開いた中へ）・GLOSSARY・ARCHITECTURE・CHAT §7・CHANGELOG（Unreleased）。
+- 検証: acp_client（見立て 6 本・SSH 先のシェルを手元の sh と dash で偽のホームへ本当に流す 1 本・置き場の版・npm の指定）、settings（`disabled_agents` がファイルを往復する・最後の 1 つはスイッチでも外すでも断る・断る理由の順・版の行の文を ja / en で固定・偽の SSH 先でページを描く）。`cargo test --workspace`（使い捨て HOME）緑。隔離 offscreen（`NECODER_HOME` ほか + `NECODER_ACP_REGISTRY_CACHE` に実物のレジストリの写し）で、このマシン（使える・足りない物・使わない・レジストリから足した行・Codex を開いた所）・偽の SSH 先（Claude を開いた所）・初回の案内・英語を撮って目視。
+- 学び/罠:
+  - SSH 先のコマンドはプロジェクトの根の中でしか流せない（`RemoteHost::relative`）ので、ホストだけでなく根も渡す（`AgentHost { host, root }`）。
+  - `package.json` を sed で読むと 1 行に詰めた物を取りこぼす。`tr ',{}' '\n\n\n'` で割ってから読む（テストで気づいた）。
+  - main は rustfmt も clippy もまっさらではない。`cargo fmt --all` を流すと無関係な 22 ファイルが書き換わる — 触った所だけ整え、ほかは戻す。clippy は自分の行に出た物だけ直す。
+  - `NECODER_SCREENSHOT` の `@Nms` は撮るのに掛かった時間で、起動からの時間ではない。
+- 次: 本人の実機（本物の SSH 先）で、ホストの切り替えと読み取りの速さ・版の行の言い方を見る。#38 の H3（接続）・H4（composer の 2 軸のチップ）は別 Task。
+
+## 2026-10-03 — 開いた後に `git init` したフォルダでも Task が系譜に載るようにする
+
+- 発端（本人・ドッグフーディング）: engineer_education_tool の開発中に、Captain の分解案から切った Task が統合先の系譜から分離した。
+- 原因: 15:48 に git でないフォルダとして開き（リポジトリ ID は root の代用 `local:/…/engineer_education_tool`）、15:50 に `git init`、16:20 に最初のコミット。リポジトリ ID は開いた時に 1 回しか読まないので代用のまま残り、後で切った Task（`…/.git`）と食い違った。分解案の記録にも代用の ID が残っていた。DB に統合先の古い行は無いので、再起動すれば直る（PR #49 の「台帳の古い ID」とは別の経路）。
+- やったこと: `refresh_git_status_for`（ファイルの変更・切替・起動で走る背景の git 読み直し）で `project::git_repository_id_on` も読み、slot の値と違えば入れ替えて台帳にも書く（`update_repository_id`）。git でないフォルダは読み直さない（root の代用を上書きしない）。`repository_id_on` は `git_repository_id_on` + 代用に分けた。
+- 検証: `repository_id_follows_git_init_after_opening`（git でないフォルダを開く → `git init` → 読み直しで git の値に揃う）。直しを外すと落ちることを確かめた。最初は git でないフォルダでも読み直していて、偽の ID を手で入れる `task_rows_are_scoped_to_the_selected_repository` が落ちた → git だと確かめられた値だけ採るように絞った。
+- 次: 本人の実機で「新しいフォルダを開く → エージェントが `git init` → Captain の分解案から Task」を通して系譜に載るか。
+
+## 2026-10-03 — エージェントが切った Task を Fleet に載せる（`adopt_task`）
+
+- 発端（本人・ドッグフーディング）: 「task から task 切らせてもフリートで表示されるわけではないのね」。maxwell では担当（Claude Code）が自前のサブエージェントで `.claude/worktrees/agent-…` に worktree を作っていて、necoder は存在を知らなかった。necoder の `fleet_create_task` で切っても、worktree と台帳の 1 行だけで、slot・Fleet のセル・親子・担当が無かった（FLEET-CONTROL-PLAN の「spawn の断絶」の残り）。
+- やったこと:
+  - `necoder::fleet::create_task`: 呼び出し元が linked worktree（Task）なら `task_origin` でメインの作業ツリー基準・そのブランチを起点・その Task を親にする（以前は呼び出し元の隣に `<task>-worktrees/` を作り、起点はリポジトリの既定・親なし）。DB 直書きの時も `set_task_parent` で親を残す。
+  - GUI 稼働中は `record_task` の代わりに `adopt_task`（control IPC）。`register_created_task` に通して slot・Fleet のセル・親・台帳・`task_created` まで。名前は呼び出し元の title。
+  - MCP `fleet_create_task` に `prompt`（担当への最初の指示・空なら起こさない）。`project::main_worktree_root_on` を追加。
+- 検証: `adopt_task_puts_an_agent_created_task_on_the_fleet`（本物の git + worktree・Task の slot・Fleet のセル・親・名前・root/branch 無しは断る）・`task_origin_branches_from_the_calling_task`・`linked_worktree_is_distinguished_from_main_checkout` に main root の確認を追加。
+- 次: 本人の実機で、担当に `fleet_create_task`（prompt 付き）を呼ばせて Fleet に子 Task が出て担当が動くか確かめる。担当が Claude Code のサブエージェントを使うこと自体は止めていない（担当への案内は後続）。
+
+## 2026-10-03 — Fleet の統合: 統合先の手元の変更と重ならなければ統合する
+
+- 発端（本人・2026-10-02）: Fleet から統合を 9 回押して、9 回とも「IntegrationSpace に未コミット変更があります。統合前に clean にしてください」で止まった。本人の main にはいつも公開しない変更（CLAUDE.md の 1 行・`docs/necoder-router.md`・`reports/`・`research_notes/`・`promo/`）がある。判定は `git_status_on`（`--untracked-files=all`）が空かどうかだったので、未追跡のファイル 1 つでも断り、どのファイルのせいかも出なかった。
+- やったこと:
+  - `project::integrate_branch_on`: 順に ①ステージした変更（`git add -N`・競合中も）があれば断る ②下見（`preview_merge_on`）で競合なら `MergeConflicts`（O19 のまま）③統合が触るパス（`merge-base --all` から branch までの `diff --name-status --no-renames`・分岐点が複数なら和）と、作業ツリーだけの変更 + 統合が足すパスとぶつかる未追跡のファイル（同じパス・ファイルとフォルダの取り合い）が重なれば断る ④ merge。断る時は `BlockingLocalChanges { reason: Staged | Overlapping, paths }`。手元の変更は `git status` を自前で読み、読めなければ止める（`git_status_on` は読めないと空＝変更なしを返すので、門には使えなかった）。merge が失敗した時の中止は `MERGE_HEAD` がある時だけにし、`let _ =` で捨てていた中止の失敗を返すようにした。
+  - `workspace`: 統合の呼び口で `BlockingLocalChanges` を見分け、失敗の知らせ（理由 + 1 行 1 ファイル 5 件まで・残りは全文）、要対応のカードに warn 色の 1 行（3 件まで・折り返す・もう一度押すまで・`chrome.task_integration_blocked`）、ニュースと台帳のイベントにも同じ 1 行。Task の要約は上書きしない。開発用の組み立て命令 `fleet`（Fleet に入る）・`integrate`（選択中の Task の「統合」を押す）。
+  - docs: FLEET-V2 §4.3（統合と統合先の手元の変更）・§8・§10.5、FLEET-ARCHITECTURE、UI-SPEC、CHANGELOG（Unreleased）。
+- 検証: project の新テスト 5 本（重ならない変更と未追跡のフォルダが統合の後もバイト単位で残り merge のコミットに入らない / 統合が触るファイルの変更・削除を名指しで断る / 統合が足すパスの未追跡のファイルで断る / ステージで断る / 重なりの線の単体）。workspace の新テスト 2 本（本人の main と同じ形の統合先で、重ならない Task は統合・CLAUDE.md を触る Task はトーストと要対応で名指し・退けて押し直せば統合 / 知らせの件数の上限）。既存の下見・競合・中止のテストは緑。隔離 offscreen（ja / en・7 ファイル）で断る所と通る所を目視。`ne fleet create / review / integrate` を一時ディレクトリ（CLAUDE.md の変更 + 未追跡のフォルダ）で流し、重なる Task は終了コード 1 で名指し、重ならない Task は統合されて手元の 5 ファイルのハッシュが一致した。
+- 学び/罠:
+  - git の merge（ort）は index が HEAD と違うと、重なりに関係なく「Your local changes … would be overwritten」で始めない（`git add -N` の印も同じ）。作業ツリーだけの変更・未追跡のファイルは、merge が書くパスに当たる時だけ断る（ファイルとフォルダの取り合いも）。どれも `MERGE_HEAD` を作らずに止まるので、中止は要らない。
+  - GUI の遷移（`transition_task_space`）の要約はニュースと台帳のイベントに載るだけで、`result_summary` には入らない。要対応のカードの要約は `result_summary`（エージェントの最後の発言）なので、統合の失敗は今まで要対応に出ていなかった。
+  - Fleet の組み立て命令の `graph` は Fleet に入らない（入るのは `NECODER_CONTROL_PROBE` の仕込み）。本物の worktree の Task を撮る時は `fleet` を先頭に置く。
+  - 統合の merge コミットは necoder の git（`-c` を付けない）で作るので、試験の作者はコマンドごとの `-c user.email` ではなく一時リポジトリの設定（`git config user.email`）に書く。Windows のランナーには git の作者が無く「Committer identity unknown」で落ちた（mac は作者を推測するので手元では出ない）。手元で同じ条件にするには `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true` を付けて流す。
+- 次: 本人の main（手元の変更あり）で、重ならない Task を実際に統合して確かめる。
+
+## 2026-10-05 — 開いている PR 10 本を dev ブランチで統合（#43〜#52）
+
+- 発端（本人・Captain 経由）: 10 本は単独では main と衝突しないが、acp_client.rs を 4 本・agent_panel.rs を 3 本・CHANGELOG を 6 本が書き換え、#49〜#52 は project / workspace / JOURNAL で重なる。衝突を 1 か所で解き、CI を 1 回で済ませ、main は確かめ済みの状態にだけ進める。
+- やったこと: origin/main（v0.1.24）から `dev/integration-2026-10-05` を切り、#45 → #43 → #49 → #52 → #50 → #51 → #44 → #48 → #47 → #46 の順に `--no-ff` で merge（どこをどう解いたかは各 merge コミットの本文）。統合で足した直し:
+  - 設定のカード（#48）の在庫を #47 の `StockKey` で引く（`stocked_configs`・接続やログインを替える前のセッションの広告は出さない）。#48 でエージェントのピルが無くなったので、#47 の `· 接続の名前` はチップ（エージェントの後・要約の前）とカードのエージェントの行（H4 の欄）へ移し、カードを開く時もログインを確かめ直す。
+  - #44 の差し込みの応答で接続が切れた時の `return Ok(())` を #47 の `Attempt::Finished` に。#44 の `probe_steering` を #48 の `ConfigOption::choices()` / `current()` に。
+  - ARCHITECTURE は #44 と #47 がどちらも §7.6 を足していた → 差し込みを §7.6、設定の層と接続を §7.7 にして参照を直した。
+- 検証: `cargo test --workspace`（使い捨て HOME・62 バイナリ・1247 passed）・`cargo deny check`・`scripts/check-license-boundary.sh`。隔離 offscreen で、composer（送信待ちの「今すぐ差し込む」・接続付きのチップ・カード）・設定 › 接続・設定 › AI エージェント・Fleet（擬似 Task と、本物の worktree の統合を手元の変更で断る所と通る所）を撮って目視。カードのエージェントの行が名前と接続の名前の両方で切れていたのを、この撮影で見つけて直した。
+- 学び/罠:
+  - #47 の在庫の鍵はログインの指紋を含み、指紋は一度確かめると 0 でなくなる。セッション無しで `on_event` に広告を流す撮影用の命令（`NECODER_CONFIG_CARD_PROBE`）は、流す前に指紋を確かめないと在庫が指紋 0 の鍵に入り、カードやピルのメニューを開いた時の確かめ直しで見えなくなる（本番はセッションを立てる時に確かめてから広告を受けるので起きない）。
+  - 同じ位置に試験を足した 2 本は、偽エージェントの python の共通行で git が縫い合わせて 3 hunk の衝突になる。各側の全文を組み立て直して並べ、各 PR の版と文字どおり一致するかで確かめた。
+- 次: dev → main の PR を本人が「Create a merge commit」で入れる（10 本が merged になる）。#48 で残っていた「composer のエージェントのピル」の言い方（MANUAL・UI-SPEC §12）も、カードのエージェントの一覧に直した。
+
 ## 2026-10-05 — エクスプローラの余白の右クリック（空のフォルダの入口）
 
 - 発端: 本人「始めてのフォルダで何もないときに、ファイルブラウザーで右クリックして新しいフォルダ作成とかFinderで表示とかの右クリックできるようにしてほしいな」。

@@ -1,4 +1,4 @@
-//! エージェントの起動の上書き（O16・B07）。設定 › AI エージェントの各行の下に「起動: …」の 1 行を出し、
+//! エージェントの起動の上書き（O16・B07）。設定 › AI エージェントの行を開いた中の「起動」に今の起動を出し、
 //! 「変える…」で `agent_servers.<id>`（settings.json）を画面から書く。「既定に戻す」で項目ごと消す。
 //!
 //! 2 つの形（[`settings_core::AgentServerSetting`]）:
@@ -203,8 +203,9 @@ impl SettingsView {
     }
 
     /// 外したエージェントが落とした binary（`external_agents/binary/<id>`・H2-b）を背景で消す。
-    /// **消す直前に settings.json（user と project の層）を読み直し**、同じ id がまだどこかに書かれて
-    /// いれば消さない（書き直した・プロジェクトの設定で足している）。消すのは necoder が置いた物だけ
+    /// **消す直前に settings.json を読み直し**、同じ id がまだ書かれていれば消さない（書き直した）。
+    /// リポジトリの `.necoder/settings.json` の `agent_servers` は読まない（`USER_ONLY_KEYS`）ので、そこに
+    /// 書いてあっても使われていない。消すのは necoder が置いた物だけ
     /// （[`acp_client::deploy::remove_deployed`]・置き場の外や symlink の先は触らない）。消せなかった時は
     /// 知らせる（次に同じ版を足せば、置いてある物をそのまま使うだけ）。
     fn remove_agent_binaries(&mut self, agent_id: &str, cx: &mut Context<Self>) {
@@ -251,18 +252,13 @@ impl SettingsView {
         .detach();
     }
 
-    /// 足したエージェントの「外す」: `agent_servers.<id>` を消す（一覧から消える）。既定のエージェントと
-    /// Captain は外せない（使う / 使わないのスイッチと同じ理由・先に別のエージェントを既定にする）。
-    pub(crate) fn remove_custom_agent(
-        &mut self,
-        agent_id: &str,
-        locked: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if locked {
-            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(i18n::t!(
-                "settings.agent_disable_locked"
-            ))));
+    /// 足したエージェントの「外す」: `agent_servers.<id>` を消す（一覧から消える）。既定のエージェント・
+    /// Captain・使う最後の 1 つは外せない（使う / 使わないのスイッチと同じ理由・[`disable_refusal`]）。
+    pub(crate) fn remove_custom_agent(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        if let Some(refusal) = disable_refusal(&get(cx), &agent_catalog(cx), agent_id) {
+            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(
+                refusal.message(),
+            )));
             return;
         }
         let result = set_agent_server(cx, agent_id, None);
@@ -274,28 +270,27 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 1 エージェント分の起動の行: 「起動: 今の起動」+「変える…」（+ 上書きがあれば「既定に戻す」）。
-    /// 足したエージェント（`removable`）は「既定に戻す」の代わりに「外す」を出す。`locked` = 外せない
-    /// （既定のエージェント・Captain）。
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn launch_line(
+    /// 開いた行の中の「起動」: 今の起動 + 「変える…」（+ 組み込みは上書きがある時だけ「既定に戻す」）。
+    /// 足したエージェント（`removable`）は「既定に戻す」の代わりに「外す」を出す（外せない時は 45%・押すと
+    /// 理由のトースト）。
+    pub(crate) fn launch_controls(
         &self,
         index: usize,
         agent_id: SharedString,
         agent_label: SharedString,
         removable: bool,
-        locked: bool,
         settings: &Settings,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = self.theme.clone();
         let current = settings.agent_servers.get(agent_id.as_ref());
+        let locked =
+            removable && disable_refusal(settings, &agent_catalog(cx), &agent_id).is_some();
         let link = |id: (&'static str, usize), label: String| {
             div()
                 .id(id)
                 .flex_none()
-                .px(px(6.))
-                .text_size(px(11.))
+                .whitespace_nowrap()
                 .text_color(theme.fg2)
                 .cursor_pointer()
                 .hover(|style| style.text_color(theme.fg0))
@@ -303,17 +298,13 @@ impl SettingsView {
         };
         div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(4.))
-            .pl(px(48.))
+            .gap(px(6.))
             .child(
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(10.5))
-                    .text_color(theme.fg2)
+                    .text_color(theme.fg1)
                     .child(SharedString::from(launch_summary(current))),
             )
             .child({
@@ -343,7 +334,7 @@ impl SettingsView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, _, _window, cx| {
-                                view.remove_custom_agent(&agent_id, locked, cx)
+                                view.remove_custom_agent(&agent_id, cx)
                             }),
                         ),
                 )

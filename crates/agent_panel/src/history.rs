@@ -756,6 +756,7 @@ mod tests {
                     session_id: "cli-session".into(),
                     resumed: true,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );
@@ -817,6 +818,7 @@ mod tests {
                     session_id: "fresh".into(),
                     resumed: false,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );
@@ -843,6 +845,7 @@ mod tests {
                     session_id: "cli-loaded".into(),
                     resumed: true,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );

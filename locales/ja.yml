@@ -69,8 +69,30 @@ agent:
   pill_model: モデル
   pill_effort: 推論の深さ（effort）
   pill_awaiting_agent: 接続すると選べます（エージェントが候補を送ってきます）
+  card_chip_tip: モデル・思考量・Fast などの設定  ⌘/
+  card_tab_hint: で切り替え
+  card_agent_fixed: この会話では固定
+  card_effort: 思考量
+  card_effort_step: "%{position} / %{total} 段"
+  card_effort_default: エージェント任せ
+  card_no_options: モデルなどはエージェントが送ってきてから選べます
+  card_key_models: モデル
+  card_key_effort: 思考量
+  card_key_close: 閉じる
+  card_key_select: 選ぶ
+  card_key_choose: 決める
+  card_key_back: 戻る
+  card_list_models: モデル
+  card_list_agents: エージェント
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
+  connection_remote_skipped: "接続「%{connection}」はリモート（SSH 先）のエージェントには渡しません。このスレッドは SSH 先のエージェント自身のログインで動きます"
+  connection_unsupported: "%{agent} には接続「%{connection}」を渡せません（渡し方が分かっていません）。設定 › 接続 で「自分のログイン」に戻してください"
+  connection_refused: "接続「%{connection}」を渡せないので起動しません: %{reason}"
+  connection_key_unreadable: "接続「%{connection}」のキーをキーチェーンから読めませんでした: %{reason}"
+  connection_provider_rejected: "接続「%{connection}」をエージェントが受け付けなかったので起動しません: %{reason}"
+  connection_task_env_skipped: "接続を渡すセッションなので、.necoder/task.env の %{names} は読みませんでした"
+  pill_connection: "接続: %{connection}（エージェントはこの契約の API で動きます・設定 › 接続 で変える）"
   err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
   err_launch_not_in_registry: "%{id} が ACP レジストリに見つかりません（設定 → AI エージェント → エージェントを追加 で取り直してください）"
   err_launch_no_distribution: "このマシン（%{platform}）向けの配布がありません"
@@ -158,6 +180,9 @@ agent:
   file_append: "追記 %{path}"
   queued_title: "送信待ち %{n} 件（ターン完了で自動送信）"
   queue_send_now: 中断して今すぐ
+  queue_steer_now: 今すぐ差し込む
+  queue_steering: 差し込み中…
+  steer_refused: "差し込めませんでした（%{reason}）。中断して送り直します"
   elicitation_submit: これで回答
   elicitation_decline: 答えない
   elicitation_custom_single: 自分で書く（案を選んだ時はその案に添えるメモになる）
@@ -554,6 +579,12 @@ fleet:
   toast_merge_preview_failed: "merge preview に失敗: %{error}"
   toast_integrated: Task を IntegrationSpace へ統合しました
   toast_integrate_failed: "統合できません: %{error}"
+  toast_integrate_overlap: "統合先の手元の変更と重なるので、統合しませんでした。次のファイルをコミットするか退けてから、もう一度「統合」:"
+  toast_integrate_staged: "統合先にステージした変更があるので、統合しませんでした。コミットするかステージを解除してから、もう一度「統合」:"
+  integrate_overlap_summary: "統合先の手元の変更と重なる: %{paths}"
+  integrate_staged_summary: "統合先にステージした変更がある: %{paths}"
+  integrate_more_files: "他 %{count} ファイル"
+  integrate_blocked_title: 統合を止めた手元の変更
   space_closed: TaskSpace は閉じられています
   stage_one: 舞台 1 枚
   stage_two: 舞台 2 列
@@ -739,35 +770,80 @@ settings:
   mcp_claude_connectors_sub: アカウントに繋いだコネクタ（Figma・Google Calendar など）。切ると初回応答が速くなります（実測 4.2 秒 → 1.8 秒）。Chat モードは常に読み込みません
   title: 設定
   agents_heading: AI エージェント
-  agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を necoder は保存しません。
+  agents_sub: ホストごとに、エージェントが動くか・版・使う / 使わないを見ます。認証情報を necoder は保存しません。
   permission_default: 権限の既定
   permission_default_sub: 新しいスレッドを始めるモード。選ぶとピルで選んだモードの記憶を全エージェントで消して揃える。「聞かずに進める」はそのモードを持つエージェントだけに効く（Claude Code の bypassPermissions など）。Chat には効かない
   permission_default_agent: エージェントの既定
   permission_default_bypass: 聞かずに進める（Yolo）
   permission_remembered: ピルで選んだモード（押すと忘れる）
-  installed: 導入済み
-  available_npx: 初回に取得（npx）
-  not_installed: 未導入
-  agent_checking: 確認中…
-  agent_available: 利用可能
-  agent_configured: 設定あり・未確認
-  agent_signed_out: 未ログイン
-  agent_disabled: 使わない（選択肢に出さない）
   agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
   agent_remove: 外す
   agent_remove_binary_failed: "%{agent} の落とした binary を消せませんでした: %{reason}"
-  custom_command_ready: "自分のコマンドで起動（%{command}）"
-  custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
-  custom_registry_npx: "レジストリ %{version} · npx（初回に取得）"
+  agent_host_label: "ホスト"
+  agent_host_local: "このマシン"
+  agent_host_ssh: "SSH"
+  agent_host_recheck: "確かめ直す"
+  agent_host_note: "使う / 使わない・既定・起動の変更はどのホストでも同じです。SSH のプロジェクトを開くと、その接続先もここで選べます。"
+  agent_host_failed: "%{host} の状態を読めませんでした: %{reason}"
+  agent_kind_builtin: "組み込み"
+  agent_kind_command: "自分のコマンド"
+  agent_kind_registry: "レジストリ"
+  agent_kind_registry_with: "レジストリ · %{kind}"
+  agent_status_ready: "使える"
+  agent_status_unverified: "ログインの跡があります（確かめられませんでした）"
+  agent_status_unverified_remote: "ログインの跡があります（SSH 先では確かめません）"
+  agent_status_checking: "確かめています…"
+  agent_status_disabled: "使わない（composer に出しません）"
+  agent_status_unreachable: "確かめられませんでした"
+  agent_status_missing: "足りない物:"
+  agent_missing_node: "node"
+  agent_missing_uv: "uv"
+  agent_missing_cli: "CLI 本体（%{name}）"
+  agent_missing_command: "コマンド（%{command}）"
+  agent_missing_login: "ログイン"
+  agent_missing_separator: "・"
+  agent_version_same: "%{version}（レジストリと同じ）"
+  agent_version_update: "%{current} → %{target}（次の起動でレジストリの版にします）"
+  agent_version_fetch: "レジストリ %{version}（最初の起動で取得します）"
+  agent_version_behind: "%{current} · レジストリ %{target}"
+  agent_version_registry: "レジストリ %{version}"
+  agent_version_binary_same: "%{version} · sha256 で照合済み"
+  agent_version_binary_same_unverified: "%{version} · 検証の値がありません"
+  agent_version_binary_update: "%{current} → %{target}（次の起動で落として sha256 で照合します）"
+  agent_version_binary_update_unverified: "%{current} → %{target}（次の起動で落とします・検証の値がありません）"
+  agent_version_binary_fetch: "レジストリ %{version}（最初の起動で落として sha256 で照合します）"
+  agent_version_binary_fetch_unverified: "レジストリ %{version}（最初の起動で落とします・検証の値がありません）"
+  agent_version_path_same: "%{version}（レジストリと同じ・PATH の %{command} を使います）"
+  agent_version_path_behind: "%{current} · レジストリ %{registry}（PATH の %{command} を使います）"
+  agent_version_path_current: "%{version}（PATH の %{command} を使います）"
+  agent_version_path_registry: "PATH の %{command} · レジストリ %{registry}"
+  agent_version_path: "PATH の %{command}"
+  agent_version_own: "自分のコマンドで起動（%{command}）"
+  agent_action_install: "入れる"
+  agent_action_login: "ログイン"
+  agent_action_open_cli: "CLI を開く"
+  agent_detail_role: "役割"
+  agent_detail_launch: "起動"
+  agent_detail_distribution: "配布"
+  agent_detail_account: "アカウント"
+  agent_detail_login: "ログイン"
+  agent_detail_install: "入れ方"
+  agent_detail_run_login: "ターミナルで開く"
+  agent_detail_run_install: "ターミナルで流す"
+  agent_detail_copy: "コピー"
+  agent_detail_remote_note: "コマンドは SSH 先のターミナルで打ってください（ここからは手元でしか流せません）"
+  agent_copied: "コピーしました: %{command}"
+  agent_role_unusable: "このマシンで使えるようになると、既定・Captain にできます"
+  agent_distribution_npx: "npx · %{package}"
+  agent_distribution_uvx: "uvx · %{package}"
+  agent_distribution_binary: "binary · %{platform} · sha256 あり"
+  agent_distribution_binary_unverified: "binary · %{platform} · sha256 なし"
+  agent_disable_last: "外せません: 最後の 1 つは使うままにします（composer で選べるエージェントが無くなります）。先に別のエージェントを使うにしてください"
+  captain_dismiss: "⚑ Captain（押すとやめる）"
   custom_not_in_registry: "レジストリに見つかりません（%{id}）。エージェントを追加 で取り直してください"
   custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
   custom_needs_node: node が要ります（npx で起動する配布）
   custom_needs_uv: uv が要ります（uvx で起動する配布）。uv を入れると使えます（necoder は入れません）
-  custom_registry_uvx: "レジストリ %{version} · uvx（初回に取得）"
-  custom_binary_ready: "レジストリ %{version} · binary（置いてあります・sha256 で照合済み）"
-  custom_binary_ready_unverified: "レジストリ %{version} · binary（置いてあります・検証の値がありません）"
-  custom_binary_download: "レジストリ %{version} · binary（最初の起動で落として sha256 で照合します）"
-  custom_binary_download_unverified: "レジストリ %{version} · binary（最初の起動で落とします・検証の値がありません）"
   custom_binary_on_remote: binary の配布しか無いので、リモート（SSH）では起動できません
   custom_not_deployed: まだ落としていません（最初の起動で落とします）
   custom_deploy_failed: "binary を置けませんでした: %{reason}"
@@ -809,16 +885,10 @@ settings:
   launch_command_missing: コマンドを入れてください
   launch_cancel: キャンセル
   launch_save: 保存
-  logged_in: ログイン済み
-  login_required: ログインが必要
-  login_status_unknown: ログイン状態は CLI で確認
   make_default: 既定にする
   is_default: ★ 既定
   make_captain: Captain にする
   is_captain: ⚑ Captain
-  login: ログイン
-  open_cli: CLI を開く
-  install: 導入
   welcome_title: ようこそ 🎨
   welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
   get_started: これで始める →
@@ -826,6 +896,59 @@ settings:
   mcp_sub: エージェントに持たせる道具。有効にしたものだけが新しいスレッドから見えます。
   mcp_empty: MCP サーバがありません。settings.json の mcp_servers に書くか、Codex CLI・Claude Code・Cursor に登録すると、ここに並びます。
   mcp_note: 変更は次に開くスレッドから効きます（実行中のセッションは繋ぎ直しません）。
+  connections_heading: 接続
+  connections_sub: エージェントがモデルの API を呼ぶ口と、その契約のキー（GLM・Kimi・DeepSeek など）。キーは OS のキーチェーンに入り、settings.json には書きません。necoder はこのキーで API を呼ばず、エージェントを起こす時に渡すだけです。
+  connections_remote_note: リモート（SSH 先で起こすエージェント）には接続を渡しません。渡すのは手元で起こすエージェントだけで、リモートのスレッドはそのエージェント自身のログインで動きます。
+  connections_empty: まだ接続がありません。「＋ 接続を追加」でひな形を選び、キーを貼ります。
+  connections_add: ＋ 接続を追加
+  connections_agents_heading: エージェントごとの接続
+  connections_agents_sub: 選んだ接続は次に起動するセッションから使います（動いているスレッドはそのまま）。Claude Code に他社の接続を挿すと、composer の設定のチップに「Claude Code · 接続の名前」と出ます。
+  connections_other_agents: Codex・GitHub Copilot・Qwen Code・Kimi CLI・Grok Build と、足したほかのエージェントには、まだ接続を渡せません。
+  connection_refusal_protocol: "%{protocol}の口だけを受け付けます"
+  connection_refusal_only_deepseek: DeepSeek Harness には DeepSeek API の接続だけを渡せます（ほかの会社は dsh の設定で選びます）
+  connection_refusal_opencode: OpenCode の組み込みのプロバイダに当たらないので渡せません（OpenCode の設定で足してください）
+  connection_refusal_opencode_url: ベース URL を書き換えた接続は OpenCode に渡せません（OpenCode は自分の既定の口で繋ぎます）
+  connection_refusal_missing_key: キーがキーチェーンにありません（設定 › 接続 の「変える…」で貼ってください）
+  connection_protocol_anthropic: Anthropic 互換
+  connection_protocol_openai: OpenAI 互換
+  connection_preset_openai_compatible: その他の OpenAI 互換
+  connection_preset_anthropic_compatible: その他の Anthropic 互換
+  connection_key_pasted: "貼りました（…%{tail}・%{length} 文字）"
+  connection_key_present: "キー: キーチェーンにあります"
+  connection_key_missing: "キー: まだありません（「変える…」で貼ってください）"
+  connection_key_not_needed: キーは要りません
+  connection_key_unavailable: "キー: この OS ではまだキーチェーンに置けません"
+  connection_key_failed: "キー: キーチェーンを引けませんでした（%{reason}）"
+  connection_key_checking: "キー: 確かめています…"
+  connection_used_by_none: "使うエージェント: なし（下で選びます）"
+  connection_used_by: "使うエージェント: %{agents}"
+  connection_edit: 変える…
+  connection_remove: 外す
+  connection_own_login: 自分のログイン
+  connection_choice_missing: "選んでいる接続「%{id}」がありません。このエージェントは起動しません（選び直してください）"
+  connection_choice_refused: "選んでいる接続「%{name}」は渡せません（%{reason}）。このエージェントは起動しません"
+  connection_refused_list: "渡せない接続: %{list}"
+  connection_refused_item: "%{names}（%{reason}）"
+  connection_removed: "接続「%{name}」を外しました（使っていたエージェントは自分のログインに戻ります）"
+  connection_removed_key_left: "接続「%{name}」を外しましたが、キーチェーンのキーを消せませんでした（%{reason}）"
+  connection_key_paste_invalid: クリップボードにキーがありません（1 行で空白を含まない文字列をコピーしてから押してください）
+  connection_url_invalid: ベース URL は http:// か https:// で始めてください
+  connection_key_required: キーを貼ってください（コピーしてから「クリップボードから貼る」）
+  connection_key_keep: キーチェーンのキーをそのまま使います（貼ると置き換えます）
+  connection_key_not_pasted: まだ貼っていません
+  connection_key_optional: キーは要りません（要る口なら貼ってください）
+  connection_edit_title: 接続を変える
+  connection_add_title: 接続を追加
+  connection_preset: ひな形
+  connection_preset_fixed: "ひな形: %{preset}"
+  connection_name: 名前
+  connection_protocol: 形式
+  connection_base_url: ベース URL
+  connection_key: API キー
+  connection_paste_key: クリップボードから貼る
+  connection_key_note: キーは OS のキーチェーンに入り、settings.json には書きません。画面にも出しません（末尾 4 文字だけ）。
+  connection_docs: "各社の手順: %{url}"
+  connection_saving: 保存しています…
   mcp_source_necoder: necoder の設定
   mcp_source_codex: Codex CLI で発見
   mcp_source_claude: Claude Code で発見
@@ -903,7 +1026,6 @@ settings:
   tabs_view_list: 縦リスト
   pref_system_notifications: OS の通知
   pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
-  account_label: "アカウント:"
   account_default: 既定
   account_elsewhere: （ほかの場所）
   account_add: ＋ 新しいアカウント
@@ -1397,6 +1519,7 @@ ipc:
   err_task_not_open: Task が GUI に開かれていません
   err_bad_phase: 不正な phase です
   err_record_id_required: record の id が必要です
+  err_root_branch_required: Task の root と branch が必要です
   err_unknown_method: "未知の method: %{name}"
   err_bad_json: "JSON が読めない: %{detail}"
   err_gui_timeout: GUI の応答が timeout しました
@@ -1619,6 +1742,7 @@ key:
     super_key: Super キーの操作
   section_editor: エディタ
   section_agent: AI チャット
+  section_composer: AI チャットの入力欄
   section_control: 管制
   section_global: グローバル
   section_explorer: エクスプローラ
@@ -1675,6 +1799,7 @@ key:
   cancel: 選択解除・取消
   submit_prompt: プロンプトを送信
   close_active_thread: アクティブスレッドを閉じる
+  toggle_config_card: 設定のカード（モデル・思考量・Fast）
   command_palette: コマンドパレット
   control_next: "管制: 次の要対応へ"
   cleanup_task: "Task: 選んだ Task を片付ける…"

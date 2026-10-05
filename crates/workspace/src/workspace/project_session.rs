@@ -342,19 +342,22 @@ impl Workspace {
                     .into_iter()
                     .map(|record| (record.id.clone(), record))
                     .collect();
-                let mut missing = Vec::new();
+                let mut to_persist = Vec::new();
                 for slot in &mut workspace.project_sessions.projects {
                     if let Some(record) = by_id.get(slot.task_space.id.as_str()) {
-                        slot.task_space.overlay_stored(record);
+                        if slot.task_space.overlay_stored(record) {
+                            // 台帳の repository_id が古い。git の値で書き直す（次の起動でも食い違わない）。
+                            to_persist.push(slot.task_space.to_record(slot));
+                        }
                     } else {
-                        missing.push(slot.task_space.to_record(slot));
+                        to_persist.push(slot.task_space.to_record(slot));
                     }
                 }
-                if !missing.is_empty() {
+                if !to_persist.is_empty() {
                     let storage = storage.clone();
                     cx.background_executor()
                         .spawn(async move {
-                            for record in missing {
+                            for record in to_persist {
                                 if let Err(error) = storage.upsert_task_space(&record) {
                                     eprintln!("TaskSpace を永続化できない: {error:#}");
                                 }
@@ -900,6 +903,7 @@ impl Workspace {
                 pending_task_agents: HashMap::new(),
                 held_proposal_rows: HashMap::new(),
                 task_conflicts: HashMap::new(),
+                task_integration_blocked: HashMap::new(),
                 task_creations: Vec::new(),
                 next_task_creation_id: 0,
                 #[cfg(test)]
@@ -1695,7 +1699,21 @@ impl Workspace {
                             })
                             .map(|worktree| worktree.branch.clone())
                     };
-                    (status, branch, changes, history, slug, linked, task_files)
+                    // 開いた後に `git init` されたフォルダでは、開いた時のリポジトリ ID（root の代用）が
+                    // git の値と食い違う。読み直さないと、後で切った Task が別リポジトリ扱いになり系譜から
+                    // 外れる（2026-10-03 ユーザー報告・engineer_education_tool）。
+                    // git でないフォルダは読み直さない（開いた時の値のまま）。
+                    let repository_id = project::git_repository_id_on(host.as_ref(), &root);
+                    (
+                        status,
+                        branch,
+                        changes,
+                        history,
+                        slug,
+                        linked,
+                        task_files,
+                        repository_id,
+                    )
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
@@ -1706,7 +1724,8 @@ impl Workspace {
                 if session.repository.refresh_generation != generation {
                     return; // 古い結果（その後に別の refresh が走った）
                 }
-                let (status, branch, changes, history, slug, linked, task_files) = snapshot;
+                let (status, branch, changes, history, slug, linked, task_files, repository_id) =
+                    snapshot;
                 session.repository.status = status.into_iter().collect();
                 session.repository.task_files = task_files;
                 let git_panel = session.git_panel.clone();
@@ -1727,10 +1746,31 @@ impl Workspace {
                     slot.worktree_branch =
                         linked.map(|linked| linked.or(branch).unwrap_or_default());
                 }
+                if let Some(repository_id) = repository_id {
+                    workspace.update_repository_id(session_index, repository_id, cx);
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// git から読んだリポジトリ ID が slot の値と違えば入れ替えて台帳にも書く（開いた後の `git init`）。
+    /// 変わらなければ何もしない。
+    pub(crate) fn update_repository_id(
+        &mut self,
+        session_index: usize,
+        repository_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.project_sessions.projects.get_mut(session_index) else {
+            return;
+        };
+        if slot.task_space.repository_id == repository_id {
+            return;
+        }
+        slot.task_space.repository_id = repository_id;
+        self.persist_new_task_space(session_index, cx);
     }
 
     /// git 状態の色（UI-SPEC §1.3: 色は識別に集約。theme の診断/git トークンを流用）。

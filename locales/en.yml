@@ -68,8 +68,30 @@ agent:
   pill_model: Model
   pill_effort: Reasoning effort
   pill_awaiting_agent: Available once the agent connects
+  card_chip_tip: Model, effort, Fast and other settings  ⌘/
+  card_tab_hint: to switch
+  card_agent_fixed: Fixed for this conversation
+  card_effort: Effort
+  card_effort_step: "%{position} of %{total}"
+  card_effort_default: Agent decides
+  card_no_options: Models and other settings appear once the agent sends them
+  card_key_models: model
+  card_key_effort: effort
+  card_key_close: close
+  card_key_select: select
+  card_key_choose: choose
+  card_key_back: back
+  card_list_models: Models
+  card_list_agents: Agents
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
+  connection_remote_skipped: "Connection \"%{connection}\" isn't passed to remote (SSH) agents. This thread runs on the remote agent's own login"
+  connection_unsupported: "Can't pass connection \"%{connection}\" to %{agent} (no known way to inject it). Switch back to \"Own login\" in Settings › Connections"
+  connection_refused: "Not starting because connection \"%{connection}\" can't be used: %{reason}"
+  connection_key_unreadable: "Couldn't read the key of connection \"%{connection}\" from the keychain: %{reason}"
+  connection_provider_rejected: "Not starting because the agent rejected connection \"%{connection}\": %{reason}"
+  connection_task_env_skipped: "This session carries a connection, so .necoder/task.env was not allowed to set %{names}"
+  pill_connection: "Connection: %{connection} (the agent runs on this plan's API; change it in Settings › Connections)"
   err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
   err_launch_not_in_registry: "%{id} isn't in the ACP registry (refresh it from Settings → AI agents → Add agent)"
   err_launch_no_distribution: "No build for this machine (%{platform})"
@@ -157,6 +179,9 @@ agent:
   file_append: "Append %{path}"
   queued_title: "%{n} queued (sent when the turn ends)"
   queue_send_now: Interrupt & send
+  queue_steer_now: Steer now
+  queue_steering: Steering…
+  steer_refused: "Couldn't steer the running turn (%{reason}). Interrupting and sending it again"
   elicitation_submit: Submit
   elicitation_decline: Decline
   elicitation_custom_single: Type your own answer (or a note on the option you pick)
@@ -553,6 +578,12 @@ fleet:
   toast_merge_preview_failed: "Merge preview failed: %{error}"
   toast_integrated: Task integrated into the IntegrationSpace
   toast_integrate_failed: "Cannot integrate: %{error}"
+  toast_integrate_overlap: "Not integrated: your local changes in the base touch the same files. Commit these files or move the changes aside, then integrate again:"
+  toast_integrate_staged: "Not integrated: the base has staged changes. Commit or unstage them, then integrate again:"
+  integrate_overlap_summary: "Overlaps local changes in the base: %{paths}"
+  integrate_staged_summary: "Staged changes in the base: %{paths}"
+  integrate_more_files: "%{count} more file(s)"
+  integrate_blocked_title: Local changes that stopped the integration
   space_closed: This TaskSpace is closed
   stage_one: Stage 1 card
   stage_two: Stage 2 columns
@@ -738,35 +769,80 @@ settings:
   mcp_claude_connectors_sub: Connectors linked to your account (Figma, Google Calendar, …). Turning this off makes the first reply faster (measured 4.2 s → 1.8 s). Chat mode never loads them
   title: Settings
   agents_heading: AI Agents
-  agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
+  agents_sub: For each host, see whether each agent runs, its version, and whether it's on. necoder never stores credentials.
   permission_default: Default permissions
   permission_default_sub: The mode new threads start in. Choosing resets the modes remembered from the pill for every agent. "Don't ask" applies only to agents that offer such a mode (such as Claude Code's bypassPermissions). Chat is not affected
   permission_default_agent: Agent default
   permission_default_bypass: Don't ask (Yolo)
   permission_remembered: Modes chosen in the pill (click to forget)
-  installed: Installed
-  available_npx: Fetch on first use (npx)
-  not_installed: Not installed
-  agent_checking: Checking…
-  agent_available: Available
-  agent_configured: Configured · unverified
-  agent_signed_out: Signed out
-  agent_disabled: Off (hidden from choices)
   agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
   agent_remove: Remove
   agent_remove_binary_failed: "Couldn't delete the binary downloaded for %{agent}: %{reason}"
-  custom_command_ready: "Starts with your command (%{command})"
-  custom_command_missing: "Command not found (%{command}). Write a name on the PATH or an absolute path"
-  custom_registry_npx: "Registry %{version} · npx (fetched on first start)"
+  agent_host_label: "Host"
+  agent_host_local: "This machine"
+  agent_host_ssh: "SSH"
+  agent_host_recheck: "Check again"
+  agent_host_note: "On/off, the default, and launch changes are the same on every host. Open an SSH project to pick its host here too."
+  agent_host_failed: "Couldn't read the state on %{host}: %{reason}"
+  agent_kind_builtin: "Built in"
+  agent_kind_command: "Own command"
+  agent_kind_registry: "Registry"
+  agent_kind_registry_with: "Registry · %{kind}"
+  agent_status_ready: "Ready"
+  agent_status_unverified: "Sign-in found (couldn't confirm it)"
+  agent_status_unverified_remote: "Sign-in found (not confirmed over SSH)"
+  agent_status_checking: "Checking…"
+  agent_status_disabled: "Off (not offered in the composer)"
+  agent_status_unreachable: "Couldn't check"
+  agent_status_missing: "Missing:"
+  agent_missing_node: "node"
+  agent_missing_uv: "uv"
+  agent_missing_cli: "the CLI (%{name})"
+  agent_missing_command: "the command (%{command})"
+  agent_missing_login: "sign-in"
+  agent_missing_separator: ", "
+  agent_version_same: "%{version} (same as the registry)"
+  agent_version_update: "%{current} → %{target} (moves to the registry version on the next start)"
+  agent_version_fetch: "Registry %{version} (fetched on first start)"
+  agent_version_behind: "%{current} · registry %{target}"
+  agent_version_registry: "Registry %{version}"
+  agent_version_binary_same: "%{version} · checked against sha256"
+  agent_version_binary_same_unverified: "%{version} · no checksum to check"
+  agent_version_binary_update: "%{current} → %{target} (downloaded and checked against sha256 on the next start)"
+  agent_version_binary_update_unverified: "%{current} → %{target} (downloaded on the next start, no checksum to check)"
+  agent_version_binary_fetch: "Registry %{version} (downloaded and checked against sha256 on first start)"
+  agent_version_binary_fetch_unverified: "Registry %{version} (downloaded on first start, no checksum to check)"
+  agent_version_path_same: "%{version} (same as the registry, uses %{command} on the PATH)"
+  agent_version_path_behind: "%{current} · registry %{registry} (uses %{command} on the PATH)"
+  agent_version_path_current: "%{version} (uses %{command} on the PATH)"
+  agent_version_path_registry: "%{command} on the PATH · registry %{registry}"
+  agent_version_path: "%{command} on the PATH"
+  agent_version_own: "Starts with your command (%{command})"
+  agent_action_install: "Install"
+  agent_action_login: "Log in"
+  agent_action_open_cli: "Open CLI"
+  agent_detail_role: "Role"
+  agent_detail_launch: "Launch"
+  agent_detail_distribution: "Build"
+  agent_detail_account: "Account"
+  agent_detail_login: "Log in"
+  agent_detail_install: "Install"
+  agent_detail_run_login: "Open in terminal"
+  agent_detail_run_install: "Run in terminal"
+  agent_detail_copy: "Copy"
+  agent_detail_remote_note: "Run these in a terminal on the SSH host. From here they would run on this machine."
+  agent_copied: "Copied: %{command}"
+  agent_role_unusable: "Once it's ready on this machine, it can be the default or the Captain"
+  agent_distribution_npx: "npx · %{package}"
+  agent_distribution_uvx: "uvx · %{package}"
+  agent_distribution_binary: "binary · %{platform} · with sha256"
+  agent_distribution_binary_unverified: "binary · %{platform} · no sha256"
+  agent_disable_last: "Can't turn off: the last agent stays on (the composer would have nothing to pick). Turn another agent on first"
+  captain_dismiss: "⚑ Captain (click to dismiss)"
   custom_not_in_registry: "Not found in the registry (%{id}). Refresh it from Add agent"
   custom_no_distribution: "No build for this machine (%{platform})"
   custom_needs_node: Needs node (this build starts with npx)
   custom_needs_uv: Needs uv (this build starts with uvx). Install uv to use it (necoder doesn't install it)
-  custom_registry_uvx: "Registry %{version} · uvx (fetched on first start)"
-  custom_binary_ready: "Registry %{version} · binary (in place, checked against sha256)"
-  custom_binary_ready_unverified: "Registry %{version} · binary (in place, no checksum to check)"
-  custom_binary_download: "Registry %{version} · binary (downloaded and checked against sha256 on first start)"
-  custom_binary_download_unverified: "Registry %{version} · binary (downloaded on first start, no checksum to check)"
   custom_binary_on_remote: This agent only ships a binary, so it can't start over SSH
   custom_not_deployed: Not downloaded yet (downloaded on first start)
   custom_deploy_failed: "Couldn't put the binary in place: %{reason}"
@@ -808,16 +884,10 @@ settings:
   launch_command_missing: Enter a command
   launch_cancel: Cancel
   launch_save: Save
-  logged_in: Logged in
-  login_required: Login required
-  login_status_unknown: Check login status in the CLI
   make_default: Set as default
   is_default: ★ Default
   make_captain: Make Captain
   is_captain: ⚑ Captain
-  login: Log in
-  open_cli: Open CLI
-  install: Install
   welcome_title: Welcome 🎨
   welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.
   get_started: Get started →
@@ -825,6 +895,59 @@ settings:
   mcp_sub: Tools you hand to the agent. Only the ones you enable are visible to new threads.
   mcp_empty: No MCP servers yet. Add them under mcp_servers in settings.json, or register them with Codex CLI, Claude Code or Cursor and they show up here.
   mcp_note: Changes apply to the next thread you open; running sessions are not reconnected.
+  connections_heading: Connections
+  connections_sub: Where agents call model APIs, and the key for that plan (GLM, Kimi, DeepSeek and more). Keys go into the OS keychain, never into settings.json. necoder never calls an API with them; it only hands them to the agent it starts.
+  connections_remote_note: Connections are not passed to remote agents (started over SSH). Only agents started on this machine get them; remote threads use the agent's own login.
+  connections_empty: No connections yet. Use "+ Add connection" to pick a template and paste a key.
+  connections_add: + Add connection
+  connections_agents_heading: Connection per agent
+  connections_agents_sub: The chosen connection applies from the next session the agent starts (running threads keep theirs). When Claude Code uses another company's connection, the settings chip under the composer reads "Claude Code · <connection>".
+  connections_other_agents: Codex, GitHub Copilot, Qwen Code, Kimi CLI, Grok Build and other added agents can't take a connection yet.
+  connection_refusal_protocol: "only takes %{protocol} endpoints"
+  connection_refusal_only_deepseek: DeepSeek Harness only takes the DeepSeek API connection (choose other providers in dsh's own settings)
+  connection_refusal_opencode: not one of OpenCode's built-in providers (add it in OpenCode's settings)
+  connection_refusal_opencode_url: OpenCode can't take a connection with an edited base URL (it connects to its own default endpoint)
+  connection_refusal_missing_key: the key is not in the keychain (paste it from Settings › Connections › Edit…)
+  connection_protocol_anthropic: Anthropic-compatible
+  connection_protocol_openai: OpenAI-compatible
+  connection_preset_openai_compatible: Other OpenAI-compatible
+  connection_preset_anthropic_compatible: Other Anthropic-compatible
+  connection_key_pasted: "Pasted (…%{tail}, %{length} characters)"
+  connection_key_present: "Key: in the keychain"
+  connection_key_missing: "Key: not set yet (paste it with Edit…)"
+  connection_key_not_needed: No key needed
+  connection_key_unavailable: "Key: this OS's keychain isn't supported yet"
+  connection_key_failed: "Key: couldn't read the keychain (%{reason})"
+  connection_key_checking: "Key: checking…"
+  connection_used_by_none: "Used by: none (choose below)"
+  connection_used_by: "Used by: %{agents}"
+  connection_edit: Edit…
+  connection_remove: Remove
+  connection_own_login: Own login
+  connection_choice_missing: "The chosen connection \"%{id}\" doesn't exist. This agent won't start until you choose again"
+  connection_choice_refused: "The chosen connection \"%{name}\" can't be used (%{reason}). This agent won't start"
+  connection_refused_list: "Can't use: %{list}"
+  connection_refused_item: "%{names} (%{reason})"
+  connection_removed: "Removed connection \"%{name}\" (agents that used it go back to their own login)"
+  connection_removed_key_left: "Removed connection \"%{name}\", but couldn't delete its key from the keychain (%{reason})"
+  connection_key_paste_invalid: No key on the clipboard (copy a single line without spaces, then press again)
+  connection_url_invalid: The base URL must start with http:// or https://
+  connection_key_required: Paste the key (copy it, then press "Paste from clipboard")
+  connection_key_keep: Keeps the key in the keychain (pasting replaces it)
+  connection_key_not_pasted: Not pasted yet
+  connection_key_optional: No key needed (paste one if the endpoint wants it)
+  connection_edit_title: Edit connection
+  connection_add_title: Add connection
+  connection_preset: Template
+  connection_preset_fixed: "Template: %{preset}"
+  connection_name: Name
+  connection_protocol: API format
+  connection_base_url: Base URL
+  connection_key: API key
+  connection_paste_key: Paste from clipboard
+  connection_key_note: The key goes into the OS keychain, never into settings.json, and is never shown (only its last 4 characters).
+  connection_docs: "Provider's guide: %{url}"
+  connection_saving: Saving…
   mcp_source_necoder: necoder settings
   mcp_source_codex: found in Codex CLI
   mcp_source_claude: found in Claude Code
@@ -902,7 +1025,6 @@ settings:
   tabs_view_list: List
   pref_system_notifications: System notifications
   pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
-  account_label: "Account:"
   account_default: Default
   account_elsewhere: (elsewhere)
   account_add: + New account
@@ -1396,6 +1518,7 @@ ipc:
   err_task_not_open: Task is not open in the GUI
   err_bad_phase: Invalid phase
   err_record_id_required: record id is required
+  err_root_branch_required: The task root and branch are required
   err_unknown_method: "Unknown method: %{name}"
   err_bad_json: "Can't parse JSON: %{detail}"
   err_gui_timeout: GUI response timed out
@@ -1618,6 +1741,7 @@ key:
     super_key: Super key shortcuts
   section_editor: Editor
   section_agent: AI chat
+  section_composer: AI chat input
   section_control: Control
   section_global: Global
   section_explorer: Explorer
@@ -1674,6 +1798,7 @@ key:
   cancel: Cancel / clear selection
   submit_prompt: Send prompt
   close_active_thread: Close active thread
+  toggle_config_card: Settings card (model, effort, Fast)
   command_palette: Command palette
   control_next: "Control: next item"
   cleanup_task: "Task: Clean up the selected Tasks…"

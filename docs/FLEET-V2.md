@@ -326,10 +326,37 @@ ThreadActivity（Working / Blocked / Done / Idle）は状態グリフ、Git heal
 |---|---|---|
 | 稼働中 | レビューへ（quiet） | `transition_task_space(review_ready)` + radar 実行 |
 | 承認待ち | 許可 | `respond_permission`（他の選択肢は要対応カード / transcript 内） |
-| レビュー待ち radar ✓ | Integrate | `integrate_task`（dirty main / 衝突は拒否・既存 gate） |
+| レビュー待ち radar ✓ | Integrate | `integrate_task`（ステージした変更・統合先の手元の変更との重なり・衝突は断る。下の「統合と統合先の手元の変更」） |
 | レビュー待ち radar ✗ | 修正を指示 | composer にフォーカス + 衝突ファイル名を挿入 |
 | 統合済み | 片付け | ⋯ メニューを開く（既存 5 段） |
 | 失敗 | 修正を指示 | composer にフォーカス |
+
+**統合と統合先の手元の変更**（2026-10-03）: 統合先（main の作業ツリー）に手元の変更があっても、統合が触るパスと
+重ならなければ統合する。線は git の merge と同じ所に引く。*以前の訂正*: 未コミットの変更が 1 つでもあると（未追跡のファイルも
+数えて）「clean にしてください」と断っていた。公開しない変更（CLAUDE.md の 1 行・`reports/` など）をいつも置いている本人の
+main からは一度も統合できず、どのファイルのせいかも出なかった（2026-10-02 に 9 回押して 9 回止まった）。
+
+- **統合が触るパス** = 統合先の HEAD と Task のブランチの分岐点から、ブランチまでの差分（`git merge-base --all` +
+  `git diff --name-status --no-renames`・分岐点が複数なら和）。merge が作業ツリーに書くのはこの内側だけ（統合先も同じ変更を
+  持っていれば書かないので、git の線より少し広い＝安全側）。手元の変更は `git status --porcelain=v1 --untracked-files=all` で読み、
+  読めなければ統合しない
+- **断るのは 3 つ**（上から順に調べる）:
+  1. **ステージした変更がある**（重なりに関係なく・`git add -N` と競合中も含む）。統合が途中で失敗した時の `git merge --abort`
+     （`reset --merge` 相当）は、ステージした変更を元に戻せないことがある。git の merge（ort）も index が HEAD と同じでなければ始めない
+  2. **下見で競合**（`preview_merge_on` の `git merge-tree`・O19 のまま。次へが「競合を直させる」になる）
+  3. **手元の変更と重なる**: 統合が触るファイルの作業ツリーだけの変更・削除。**未追跡のファイルは、統合がファイルを足すパスと
+     ぶつかる時だけ**（同じパス・ファイルの場所にフォルダを作る・フォルダの場所にファイルを足す）。同じフォルダの別のファイルは重ならない。
+     入れ子の git リポジトリ（status に `dir/` とフォルダで出る）の中に統合がファイルを足す時も重なりとみなす（git は同じ名前が
+     無ければ黙って書き込むが、人の別のリポジトリの中へは書かない側に倒す）
+- 重ならない手元の変更は、統合の後もそのまま残る（merge のコミットに入らない・バイト単位で同じ）。stash は使わない
+- 判定と merge の間に統合先が変わっても、git の merge が自分で「上書きされる」と断る（統合先は触られない）。merge が途中で
+  失敗した時は、始まった merge だけを中止する（`MERGE_HEAD` が無ければ中止しない・中止に失敗したらそう言う）
+- **断った時の見せ方**: `project::BlockingLocalChanges`（理由 + ファイル）を返す。GUI は失敗の知らせ（12 秒）に、理由とどうすれば
+  統合できるか + 1 行 1 ファイル（5 件まで + 「他 N ファイル」・残りは「全文 ›」で全部）。**要対応のカード**に warn 色の 1 行
+  （`統合先の手元の変更と重なる: CLAUDE.md`・3 件まで・切らずに折り返す・merge_ready の間・もう一度「統合」を押すまで・
+  起動している間だけ）。ニュースと台帳のイベントにも同じ 1 行。GUI は Task の要約（`result_summary`）を上書きしない。
+  CLI（`ne fleet integrate`・終了コード 1）と MCP（`fleet_integrate_task`）は同じ理由を日本語の 1 文で返す（10 件まで）。CLI は
+  従来どおり台帳の要約を `integration failed: <その文>` にする。次へは「統合」のまま（直してもう一度押す）
 
 ### 4.4 片付け・削除
 
@@ -496,7 +523,8 @@ Captain が実行中ならターン終了で未読を確かめて続けて渡す
 
 ### 5.7 任命
 
-設定 `captain_agent`（旧 `coordinator_agent`・プロジェクト設定 `.necoder/settings.json` でも可・既定ドリフト禁止）。
+設定 `captain_agent`（旧 `coordinator_agent`・**user の settings.json だけ**・既定ドリフト禁止。リポジトリの
+`.necoder/settings.json` からは読まない＝自分から起きて走るスレッドの任命をリポジトリに決めさせない・ARCHITECTURE §7.7）。
 未任命の間も要対応・Task 行・＋Task は全部そのまま使える（Captain 無しでも Fleet は成立する）。
 
 *2026-09-20*: **任命の UI を足した**。それまでは settings.json の手書きが唯一の入口で（Captain バーの文言が
@@ -506,9 +534,9 @@ Captain が実行中ならターン終了で未読を確かめて続けて渡す
 - **任命**: ブリッジの `⚑ Captain を任命` タブ / Captain バー / ⌘0 → 会話ペインに任命の面（役割の説明 +
   サインイン済みエージェントのボタン = `acp_client::authenticated_agent_labels()`）。押すと `captain_agent` を書いて
   そのまま Captain の会話へ入る。
-- **設定からの任命・交代・解任**: 設定 → AI エージェントの行ごとの `Captain にする` / `⚑ Captain` ボタン（PR #8）。任命中のボタンをもう一度押すと解任。
+- **設定からの任命・交代・解任**: 設定 → AI エージェントの行を開いた中の「役割」の `Captain にする` / `⚑ Captain（押すとやめる）` ボタン（PR #8・2026-10-02 に行を開いた中へ移した＝UI-SPEC §12。任命中の行の頭には `⚑ Captain` のバッジ）。任命中のボタンをもう一度押すと解任。
   user の `captain_agent` を更新し、既定エージェント（★）とは連動させない。解任は既存の永続化規約に従ってキーを削除する。
-  プロジェクトの `.necoder/settings.json` に同じキーがある場合は project 層が優先される。オンボーディングには任命ボタンを出さない。
+  リポジトリの `.necoder/settings.json` の `captain_agent` は読まない（2026-10-02・issue #38 H3）。オンボーディングには任命ボタンを出さない。
   作業中だった設定のセグメントは同じ操作の重複になるため、この行ごとのボタンへ統一した。Fleet 内の任命面はそのまま残す。
 
 ### 5.8 Captain の席（道具と決まり・*2026-09-24*）
@@ -669,6 +697,7 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 `fleet.next_review/allow/integrate/fix/cleanup` `fleet.new_task` `fleet.new_task_hint` `fleet.new_task_branch_auto`
 `fleet.new_task_setup_found/missing/create` `fleet.new_task_more` `fleet.new_task_existing_branch` `fleet.new_task_same_worktree`
 `fleet.new_task_start` `fleet.setup_failed` `fleet.tokens_total` `fleet.tokens_total_tip`（statusbar の Σ・§5.6）
+`fleet.toast_integrate_overlap/staged` `fleet.integrate_overlap_summary/staged_summary/more_files/blocked_title`（統合先の手元の変更で断った時・§4.3・2026-10-03）
 `captain.title` `captain.row_sub` `captain.appoint` `captain.phase` `captain.tab_log` `captain.tab_tasks`
 `captain.dest` `captain.pill_scope` `captain.role` `captain.facts` `captain.spawned_by` `captain.human_send`
 `captain.recommend_allow/deny/ask_human/card/news/reply/wake_header/wake_line` `captain.recommend_err_field/verdict/line/long/no_captain/task/integration/stale/stale_current/stale_none`（*2026-09-28*: 予定の `captain.recommend` を分けた）
@@ -762,6 +791,8 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
 | `adopt` | 外部の worktree の先頭を、サイドバーの「取り込む」と同じ入口（`adopt_worktree`）で取り込む（O21・一覧は git に直接聞く。撮るなら先に `git -C $ISO/project worktree add -b feature/x $ISO/x` で外の worktree を作る） |
 | `interrupted` | Captain の分解案の中断した行を段ごとに仕込む（未着手 / Task 登録 / 委任文の送信 / 作れなかった・R09・DB には書かず worktree も作らない） |
 | `compare:<n>` | 先頭から n 本（2〜3）の Task を舞台に並べ、各カードの「変更」を開く（O23 の並べて比べる） |
+| `fleet` | Editor から Fleet に入る（⌘⇧M と同じ道）。`NECODER_CONTROL_PROBE` の擬似 Task を使わず、本物の worktree の Task を撮る時に先頭へ置く |
+| `integrate` | 選択中の Task の「統合」を押す（phase を merge_ready にしてから・本物の `git merge` が走る）。§4.3 の統合先の手元の変更で断る所を撮るなら、`$ISO/project` に Task を `git worktree add -b task/x $ISO/project-worktrees/x` で切ってコミットし、統合先の同じファイルを手で変えてから、起動の引数に両方を並べて `fleet;graph;task:1;integrate` |
 | `captain-transcript` | Captain の会話に見本（人の発話・台帳の知らせの灰色のカード 2 枚・fleet の道具・采配の本文）とトークン 4.2k を仕込む（`captain` の後に置く・任命済みの時だけ・エージェントには送らない・§3.6 / §5.6） |
 | `menu` / `rename` / `maximize` / `terminal` / `tall` / `close-all` | 従来の片付け UI・下段の検証 |
 

@@ -244,6 +244,22 @@ manifest の名前・版・`bin` を確かめてから rename で公開し、以
 - 設定の画面・追加の画面は**キャッシュを読むだけ**。取りに行くのは人が「取得する」「取り直す」を押した時と、
   既存の起動 12 秒後の背景の後追い（1 時間スロットル）だけ
 
+**状態と版を読むだけの層（#38 H2 の見せ方・2026-10-02・`acp_client::readiness`）**: 設定 › AI エージェントの行の
+「このホストで動くか（使える / 足りない物）」と「版（今の版とレジストリの版）」は、起動の解決と同じ順で**読むだけ**で決める
+（起動の振る舞いは変えない・CLI を子プロセスで起こさない・資格情報の中身は読まない）。
+
+- **事実**（`HostFacts`）と**見立て**（`assess`）を分ける。見立ては純関数で、このマシンでも SSH 先でも同じ
+- このマシンの事実 = `local_facts`（PATH・Zed の npx キャッシュ・`install` の置き場の版・npx のキャッシュの版・`deploy` の
+  印の版・ログインの跡のファイルと環境変数の名前）。読み取りの口は `install::installed_versions`・`deploy::deployed_versions`・
+  `registry::split_npm_spec` に足した（どれも読むだけ）。ログインの跡の表は `AgentKind::login_traces` 1 本で、
+  `configured_auth_state`（このマシン）と SSH 先の見立てが同じ表を見る
+- SSH 先の事実 = `probe_remote`。workspace が渡した「この窓で開いている SSH のプロジェクトの接続とその根」
+  （`settings::AgentHost`）で、`sh -lc` の読み取りだけのシェルを 1 回流す（`run_command_retry_safe`・
+  `command -v` / `readlink -f` で辿った `package.json` / npx のキャッシュ / `test -e` / `printenv`）。新しく SSH を
+  張らない。シェルは手元の `sh` と dash で本当に流すテストで固定している
+- 「使わない」にできない理由（既定・Captain・使う最後の 1 つ）は `settings::agents_page::disable_refusal` 1 本で、
+  スイッチと「外す」が書く前に確かめる
+
 **binary の配備（H2-b・`acp_client::deploy`）— 外から落とした実行ファイルを走らせるので、ここを固定する**:
 
 - **落とす元**: レジストリの JSON の `distribution.binary.<os>-<arch>.archive` の URL **だけ**。necoder は URL を
@@ -265,7 +281,8 @@ manifest の名前・版・`bin` を確かめてから rename で公開し、以
 - **外す**（設定の「外す」・2026-09-27）: `external_agents/binary/<id>` の中の **necoder が置いた物だけ**を消す
   （`deploy::remove_deployed`: 完了の印のある `<version>/<os>-<arch>` と途中の `.staging-*` / `.download-*`。
   `<id>` 自体が symlink なら何もしない・中の symlink はリンクだけ消えて先は触らない・知らないファイルは残す）。
-  消す直前に settings.json（user と project の層）を読み直し、同じ id がまだ書かれていれば消さない
+  消す直前に settings.json を読み直し、同じ id がまだ書かれていれば消さない（`agent_servers` は user の層
+  だけから読む・§7.7）
 - 同じアプリの中で同時に初回が起きても落とすのは 1 回（プロセスの中の lock）。別のプロセスが先に同じ版を
   置いたら、その完成品を使う
 
@@ -380,6 +397,125 @@ herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さ
 **`RunningRegistry`（全窓横断のスレッド台帳）は panel ごとの行を保持して root で集約する。**
 root キーに直接 upsert すると、同じ root の 2 枚目の ACP が 1 枚目の行を消す。パネルの解放は
 `cx.on_release` で自分の行だけ落とす。
+
+### 7.6 実行中のターンへの差し込み（`_session/steering`・2026-10-02）
+
+送信待ちの「今すぐ」（UI-SPEC §6 の送信待ち）は、エージェントが広告していれば**実行中のターンを止めずに**文を渡す。
+以前は `session/cancel` でターンを畳んでから送り直しており、途中のツール作業を捨てていた。広告の無い
+エージェントは今までどおり「中断 → 閉じたら先頭として送る」。
+
+- **判定は initialize の実物から**: 応答の**最上位**の `_meta.steering.supported == true`（`agentCapabilities` の
+  中ではない）。claude-agent-acp 0.81.2（`dist/acp-agent.js` の `initialize`・`STEER_METHOD`）と codex-acp 1.13.1
+  （`dist/index.js` の `initialize`・`SESSION_STEERING_METHOD`）が同じ形で広告する（レジストリの今の版
+  claude-agent-acp 0.84.0・codex-acp 2.1.0 もソース上は同じ契約）。`acp_client::steering_supported`
+  が読み、`AgentEvent::SessionStarted.steerable` で UI へ渡す
+- **線の形**: request `_session/steering` `{sessionId, prompt: ContentBlock[], _meta: {steering: {idleBehavior:
+  "promptRequired"}}}` → `{outcome}`。`injected` = 走っているターンに入った / `promptRequired` = もうターンが
+  無かった（文は**届いていない**）/ `startedNewTurn` = エージェントが自分で新しいターンを始めた。
+  `SteerOutcome` は `Injected` / `TurnOver` / `StartedTurn` / `Refused(理由)`（エラー応答・知らない outcome）
+- **`SessionCommand::Steer { id, text, images }`**: `run_session_on` は応答を**ターンの select の 1 本**として待つ
+  （その場で await しない＝待つ間も更新は流れる）。待機中も同じ future を見張る（ターンの終わり際に送った分は
+  応答がターンの後に来る）。1 セッション 1 本ずつで、後から来た分は前の応答を待つ。ターンが閉じた時に
+  待っていた分は送らずに `TurnOver`。待機中に届いた `Steer` も送らずに `TurnOver`（＝普通の送信に回す）
+- **select の順は 更新 → 差し込みの応答 → prompt 応答 → コマンド**。差し込みの応答を prompt 応答より先に
+  読むのは、両方が同時に届いた時に「差し込んだ文」をターンの終わりより前の位置に置くため。prompt 応答を
+  コマンドより先に読むのは、終端が手元に届いているのに `Steer` を終わったターンへ送らないため
+- **UI の後始末は 1 か所（キュー）**: `TurnOver` と `Refused` は文を送信待ちの先頭へ戻す。`TurnOver` は
+  ターンの終わりのフラッシュがそのまま次のターンとして送り、`Refused` は理由を 1 行出して「中断 → 送り直し」
+  に落ちる。差し込みの応答を待つ間は、ターンが閉じても送信待ちを流さない（順序を守る）
+- **ターンの終わりの判定は変えない**: ターンは `session/prompt` の応答（`stopReason`）でだけ閉じる。差し込みは
+  新しいターンを作らない — claude-agent-acp は差し込みの後、ターンの決着を SDK の idle まで遅らせ
+  （`Turn.steeredEchoes`）、codex-acp は Codex の `turn/steer` で同じターンに足す。どちらも差し込んだ文に
+  答え終えてから prompt 応答を返す。zeron が Claude / Codex のアダプタを捨てた理由（背景の作業のために
+  ターンを開いたままにして完了判定が狂う・`zeron/crates/harness/src/lib.rs` 冒頭）に当たらないことは、
+  実アダプタで確かめた（`cargo run -p acp_client --example probe_steering`・2026-10-02）: `sleep 6` を
+  走らせている最中に差し込むと、claude-agent-acp 0.81.2（haiku）も codex-acp 1.13.1（gpt-5.6-luna）も
+  すぐ `injected` を返し、**走っているシェルは止めずに最後まで走らせ**、終わってから差し込んだ文に答えて
+  ターン 1 本のまま `Completed` で閉じた（ツールの終わりから Claude 1.6 秒・Codex 2.4 秒）。Claude は呼び出しを
+  **書いている途中**に差し込むと、その生成を止めて（優先度 `now`）呼び出しを出し直す（書きかけの呼び出しは
+  走らず、結果の更新も来ない）
+- **既知の端: codex-acp 1.13.1 は `idleBehavior` を読まない**（`parseSessionSteerParams` は `sessionId` と
+  `prompt` だけ）。Codex のターンが閉じた（`turn/completed`）直後〜prompt 応答がこちらに届くまでの数 ms に
+  差し込みが着くと、Codex は自分で新しいターンを始める（`startedNewTurn`）。necoder は文を transcript に出し、
+  返事は待機中の更新の道（目標の自走ターンと同じ）で届くが、そのターンの実行中・完了は示せない。
+  残りの送信待ちは自動では流さない（codex-acp は自分で始めたターンの最中に `session/prompt` が来ると
+  ターンの控えを上書きする）。次のターンの終わりか、人の送信で流れる。Claude は `promptRequired` を返すので
+  この端は無い
+
+### 7.7 設定の層と接続（issue #38 H3・2026-10-02）
+
+**project 層はリポジトリが持つファイル**。設定は既定 → user → リポジトリの `.necoder/settings.json` を深く重ねるが、
+clone しただけのリポジトリが「どこへ何を送るか・何を起こすか・何を聞かずに通すか」を決められると、キーチェーンの
+キーを別の宛先へ送らせたり、任意のコマンドを起こさせたりできる。だから `settings_core::USER_ONLY_KEYS` を
+project 層から**外してから**重ねる（`SettingsStore::load`。外したキーは `ignored_project_keys` に残し標準エラーに 1 行）:
+
+| キー | リポジトリに決めさせると |
+|---|---|
+| `connections` / `agent_connections` | 接続の `base_url` を差し替えて、キーを別の宛先へ送らせる |
+| `agent_servers` | 任意の起動コマンド・`ANTHROPIC_BASE_URL` などの env |
+| `mcp_servers` | 任意の MCP のコマンド・URL（ヘッダの `${VAR}` は手元の env を展開する＝秘密を外へ送らせる） |
+| `agent_permission_default` / `agent_config_defaults` | 「聞かずに進める」権限モードを既定にする |
+| `allow_terminal_send` | CLI から端末へキーを打たせる |
+| `terminal_shell` / `terminal_shell_args` | 端末を開くたびに任意のコマンド |
+| `captain_agent` | 自分から起きて 1 ターン走る Captain の任命（人の明示操作に限る） |
+| `claude_ai_connectors` | claude.ai のコネクタ（メール・カレンダー等）をセッションへ持ち込む |
+| `chat` | 全チャットのシステムプロンプトへの追記と置き場（プロジェクトに紐づかない） |
+
+読むのは見た目と、人が押すまで何も起きない物（`quick_commands` は押すと端末で走るが、押すまで何も起きず中身は
+ツールチップで見える）。書き手（`persist_*`）は元から user のファイルだけを書く。
+
+**接続 = エージェントがモデルの API を呼ぶ口と、その契約**（GLM Coding Plan・Kimi Code・DeepSeek API …）:
+
+- **置き場**: 宛先（ひな形・名前・形式・ベース URL）は `connections.<id>`、エージェントごとの選択は
+  `agent_connections.<agent id>`（どちらも user の層だけ）。**API キーは OS のキーチェーン**
+  （`acp_client::connections::secrets`・項目名 `necoder.connection.<id>`・macOS = ログインのキーチェーン /
+  Windows = 資格情報マネージャ / Linux は未対応で保存できない旨を出す）。settings.json にキーの欄は無い。
+  **necoder 自身はこのキーで API を呼ばない** — エージェントを起こす時に渡すだけ（issue #38 §5-1）
+- **キーの読み書きは背景のスレッド**（macOS は許可のダイアログで止まりうる）。設定の面のキーの有無は中身を読まずに
+  項目の属性だけで引く（`SecretStore::contains`・ダイアログを出さない）。中身を読むのはセッションを起こす時だけ。
+  キーの置き場はアプリの起動（`settings::install_os_keychain`）だけが OS のキーチェーンにする — 置かれていなければ
+  メモリだけの置き場（テストと隔離した offscreen は本物のキーチェーンに触れない。debug ビルドの
+  `NECODER_SECRET_STORE=memory[:id,…]` も同じ）
+- **渡し方**（`connections::Harness`・渡し方の分かるエージェントだけ）:
+  - Claude Code（claude-agent-acp）: Anthropic 互換だけ。`initialize` の `agentCapabilities.providers` を見て、
+    広告していれば `session/new` / `session/load` の**前に** `providers/set`（`providerId: "main"`・
+    `apiType: "anthropic"`・キーは `Authorization: Bearer`、`x-api-key` の口は両方に載せる）。Rust の ACP crate 1.3 は
+    この要求を持たないので、型はスキーマ crate（feature `unstable_llm_providers`）から引いて `UntypedMessage` で送る。
+    アダプタはこの値を Claude Code の env と**設定**の両方へ入れる（リポジトリの `.claude/settings.json` の env でも
+    上書きできない）。プロセス単位の設定で、necoder はスレッド 1 本 = プロセス 1 本なので混ざらない。
+    **広告しない古いアダプタ**は、セッションを開かずにプロセスを畳み、`ANTHROPIC_BASE_URL` /
+    `ANTHROPIC_AUTH_TOKEN`（`x-api-key` の口は `ANTHROPIC_API_KEY`）を足して 1 回だけ起こし直す。この時は他の
+    宛先と資格情報の変数（`ANTHROPIC_API_KEY`・`CLAUDE_CODE_OAUTH_TOKEN` …）を空にしてから入れる（手元のキーを
+    別の会社へ送らない・アダプタの `providers/set` と同じ顔ぶれ）
+  - DeepSeek Harness（足したエージェントのコマンドが `dsh-acp`）: dsh の DeepSeek の経路は Anthropic Messages の口で、
+    `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` を読まず `providers/set` も持たない。DeepSeek API の接続だけを
+    `DSH_PROVIDER=deepseek` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` で渡す
+  - OpenCode: ひな形が OpenCode の組み込みのプロバイダ（models.dev の id）に当たる時だけ、そのプロバイダの環境変数で
+    キーを渡し、`OPENCODE_CONFIG_CONTENT`（リポジトリの `opencode.json` より強い）の `enabled_providers` でその
+    プロバイダだけにする。宛先は OpenCode の既定の口なので、ベース URL を書き換えた接続は渡さない
+  - それ以外（Codex・Copilot・Qwen Code・Kimi CLI・Grok Build・他の足したエージェント）は渡さない。Pi は別 Task
+- **env の積み順**: task.env → `agent_servers` の env → プリセット（Chat・席）→ **接続**（最後＝どれにも上書きさせない）。
+  接続を渡すセッションでは、リポジトリの `.necoder/task.env` から宛先・プロキシ・証明書・差し込むコードを変える変数
+  （`ANTHROPIC_*` / `OPENAI_*` / `OPENCODE_*` / `HTTPS_PROXY` / `NODE_OPTIONS` / `NODE_EXTRA_CA_CERTS` / `DYLD_*` …・
+  `connections::guarded_from_task_env`）を読まず、読まなかった名前を transcript に 1 行出す
+- **渡せない時は起こさない**: 選んだ接続をそのエージェントが受け付けない・キーがキーチェーンに無い・キーチェーンを読めない
+  時は、黙って自分のログインで走らせず（別の契約に請求させない）、理由を transcript に出す
+- **リモート（SSH 先で起こすエージェント）には渡さない**（キーを手元の外へ出さない・H3 の範囲外）。そのスレッドは
+  SSH 先のエージェント自身のログインで動き、エージェントごとに一度だけ transcript で知らせる
+- **効くのは次に起動するセッションから**（アカウントの切り替えと同じ）。ただし先張りしたまま 1 度も使っていない
+  セッションは、設定が変わって鍵が変わったら畳んで張り直す（前の接続のまま最初の送信が走らない）
+- **見せ方**: composer の設定のチップとカードのエージェントの行に `· 接続の名前` を添える（Claude Code に他社の接続を挿しても中身を隠さない・§5-2。カードの在庫も [`StockKey`] で引く）。
+  使用量の鍵（R08）にも接続を入れる（別の契約の値を混ぜない）
+
+**モデル一覧の在庫の鍵**（`agent_panel::StockKey`）: 広告の在庫（モデル・思考量・権限モード）は今まで表示名だけで
+引いていたが、接続やログインを替えると一覧が変わる。鍵 = 使用量の鍵（エージェント・動かしている場所・認証の置き場・
+認証に関わる env の指紋・接続）+ ログインの指紋（`connections::login_fingerprint`: ログインと設定のファイルの更新時刻と
+大きさ・Claude Code は `.claude.json` のアカウントの id。資格情報の中身は読まない。zeron の `model_context` と同じ
+考え方を独立に実装）。セッションを立てた時に決めてスレッドに持たせ、まだセッションの無いタブは今の設定で立てた時の
+鍵で引く（ログインの指紋は最後に確かめた値＝描画でファイルを見ない。ピルのメニューを開いた時に確かめ直す）。
+スレッド自身の広告も、前のセッションの鍵が今の鍵と違えば出さない。実行ファイルの版は鍵に入れない（起こす前に
+解決しないと分からない・版が変われば次のセッションの広告で入れ替わる）。slash コマンドと会話名の在庫は接続で
+変わらないので表示名のまま（`HarnessStock`）。
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 

@@ -21,11 +21,13 @@
 //! `min_w_0` のみ → **0px × 2540px** / `flex_1` + `min_w_0` → 1260px × 20px / 無指定 → 826px × 20px。
 
 use acp_client::{
-    AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
-    PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
+    AgentEvent, AgentKind, ConfigCategory, ConfigOption, ConfigValue, ElicitationField,
+    PermissionChoice, PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand,
+    SteerOutcome, ToolCallInfo, TurnEnd,
 };
 mod auto_prompt;
 mod chat;
+mod config_card;
 mod history;
 mod idle;
 mod recipes;
@@ -62,7 +64,7 @@ use gpui::{
 };
 use host::{Host, LocalHost};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -71,7 +73,15 @@ use std::sync::Arc;
 use theme_core::{claude_bullet, thread_color, Theme};
 use ui::{DraggedFile, Tooltip};
 
-actions!(agent, [SubmitPrompt, CloseActiveThread, FindInTranscript]);
+actions!(
+    agent,
+    [
+        SubmitPrompt,
+        CloseActiveThread,
+        FindInTranscript,
+        ToggleConfigCard
+    ]
+);
 
 /// ドラッグ中のスレッドタブのゴースト（Chrome 風の並べ替え用。ポインタに追従する小チップ）。
 #[derive(Clone)]
@@ -1030,15 +1040,34 @@ impl RunningRegistry {
 
 /// あるエージェントが広告した選択肢の在庫（モデル・思考量・権限モード）。
 ///
-/// 広告は **agent 固有でスレッド非依存**（同じ `claude-agent-acp` なら、どのセッションに聞いても
-/// 同じ一覧が返る）。だから 1 度でも受け取ったらパネル内で使い回す — まだセッションが開いていない
+/// 広告は**スレッド非依存**（同じ `claude-agent-acp` を同じ接続・同じログインで起こせば、どのセッションに
+/// 聞いても同じ一覧が返る）。だから 1 度でも受け取ったらパネル内で使い回す — まだセッションが開いていない
 /// タブでも、ピルが表示名で出て**押して選べる**（選んだ値は sticky に載り、次に開くセッションへ
 /// [`acp_client::SessionPreferences`] で渡る）。捏造ではなく「そのエージェントが実際に広告した物」
-/// だけを持つのが要点。
+/// だけを持つのが要点。鍵は [`StockKey`]: 接続やログインを替えるとモデルの一覧が変わるので、別の接続・
+/// 別のログインの一覧を出さない（issue #38 H3）。
 #[derive(Default, Clone)]
 struct AgentAdvertisement {
     configs: Vec<ConfigOption>,
     modes: Vec<(SharedString, SharedString)>,
+}
+
+/// 広告の在庫の鍵（issue #38 H3）: 使用量の鍵（エージェント・動かしている場所・認証の置き場・認証に
+/// 関わる env の指紋・接続）+ ログインの指紋（ログインと設定のファイル・`.claude.json` のアカウント）。
+/// セッションを立てた時に決めてスレッドに持たせ（[`Thread::stock_key`]）、そのセッションの広告はこの鍵へ
+/// 控える。まだセッションの無いタブは、今の設定で立てた時に付く鍵（[`AgentPanel::prospective_stock_key`]）
+/// で引く。実行ファイルの版は鍵に入れない（起こす前に解決しないと分からない・版が変われば次のセッションの
+/// 広告で入れ替わる）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StockKey {
+    usage: usage::UsageKey,
+    /// [`acp_client::connections::login_fingerprint`]（手元だけ。SSH 先は 0）。
+    login: u64,
+}
+
+/// エージェントごとの在庫のうち、接続やログインでは変わらない物（表示名で持つ）。
+#[derive(Default, Clone)]
+struct HarnessStock {
     /// slash コマンド一覧（O2）。セッションがまだ開いていないタブの `/` 補完に使う。
     /// 同じパネルのスレッドは宛先（cwd）も同じなので、同じ agent なら一覧もほぼ同じ。
     commands: Vec<acp_client::SlashCommand>,
@@ -1110,6 +1139,44 @@ pub struct QuestionCard {
     pub waited_secs: u64,
 }
 
+/// 1 通の送信の中身（[`AgentPanel::compose_prompt`]）。エージェントへ送る全文と、送れた時に片付ける物。
+struct ComposedPrompt {
+    /// エージェントへ送る全文（引き継ぎの前置き・添付の `@パス`・スレッドの前置き・`!` の結果 + 本文）。
+    text: String,
+    /// image ブロックで送る画像（添付のうち画像として読めた物）。
+    images: Vec<acp_client::PromptImage>,
+    /// 画像として送った添付（送れたら添付から外す・transcript の発話に名前を添える）。
+    image_paths: Vec<SharedString>,
+    /// 添えた `!` の結果（送れたら渡し済みにする）。
+    shell_delivered: Option<Vec<u64>>,
+    /// 引き継ぎの前置きを付けた（送れたら捨てる）。
+    handoff: bool,
+}
+
+/// 応答を待っている差し込み（[`Thread::steering`]）。受け取られたら transcript に出して、添付などを
+/// 渡し済みにする（[`ComposedPrompt`] の後始末の分だけ持つ）。
+struct PendingSteer {
+    /// [`SessionCommand::Steer`] の id（結果の [`AgentEvent::Steered`] と突き合わせる）。
+    id: u64,
+    /// 人が書いた本文（送信待ちの 1 行）。受け取られなかったら送信待ちの先頭へ戻す。
+    prompt: String,
+    image_paths: Vec<SharedString>,
+    shell_delivered: Option<Vec<u64>>,
+    handoff: bool,
+}
+
+/// transcript に出す人の発話。画像を添えた時は名前を `▦ a.png · b.png` で添える。
+fn user_entry_text(prompt: &str, image_paths: &[SharedString]) -> SharedString {
+    if image_paths.is_empty() {
+        return SharedString::from(prompt.to_string());
+    }
+    let names: Vec<String> = image_paths
+        .iter()
+        .map(|path| context_chip_label(path.as_ref()).to_string())
+        .collect();
+    SharedString::from(format!("{prompt}\n\n▦ {}", names.join(" · ")))
+}
+
 /// 1 スレッド = 1 会話。固有色を持ち、UI 全体へ貫通する。
 struct Thread {
     /// 永続化キー（unix ms + 連番。再起動を跨いで同一・M12-1）。
@@ -1150,9 +1217,17 @@ struct Thread {
     /// エージェントが広告する権限モード `(mode_id, 表示名)` と現在の mode_id（セッション開始後に埋まる）。
     available_modes: Vec<(SharedString, SharedString)>,
     current_mode_id: SharedString,
-    /// エージェントが広告する設定オプション（モデル・思考レベル等）。あれば Model/Effort セレクタを
+    /// エージェントが広告する設定オプション（モデル・思考レベル・Fast mode 等）。あれば選択肢を
     /// 実選択肢に置き換え、選択で `session/set_config_option` を送る。
     configs: Vec<ConfigOption>,
+    /// モデル・思考量・権限モードの外の設定（Fast mode 等・[`ConfigCategory::Other`]）でこのスレッドが
+    /// 望む値（ACP の config_id → 保存形: select は value_id・boolean は `true` / `false`）。sticky から
+    /// 載せ、セッションを開いた直後に [`acp_client::SessionPreferences::options`] で合わせる。広告が
+    /// 届いた後はエージェントの値を写す（[`adopt_advertised_options`]・使えない等で戻されたら言い返さない）。
+    options: BTreeMap<String, String>,
+    /// 人が変えて、エージェントの返事（`Configs`）をまだ待っている設定の config_id。ターン中の変更は
+    /// ターンが終わるまで送られない（acp_client の deferred）ので、その間は古い値の広告で表示を戻さない。
+    options_in_flight: HashSet<String>,
     /// 承認待ちの権限リクエスト（あれば composer 上部にカードを出す）。
     pending_permission: Option<PendingPermission>,
     /// 回答待ちの Elicitation（選択肢付き質問。あれば composer 上部にカードを出す・単一選択のみ）。
@@ -1188,8 +1263,15 @@ struct Thread {
     /// **状態を上書きしない**（状態と数字は事実層・これは添える文）。新しいターン開始でクリア。
     tier2: Option<SharedString>,
     /// 生成中に積んだ送信待ちの prompt（キュー・FIFO）。ターン完了で先頭から自動フラッシュする。
-    /// 「今すぐ送信（steer）」はこのキューを介さず即 [`Self::send_prompt_text`] する。
+    /// 行の「今すぐ」は、差し込める相手なら実行中のターンへ差し込み（[`Self::steering`]）、そうで
+    /// なければ中断してから先頭として送る（[`AgentPanel::send_queued_now`]）。
     queued_prompts: Vec<String>,
+    /// このセッションのエージェントが実行中のターンへの差し込み（`_session/steering`）を広告している
+    /// （`AgentEvent::SessionStarted.steerable`・ARCHITECTURE §7.6）。
+    steerable: bool,
+    /// 応答を待っている差し込み（送信待ちから「今すぐ差し込む」で送った 1 行）。1 本ずつ。ある間は
+    /// 送信待ちを流さない（受け取られなかったら先頭へ戻して順番を守る）。
+    steering: Option<PendingSteer>,
     /// エージェント側のセッション id（`SessionStarted` で控え、DB にも書く）。次にこのスレッドの
     /// エージェントを立ち上げ直すとき `session/load` に渡して会話を引き継ぐ（2026-09-08）。
     acp_session_id: Option<String>,
@@ -1229,6 +1311,10 @@ struct Thread {
     /// セッションは前の鍵のまま（アカウントの切り替えは次に立てるセッションから効く・O14）。
     /// セッションを 1 度も立てていなければ `None`。
     usage_key: Option<usage::UsageKey>,
+    /// 今のセッションの広告の在庫の鍵（[`StockKey`]・issue #38 H3）。セッションを立てた時に決め、その
+    /// セッションの広告（モデル・思考量・権限モード）はこの鍵へ控える。接続やログインを替えた後は、
+    /// 前のセッションの広告（`configs` / `available_modes`）をピルに出さない。
+    stock_key: Option<StockKey>,
     /// エージェント側の過去の会話を開いたばかりで、`session/load` の再生を待っている（O15）。
     /// 起動時に `replay_history` を頼み、再生を transcript に積んだら（`SessionStarted` で）下ろす。
     replay_pending: bool,
@@ -1246,6 +1332,14 @@ struct Thread {
 }
 
 impl Thread {
+    /// 応答を待っていた差し込みを送信待ちの先頭へ戻す。セッションが終わった・立て直した＝もう応答は
+    /// 来ない（文は届いたか分からないが、失うよりは送り直す側に倒す）。
+    fn requeue_pending_steer(&mut self) {
+        if let Some(steer) = self.steering.take() {
+            self.queued_prompts.insert(0, steer.prompt);
+        }
+    }
+
     /// `/compact` を送る先の会話があるか（生きたセッション、**または**次の送信で `session/load` が
     /// 引き継ぐ id）。無いのは一度も起こしていないスレッドだけ＝圧縮する文脈が無い。
     ///
@@ -1300,6 +1394,8 @@ impl Thread {
             available_modes: Vec::new(),
             current_mode_id: SharedString::default(),
             configs: Vec::new(),
+            options: BTreeMap::new(),
+            options_in_flight: HashSet::new(),
             pending_permission: None,
             pending_elicitation: None,
             persisted_entries: 0,
@@ -1313,6 +1409,8 @@ impl Thread {
             muted: false,
             tier2: None,
             queued_prompts: Vec::new(),
+            steerable: false,
+            steering: None,
             acp_session_id: None,
             session_lost: false,
             startup_exit: None,
@@ -1325,6 +1423,7 @@ impl Thread {
             last_active_at_ms: 0,
             usage: usage::CostMeter::default(),
             usage_key: None,
+            stock_key: None,
             replay_pending: false,
             handoff_preamble: None,
             seat: None,
@@ -2350,8 +2449,10 @@ pub struct AgentPanel {
     hovered_link: Option<(RegionId, Range<usize>)>,
     /// 押した時にリンクの上だった（up で選択が空のままなら開く＝ドラッグ選択と両立させる）。
     pressed_link: Option<(RegionId, Range<usize>)>,
-    /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。
+    /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。今のピルは権限モードだけ。
     open_menu: Option<Selector>,
+    /// 設定のカード（チップから開く 1 枚・`config_card.rs`。None = 閉）。
+    config_card: Option<config_card::ConfigCard>,
     /// スレッドタブ（一覧の行）の右クリックメニュー（O15。None = 閉）。
     thread_menu: Option<history::ThreadMenu>,
     /// Add context の候補（プロジェクトのファイル相対パス。workspace が渡す）と開閉。
@@ -2404,9 +2505,16 @@ pub struct AgentPanel {
     /// リサイズ開始時のマウス Y と高さ（ドラッグ量の基準）。
     composer_resize_start_y: f32,
     composer_resize_start_height: f32,
-    /// エージェント別の広告在庫（[`AgentAdvertisement`]）。セッションがまだ開いていないタブの
-    /// ピルは、同じ agent のこの在庫から選択肢と表示名を引く。
-    catalog: HashMap<SharedString, AgentAdvertisement>,
+    /// 広告の在庫（[`AgentAdvertisement`]・鍵は [`StockKey`]）。セッションがまだ開いていないタブの
+    /// ピルは、同じ鍵のこの在庫から選択肢と表示名を引く。
+    catalog: HashMap<StockKey, AgentAdvertisement>,
+    /// エージェント別の在庫のうち接続やログインで変わらない物（slash コマンド・会話名）。
+    harness_stock: HashMap<SharedString, HarnessStock>,
+    /// 最後に確かめたログインの指紋（使用量の鍵ごと）。描画でファイルを見ないための控え
+    /// （セッションを立てる時・ピルのメニューを開く時・設定が変わった時に確かめ直す）。
+    login_fingerprints: HashMap<usage::UsageKey, u64>,
+    /// 「接続はリモートのエージェントには渡さない」を知らせ済みのエージェント（表示名）。
+    remote_connection_noted: std::collections::HashSet<SharedString>,
     /// 先張りの世代。タブを続けて切り替えた時、最後の予約だけを生かす。
     prewarm_gen: u32,
     /// この宛先で先張りを試したスレッド id。失敗しても連打しない（1 スレッド 1 回）。
@@ -2580,6 +2688,8 @@ impl AgentPanel {
                 });
                 cx.notify();
             }
+            // 接続・認証の環境を替えたら、まだ使っていない先張りを今の設定で張り直す（issue #38 H3）。
+            panel.retire_stale_prewarms(cx);
         })
         .detach();
         // 開発用: NECODER_AGENT_START_PROBE=<エージェントの名前> で、いまのスレッドをそのエージェントにして
@@ -2736,6 +2846,22 @@ impl AgentPanel {
             })
             .detach();
         }
+        // 開発用: NECODER_QUEUE_PROBE=steer|steering|interrupt|injected で、生成中のスレッドに送信待ちを
+        // 積んで撮る（UI-SPEC §6 の送信待ち・実エージェント無し）。`steering` は応答待ちの差し込み、
+        // `injected` は差し込みが受け取られた後の transcript（実経路の `Steered` を通す）。
+        #[cfg(debug_assertions)]
+        if let Ok(mode) = std::env::var("NECODER_QUEUE_PROBE") {
+            cx.spawn(async move |panel, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                if let Err(error) = panel.update(cx, |panel, cx| panel.seed_queue_probe(&mode, cx))
+                {
+                    eprintln!("NECODER_QUEUE_PROBE: パネルが無い: {error:#}");
+                }
+            })
+            .detach();
+        }
         // 通常起動は空スレッド 1 本から始める（デモ transcript を新プロジェクトごとに種付けしない）。
         // offscreen 検証プローブはモック内容・複数タブが前提なので、その時だけ M4 由来の種を使う。
         // 既定エージェント + 前回のモデル/思考量を適用して「そのまま開く」を実現。
@@ -2885,6 +3011,7 @@ PYEOF"#;
             hovered_link: None,
             pressed_link: None,
             open_menu: None,
+            config_card: None,
             thread_menu: None,
             context_files: Vec::new(),
             context_menu_open: false,
@@ -2909,6 +3036,9 @@ PYEOF"#;
             composer_resize_start_y: 0.0,
             composer_resize_start_height: 0.0,
             catalog: HashMap::new(),
+            harness_stock: HashMap::new(),
+            login_fingerprints: HashMap::new(),
+            remote_connection_noted: std::collections::HashSet::new(),
             prewarm_gen: 0,
             prewarmed: std::collections::HashSet::new(),
             prewarm_order: Vec::new(),
@@ -3323,9 +3453,9 @@ PYEOF"#;
     /// その agent が会話名を自分で送ってこない（O2）。
     fn needs_own_auto_name(&self, thread: &Thread) -> bool {
         let agent_names_itself = self
-            .catalog
+            .harness_stock
             .get(&thread.agent)
-            .is_some_and(|advertisement| advertisement.sends_titles);
+            .is_some_and(|stock| stock.sends_titles);
         !thread.name_is_custom && is_placeholder_name(&thread.name) && !agent_names_itself
     }
 
@@ -3376,8 +3506,8 @@ PYEOF"#;
                 // 一覧は捨て、新しいセッションの広告で埋め直す（在庫も同じ理由で捨てる）。
                 thread.commands.clear();
             }
-            for advertisement in self.catalog.values_mut() {
-                advertisement.commands.clear();
+            for stock in self.harness_stock.values_mut() {
+                stock.commands.clear();
             }
             // 宛先が変われば cwd も変わる＝別のセッション。先張りの試行履歴も畳んで張り直す。
             self.prewarmed.clear();
@@ -4657,6 +4787,7 @@ PYEOF"#;
         thread.session_lost = true;
         // 「再開中…」の一言はもう当たらない（切れた印とカードが代わりに出る）。
         thread.session_note = None;
+        thread.requeue_pending_steer();
         self.tidy_chat_dir(index);
         // 終端イベント無しでターン中に終わった場合の畳み（running=false なら何もしない）。
         self.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
@@ -4674,6 +4805,7 @@ PYEOF"#;
         thread.command_tx = None;
         thread.session_lost = true;
         thread.session_note = None;
+        thread.requeue_pending_steer();
         let message = self.session_lost_reason();
         self.abandon_turn(thread_index, &message, cx);
         self.sync_running_registry(cx);
@@ -5005,6 +5137,7 @@ PYEOF"#;
         }
         self.save_active_draft(cx);
         self.renaming = None; // 別タブへ切替えたら編集中の改名は破棄する
+        self.config_card = None; // 設定のカードは開いた時のスレッドの物
         self.active = index;
         if let Some(thread) = self.threads.get_mut(index) {
             thread.done = None; // 見た＝herdr の Done ラッチ（完了・未確認）を解除
@@ -5040,6 +5173,7 @@ PYEOF"#;
             }
         }
         self.save_active_draft(cx);
+        self.config_card = None; // 設定のカードは開いた時のスレッドの物
         let mut closed = self.threads.remove(index);
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
         closed.running = false;
@@ -5203,6 +5337,7 @@ PYEOF"#;
                     .contains_focused(window, cx)
             })
             || self.elicitation_input_focused(window, cx)
+            || self.config_card_focused(window, cx)
     }
 
     fn save_active_draft(&mut self, cx: &App) {
@@ -5950,6 +6085,74 @@ PYEOF"#;
         } else {
             Some(selector)
         };
+        // 設定のカードとは排他（同じ列の浮かぶ面を 2 枚重ねない）。
+        if self.open_menu.is_some() {
+            self.config_card = None;
+        }
+        // 一覧を見ようとした時に、ログインを替えていないか確かめ直す（ターミナルでログインし直した後に
+        // 前のログインの一覧を出さない・issue #38 H3）。ファイルの更新時刻を見るだけ。
+        if self.open_menu.is_some() && selector != Selector::Agent {
+            self.refresh_login_fingerprint(cx);
+        }
+        cx.notify();
+    }
+
+    /// アクティブスレッドのエージェントのログインの指紋を確かめ直す（手元・セッションがまだ無いタブだけ。
+    /// 動いているセッションの広告はそのセッションの物が正）。
+    fn refresh_login_fingerprint(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        if thread.command_tx.is_some() || self.dest_host.is_remote() {
+            return;
+        }
+        let Some(agent) = settings::agent_by_label(cx, &thread.agent) else {
+            return;
+        };
+        let usage =
+            usage::UsageKey::for_agent(thread.agent.clone(), self.dest_host_label.clone(), cx);
+        let env = agent_server_override(agent.id(), cx)
+            .map(|agent_override| agent_override.env)
+            .unwrap_or_default();
+        let login = acp_client::connections::login_fingerprint(agent.id(), &env);
+        self.login_fingerprints.insert(usage, login);
+    }
+
+    /// 設定が変わった時: 先張りしたまま 1 度も使っていないセッションのうち、今の設定（接続・認証の環境）
+    /// なら別の鍵で立つ物を畳んで張り直す（前の接続のまま最初の送信が走らない・issue #38 H3）。
+    /// 使ったセッションは畳まない（動いているスレッドは立てた時の接続のまま・次に立てる時から効く）。
+    fn retire_stale_prewarms(&mut self, cx: &mut Context<Self>) {
+        let stale: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|thread| {
+                thread.command_tx.is_some()
+                    && !thread.session_used
+                    && !thread.running
+                    && thread.pending_permission.is_none()
+                    && thread.pending_elicitation.is_none()
+                    && thread.stock_key.as_ref().is_some_and(|key| {
+                        key.usage != self.prospective_stock_key(thread, cx).usage
+                    })
+            })
+            .map(|thread| thread.id.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for id in &stale {
+            if let Some(thread) = self.threads.iter_mut().find(|thread| &thread.id == id) {
+                // 送信路を捨てる＝プロセスも落ちる。通し番号を 0 にして切断のバナーを出さない
+                // （[`Self::retire_idle_prewarms`] と同じ畳み方）。広告は前の鍵の物なので捨てる。
+                thread.command_tx = None;
+                thread.session_serial = 0;
+                thread.available_modes.clear();
+                thread.configs.clear();
+            }
+            self.prewarmed.remove(id);
+        }
+        self.prewarm_order.retain(|id| !stale.contains(id));
+        self.schedule_prewarm(cx);
         cx.notify();
     }
 
@@ -6003,9 +6206,10 @@ PYEOF"#;
         // 在庫（別タブ・先張りで受け取った物）で代替する。どちらも無ければ空＝ピルは押せない。
         match selector {
             Selector::Mode => {
-                let stock = self.catalog.get(&thread.agent);
-                let modes = if thread.available_modes.is_empty() {
-                    stock
+                let modes = if thread.available_modes.is_empty()
+                    || !self.own_advertisement_current(thread, cx)
+                {
+                    self.stock(thread, cx)
                         .map(|stock| stock.modes.as_slice())
                         .unwrap_or_default()
                 } else {
@@ -6019,26 +6223,148 @@ PYEOF"#;
                     })
                     .collect()
             }
-            Selector::Model => self.stocked_config_choices(thread, ConfigCategory::Model),
-            Selector::Effort => self.stocked_config_choices(thread, ConfigCategory::ThoughtLevel),
+            Selector::Model => self.stocked_config_choices(thread, ConfigCategory::Model, cx),
+            Selector::Effort => {
+                self.stocked_config_choices(thread, ConfigCategory::ThoughtLevel, cx)
+            }
             Selector::Agent => Vec::new(),
         }
     }
 
-    /// 選択肢を「スレッド自身の広告 → 同じ agent の在庫」の順で引く。
+    /// 選択肢を「スレッド自身の広告 → 同じ鍵の在庫」の順で引く。スレッド自身の広告は、接続やログインを
+    /// 替える前のセッションの物なら使わない（[`Self::own_advertisement_current`]）。
     fn stocked_config_choices(
         &self,
         thread: &Thread,
         category: ConfigCategory,
+        cx: &App,
     ) -> Vec<SelectorChoice> {
-        let advertised = config_choices(&thread.configs, category);
-        if !advertised.is_empty() {
-            return advertised;
+        if self.own_advertisement_current(thread, cx) {
+            let advertised = config_choices(&thread.configs, category);
+            if !advertised.is_empty() {
+                return advertised;
+            }
         }
-        self.catalog
-            .get(&thread.agent)
+        self.stock(thread, cx)
             .map(|stock| config_choices(&stock.configs, category))
             .unwrap_or_default()
+    }
+
+    /// このスレッドに出す広告の全体。スレッド自身の広告があればそれ、まだなら同じ鍵の在庫
+    /// （別タブ・先張りで受け取った物）。どちらも無ければ空＝何も出さない（捏造しない）。スレッド自身の
+    /// 広告は、接続やログインを替える前のセッションの物なら使わない（[`Self::own_advertisement_current`]・
+    /// [`Self::stocked_config_choices`] と同じ引き方）。
+    fn stocked_configs<'a>(&'a self, thread: &'a Thread, cx: &App) -> &'a [ConfigOption] {
+        if !thread.configs.is_empty() && self.own_advertisement_current(thread, cx) {
+            return &thread.configs;
+        }
+        self.stock(thread, cx)
+            .map(|stock| stock.configs.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// モデル・思考量の外の設定（Fast mode・Codex の Collaboration mode 等）を変える: このスレッドの
+    /// セッションへ `session/set_config_option` を送り、その agent の記憶（sticky）に書く。広告（スレッド
+    /// 自身か在庫）に無い設定・値は受けない。セッションがまだ無ければ、開いた直後に合わせる
+    /// （[`acp_client::SessionPreferences::options`]）。
+    fn set_config_option(&mut self, config_id: &str, value: ConfigValue, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        let offered = self.stocked_configs(thread, cx).iter().any(|config| {
+            config.config_id == config_id
+                && config.category == ConfigCategory::Other
+                && config.offers(&value)
+        });
+        if !offered {
+            return;
+        }
+        let stored = value.to_stored();
+        // 区分の鍵（model / effort / mode）と同じ綴りの設定は区分の記憶を壊すので覚えない。
+        let agent_id = settings::agent_by_label(cx, thread.agent.as_ref())
+            .map(|agent| agent.id().to_string())
+            .filter(|_| !is_category_sticky_key(config_id));
+        if let Some(agent_id) = agent_id {
+            let result = settings::set_agent_config_default(cx, &agent_id, config_id, &stored);
+            self.report_settings_save(result, cx);
+        }
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            thread.options.insert(config_id.to_string(), stored);
+            // 広告がまだ届いていなくても送る（セッションは広告を流してからコマンドを読む）。
+            if let Some(command_tx) = &thread.command_tx {
+                thread.options_in_flight.insert(config_id.to_string());
+                command_tx
+                    .unbounded_send(SessionCommand::SetConfig {
+                        config_id: config_id.to_string(),
+                        value,
+                    })
+                    .ok();
+            }
+        }
+        cx.notify();
+    }
+
+    /// 今の設定（接続・認証の環境）と宛先でこのスレッドのセッションを立てた時に付く在庫の鍵
+    /// （[`Self::start_session`] と同じ作り方・issue #38 H3）。ログインの指紋はファイルを見ずに、最後に
+    /// 確かめた値（[`Self::login_fingerprints`]）を使う（描画から呼ぶ）。
+    fn prospective_stock_key(&self, thread: &Thread, cx: &App) -> StockKey {
+        let usage =
+            usage::UsageKey::for_agent(thread.agent.clone(), self.dest_host_label.clone(), cx);
+        let login = self
+            .login_fingerprints
+            .get(&usage)
+            .copied()
+            .unwrap_or_default();
+        StockKey { usage, login }
+    }
+
+    /// [`Self::prospective_stock_key`] を添字で引く（スレッドが無ければエージェントの既定で）。
+    fn prospective_stock_key_at(&self, thread_index: usize, cx: &App) -> StockKey {
+        match self.threads.get(thread_index) {
+            Some(thread) => self.prospective_stock_key(thread, cx),
+            None => StockKey {
+                usage: usage::UsageKey::for_agent(
+                    SharedString::from("Claude Code"),
+                    self.dest_host_label.clone(),
+                    cx,
+                ),
+                login: 0,
+            },
+        }
+    }
+
+    /// このスレッドの在庫の鍵: セッションが動いていれば立てた時の鍵、無ければ今の設定で立てた時の鍵。
+    fn stock_key(&self, thread: &Thread, cx: &App) -> StockKey {
+        match (&thread.command_tx, &thread.stock_key) {
+            (Some(_), Some(key)) => key.clone(),
+            _ => self.prospective_stock_key(thread, cx),
+        }
+    }
+
+    /// アクティブスレッドが使う接続の名前（設定のチップとカードのエージェントの行に添える）。セッションが
+    /// 動いていれば立てた時の接続、無ければ今の設定で手元に立てた時に使う接続（リモートには渡さないので
+    /// 出さない）。
+    fn active_connection_name(&self, cx: &App) -> Option<SharedString> {
+        let thread = self.threads.get(self.active)?;
+        self.stock_key(thread, cx)
+            .usage
+            .connection
+            .map(|connection| connection.name)
+    }
+
+    /// このスレッドに出す在庫（同じ鍵で別のタブ・先張りが受け取った広告）。
+    fn stock(&self, thread: &Thread, cx: &App) -> Option<&AgentAdvertisement> {
+        self.catalog.get(&self.stock_key(thread, cx))
+    }
+
+    /// スレッド自身の広告（`configs` / `available_modes`）を出してよいか: セッションが動いている、または
+    /// 前のセッションを今と同じ鍵で立てた（接続・ログインを替えた後は、前の接続のモデルを出さない）。
+    fn own_advertisement_current(&self, thread: &Thread, cx: &App) -> bool {
+        thread.command_tx.is_some()
+            || thread
+                .stock_key
+                .as_ref()
+                .is_some_and(|key| *key == self.prospective_stock_key(thread, cx))
     }
 
     /// 現在の選択を **value_id** で返す（未選択なら空）。比較・保存・送信はこの値だけを使う。
@@ -6193,6 +6519,7 @@ PYEOF"#;
         window.focus(&focus, cx);
         self.context_focus = Some(focus);
         self.open_menu = None; // セレクタメニューと排他
+        self.config_card = None; // 設定のカードとも排他
         cx.notify();
     }
 
@@ -6361,6 +6688,17 @@ PYEOF"#;
         } else if locked {
             tip = i18n::t!("agent.pill_awaiting_agent");
         }
+        // 接続（issue #38 H3 / §5-2）: Claude Code に他社の接続を挿しても中身を隠さない。エージェントの
+        // ピルに接続の名前を添える（動いているセッションは立てた時の接続・まだなら今の設定で使う接続）。
+        let connection = (selector == Selector::Agent)
+            .then(|| self.active_connection_name(cx))
+            .flatten();
+        if let Some(connection) = &connection {
+            tip = format!(
+                "{tip}\n{}",
+                i18n::t!("agent.pill_connection", "connection" => connection.as_ref())
+            );
+        }
         let label_color = if is_open { accent } else { theme.fg1 };
         let mut pill = div()
             .id(id)
@@ -6379,6 +6717,13 @@ PYEOF"#;
                 element.child(agent_badge(&value, 12.))
             })
             .child(value.clone())
+            .when_some(connection, |element, connection| {
+                element.child(
+                    div()
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(format!("· {connection}"))),
+                )
+            })
             .tooltip(Tooltip::text(tip, theme.clone()));
         if !locked {
             pill = pill
@@ -6403,9 +6748,10 @@ PYEOF"#;
                     }),
                 );
         }
-        // 開いている時、このピルの真上にドロップダウンを出す（ピル基準なのでズレない）。
+        // 開いている時、このピルの真上にドロップダウンを出す（ピル基準なのでズレない）。最前面に描く:
+        // GPUI は枠線を子の後に描くので、背の低い composer（Fleet の埋め込み）で枠をまたぐと透ける。
         pill.when(is_open, |element| {
-            element.child(self.render_selector_menu(selector, cx))
+            element.child(gpui::deferred(self.render_selector_menu(selector, cx)).with_priority(1))
         })
     }
 
@@ -6558,7 +6904,13 @@ PYEOF"#;
     /// 再接続で直近の指示を送り直した後、そのターン完了で改めてキューが流れる）。
     fn flush_queued_prompt_at(&mut self, thread_index: usize, cx: &mut Context<Self>) {
         let next = self.threads.get_mut(thread_index).and_then(|thread| {
-            if thread.running || thread.auth_required || thread.queued_prompts.is_empty() {
+            // 差し込みの応答を待っている間も流さない: 受け取られなかったらその行が先頭に戻り、
+            // 次のターンとして先に送られる（順番を守る）。
+            if thread.running
+                || thread.auth_required
+                || thread.steering.is_some()
+                || thread.queued_prompts.is_empty()
+            {
                 None
             } else {
                 Some(thread.queued_prompts.remove(0))
@@ -6569,35 +6921,230 @@ PYEOF"#;
         }
     }
 
-    /// キュー内の prompt を今すぐ送る（割り込み送信）。生成中なら**現ターンを中断してから**送る。
-    /// ACP は生成中に届いた prompt を deferred に回す（＝そのままでは割り込めず、しかも UI の
-    /// running が取り残される）ため、cancel を挟んで確実に新ターンとして送るのが正しい。
-    /// idle の時は即送信。宛先チップ横のボタンから。
+    /// 送信待ちの行を今すぐ送る（行の「今すぐ」・UI-SPEC §6 の送信待ち）。待機中は即送信。生成中は、
+    /// エージェントが差し込みを広告していれば（[`Thread::steerable`]）**ターンを止めずに**差し込む
+    /// （[`Self::steer_queued_prompt`]・途中のツール作業を捨てない）。広告が無い相手と slash コマンド
+    /// （ターンの頭でしか効かない）は**現ターンを中断してから**先頭として送る — ACP は生成中に届いた
+    /// prompt を deferred に回す（＝そのままでは割り込めず、しかも UI の running が取り残される）ため、
+    /// cancel を挟んで確実に新ターンとして送る。差し込みの応答を待っている間は押せない（1 本ずつ）。
     fn send_queued_now(&mut self, queue_index: usize, cx: &mut Context<Self>) {
-        let running = self.threads.get(self.active).and_then(|thread| {
-            (queue_index < thread.queued_prompts.len()).then_some(thread.running)
-        });
-        let Some(running) = running else {
+        let thread_index = self.active;
+        let Some(thread) = self.threads.get(thread_index) else {
             return;
         };
-        if running {
-            // 対象を先頭へ寄せ、現ターンを中断。中断完了（TurnEnded）で `flush_queued_prompt` が
-            // 先頭＝この prompt を新ターンとして送る（running も正しく立つ）。
-            if let Some(thread) = self.threads.get_mut(self.active) {
-                let prompt = thread.queued_prompts.remove(queue_index);
-                thread.queued_prompts.insert(0, prompt);
-            }
-            self.cancel_turn(self.active, cx);
-        } else {
+        if queue_index >= thread.queued_prompts.len() || thread.steering.is_some() {
+            return;
+        }
+        if !thread.running {
             // idle: 即送れる。
             if let Some(prompt) = self
                 .threads
-                .get_mut(self.active)
+                .get_mut(thread_index)
                 .map(|thread| thread.queued_prompts.remove(queue_index))
             {
                 self.send_prompt_text(prompt, cx);
             }
+            return;
         }
+        if thread.steerable && !is_slash_command(&thread.queued_prompts[queue_index]) {
+            self.steer_queued_prompt(thread_index, queue_index, cx);
+            return;
+        }
+        // 対象を先頭へ寄せ、現ターンを中断。中断完了（TurnEnded）で `flush_queued_prompt` が
+        // 先頭＝この prompt を新ターンとして送る（running も正しく立つ）。
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            let prompt = thread.queued_prompts.remove(queue_index);
+            thread.queued_prompts.insert(0, prompt);
+        }
+        self.cancel_turn(thread_index, cx);
+    }
+
+    /// 送信待ちの行を実行中のターンへ差し込む（`_session/steering`・ARCHITECTURE §7.6）。中身は
+    /// 普通の送信と同じく組む（添付・スレッドの前置き・`!` の結果）。行は応答が届くまで
+    /// [`Thread::steering`] に移す（カードでは先頭に `差し込み中…`）。送信路が死んでいたら行を戻して
+    /// 中断に落とす（`cancel_turn` がローカルで畳む）。
+    fn steer_queued_prompt(
+        &mut self,
+        thread_index: usize,
+        queue_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        // 結果（`AgentEvent::Steered`）と突き合わせる id。前のセッションの残響を取り違えないよう、
+        // パネル全体で使い回さない。
+        static NEXT_STEER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let Some(prompt) = self
+            .threads
+            .get_mut(thread_index)
+            .filter(|thread| queue_index < thread.queued_prompts.len())
+            .map(|thread| thread.queued_prompts.remove(queue_index))
+        else {
+            return;
+        };
+        let ComposedPrompt {
+            text,
+            images,
+            image_paths,
+            shell_delivered,
+            handoff,
+        } = self.compose_prompt(thread_index, &prompt, None);
+        let id = NEXT_STEER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sent = self
+            .threads
+            .get(thread_index)
+            .and_then(|thread| thread.command_tx.as_ref())
+            .is_some_and(|command_tx| {
+                command_tx
+                    .unbounded_send(SessionCommand::Steer { id, text, images })
+                    .is_ok()
+            });
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        if !sent {
+            thread.queued_prompts.insert(0, prompt);
+            self.cancel_turn(thread_index, cx);
+            return;
+        }
+        thread.steering = Some(PendingSteer {
+            id,
+            prompt,
+            image_paths,
+            shell_delivered,
+            handoff,
+        });
+        cx.notify();
+    }
+
+    /// 差し込みの結果（`AgentEvent::Steered`）。受け取られたら（`Injected` / `StartedTurn`）**その時点の
+    /// transcript の末尾**に人の発話として出し、添付などを渡し済みにする（UI-SPEC §6 の送信待ち）。
+    /// 受け取られなかったら行を送信待ちの先頭へ戻す: ターンがもう無かった（`TurnOver`）なら次のターン
+    /// として送り（生成中ならターンの終わりのフラッシュに任せる）、拒まれた（`Refused`）なら理由を
+    /// 1 行出して「中断 → 送り直し」に落ちる。
+    fn on_steered(
+        &mut self,
+        thread_index: usize,
+        id: u64,
+        outcome: SteerOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.active;
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        // 待っている差し込みと違う id は、立て直す前のセッションの残響（その行は送信待ちへ戻し済み）。
+        let Some(steer) = thread.steering.take_if(|steer| steer.id == id) else {
+            return;
+        };
+        let running = thread.running;
+        match outcome {
+            SteerOutcome::Injected | SteerOutcome::StartedTurn => {
+                // 直前の本文はここで伸び止まる（以後のチャンクは差し込みの下の新しい本文になる）。
+                // 最後に測ったのは前のフレームなので、測り直させる。
+                let previous_tail = thread.entries.len().checked_sub(1);
+                thread.entries.push(Entry::User(user_entry_text(
+                    &steer.prompt,
+                    &steer.image_paths,
+                )));
+                thread
+                    .context
+                    .retain(|path| !steer.image_paths.contains(path));
+                if let Some(delivered) = &steer.shell_delivered {
+                    shell::mark_shell_runs_delivered(&mut thread.entries, delivered);
+                }
+                if steer.handoff {
+                    thread.handoff_preamble = None;
+                }
+                let now = now_unix_ms();
+                thread.last_input_at_ms = Some(now);
+                thread.last_active_at_ms = now;
+                thread.last_prompt = Some(SharedString::from(steer.prompt));
+                if let Some(previous_tail) = previous_tail.filter(|_| thread_index == active) {
+                    self.transcript_list
+                        .remeasure_items(previous_tail..previous_tail + 1);
+                }
+                // ターンの後に受け取られた差し込み（ターンの終わりのフラッシュは待っていた）は、ここで
+                // 次を流す。Codex が自分で始めたターン（`StartedTurn`）の最中には流さない
+                // （ARCHITECTURE §7.6 の既知の端）。
+                if !running && outcome == SteerOutcome::Injected {
+                    self.flush_queued_prompt_at(thread_index, cx);
+                }
+            }
+            SteerOutcome::TurnOver => {
+                thread.queued_prompts.insert(0, steer.prompt);
+                if !running {
+                    self.flush_queued_prompt_at(thread_index, cx);
+                }
+            }
+            SteerOutcome::Refused(reason) => {
+                thread.queued_prompts.insert(0, steer.prompt);
+                thread
+                    .entries
+                    .push(Entry::Agent(SharedString::from(i18n::t!(
+                        "agent.steer_refused",
+                        "reason" => reason
+                    ))));
+                if running {
+                    self.cancel_turn(thread_index, cx);
+                } else {
+                    self.flush_queued_prompt_at(thread_index, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// 撮影用（`NECODER_QUEUE_PROBE`）: アクティブなスレッドを生成中にして送信待ちを積む。エージェントは
+    /// 起こさない（送信路は持たない）。`injected` は差し込みの結果を実経路（[`Self::on_steered`]）で通す。
+    #[cfg(debug_assertions)]
+    fn seed_queue_probe(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let active = self.active;
+        let Some(thread) = self.threads.get_mut(active) else {
+            return;
+        };
+        thread.entries.push(Entry::User(
+            "ログイン画面のバリデーションを直して、テストも足して".into(),
+        ));
+        thread.entries.push(build_step_entry(ToolCallInfo {
+            id: "queue-probe-test".to_string(),
+            title: Some("cargo test -p auth".to_string()),
+            kind: Some(acp_client::ToolCallKind::Execute),
+            locations: Vec::new(),
+            diffs: Vec::new(),
+            output: None,
+            completed: None,
+            parent: None,
+        }));
+        thread.entries.push(Entry::Agent(
+            "テストを流しています。落ちているのは `validate_email` の空文字の扱いです。".into(),
+        ));
+        thread.running = true;
+        thread.turn_started_at = Some(std::time::Instant::now());
+        thread.steerable = mode != "interrupt";
+        thread.queued_prompts = vec![
+            "エラーメッセージも日本語にして".to_string(),
+            "/compact".to_string(),
+        ];
+        if matches!(mode, "steering" | "injected") {
+            thread.steering = Some(PendingSteer {
+                id: 0,
+                prompt: "やっぱり README の手順も直して".to_string(),
+                image_paths: Vec::new(),
+                shell_delivered: None,
+                handoff: false,
+            });
+        }
+        if mode == "injected" {
+            self.on_steered(active, 0, SteerOutcome::Injected, cx);
+            self.on_event(
+                active,
+                AgentEvent::AgentChunk(
+                    "了解です。テストが通ったら README の手順も直します。".into(),
+                ),
+                cx,
+            );
+        }
+        self.reset_transcript_list(true);
+        cx.notify();
     }
 
     /// キューから prompt を取り消す（宛先チップ横の ✕ から）。
@@ -6658,9 +7205,9 @@ PYEOF"#;
             if !thread.commands.is_empty() || self.chat_mode {
                 &thread.commands
             } else {
-                self.catalog
+                self.harness_stock
                     .get(&thread.agent)
-                    .map(|advertisement| advertisement.commands.as_slice())
+                    .map(|stock| stock.commands.as_slice())
                     .unwrap_or(&[])
             };
         agent_commands
@@ -6881,35 +7428,29 @@ PYEOF"#;
         true
     }
 
-    /// `auto_source` = necoder の知らせの出所（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
-    fn send_prompt_entry(
-        &mut self,
+    /// 1 通の送信の中身を組む（普通の送信と、送信待ちからの差し込みで同じ物）。`auto` = necoder の
+    /// 知らせ（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
+    fn compose_prompt(
+        &self,
         thread_index: usize,
-        prompt: String,
-        auto_source: Option<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        let auto = auto_source.map(|source| auto_prompt::AutoPrompt::now(source, prompt.clone()));
+        prompt: &str,
+        auto: Option<&auto_prompt::AutoPrompt>,
+    ) -> ComposedPrompt {
         // slash コマンド（`/clear` `/compact` 等）は**本文 1 ブロックだけ**で送る。エージェントに
         // よってコマンドとして読むブロックが違い（Claude は末尾・Codex は先頭）、添付や画像を
         // 1 つでも足すとどちらかで効かない（`acp_client::prompt_blocks` の説明）。スレッドの
         // context（Captain の役割・現況表）・`@path` の添付・画像は付けない。添付は外さずに残す＝
         // 次の通常の送信に付く（毎ターン送る設計はそのまま）。necoder の知らせは印で始まるので
         // コマンドにはならない。
-        let is_slash_command = auto.is_none() && is_slash_command(&prompt);
+        let is_slash_command = auto.is_none() && is_slash_command(prompt);
+        let thread = self.threads.get(thread_index).filter(|_| !is_slash_command);
         // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
         // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
-        let (images, image_paths) = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
+        let (images, image_paths) = thread
             .map(|thread| load_prompt_images(&thread.context, self.dest_cwd.as_deref()))
             .unwrap_or_default();
         // それ以外の添付は prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
-        let mut context_prefix: String = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
+        let mut context_prefix: String = thread
             .map(|thread| {
                 thread
                     .context
@@ -6919,57 +7460,63 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(context) = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
-            .and_then(|thread| self.prompt_context.get(thread.id.as_str()))
+        if let Some(context) = thread.and_then(|thread| self.prompt_context.get(thread.id.as_str()))
         {
             context_prefix.push_str(&auto_prompt::wrap_prompt_context(context));
         }
         // `!` で人が走らせたコマンドの結果（#37）は、次の通常の送信に 1 回だけ添える（本文の直前）。
         // この会話の持ち主の文脈なので、composer 以外の入口（キュー・Captain の台帳など）から来た
         // 送信にも添える。slash コマンドには添えない（本文 1 ブロックの約束・次の通常の送信まで残す）。
-        let shell_attachment = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
-            .and_then(|thread| shell::pending_shell_attachment(&thread.entries));
+        let shell_attachment =
+            thread.and_then(|thread| shell::pending_shell_attachment(&thread.entries));
         if let Some((block, _)) = &shell_attachment {
             context_prefix.push_str(block);
         }
         // 「新しいセッションで続ける」の前置き（O15）は、次の通常の送信の頭に 1 回だけ付ける
         // （表示は人の本文のまま）。送れたら捨てる。
-        let handoff = self
-            .threads
-            .get(thread_index)
-            .filter(|_| !is_slash_command)
-            .and_then(|thread| thread.handoff_preamble.clone());
-        if let Some(preamble) = &handoff {
+        let handoff = thread.and_then(|thread| thread.handoff_preamble.as_deref());
+        if let Some(preamble) = handoff {
             context_prefix.insert_str(0, &format!("{preamble}\n\n"));
         }
         // necoder の知らせは印で囲んで送る（再生された会話でも人の発話と見分けられる・`auto_prompt.rs`）。
         let body = auto
-            .as_ref()
             .map(auto_prompt::AutoPrompt::wire)
-            .unwrap_or_else(|| prompt.clone());
-        let full_prompt = if context_prefix.is_empty() {
+            .unwrap_or_else(|| prompt.to_string());
+        let text = if context_prefix.is_empty() {
             body
         } else {
             format!("{context_prefix}\n{body}")
         };
+        ComposedPrompt {
+            text,
+            images,
+            image_paths,
+            shell_delivered: shell_attachment.map(|(_, delivered)| delivered),
+            handoff: handoff.is_some(),
+        }
+    }
+
+    /// `auto_source` = necoder の知らせの出所（[`Self::send_auto_prompt_to`]）。`None` は人の発話。
+    fn send_prompt_entry(
+        &mut self,
+        thread_index: usize,
+        prompt: String,
+        auto_source: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let auto = auto_source.map(|source| auto_prompt::AutoPrompt::now(source, prompt.clone()));
+        let ComposedPrompt {
+            text: full_prompt,
+            images,
+            image_paths,
+            shell_delivered,
+            handoff,
+        } = self.compose_prompt(thread_index, &prompt, auto.as_ref());
         if let Some(thread) = self.threads.get_mut(thread_index) {
             let human = auto.is_none();
             thread.entries.push(match auto {
                 Some(auto) => Entry::AutoPrompt(auto),
-                None if images.is_empty() => Entry::User(prompt.clone().into()),
-                None => {
-                    let names: Vec<String> = image_paths
-                        .iter()
-                        .map(|path| context_chip_label(path.as_ref()).to_string())
-                        .collect();
-                    Entry::User(format!("{prompt}\n\n▦ {}", names.join(" · ")).into())
-                }
+                None => Entry::User(user_entry_text(&prompt, &image_paths)),
             });
             // 画像は**その 1 通だけ**に添える（パスの添付と違って毎ターン送り直すと重い）。
             thread.context.retain(|path| !image_paths.contains(path));
@@ -7071,11 +7618,11 @@ PYEOF"#;
             }
             self.fail_turn(thread_index, &i18n::t!("agent.err_session_lost"), cx);
         } else if let Some(thread) = self.threads.get_mut(thread_index) {
-            if handoff.is_some() {
+            if handoff {
                 thread.handoff_preamble = None;
             }
             // 添えたシェルの結果は渡し済み（次の送信には添えない）。
-            if let Some((_, delivered)) = &shell_attachment {
+            if let Some(delivered) = &shell_delivered {
                 shell::mark_shell_runs_delivered(&mut thread.entries, delivered);
             }
         }
@@ -7103,10 +7650,11 @@ PYEOF"#;
 
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
     /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドル・通し番号・
-    /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる。
-    /// 起動できなければ理由の文（組み込みは「見つかりません」・足したエージェントは原因）。
+    /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる
+    /// （広告の在庫の鍵 [`Thread::stock_key`] はここで持たせる）。
+    /// 起動できなければ理由の文（組み込みは「見つかりません」・足したエージェントは原因・接続を渡せない）。
     fn start_session(
-        &self,
+        &mut self,
         thread_index: usize,
         cwd: PathBuf,
         cx: &mut Context<Self>,
@@ -7137,13 +7685,62 @@ PYEOF"#;
         // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
         let agent_override = agent_server_override(agent.id(), cx);
-        // このセッションの使用量の鍵は、起動に渡すのと同じ宛先と env から今決める（R08。後で設定を
-        // 変えても、このセッションの知らせは立てた時の鍵へ重ねる）。
+        // 接続（issue #38 H3）: 設定で選んだ接続を、渡し方の分かるエージェントにだけ渡す。**リモート
+        // （SSH 先で起こすエージェント）には渡さない**（キーを手元の外へ出さない）— そのエージェント自身の
+        // ログインで動くので、一度だけ知らせる。渡せない接続を選んでいたら起こさない（黙って自分の
+        // ログインで走らせない＝別の契約に請求させない）。
+        let mut connection_notice = None;
+        let connection = match settings::agent_connection_in(cx, agent.id()) {
+            Some(connection) if host.is_remote() => {
+                if self.remote_connection_noted.insert(agent_label.clone()) {
+                    connection_notice = Some(i18n::t!(
+                        "agent.connection_remote_skipped",
+                        "connection" => &connection.name
+                    ));
+                }
+                None
+            }
+            Some(connection) => {
+                let harness = acp_client::connections::Harness::of(&agent).ok_or_else(|| {
+                    i18n::t!(
+                        "agent.connection_unsupported",
+                        "agent" => agent.label(),
+                        "connection" => &connection.name
+                    )
+                })?;
+                harness.accepts(&connection).map_err(|refusal| {
+                    i18n::t!(
+                        "agent.connection_refused",
+                        "connection" => &connection.name,
+                        "reason" => settings::refusal_text(refusal)
+                    )
+                })?;
+                Some((connection, harness))
+            }
+            None => None,
+        };
+        // このセッションの使用量の鍵は、起動に渡すのと同じ宛先と env と接続から今決める（R08。後で
+        // 設定を変えても、このセッションの知らせは立てた時の鍵へ重ねる）。
         let usage_key = usage::UsageKey::with_override(
             agent_label.clone(),
             self.dest_host_label.clone(),
             agent_override.as_ref(),
-        );
+        )
+        .with_connection(connection.as_ref().map(|(connection, _)| connection));
+        // 広告の在庫の鍵（issue #38 H3）: 使用量の鍵 + ログインの指紋（手元のファイルを見る。SSH 先は 0）。
+        let login = if host.is_remote() {
+            0
+        } else {
+            let env = agent_override
+                .as_ref()
+                .map(|agent_override| agent_override.env.clone())
+                .unwrap_or_default();
+            acp_client::connections::login_fingerprint(agent.id(), &env)
+        };
+        let stock_key = StockKey {
+            usage: usage_key.clone(),
+            login,
+        };
         let registry = acp_client::registry::load_cached();
         // レジストリから足した binary をまだ置いていなければ、背景で落として検証・展開してから起こす
         // （H2-b・UI スレッドでダウンロードを待たない）。落としている間は transcript に 1 行出す。
@@ -7194,17 +7791,25 @@ PYEOF"#;
                     .filter(|mode| !mode.is_empty())
                     .or_else(|| {
                         let wanted = bypass_by_default && thread.chat.is_none();
-                        let stock = self.catalog.get(&thread.agent).filter(|_| wanted)?;
+                        let stock = self.catalog.get(&stock_key).filter(|_| wanted)?;
                         bypass_mode_among(&stock.modes).map(|mode| mode.to_string())
                     }),
                 model: Some(thread.model.to_string()).filter(|model| !model.is_empty()),
                 effort: Some(thread.effort.to_string()).filter(|effort| !effort.is_empty()),
+                // Fast mode 等の覚えた値（モデルの後に合わせる・広告に無い物は送られない）。
+                options: thread
+                    .options
+                    .iter()
+                    .map(|(config_id, stored)| (config_id.clone(), stored.clone()))
+                    .collect(),
                 // 前回のセッション id。エージェントが loadSession を広告していれば会話を引き継ぐ。
                 resume: thread.acp_session_id.clone(),
                 mcp_servers,
                 preset: acp_client::preset::SessionPreset::default(),
                 // エージェント側の過去の会話を開いた直後だけ、再生された履歴を受け取る（O15）。
                 replay_history: thread.replay_pending,
+                // 接続はキーチェーンからキーを読んでから、下の背景で載せる。
+                connection: None,
             })
             .unwrap_or_default();
         // claude.ai のコネクタを読み込まない設定なら、エージェントのプロセスへそう伝える
@@ -7223,9 +7828,66 @@ PYEOF"#;
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
+        // 接続のキーはキーチェーンにある。有無はここで**中身を読まずに**確かめる（許可のダイアログを
+        // 出さない）— 無ければ起こさない＝先張りは黙り、送信なら理由が出る。中身を読むのは下の背景で
+        // （許可のダイアログで UI を止めない）。
+        let secrets = connection.is_some().then(|| settings::secret_store(cx));
+        let missing_key = connection.as_ref().map(|(connection, _)| {
+            i18n::t!(
+                "agent.connection_refused",
+                "connection" => &connection.name,
+                "reason" => settings::refusal_text(acp_client::connections::Refusal::MissingKey)
+            )
+        });
+        if let (Some((connection, _)), Some(secrets)) = (&connection, &secrets) {
+            if connection.needs_key() {
+                match secrets.contains(&connection.id) {
+                    Ok(true) => {}
+                    Ok(false) => return Err(missing_key.clone().unwrap_or_default()),
+                    Err(error) => {
+                        return Err(i18n::t!(
+                            "agent.connection_key_unreadable",
+                            "connection" => &connection.name,
+                            "reason" => format!("{error:#}")
+                        ))
+                    }
+                }
+            }
+        }
+        self.login_fingerprints.insert(usage_key.clone(), login);
+        if let Some(thread) = self.threads.get_mut(thread_index) {
+            thread.stock_key = Some(stock_key);
+        }
 
         cx.background_executor()
             .spawn(async move {
+                if let Some(notice) = connection_notice {
+                    error_tx.unbounded_send(AgentEvent::Notice(notice)).ok();
+                }
+                let mut preferences = preferences;
+                if let (Some((connection, harness)), Some(secrets)) = (connection, secrets) {
+                    let key = match secrets.get(&connection.id) {
+                        Ok(key) => key,
+                        Err(error) => {
+                            let message = i18n::t!(
+                                "agent.connection_key_unreadable",
+                                "connection" => &connection.name,
+                                "reason" => format!("{error:#}")
+                            );
+                            error_tx.unbounded_send(AgentEvent::Failed(message)).ok();
+                            return;
+                        }
+                    };
+                    match harness.launch(&connection, key.as_deref()) {
+                        Ok(launch) => preferences.connection = Some(launch),
+                        Err(_) => {
+                            error_tx
+                                .unbounded_send(AgentEvent::Failed(missing_key.unwrap_or_default()))
+                                .ok();
+                            return;
+                        }
+                    }
+                }
                 let command = match (command, deploying) {
                     (Some(command), _) => command,
                     (None, Some(deploying)) => {
@@ -7316,8 +7978,9 @@ PYEOF"#;
         let mut celebrate_now = false;
         // 広告（モデル/思考量/モード）は agent 固有なので、受け取ったら在庫へ控えて他タブでも使う。
         // `thread` の借用が残っている間は self を触れないので、末尾でまとめて反映する。
-        let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
-        let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
+        // 在庫の鍵はセッションを立てた時の鍵（[`Thread::stock_key`]・無ければ今の設定の鍵を末尾で引く）。
+        let mut stocked_configs: Option<(Option<StockKey>, Vec<ConfigOption>)> = None;
+        let mut stocked_modes: Option<(Option<StockKey>, Vec<(SharedString, SharedString)>)> = None;
         let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
         // レート制限の知らせ（O11）。鍵ごとの全体の置き場（Global）へ末尾で重ねる。鍵はスレッドが持つ
         // 「セッションを立てた時の鍵」（R08）。`None` = セッションを立てていない（今の宛先と設定で決める）。
@@ -7334,6 +7997,11 @@ PYEOF"#;
         // そちらは通し番号で「同じセッション」のときだけ後始末する。
         if matches!(event, AgentEvent::SessionLost) {
             self.on_session_lost(thread_index, cx);
+            return;
+        }
+        // 差し込みの結果は送信待ち・中断・フラッシュに触るので、スレッドの借用の外で捌く。
+        if let AgentEvent::Steered { id, outcome } = event {
+            self.on_steered(thread_index, id, outcome, cx);
             return;
         }
         let Some(thread) = self.threads.get_mut(thread_index) else {
@@ -7368,8 +8036,12 @@ PYEOF"#;
                 session_id,
                 resumed,
                 resumable,
+                steerable,
             } => {
                 thread.session_resumable = resumable;
+                thread.steerable = steerable;
+                // 前のセッションで応答を待っていた差し込みは、もう答えが来ない。送信待ちへ戻す。
+                thread.requeue_pending_steer();
                 // 開けた＝前に起動してすぐ終わった時のカードはもう要らない。
                 thread.startup_exit = None;
                 // 目標への操作は新しいセッションの広告で決め直す（届かなければ操作なし・O17）。
@@ -7419,7 +8091,7 @@ PYEOF"#;
                 }
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
-            AgentEvent::SessionLost => {}
+            AgentEvent::SessionLost | AgentEvent::Steered { .. } => {}
             // 起動してすぐ終わった: 終わり方と stderr の末尾をカードに出す（画面だけ・保存しない）。
             // transcript に残る失敗の 1 行は、続いて届く `Failed`（stderr を含まない文）が書く。
             AgentEvent::ExitedAtStartup(exited) => {
@@ -7591,7 +8263,7 @@ PYEOF"#;
                     .into_iter()
                     .map(|(id, name)| (SharedString::from(id), SharedString::from(name)))
                     .collect();
-                stocked_modes = Some((thread.agent.clone(), thread.available_modes.clone()));
+                stocked_modes = Some((thread.stock_key.clone(), thread.available_modes.clone()));
                 let advertised_current = SharedString::from(current);
                 // 権限の既定が「聞かずに進める」（O16）なら、希望の無いスレッドは広告の中の「聞かない」
                 // モードで始める（無ければエージェントの既定のまま）。Chat は裁定を necoder が持つので対象外。
@@ -7640,12 +8312,12 @@ PYEOF"#;
                 // 通常ここは一致して無送信（ここからの SetConfig はターン中 deferred＝初回ターンに
                 // 間に合わない）。ターン途中の `ConfigOptionUpdate` と広告に無い値のフォールバックが担当。
                 thread.configs = configs;
-                stocked_configs = Some((thread.agent.clone(), thread.configs.clone()));
+                stocked_configs = Some((thread.stock_key.clone(), thread.configs.clone()));
                 for category in [ConfigCategory::Model, ConfigCategory::ThoughtLevel] {
                     let desired = match category {
                         ConfigCategory::Model => thread.model.clone(),
                         ConfigCategory::ThoughtLevel => thread.effort.clone(),
-                        ConfigCategory::Other => continue,
+                        ConfigCategory::Mode | ConfigCategory::Other => continue,
                     };
                     // 借用を残さずに「desired は広告されているか / 広告 current は何か」を取り出す。
                     let Some((offered, advertised_current)) = thread
@@ -7654,11 +8326,8 @@ PYEOF"#;
                         .find(|config| config.category == category)
                         .map(|config| {
                             let offered = !desired.is_empty()
-                                && config
-                                    .choices
-                                    .iter()
-                                    .any(|(id, _)| id.as_str() == desired.as_ref());
-                            (offered, SharedString::from(config.current.clone()))
+                                && config.offers(&ConfigValue::Id(desired.to_string()));
+                            (offered, SharedString::from(config.current().to_stored()))
                         })
                     else {
                         continue;
@@ -7672,10 +8341,11 @@ PYEOF"#;
                         match category {
                             ConfigCategory::Model => thread.model = advertised_current,
                             ConfigCategory::ThoughtLevel => thread.effort = advertised_current,
-                            ConfigCategory::Other => {}
+                            ConfigCategory::Mode | ConfigCategory::Other => {}
                         }
                     }
                 }
+                adopt_advertised_options(thread);
             }
             AgentEvent::Plan(items) => {
                 // プランは毎回全量で届く（ACP 仕様）ので**置換**。常設チェックリストが追従する。
@@ -7922,6 +8592,15 @@ PYEOF"#;
                     .entries
                     .push(Entry::Agent(SharedString::from(message)));
             }
+            // 接続を渡すので task.env から読まなかった変数（issue #38 H3）。走行状態は触らない。
+            AgentEvent::TaskEnvSkipped(names) => {
+                thread
+                    .entries
+                    .push(Entry::Agent(SharedString::from(i18n::t!(
+                        "agent.connection_task_env_skipped",
+                        "names" => names.join(", ")
+                    ))));
+            }
             AgentEvent::Failed(error) => {
                 // 遷移スナップショット（P1 素材③）: Failed = エラー文字列（1 行に畳む）。
                 thread.digest = digest_tail(&error).or(thread.digest.take());
@@ -8091,14 +8770,16 @@ PYEOF"#;
         if turn_finished {
             self.flush_queued_prompt_at(thread_index, cx);
         }
-        if let Some((agent, configs)) = stocked_configs {
-            self.catalog.entry(agent).or_default().configs = configs;
+        if let Some((key, configs)) = stocked_configs {
+            let key = key.unwrap_or_else(|| self.prospective_stock_key_at(thread_index, cx));
+            self.catalog.entry(key).or_default().configs = configs;
         }
-        if let Some((agent, modes)) = stocked_modes {
-            self.catalog.entry(agent).or_default().modes = modes;
+        if let Some((key, modes)) = stocked_modes {
+            let key = key.unwrap_or_else(|| self.prospective_stock_key_at(thread_index, cx));
+            self.catalog.entry(key).or_default().modes = modes;
         }
         if let Some((agent, commands)) = stocked_commands {
-            self.catalog.entry(agent).or_default().commands = commands;
+            self.harness_stock.entry(agent).or_default().commands = commands;
         }
         if let Some((key, limits)) = rate_limits {
             // 鍵は「エージェント + 動かしている場所 + 認証の環境」（R08・SSH 先や別の環境の値と混ぜない）。
@@ -8110,7 +8791,7 @@ PYEOF"#;
                 .record(key, limits, now_unix_ms());
         }
         if let Some(agent) = titled_by_agent {
-            self.catalog.entry(agent).or_default().sends_titles = true;
+            self.harness_stock.entry(agent).or_default().sends_titles = true;
         }
         if let Some(name) = agent_renamed {
             // 自動命名と同じ出口（Task 名の引き継ぎ・一覧の更新）。保存はメタだけ — ターンの途中に
@@ -11179,8 +11860,6 @@ PYEOF"#;
         Some(card.into_any_element())
     }
 
-    /// 送信待ちキュー（生成中に積んだ prompt）を composer 上部に並べる。各チップは 1 行プレビュー +
-    /// 「今すぐ」（steer・割り込み送信）+ ✕（取消）。空なら None（描画しない）。
     /// セッションが切れた印（composer の直上）: 何が起きたかの一文 + 「再開」チップ。送信待ちの
     /// チップと同じ様式（文字チップ・枠 1px・10.5px）。再開中/再開直後の一言（引き継げた・
     /// 引き継げなかった）も同じ場所に薄字で出し、次のターン開始で消す（2026-09-08）。
@@ -11361,31 +12040,22 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// 送信待ち（UI-SPEC §6）。応答を待っている差し込みを先頭に `差し込み中…` で出し、続けて送信待ちの
+    /// 行。行の「今すぐ」は差し込める相手なら `今すぐ差し込む`、それ以外（と slash コマンド）は
+    /// `中断して今すぐ`。差し込みを待っている間は押せない（1 本ずつ）。
     fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
-        if thread.queued_prompts.is_empty() {
+        let steering = thread.steering.as_ref().map(|steer| steer.prompt.clone());
+        if thread.queued_prompts.is_empty() && steering.is_none() {
             return None;
         }
         let theme = self.theme.clone();
         let color = thread.color;
+        let steerable = thread.steerable;
         let prompts = thread.queued_prompts.clone();
-        let mut card = div()
-            .id("queued-prompts")
-            .mx(px(12.))
-            .mb(px(8.))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(
-                        i18n::t!("agent.queued_title", "n" => prompts.len()),
-                    )),
-            );
-        for (index, prompt) in prompts.iter().enumerate() {
-            let row = div()
+        let count = prompts.len() + usize::from(steering.is_some());
+        let row = |preview: &str| {
+            div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -11403,31 +12073,71 @@ PYEOF"#;
                         .whitespace_nowrap()
                         .text_size(px(11.5))
                         .text_color(theme.fg1)
-                        .child(step_args_preview("", prompt)),
+                        .child(step_args_preview("", preview)),
                 )
-                .child(
+        };
+        let mut card = div()
+            .id("queued-prompts")
+            .mx(px(12.))
+            .mb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(
+                        i18n::t!("agent.queued_title", "n" => count),
+                    )),
+            );
+        if let Some(prompt) = &steering {
+            card = card.child(
+                row(prompt).child(
                     div()
-                        .id(("queue-send-now", index))
                         .flex_none()
                         .px(px(7.))
                         .py(px(2.))
-                        .rounded(px(5.))
-                        .border_1()
-                        .border_color(theme.border)
                         .text_size(px(10.5))
-                        .text_color(theme.fg1)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                        .child(SharedString::from(i18n::t!("agent.queue_send_now")))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |panel, _, _window, cx| {
-                                cx.stop_propagation();
-                                panel.send_queued_now(index, cx);
-                            }),
-                        ),
-                )
-                .child(
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("agent.queue_steering"))),
+                ),
+            );
+        }
+        for (index, prompt) in prompts.iter().enumerate() {
+            let label = if steerable && !is_slash_command(prompt) {
+                i18n::t!("agent.queue_steer_now")
+            } else {
+                i18n::t!("agent.queue_send_now")
+            };
+            let send_now = div()
+                .id(("queue-send-now", index))
+                .flex_none()
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(10.5))
+                .child(SharedString::from(label));
+            // 差し込みの応答を待っている間は押せない（1 本ずつ・押しても `send_queued_now` が無視する）。
+            let send_now = if steering.is_some() {
+                send_now.text_color(theme.fg2)
+            } else {
+                send_now
+                    .text_color(theme.fg1)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |panel, _, _window, cx| {
+                            cx.stop_propagation();
+                            panel.send_queued_now(index, cx);
+                        }),
+                    )
+            };
+            card = card.child(
+                row(prompt).child(send_now).child(
                     div()
                         .id(("queue-remove", index))
                         .flex_none()
@@ -11443,8 +12153,8 @@ PYEOF"#;
                                 panel.remove_queued_prompt(index, cx);
                             }),
                         ),
-                );
-            card = card.child(row);
+                ),
+            );
         }
         Some(card.into_any_element())
     }
@@ -12433,7 +13143,8 @@ PYEOF"#;
                     )
                     // 本文が `!` で始まる間: シェルで走ること（走らせられない理由）を 1 行（#37）。
                     .children(self.render_shell_hint(cx))
-                    // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
+                    // 下部コントロール列: 設定のチップ（エージェント・モデル・思考量・Fast 等を 1 枚の
+                    // カードで・`config_card.rs`）+ 権限モードのピル（安全に関わるのでカードの外・C-1）
                     .child(
                         div()
                             .flex()
@@ -12441,9 +13152,9 @@ PYEOF"#;
                             .items_center()
                             .gap(px(6.))
                             .pt(px(6.))
+                            .child(self.render_config_chip(cx))
                             .when(!self.chat_mode, |row| {
-                                row.child(self.render_selector_pill(Selector::Agent, cx))
-                                    .child(self.render_selector_pill(Selector::Mode, cx))
+                                row.child(self.render_selector_pill(Selector::Mode, cx))
                             })
                             // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
                             // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
@@ -12460,9 +13171,7 @@ PYEOF"#;
                                             theme.clone(),
                                         )),
                                 )
-                            })
-                            .child(self.render_selector_pill(Selector::Model, cx))
-                            .child(self.render_selector_pill(Selector::Effort, cx)),
+                            }),
                     )
                     // 送信行: [Enter 挙動トグル] … [送信ボタン（現ヒント付き）]
                     .child(
@@ -12654,6 +13363,8 @@ impl Render for AgentPanel {
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::open_transcript_search))
             .on_action(cx.listener(Self::on_close_thread))
+            // ⌘/ = 設定のカード（composer とカードの中だけ・keymap の `AgentPanel > (Editor || ConfigCard)`）。
+            .on_action(cx.listener(Self::on_toggle_config_card))
             // transcript が focus 中の ⌘A。composer focus 中は EditorView 側が先に消費する。
             .on_action(cx.listener(Self::on_select_all_transcript))
             // transcript 選択の ⌘C（composer が空選択で譲った Copy を root で受ける・M13）。
@@ -13315,11 +14026,11 @@ fn config_choices(configs: &[ConfigOption], category: ConfigCategory) -> Vec<Sel
         .find(|config| config.category == category)
         .map(|config| {
             config
-                .choices
+                .choices()
                 .iter()
-                .map(|(value, label)| SelectorChoice {
-                    value: SharedString::from(value.clone()),
-                    label: SharedString::from(label.clone()),
+                .map(|choice| SelectorChoice {
+                    value: SharedString::from(choice.value_id.clone()),
+                    label: SharedString::from(choice.name.clone()),
                 })
                 .collect()
         })
@@ -13341,7 +14052,7 @@ fn send_set_config(thread: &Thread, category: ConfigCategory, value_id: &SharedS
         command_tx
             .unbounded_send(SessionCommand::SetConfig {
                 config_id: config.config_id.clone(),
-                value_id: value_id.to_string(),
+                value: ConfigValue::Id(value_id.to_string()),
             })
             .ok();
     }
@@ -13613,6 +14324,13 @@ fn launch_error_text(error: &anyhow::Error) -> String {
 /// 異常終了: ACP initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context だけに
 /// なりハンドシェイクの無言ハングが埋もれるため。
 fn session_error_text(error: &anyhow::Error) -> String {
+    if let Some(rejected) = error.downcast_ref::<acp_client::connections::ProviderRejected>() {
+        return i18n::t!(
+            "agent.connection_provider_rejected",
+            "connection" => &rejected.connection,
+            "reason" => &rejected.reason
+        );
+    }
     match error.downcast_ref::<acp_client::AgentExited>() {
         Some(exited) => i18n::t!("agent.err_agent_exited", "status" => exit_status_text(exited)),
         None => format!("{error:#}"),
@@ -13712,6 +14430,67 @@ fn apply_agent_sticky(thread: &mut Thread, cx: &App) {
     thread.effort = agent_sticky_value(agent.as_ref(), "effort", cx);
     thread.permission_mode = agent_sticky_value(agent.as_ref(), "mode", cx);
     thread.current_mode_id = thread.permission_mode.clone();
+    thread.options = agent_sticky_options(agent.as_ref(), cx);
+    thread.options_in_flight.clear();
+}
+
+/// その agent で覚えた、モデル・思考量・権限モードの外の設定（Fast mode 等）。
+/// `agent_config_defaults[agent_id]` のうち necoder の区分の鍵（`model` / `effort` / `mode`）以外で、
+/// 鍵はエージェントの config_id（`fast`）、値は保存形（[`ConfigValue::to_stored`]）。
+fn agent_sticky_options(agent_label: &str, cx: &App) -> BTreeMap<String, String> {
+    let Some(agent) = settings::agent_by_label(cx, agent_label) else {
+        return BTreeMap::new();
+    };
+    settings::get(cx)
+        .agent_config_defaults
+        .get(agent.id())
+        .map(|defaults| {
+            defaults
+                .iter()
+                .filter(|(key, value)| !is_category_sticky_key(key) && !value.is_empty())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `agent_config_defaults` の鍵のうち、necoder の区分（[`Selector::config_id`]）の物か。
+/// その他の設定はエージェントの config_id を鍵にするので、同じ綴りの設定は区分の側が持つ。
+fn is_category_sticky_key(key: &str) -> bool {
+    [Selector::Mode, Selector::Model, Selector::Effort]
+        .iter()
+        .any(|selector| selector.config_id() == Some(key))
+}
+
+/// 広告の「その他の設定」（Fast mode 等）の今の値をスレッドへ写す。モデル・思考量と違い、食い違っても
+/// 送り直さない — エージェントが自分で戻した値（Fast mode が使えないプラン等）に言い返すと、知らせの
+/// たびに送り合いになる。人が変えて返事待ちの設定は、ターン中は写さない（ターン中の変更はターンが
+/// 終わってから送られる＝それまでの広告は変える前の値）。
+fn adopt_advertised_options(thread: &mut Thread) {
+    for config in thread
+        .configs
+        .iter()
+        .filter(|config| config.category == ConfigCategory::Other)
+    {
+        let advertised = config.current().to_stored();
+        if thread.options_in_flight.contains(&config.config_id) {
+            let confirmed = thread.options.get(&config.config_id) == Some(&advertised);
+            if !confirmed && thread.running {
+                continue;
+            }
+            thread.options_in_flight.remove(&config.config_id);
+        }
+        thread.options.insert(config.config_id.clone(), advertised);
+    }
+}
+
+/// 「その他の設定」の今の値（描画用）。このスレッドが望む値が広告に合えばそれ、無ければ広告の値。
+fn option_value(thread: &Thread, config: &ConfigOption) -> ConfigValue {
+    thread
+        .options
+        .get(&config.config_id)
+        .and_then(|stored| config.value_from_stored(stored))
+        .unwrap_or_else(|| config.current())
 }
 
 /// 新規スレッドへ「前回選んだ状態」を載せる（2026-07-27 ユーザー要望「前に設定した状態を保持して」）。
@@ -13859,6 +14638,8 @@ fn seed_threads() -> Vec<Thread> {
         available_modes: Vec::new(),
         current_mode_id: SharedString::default(),
         configs: Vec::new(),
+        options: BTreeMap::new(),
+        options_in_flight: HashSet::new(),
         pending_permission: None,
         pending_elicitation: None,
         // 遷移スナップショット（P1）の種: offscreen 検証で herd 行/セル帯に digest が写る。
@@ -13866,6 +14647,8 @@ fn seed_threads() -> Vec<Thread> {
         muted: false,
         tier2: None,
         queued_prompts: Vec::new(),
+        steerable: false,
+        steering: None,
         acp_session_id: None,
         session_lost: false,
         startup_exit: None,
@@ -13878,6 +14661,7 @@ fn seed_threads() -> Vec<Thread> {
         last_active_at_ms: 0,
         usage: usage::CostMeter::default(),
         usage_key: None,
+        stock_key: None,
         replay_pending: false,
         handoff_preamble: None,
         seat: None,
@@ -15052,6 +15836,285 @@ PYEOF"#;
                 !panel.send_user_prompt_to(99, "x".into(), cx),
                 "無いスレッドは false"
             );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 送信待ちの「今すぐ」のテスト用: 生成中のアクティブスレッドに手で送信路を付け、送信待ちを積む。
+    /// ターンの終わりで本物のエージェント（自動命名・要約・先張り）を起こさない設定で開く。
+    fn running_thread_with_queue<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        label: &str,
+        steerable: bool,
+        queue: &[&str],
+    ) -> (
+        Entity<AgentPanel>,
+        &'a mut gpui::VisualTestContext,
+        mpsc::UnboundedReceiver<SessionCommand>,
+        PathBuf,
+    ) {
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_{label}_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"agent_auto_name":false,"tier2_summaries":false}"#,
+        )
+        .expect("テスト用の設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (command_tx, command_rx) = mpsc::unbounded::<SessionCommand>();
+        panel.update(cx, |panel, _cx| {
+            let active = panel.active;
+            panel.dest_cwd = Some(std::env::temp_dir());
+            let thread = &mut panel.threads[active];
+            thread.command_tx = Some(command_tx);
+            thread.running = true;
+            thread.steerable = steerable;
+            thread.queued_prompts = queue.iter().map(|prompt| prompt.to_string()).collect();
+        });
+        (panel, cx, command_rx, settings_path)
+    }
+
+    fn last_user_text(panel: &AgentPanel) -> Option<String> {
+        panel.threads[panel.active]
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::User(text) => Some(text.to_string()),
+                _ => None,
+            })
+    }
+
+    /// 差し込める相手（`steerable`）の「今すぐ」: ターンを止めずに `Steer` を送る（`Cancel` は出さない）。
+    /// 受け取られる（`Injected`）までは transcript に出さず、カードの先頭で待つ。受け取られたら
+    /// **その時点の transcript の末尾**に人の発話として入り、ターンは走ったまま。残りの送信待ちは
+    /// ターンの終わりで流れる。待っている間の「今すぐ」は押せない。
+    #[gpui::test]
+    fn queued_now_steers_into_the_running_turn_when_advertised(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, mut command_rx, settings_path) =
+            running_thread_with_queue(cx, "steer_now", true, &["次はテスト", "README も直して"]);
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.on_event(active, AgentEvent::AgentChunk("作業中の本文".into()), cx);
+            let entries_before = panel.threads[active].entries.len();
+            panel.send_queued_now(1, cx);
+            let id = match command_rx.try_recv() {
+                Ok(SessionCommand::Steer { id, text, images }) => {
+                    assert_eq!(text, "README も直して");
+                    assert!(images.is_empty());
+                    id
+                }
+                other => panic!("Steer を期待: {other:?}"),
+            };
+            assert!(command_rx.try_recv().is_err(), "Cancel は出さない");
+            let thread = &panel.threads[active];
+            assert_eq!(thread.queued_prompts, vec!["次はテスト".to_string()]);
+            assert_eq!(
+                thread.steering.as_ref().map(|steer| steer.prompt.as_str()),
+                Some("README も直して")
+            );
+            assert_eq!(thread.entries.len(), entries_before, "受け取られるまで出さない");
+            assert!(thread.running);
+
+            // 待っている間は 1 本ずつ（押しても何も送らない）。
+            panel.send_queued_now(0, cx);
+            assert!(command_rx.try_recv().is_err(), "2 本目は送らない");
+
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::Injected,
+                },
+                cx,
+            );
+            let thread = &panel.threads[active];
+            assert!(thread.steering.is_none());
+            assert!(thread.running, "同じターンの続き");
+            assert!(
+                matches!(thread.entries.last(), Some(Entry::User(text)) if text.as_ref() == "README も直して"),
+                "transcript の末尾に人の発話として入る"
+            );
+            assert_eq!(
+                thread.last_prompt.as_ref().map(|prompt| prompt.as_ref()),
+                Some("README も直して")
+            );
+            // 差し込みの後の本文は、差し込みの下の新しい本文になる。
+            panel.on_event(active, AgentEvent::AgentChunk("了解".into()), cx);
+            assert!(matches!(
+                panel.threads[active].entries.last(),
+                Some(Entry::Agent(text)) if text.as_ref() == "了解"
+            ));
+            assert!(command_rx.try_recv().is_err());
+
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "次はテスト"),
+                other => panic!("残りの送信待ちが流れていない: {other:?}"),
+            }
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 差し込みを広告しない相手の「今すぐ」は今までどおり: 行を先頭へ寄せて中断し、閉じたら送る。
+    /// slash コマンドの行は差し込める相手でも中断して送る（ターンの頭でしか効かない）。
+    #[gpui::test]
+    fn queued_now_interrupts_then_resends_without_the_advertisement(cx: &mut gpui::TestAppContext) {
+        for (steerable, prompt) in [(false, "README も直して"), (true, "/compact")] {
+            let (panel, cx, mut command_rx, settings_path) =
+                running_thread_with_queue(cx, "interrupt_now", steerable, &["次はテスト", prompt]);
+            panel.update(cx, |panel, cx| {
+                let active = panel.active;
+                panel.send_queued_now(1, cx);
+                assert!(
+                    matches!(command_rx.try_recv(), Ok(SessionCommand::Cancel)),
+                    "中断する（steerable={steerable}）"
+                );
+                assert_eq!(
+                    panel.threads[active].queued_prompts,
+                    vec![prompt.to_string(), "次はテスト".to_string()],
+                    "押した行が先頭"
+                );
+                assert!(panel.threads[active].steering.is_none());
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnEnded {
+                        reason: TurnEnd::Interrupted,
+                    },
+                    cx,
+                );
+                match command_rx.try_recv() {
+                    Ok(SessionCommand::Prompt(text)) => assert_eq!(text, prompt),
+                    other => panic!("中断の後に送り直していない: {other:?}"),
+                }
+                assert_eq!(last_user_text(panel).as_deref(), Some(prompt));
+            });
+            let _ = std::fs::remove_file(settings_path);
+        }
+    }
+
+    /// ターンの閉じ際に着いた差し込み（`TurnOver`）: 応答を待つ間はターンの終わりでも送信待ちを流さず、
+    /// 応答で行を先頭へ戻して次のターンとして送る（後ろの行より先に）。セッションを立て直したら、
+    /// 待っていた差し込みは送信待ちへ戻り、前のセッションの残響（古い id）は捨てる。
+    #[gpui::test]
+    fn a_steer_that_missed_the_turn_is_sent_first_next_turn(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, mut command_rx, settings_path) =
+            running_thread_with_queue(cx, "steer_late", true, &["次はテスト", "README も直して"]);
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.send_queued_now(1, cx);
+            let Ok(SessionCommand::Steer { id, .. }) = command_rx.try_recv() else {
+                panic!("Steer を期待");
+            };
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            assert!(command_rx.try_recv().is_err(), "応答を待つ間は流さない");
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::TurnOver,
+                },
+                cx,
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "README も直して"),
+                other => panic!("差し込めなかった行が先に送られていない: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].queued_prompts,
+                vec!["次はテスト".to_string()]
+            );
+            assert_eq!(last_user_text(panel).as_deref(), Some("README も直して"));
+
+            // 立て直し: 待っていた差し込みは送信待ちの先頭へ戻り、古い id の結果は何もしない。
+            panel.send_queued_now(0, cx);
+            let Ok(SessionCommand::Steer { id: stale, .. }) = command_rx.try_recv() else {
+                panic!("Steer を期待");
+            };
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "next".into(),
+                    resumed: true,
+                    resumable: true,
+                    steerable: true,
+                },
+                cx,
+            );
+            assert!(panel.threads[active].steering.is_none());
+            assert_eq!(
+                panel.threads[active].queued_prompts,
+                vec!["次はテスト".to_string()]
+            );
+            let entries = panel.threads[active].entries.len();
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id: stale,
+                    outcome: SteerOutcome::Injected,
+                },
+                cx,
+            );
+            assert_eq!(panel.threads[active].entries.len(), entries, "残響は捨てる");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 差し込みが拒まれた（`Refused`）: 理由を 1 行出し、行を先頭へ戻して「中断 → 送り直し」に落ちる。
+    #[gpui::test]
+    fn a_refused_steer_falls_back_to_interrupt_and_resend(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, mut command_rx, settings_path) =
+            running_thread_with_queue(cx, "steer_refused", true, &["README も直して"]);
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.send_queued_now(0, cx);
+            let Ok(SessionCommand::Steer { id, .. }) = command_rx.try_recv() else {
+                panic!("Steer を期待");
+            };
+            panel.on_event(
+                active,
+                AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::Refused("model rejected images".into()),
+                },
+                cx,
+            );
+            assert!(matches!(command_rx.try_recv(), Ok(SessionCommand::Cancel)));
+            assert!(matches!(
+                panel.threads[active].entries.last(),
+                Some(Entry::Agent(text)) if text.contains("model rejected images")
+            ));
+            assert_eq!(
+                panel.threads[active].queued_prompts,
+                vec!["README も直して".to_string()]
+            );
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Interrupted,
+                },
+                cx,
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "README も直して"),
+                other => panic!("送り直していない: {other:?}"),
+            }
         });
         let _ = std::fs::remove_file(settings_path);
     }
@@ -16265,12 +17328,20 @@ PYEOF"#;
     fn config(category: ConfigCategory, current: &str, choices: &[(&str, &str)]) -> ConfigOption {
         ConfigOption {
             config_id: format!("{category:?}"),
+            name: format!("{category:?}"),
+            description: None,
             category,
-            current: current.to_string(),
-            choices: choices
-                .iter()
-                .map(|(id, name)| (id.to_string(), name.to_string()))
-                .collect(),
+            kind: acp_client::ConfigKind::Select {
+                current: current.to_string(),
+                choices: choices
+                    .iter()
+                    .map(|(id, name)| acp_client::ConfigChoice {
+                        value_id: id.to_string(),
+                        name: name.to_string(),
+                        description: None,
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -16335,7 +17406,10 @@ PYEOF"#;
 
             let sent: Vec<String> = std::iter::from_fn(|| command_rx.try_recv().ok())
                 .filter_map(|command| match command {
-                    SessionCommand::SetConfig { value_id, .. } => Some(value_id),
+                    SessionCommand::SetConfig {
+                        value: ConfigValue::Id(value_id),
+                        ..
+                    } => Some(value_id),
                     _ => None,
                 })
                 .collect();
@@ -16343,6 +17417,177 @@ PYEOF"#;
                 sent,
                 vec!["opus[1m]", "xhigh", "opus[1m]", "xhigh"],
                 "ピル選択時と、再広告で current がずれている時の両方で合わせに行く"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// issue #38 H3: モデルの在庫は接続ごとに分かれる。接続を替えると、まだセッションの無いタブにも、
+    /// 前の接続で立てたスレッド自身の広告にも、前の接続のモデルを出さない。戻せば元の在庫が出る。
+    /// エージェントのピルには接続の名前が付く（中身が Claude でないことを隠さない）。
+    #[gpui::test]
+    fn the_model_stock_is_split_by_connection(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_connection_stock_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"connections":{"glm":{"name":"GLM","preset":"zai-coding-plan",
+                "protocol":"anthropic","base_url":"https://api.z.ai/api/anthropic"}}}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let claude_models = || {
+            vec![config(
+                ConfigCategory::Model,
+                "opus",
+                &[("opus", "Opus"), ("fable", "Fable")],
+            )]
+        };
+        let glm_models = || {
+            vec![config(
+                ConfigCategory::Model,
+                "glm-5.3",
+                &[("glm-5.3", "GLM-5.3"), ("glm-5.3-flash", "GLM-5.3 Flash")],
+            )]
+        };
+        let labels = |panel: &AgentPanel, cx: &App| -> Vec<String> {
+            panel
+                .selector_choices(Selector::Model, cx)
+                .into_iter()
+                .map(|choice| choice.label.to_string())
+                .collect()
+        };
+        // 自分のログインのセッションが広告した一覧を控える（立てた時の鍵 = 今の設定の鍵）。
+        let start = |panel: &mut AgentPanel, index: usize, cx: &mut Context<AgentPanel>| {
+            let key = panel.prospective_stock_key(&panel.threads[index], cx);
+            let (command_tx, _command_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[index].stock_key = Some(key);
+            panel.threads[index].command_tx = Some(command_tx);
+        };
+        panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            start(panel, first, cx);
+            panel.on_event(first, AgentEvent::Configs(claude_models()), cx);
+            panel.threads[first].command_tx = None;
+            panel.add_thread(cx);
+            assert_eq!(labels(panel, cx), vec!["Opus", "Fable"], "同じ鍵の在庫");
+            assert_eq!(panel.active_connection_name(cx), None);
+        });
+        // Claude Code の接続を GLM にする。
+        cx.update(|_window, cx| {
+            settings::set_agent_connection(cx, "claude", Some("glm")).expect("書ける")
+        });
+        panel.update(cx, |panel, cx| {
+            assert!(
+                labels(panel, cx).is_empty(),
+                "別の接続のモデルを出さない（GLM の一覧はまだ届いていない）"
+            );
+            assert_eq!(
+                panel.active_connection_name(cx).as_deref(),
+                Some("GLM"),
+                "ピルに接続の名前"
+            );
+            let second = panel.active;
+            start(panel, second, cx);
+            panel.on_event(second, AgentEvent::Configs(glm_models()), cx);
+            panel.threads[second].command_tx = None;
+            assert_eq!(labels(panel, cx), vec!["GLM-5.3", "GLM-5.3 Flash"]);
+            panel.add_thread(cx);
+            assert_eq!(
+                labels(panel, cx),
+                vec!["GLM-5.3", "GLM-5.3 Flash"],
+                "同じ接続の新しいタブは GLM の在庫"
+            );
+            panel.active = second;
+        });
+        // 自分のログインへ戻す: GLM で立てたスレッドにも GLM のモデルを出さない。
+        cx.update(|_window, cx| {
+            settings::set_agent_connection(cx, "claude", None).expect("書ける")
+        });
+        panel.update(cx, |panel, cx| {
+            assert_eq!(
+                labels(panel, cx),
+                vec!["Opus", "Fable"],
+                "前の接続のセッションの広告ではなく、今の鍵の在庫"
+            );
+            assert_eq!(panel.active_connection_name(cx), None);
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 接続ごとの在庫（issue #38 H3）× 設定のカード: カードもモデルの在庫を接続ごとに引き（前の接続の
+    /// モデルを出さない・戻せば元の在庫）、エージェントの行とチップに出す接続の名前が付く。カードを
+    /// 開いた時にログインを確かめ直しても、同じログインなら在庫は消えない。
+    #[gpui::test]
+    fn the_config_card_follows_the_connection(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_card_connection_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"agent_prewarm":false,"connections":{"glm":{"name":"GLM",
+                "preset":"zai-coding-plan","protocol":"anthropic",
+                "base_url":"https://api.z.ai/api/anthropic"}}}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let card_models = |panel: &AgentPanel, cx: &App| -> Vec<String> {
+            panel
+                .stocked_configs(&panel.threads[panel.active], cx)
+                .iter()
+                .filter(|config| config.category == ConfigCategory::Model)
+                .flat_map(|config| config.choices().iter().map(|choice| choice.name.clone()))
+                .collect()
+        };
+        panel.update_in(cx, |panel, window, cx| {
+            // 自分のログインのタブ（セッションはまだ無い）。カードを開いて確かめたログインで控える。
+            panel.open_config_card(window, cx);
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::Configs(vec![config(
+                    ConfigCategory::Model,
+                    "opus",
+                    &[("opus", "Opus"), ("fable", "Fable")],
+                )]),
+                cx,
+            );
+            panel.close_config_card(window, cx);
+            panel.open_config_card(window, cx);
+            assert_eq!(card_models(panel, cx), vec!["Opus", "Fable"]);
+            assert_eq!(panel.active_connection_name(cx), None);
+        });
+        cx.update(|_window, cx| {
+            settings::set_agent_connection(cx, "claude", Some("glm")).expect("書ける")
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.close_config_card(window, cx);
+            panel.open_config_card(window, cx);
+            assert!(
+                card_models(panel, cx).is_empty(),
+                "カードにも別の接続のモデルを出さない"
+            );
+            assert_eq!(
+                panel.active_connection_name(cx).as_deref(),
+                Some("GLM"),
+                "エージェントの行とチップに接続の名前"
+            );
+        });
+        cx.update(|_window, cx| {
+            settings::set_agent_connection(cx, "claude", None).expect("書ける")
+        });
+        panel.update(cx, |panel, cx| {
+            assert_eq!(
+                card_models(panel, cx),
+                vec!["Opus", "Fable"],
+                "戻せば元の在庫"
             );
         });
         let _ = std::fs::remove_file(path);
@@ -16494,6 +17739,256 @@ PYEOF"#;
     /// おり、GPUI は action listener を呼ぶ前に伝播を止める。`EditorView::cancel` は複数選択が
     /// 無ければ**何もしない**が、伝播だけは止めていた＝パネル root の Esc（中断）に一生届かず、
     /// 停止ボタンでしか止められなかった。キー配送そのものを通して確かめる。
+    /// ⌘/ は composer（と開いた設定のカード）の中だけでカードに当たり、コードのエディタ（`AgentPanel` の
+    /// 外の `Editor`）では今までどおりコメントの切り替え。どちらも同じ深さで当たるので keymap の並び順が効く。
+    #[gpui::test]
+    fn cmd_slash_opens_the_card_only_inside_the_agent_panel(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let keystroke = gpui::Keystroke::parse("cmd-/").expect("キーを読める");
+            let action_for = |contexts: &[&str]| {
+                let stack: Vec<gpui::KeyContext> = contexts
+                    .iter()
+                    .map(|context| gpui::KeyContext::parse(context).expect("文脈を読める"))
+                    .collect();
+                let (bindings, _) =
+                    keymap.bindings_for_input(std::slice::from_ref(&keystroke), &stack);
+                bindings
+                    .first()
+                    .map(|binding| binding.action().name().to_string())
+            };
+            assert_eq!(
+                action_for(&["Workspace", "Editor"]).as_deref(),
+                Some("editor::ToggleComment"),
+                "コードのエディタの ⌘/ は変わらない"
+            );
+            assert_eq!(
+                action_for(&["Workspace", "AgentPanel", "Editor"]).as_deref(),
+                Some("agent::ToggleConfigCard"),
+                "composer の ⌘/ はカード"
+            );
+            assert_eq!(
+                action_for(&["Workspace", "AgentPanel", "ConfigCard"]).as_deref(),
+                Some("agent::ToggleConfigCard"),
+                "開いたカードの中の ⌘/ で閉じる"
+            );
+        });
+    }
+
+    /// 設定のカードのキー（UI-SPEC §6）: ⌘/ で開く → → で思考量を 1 段（その場で送る）→ ↓ でモデルの
+    /// 一覧（隣のモデルに印）→ ⏎ で決めてカードへ戻る → esc で閉じる。esc は**カードだけ**を閉じ、
+    /// 走っているターンは止めない（もう一度の esc で止まる）。保存・送信は value_id のまま。
+    #[gpui::test]
+    fn the_config_card_follows_the_keys(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "card-keys");
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let mut command_rx = panel.update_in(cx, |panel, window, cx| {
+            let active = panel.active;
+            let (command_tx, command_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.on_event(
+                active,
+                AgentEvent::Configs(vec![
+                    config(
+                        ConfigCategory::Model,
+                        "default",
+                        &[
+                            ("default", "Default (recommended)"),
+                            ("opus", "Opus 4.8"),
+                            ("sonnet", "Sonnet 5"),
+                        ],
+                    ),
+                    config(
+                        ConfigCategory::ThoughtLevel,
+                        "default",
+                        &[("default", "Default"), ("low", "Low"), ("high", "High")],
+                    ),
+                ]),
+                cx,
+            );
+            panel.focus_composer(window, cx);
+            command_rx
+        });
+        let redraw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+        redraw(cx);
+
+        cx.simulate_keystrokes("cmd-/");
+        redraw(cx);
+        panel.update_in(cx, |panel, window, cx| {
+            assert!(panel.config_card.is_some(), "⌘/ でカードが開く");
+            assert!(panel.config_card_focused(window, cx), "キーはカードへ");
+        });
+
+        cx.simulate_keystrokes("right");
+        redraw(cx);
+        panel.read_with(cx, |panel, _cx| {
+            // Default（目盛りの外・割合 0）から Low（2 段の 1 段目）へ、メーターが動く。
+            let card = panel.config_card.as_ref().expect("開いたまま");
+            assert_eq!(card.effort_motion_target(), Some(0.5));
+        });
+        cx.simulate_keystrokes("down");
+        redraw(cx);
+        panel.read_with(cx, |panel, _cx| {
+            let card = panel.config_card.as_ref().expect("開いたまま");
+            assert_eq!(card.page_name(), "models", "↓ でモデルの一覧");
+            assert_eq!(card.cursor_index(), 1, "印は今のモデル（Default）の隣");
+        });
+        cx.simulate_keystrokes("enter");
+        redraw(cx);
+        panel.update_in(cx, |panel, _window, cx| {
+            let thread = &panel.threads[panel.active];
+            assert_eq!(thread.effort.as_ref(), "low", "→ で 1 段");
+            assert_eq!(thread.model.as_ref(), "opus", "⏎ で印のモデル");
+            assert_eq!(
+                panel.config_card.as_ref().map(|card| card.page_name()),
+                Some("main"),
+                "決めたらカードへ戻る"
+            );
+            let defaults = settings::get(cx).agent_config_defaults;
+            assert_eq!(defaults["claude"]["effort"], "low");
+            assert_eq!(defaults["claude"]["model"], "opus");
+            panel.threads[panel.active].running = true;
+        });
+        let sent: Vec<(String, ConfigValue)> = std::iter::from_fn(|| command_rx.try_recv().ok())
+            .filter_map(|command| match command {
+                SessionCommand::SetConfig { config_id, value } => Some((config_id, value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                ("ThoughtLevel".to_string(), ConfigValue::Id("low".into())),
+                ("Model".to_string(), ConfigValue::Id("opus".into())),
+            ],
+            "value_id のまま、その場で送る"
+        );
+
+        let cancelled =
+            |command_rx: &mut futures::channel::mpsc::UnboundedReceiver<SessionCommand>| {
+                std::iter::from_fn(|| command_rx.try_recv().ok())
+                    .any(|command| matches!(command, SessionCommand::Cancel))
+            };
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+        panel.update_in(cx, |panel, window, cx| {
+            assert!(panel.config_card.is_none(), "esc でカードを閉じる");
+            assert!(
+                panel.composer.read(cx).focus_handle(cx).is_focused(window),
+                "閉じたら composer へ戻る"
+            );
+        });
+        assert!(
+            !cancelled(&mut command_rx),
+            "カードを閉じる esc ではターンを止めない"
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(
+            cancelled(&mut command_rx),
+            "次の esc はいつもどおりターンを止める"
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 会話を始めた後はエージェントを変えない（Tab は効かない）。広告が無いまま会話が始まったら、チップは
+    /// 押せない（押せるのに何も出ない面を作らない・候補を捏造しない）。広告が届けば開ける。
+    #[gpui::test]
+    fn the_config_card_keeps_the_agent_after_the_conversation_starts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let path = init_test_settings(cx, "card-fixed");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update_in(cx, |panel, window, cx| {
+            let active = panel.active;
+            assert!(
+                panel.config_card_openable(cx),
+                "広告が無くても、会話の前ならエージェントを選ぶために開ける"
+            );
+            panel.threads[active]
+                .entries
+                .push(Entry::User("こんにちは".into()));
+            assert!(
+                !panel.config_card_openable(cx),
+                "広告も無く会話の後は開けない"
+            );
+            panel.open_config_card(window, cx);
+            assert!(panel.config_card.is_none());
+
+            panel.on_event(
+                active,
+                AgentEvent::Configs(vec![config(
+                    ConfigCategory::Model,
+                    "opus",
+                    &[("opus", "Opus 4.8"), ("sonnet", "Sonnet 5")],
+                )]),
+                cx,
+            );
+            panel.open_config_card(window, cx);
+            assert!(panel.config_card.is_some(), "広告が届けば開ける");
+            let agent = panel.threads[active].agent.clone();
+            panel.cycle_card_agent(1, cx);
+            assert_eq!(
+                panel.threads[active].agent, agent,
+                "会話の後は Tab でも変えない"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 会話の前は Tab で次のエージェントへ（今のエージェントのピルと同じ道・カードは開いたまま）。
+    /// 選べる一覧はログインの状態で変わるので、足したエージェント 2 つで必ず 2 つ以上にする。
+    #[gpui::test]
+    fn tab_in_the_config_card_switches_the_agent_before_the_conversation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_card_tab_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"agent_prewarm":false,"default_agent":"Alpha Harness",
+                "agent_servers":{"alpha":{"name":"Alpha Harness","command":"definitely-not-alpha"},
+                                 "beta":{"name":"Beta Harness","command":"definitely-not-beta"}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update_in(cx, |panel, window, cx| {
+            let active = panel.active;
+            panel.open_config_card(window, cx);
+            assert!(panel.config_card.is_some());
+            let choices = panel.selector_choices(Selector::Agent, cx);
+            assert!(choices.len() >= 2, "{:?}", choices.len());
+            let current = panel.selector_value(Selector::Agent);
+            let index = choices
+                .iter()
+                .position(|choice| choice.value == current)
+                .expect("今のエージェントは一覧に在る");
+            let expected = choices[(index + 1) % choices.len()].value.clone();
+            panel.cycle_card_agent(1, cx);
+            assert_eq!(panel.threads[active].agent, expected);
+            assert!(panel.config_card.is_some(), "カードは開いたまま");
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
     #[gpui::test]
     fn escape_in_composer_interrupts_the_running_turn(cx: &mut gpui::TestAppContext) {
         let settings_path = init_test_settings(cx, "escape-cancel");
@@ -16769,6 +18264,170 @@ PYEOF"#;
             assert_eq!(panel.open_menu, Some(Selector::Model));
         });
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 偽の ACP エージェント（Fast mode を boolean で広告する）。受けた `set_config_option` の params を
+    /// 1 行ずつ `argv[1]` のファイルへ書き、応答で更新後の一覧を返す。
+    const FAST_MODE_AGENT: &str = r#"
+import json, sys
+
+record = sys.argv[1]
+current = {"fast": False}
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def config_options():
+    return [
+        {"id": "model", "name": "Model", "category": "model", "type": "select",
+         "currentValue": "default",
+         "options": [{"value": "default", "name": "Default (recommended)"},
+                     {"value": "opus", "name": "Opus 4.8"}]},
+        {"id": "fast", "name": "Fast mode", "category": "model_config", "type": "boolean",
+         "currentValue": current["fast"],
+         "description": "Faster responses on supported models"},
+    ]
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"sessionId": "sess-1", "configOptions": config_options()}})
+    elif method == "session/set_config_option":
+        with open(record, "a") as out:
+            out.write(json.dumps({key: params[key] for key in ("configId", "type", "value")
+                                  if key in params}, sort_keys=True) + "\n")
+        current[params["configId"]] = params["value"]
+        send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": config_options()}})
+"#;
+
+    /// `Configs` が届くまで待つ（本物の `run_session` は別スレッドで動く）。
+    fn next_configs(
+        events: &mut futures::channel::mpsc::UnboundedReceiver<AgentEvent>,
+    ) -> AgentEvent {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(event @ AgentEvent::Configs(_)) => return event,
+                Ok(_) => {}
+                Err(futures::channel::mpsc::TryRecvError::Closed) => {
+                    panic!("セッションが先に終わった")
+                }
+                Err(futures::channel::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+            }
+        }
+        panic!("Configs が届かない");
+    }
+
+    /// カードで Fast mode（boolean）を切り替えると、本物の `run_session` を通って偽の ACP エージェントに
+    /// `session/set_config_option` の `type: "boolean"` で届き、エージェントの返事（更新後の一覧）で
+    /// スレッドの値が追従する。その agent の記憶（sticky）には `true` で残り、次のスレッドに載る。
+    #[gpui::test]
+    fn toggling_fast_mode_reaches_a_fake_agent(cx: &mut gpui::TestAppContext) {
+        let Some(python) = acp_client::find_in_path("python3") else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let settings_path = init_test_settings(cx, "fast-mode");
+        let record = std::env::temp_dir().join(format!(
+            "necoder_agent_fast_mode_{}_{}.jsonl",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let command = acp_client::AgentCommand::new(
+            python,
+            vec![
+                "-c".into(),
+                FAST_MODE_AGENT.into(),
+                record.display().to_string(),
+            ],
+            std::env::temp_dir(),
+        );
+        let (command_tx, command_rx) = futures::channel::mpsc::unbounded();
+        let (event_tx, mut event_rx) = futures::channel::mpsc::unbounded();
+        let session = std::thread::spawn(move || {
+            futures::executor::block_on(acp_client::run_session(
+                command,
+                acp_client::SessionPreferences::default(),
+                command_rx,
+                event_tx,
+            ))
+        });
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let active = panel.update(cx, |panel, _cx| {
+            panel.threads[panel.active].command_tx = Some(command_tx);
+            panel.active
+        });
+        let advertised = next_configs(&mut event_rx);
+        panel.update(cx, |panel, cx| {
+            panel.on_event(active, advertised, cx);
+            let thread = &panel.threads[active];
+            let fast = thread
+                .configs
+                .iter()
+                .find(|config| config.config_id == "fast")
+                .expect("boolean の設定も届く（捨てない）");
+            assert_eq!(option_value(thread, fast), ConfigValue::Bool(false));
+            // カードの Fast mode の行を押したのと同じ道。
+            panel.toggle_card_option("fast", cx);
+        });
+        let answered = next_configs(&mut event_rx);
+        panel.update(cx, |panel, cx| {
+            panel.on_event(active, answered, cx);
+            let thread = &panel.threads[active];
+            let fast = thread
+                .configs
+                .iter()
+                .find(|config| config.config_id == "fast")
+                .expect("返事の一覧にも在る");
+            assert_eq!(
+                fast.current(),
+                ConfigValue::Bool(true),
+                "エージェント側が on"
+            );
+            assert_eq!(option_value(thread, fast), ConfigValue::Bool(true));
+            assert!(thread.options_in_flight.is_empty(), "返事で確かめ終えた");
+            assert_eq!(
+                settings::get(cx).agent_config_defaults["claude"]["fast"],
+                "true",
+                "その agent の記憶に boolean のまま残る"
+            );
+            // 次のスレッドは覚えた値をセッションを開く時に合わせる（区分の鍵とは混ぜない）。
+            panel.add_thread(cx);
+            let fresh = &panel.threads[panel.active];
+            assert_eq!(fresh.options.get("fast").map(String::as_str), Some("true"));
+            assert!(!fresh.options.contains_key("model"));
+            // 広告に無い設定・種類の合わない値は送らない（捏造しない）。
+            panel.switch_thread(active, cx);
+            panel.set_config_option("context_window", ConfigValue::Id("1m".into()), cx);
+            panel.set_config_option("fast", ConfigValue::Id("on".into()), cx);
+            // セッションを閉じる（送信路を落とすと run_session が抜ける）。
+            panel.threads[active].command_tx = None;
+        });
+        session
+            .join()
+            .expect("セッションのスレッドが落ちない")
+            .expect("セッションは正常に終わる");
+        let received = std::fs::read_to_string(&record).expect("偽エージェントの記録を読める");
+        assert_eq!(
+            received.lines().collect::<Vec<_>>(),
+            vec![r#"{"configId": "fast", "type": "boolean", "value": true}"#],
+            "boolean のまま 1 回だけ届く"
+        );
+        let _ = std::fs::remove_file(record);
+        let _ = std::fs::remove_file(settings_path);
     }
 
     /// O16: 使わないと決めたエージェントはエージェントの選択肢に出さない。いまのスレッドの値だけは
@@ -18171,6 +19830,7 @@ PYEOF"#;
                     session_id: "other".into(),
                     resumed: true,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );
@@ -18206,6 +19866,7 @@ PYEOF"#;
                 session_id: "sess".into(),
                 resumed,
                 resumable: true,
+                steerable: false,
             };
             panel.on_event(active, started(true), cx);
             assert!(
@@ -18337,6 +19998,7 @@ PYEOF"#;
                     session_id: "session-1".into(),
                     resumed: false,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );
@@ -18384,6 +20046,7 @@ PYEOF"#;
                     session_id: "session-1".into(),
                     resumed: true,
                     resumable: true,
+                    steerable: false,
                 },
                 cx,
             );

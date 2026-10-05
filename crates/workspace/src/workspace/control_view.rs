@@ -39,6 +39,8 @@ pub(super) enum AttentionKind {
         phase: TaskPhase,
         digest: Option<SharedString>,
         tier2: Option<SharedString>,
+        /// 統合先の手元の変更で統合を断った理由（ファイルの名指し・merge_ready の間だけ・2026-10-03）。
+        blocked: Option<SharedString>,
     },
     /// スレッドの Done 未確認ラッチ（「確認」で Done→Idle の確認済み遷移・herdr の done/idle 区別）。
     DoneUnread {
@@ -195,8 +197,14 @@ impl Workspace {
                 AttentionKind::Failed { digest, .. } => {
                     i18n::t!("control.facts_failed", "digest" => digest.clone().unwrap_or_default())
                 }
-                AttentionKind::Review { phase, digest, .. } => {
-                    format!("{}: {}", phase.as_str(), digest.clone().unwrap_or_default())
+                AttentionKind::Review {
+                    phase,
+                    digest,
+                    blocked,
+                    ..
+                } => {
+                    let detail = blocked.clone().or_else(|| digest.clone());
+                    format!("{}: {}", phase.as_str(), detail.unwrap_or_default())
                 }
                 AttentionKind::DoneUnread { digest, .. } => {
                     i18n::t!("control.facts_done_unread", "digest" => digest.clone().unwrap_or_default())
@@ -340,6 +348,16 @@ impl Workspace {
                             phase: slot.task_space.phase,
                             digest,
                             tier2,
+                            // 統合先の手元の変更で統合を断った Task は、その理由（ファイルの名指し）を
+                            // 添える（merge_ready の間・もう一度「統合」を押すまで・2026-10-03）。
+                            blocked: (slot.task_space.phase == TaskPhase::MergeReady)
+                                .then(|| {
+                                    self.chrome
+                                        .task_integration_blocked
+                                        .get(&slot.task_space.id)
+                                })
+                                .flatten()
+                                .cloned(),
                         },
                     }),
                     _ => {}
@@ -812,6 +830,7 @@ impl Workspace {
                 phase,
                 digest,
                 tier2,
+                blocked,
             } => {
                 let phase = *phase;
                 let space = self.project_sessions.projects[session_index]
@@ -852,6 +871,16 @@ impl Workspace {
                             )
                         }),
                 )
+                // 統合先の手元の変更で統合を断った理由。ファイル名が肝なので切らずに折り返す
+                // （サイドバー 256px では要約の行に収まらない・2026-10-03）。
+                .when_some(blocked.clone(), |card, blocked| {
+                    card.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.warn)
+                            .child(blocked),
+                    )
+                })
                 .children(tier2_line(tier2, &theme))
                 .child(
                     div()

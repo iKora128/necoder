@@ -34,9 +34,13 @@ cli_shim.workspace = true
 # 設定の検索欄（O27・IME の正しい 1 行入力）
 editor_view.workspace = true
 gpui.workspace = true
+# AI エージェントのページで SSH 先の状態を読む（workspace が開いている SSH のプロジェクトの接続を渡す）
+host.workspace = true
 i18n.workspace = true
 # Dev.app（検証用）では常用と共有する置き場（`ne` のシム・skill）を書き換えない
 paths.workspace = true
 settings_core.workspace = true
 serde_json.workspace = true
 theme_core.workspace = true
+# コードの書体（AI エージェントのページのログイン・入れ方のコマンド）
+ui.workspace = true

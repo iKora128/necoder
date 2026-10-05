@@ -71,7 +71,7 @@ pub(crate) const FLEET_COMMANDS: &[FleetCommand] = &[
     FleetCommand {
         name: "create",
         arguments: "[root] [title]",
-        summary: "統合先の HEAD から task/* ブランチと worktree を作り、台帳に登録する（出力の id を以後の引数に使う）",
+        summary: "統合先から task/* ブランチと worktree を作り、台帳に登録する。Task の中で打つとそのブランチから切った子 Task になる。necoder 起動中は Fleet にも出る（出力の id を以後の引数に使う）",
         needs_gui: false,
         human_only: false,
     },
@@ -324,13 +324,65 @@ pub(crate) fn recommend(arguments: &Value) -> Result<Value> {
     )
 }
 
-pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
-    let root = paths::canonicalize(root).context("IntegrationSpace を開けません")?;
+/// 呼び出し元の worktree から決まる、新しい Task の切り方（[`task_origin`]）。
+#[derive(Debug, PartialEq, Eq)]
+struct TaskOrigin {
+    /// worktree の置き場所と台帳の基準（メインの作業ツリー）。
+    integration_root: PathBuf,
+    /// 新しいブランチの起点（呼び出し元が Task ならそのブランチ・統合先なら既定）。
+    base: Option<String>,
+    /// 親の Task の id（呼び出し元が Task の時だけ）。
+    parent: Option<String>,
+}
+
+/// 呼び出し元が linked worktree（Task）なら、メインの作業ツリーを基準に、そのブランチを起点・親にする。
+/// メインの作業ツリー（統合先）や detached HEAD の linked worktree なら、従来どおり親なし・既定の起点。
+fn task_origin(host: &dyn host::Host, caller: &Path) -> TaskOrigin {
+    if !project::is_linked_worktree_on(host, caller) {
+        return TaskOrigin {
+            integration_root: caller.to_path_buf(),
+            base: None,
+            parent: None,
+        };
+    }
+    let integration_root =
+        project::main_worktree_root_on(host, caller).unwrap_or_else(|| caller.to_path_buf());
+    let base = project::git_current_branch_on(host, caller);
+    let parent = base
+        .is_some()
+        .then(|| project::stable_worktree_id_on(host, caller));
+    TaskOrigin {
+        integration_root,
+        base,
+        parent,
+    }
+}
+
+/// Task を切る（`ne fleet create` / MCP `fleet_create_task`）。`root` は呼び出し元の worktree。
+///
+/// 呼び出し元が Task（linked worktree）なら、そのブランチを起点にして親として記録する（O21・系譜で
+/// 親の下に出る）。worktree の置き場所はメインの作業ツリー基準（`<repo>-worktrees/`）＝Task の中に
+/// Task の置き場を作らない。GUI 稼働中は台帳への登録を GUI に頼み、＋ Task と同じく slot・Fleet の
+/// セル・担当の起動まで行わせる（`prompt` = 担当への最初の指示。空なら起こさない）。
+pub(crate) fn create_task(
+    root: &Path,
+    title: &str,
+    prompt: Option<&str>,
+) -> Result<TaskSpaceRecord> {
+    let caller = paths::canonicalize(root).context("IntegrationSpace を開けません")?;
     let host = LocalHost::shared();
-    let base_oid =
-        project::git_head_oid_on(host.as_ref(), &root).context("Git repository ではありません")?;
-    let repository_id = project::repository_id_on(host.as_ref(), &root);
-    let (target, branch, setup_failure) = project::create_named_task_on(host.as_ref(), &root, title, true)?;
+    let base_oid = project::git_head_oid_on(host.as_ref(), &caller)
+        .context("Git repository ではありません")?;
+    let origin = task_origin(host.as_ref(), &caller);
+    let repository_id = project::repository_id_on(host.as_ref(), &origin.integration_root);
+    let start = project::TaskStart {
+        branch: None,
+        base: origin.base,
+        skip_setup: false,
+    };
+    let (target, branch, setup_failure) =
+        project::create_task_with_on(host.as_ref(), &origin.integration_root, title, &start)?;
+    let parent = origin.parent;
     let target = paths::canonicalize(&target).unwrap_or(target);
     let now = unix_ms();
     let record = TaskSpaceRecord {
@@ -345,26 +397,29 @@ pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
         head_oid: Some(base_oid),
         result_summary: setup_failure,
         depends_on: Vec::new(),
-        parent: None,
+        parent,
         created_at: now,
         updated_at: now,
     };
     match open_storage() {
         Ok(storage) => {
             storage.upsert_task_space(&record)?;
+            storage.set_task_parent(&record.id, record.parent.as_deref())?;
             storage.append_task_event(
                 &record.id,
                 "task_created",
                 &json!({ "source": "orchestration_api", "root": record.root }).to_string(),
             )?;
+            Ok(record)
         }
-        // GUI 稼働中（DB ロック）: 台帳への登録は GUI（単一 writer）に頼む。worktree は作成済み。
+        // GUI 稼働中（DB ロック）: GUI（単一 writer）に登録と画面への追加を頼む。worktree は作成済み。
         Err(error) if is_lock_error(&error) => {
-            gui_request("record_task", record_json(&record))?;
+            let mut params = record_json(&record);
+            params["prompt"] = json!(prompt.unwrap_or_default());
+            record_from_json(&gui_request("adopt_task", params)?)
         }
-        Err(error) => return Err(error),
+        Err(error) => Err(error),
     }
-    Ok(record)
 }
 
 /// Turso は排他ロック＝GUI 稼働中は直接 DB を開けない。その時は GUI IPC（単一 writer）へ回す。
@@ -855,7 +910,7 @@ fn run(args: &[String]) -> Result<()> {
             .unwrap_or(600)
     };
     match argument(0) {
-        Some("create") => print_record(&create_task(&root_at(1), argument(2).unwrap_or("Task"))?),
+        Some("create") => print_record(&create_task(&root_at(1), argument(2).unwrap_or("Task"), None)?),
         Some("list") => {
             let values: Vec<Value> = list_tasks(&root_at(1))?.iter().map(record_json).collect();
             print_json(&Value::Array(values));
@@ -956,6 +1011,62 @@ fn run(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task の中から切ると、メインの作業ツリー基準・そのブランチが起点・その Task が親になる。
+    /// 統合先から切るのは従来どおり（親なし・既定の起点）。
+    #[test]
+    fn task_origin_branches_from_the_calling_task() {
+        let base = std::env::temp_dir().join(format!("necoder_origin_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let main = base.join("repo");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&main, &["init", "-q", "-b", "main"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        git(&main, &["config", "user.email", "t@example.com"]);
+        git(&main, &["config", "user.name", "tester"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let parent = base.join("repo-worktrees").join("parent");
+        let parent_arg = parent.to_string_lossy().to_string();
+        git(
+            &main,
+            &["worktree", "add", "-q", "-b", "task/parent", &parent_arg],
+        );
+        let main = paths::canonicalize(&main).unwrap();
+        let parent = paths::canonicalize(&parent).unwrap();
+        let host = LocalHost::shared();
+
+        let from_task = task_origin(host.as_ref(), &parent);
+        assert_eq!(
+            paths::canonicalize(&from_task.integration_root).unwrap(),
+            main,
+            "置き場所はメインの作業ツリー基準"
+        );
+        assert_eq!(from_task.base.as_deref(), Some("task/parent"));
+        assert_eq!(
+            from_task.parent,
+            Some(project::stable_worktree_id_on(host.as_ref(), &parent))
+        );
+
+        let from_main = task_origin(host.as_ref(), &main);
+        assert_eq!(
+            from_main,
+            TaskOrigin {
+                integration_root: main.clone(),
+                base: None,
+                parent: None,
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn record(
         id: &str,
