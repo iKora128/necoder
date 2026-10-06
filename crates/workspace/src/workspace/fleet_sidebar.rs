@@ -32,8 +32,6 @@ struct TaskRow {
     tokens: u32,
     /// base からの `+N −M`（git 更新のキャッシュ。0/0 と未取得は出さない）。
     shortstat: Option<(usize, usize)>,
-    /// レール上の並び（`⌘N` = `ActivateProjectN` と一致させる。行の並び順ではない＝嘘をつかない）。
-    rail_shortcut: Option<usize>,
     /// いちばん最近の依頼の時刻（並べ替え「最近」の鍵・O21）。
     last_input_at_ms: Option<i64>,
     /// Captain の分解案を承認して作った Task（題名の前に `⚑`・FLEET-V2 §5.2）。
@@ -786,8 +784,6 @@ impl Workspace {
                     .sessions
                     .get(index)
                     .and_then(|session| session.repository.shortstat()),
-                // レールの並び = ⌘1..9（`ActivateProjectN`）。10 本目以降は出さない。
-                rail_shortcut: (index < 9).then_some(index + 1),
                 last_input_at_ms: statuses
                     .iter()
                     .filter_map(|(_, _, status)| status.last_input_at_ms)
@@ -1345,16 +1341,7 @@ impl Workspace {
                                     .items_center()
                                     .gap(px(4.))
                                     .children(self.shortstat_chips(row.shortstat)),
-                            )
-                            // ⌘N は**レールの並び**（`ActivateProjectN`）。行の並びではない＝嘘をつかない。
-                            .when_some(row.rail_shortcut, |element, n| {
-                                element.child(
-                                    div()
-                                        .text_size(px(9.))
-                                        .text_color(theme.fg2)
-                                        .child(SharedString::from(format!("⌘{n}"))),
-                                )
-                            }),
+                            ),
                     )
                     .child(div().id(("stage-pin", seq)).flex_none().text_size(px(12.)).text_color(color).cursor_pointer().child("◫")
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
@@ -1834,7 +1821,6 @@ mod tests {
             digest: digest.map(|text| SharedString::from(text.to_string())),
             tokens: 0,
             shortstat: None,
-            rail_shortcut: None,
             last_input_at_ms: None,
             captain_origin: false,
         }
@@ -2318,8 +2304,6 @@ mod tests {
                     Some(format!("いま何を {index}").as_str()),
                     "3 段目 = いま何を / どう終わったか"
                 );
-                // ⌘N は**レールの並び**（`ActivateProjectN`）＝行の並びではない（嘘をつかない）。
-                assert_eq!(row.rail_shortcut, Some(index + 1));
             }
 
             // アーカイブ済みは消える（既存の規律）。

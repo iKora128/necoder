@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rail: moving between projects skips Task worktrees**: ⌃⌘↑↓, ↑↓ after clicking the rail, and ⌘1–⌘9 now count only the projects shown on the rail. Before, they also counted the worktrees of Tasks made by Captain or + Task, which are not on the rail. Moving down the rail could then land inside a Task's worktree while the rail still lit the same project. From inside a Task, these keys count from that project's place on the rail. Task rows on the Fleet sidebar no longer show ⌘N, because Tasks have no number on the rail. Click a row to open a Task.
+
+### 日本語
+
+#### 修正
+
+- **レール：プロジェクトの移動で Task の worktree を飛ばす**：⌃⌘↑↓、レールを押した後の ↑↓、⌘1〜⌘9 は、レールに並ぶプロジェクトだけを数えるようになりました。これまでは Captain や ＋ Task が作った Task の worktree まで数えていましたが、これはレールに出ません。そのため、レールを下へ移ると、点灯は同じプロジェクトのまま、中身だけが Task の worktree に入ることがありました。Task の中に居る時は、レールで点いているそのプロジェクトの位置から数えます。Task はレールの番号を持たないので、Fleet サイドバーの Task 行には ⌘N を出さなくなりました。Task へは行を押して入ります。
+
 ## [0.1.25] - 2026-10-06
 
 > **This is a test release.** It contains everything in v0.1.24, and some of the new features have not been checked on a real machine yet. It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.

@@ -1242,7 +1242,9 @@ for line in sys.stdin:
         let command = crate::AgentCommand::new(deployed.command, Vec::new(), std::env::temp_dir());
         let opened = futures::executor::block_on(crate::probe_session(
             &command,
-            std::time::Duration::from_secs(10),
+            // 期限は時間切れで落ちないための上限で、通れば着いた時点で返る。同じ形の
+            // `custom::tests::a_custom_agent_opens_a_session` が Windows の CI で 10 秒を超えて落ちた。
+            std::time::Duration::from_secs(60),
         ));
         assert!(opened, "置いたコマンドで initialize → session/new まで通る");
     }

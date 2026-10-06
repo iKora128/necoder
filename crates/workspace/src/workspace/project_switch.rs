@@ -183,8 +183,25 @@ impl Workspace {
         }
     }
 
-    /// レール上下への循環切替（⌃⌘↑↓、およびレールが最後に触った面なら ⌘{ ⌘}）。
-    /// `step` は +1 で下（次）・-1 で上（前）。1 個しか無ければ何もしない。行き先を見ずに
+    /// ⌘1..9: レールの上から `position` 番目（0 始まり）のプロジェクトへ。レールに出ていない
+    /// Task worktree は数えない（[`Self::rail_slots`]）。その番号の枠が無ければ何もしない。
+    pub(crate) fn switch_rail_project_flashed(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.rail_slots().get(position).copied() else {
+            return;
+        };
+        self.switch_project_flashed(index, window, cx);
+    }
+
+    /// レール上下への循環切替（⌃⌘↑↓、およびレールを押した後の ↑/↓）。`step` は +1 で下（次）・
+    /// -1 で上（前）。巡るのは**レールに並ぶプロジェクトだけ**で、Captain や ＋ Task が作った
+    /// Task worktree（レールに出ない slot）は飛ばす。以前は全 slot を巡っていたので、末尾に足された
+    /// Task へ入り込み、レールの点灯は動かないまま中身だけが worktree に替わっていた（2026-10-07
+    /// 本人指摘）。Task に居る時は、レールで点いているそのリポジトリの枠から数える。行き先を見ずに
     /// 切り替えるキー操作なので、着地先の名前を中央にフラッシュする。
     pub(crate) fn switch_adjacent_project(
         &mut self,
@@ -192,12 +209,33 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let count = self.project_sessions.projects.len();
-        if count < 2 {
-            return;
+        let rail = self.rail_slots();
+        let anchor = self.rail_anchor(self.project_sessions.active);
+        if let Some(target) = adjacent_rail_slot(&rail, anchor, step) {
+            self.switch_project_flashed(target, window, cx);
         }
-        let target = (self.project_sessions.active as isize + step).rem_euclid(count as isize);
-        self.switch_project_flashed(target as usize, window, cx);
+    }
+
+    /// レールに枠が並ぶ slot の添字（上から順）。レール = リポジトリ単位で、Task worktree は
+    /// 載せない（`render_rail`）。レールのキー操作（⌘1..9・⌃⌘↑↓・↑/↓）はここに並ぶ物だけを数える。
+    pub(crate) fn rail_slots(&self) -> Vec<usize> {
+        self.project_sessions
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.task_space.is_integration())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// slot がレールのどの枠に当たるか（`projects` の添字）。統合先はその枠そのもの。Task は
+    /// 同じリポジトリの統合先（メインの作業ツリー・[`Self::integration_slot_for`]）。無ければ `None`。
+    fn rail_anchor(&self, index: usize) -> Option<usize> {
+        let slot = self.project_sessions.projects.get(index)?;
+        if slot.task_space.is_integration() {
+            return Some(index);
+        }
+        self.integration_slot_for(slot.repository_key())
     }
 
     /// アクティブプロジェクトの名前を中央に大きくフラッシュ表示する（約 1 秒で自動消灯）。
@@ -492,4 +530,61 @@ impl Workspace {
     }
 
     // ── タブ/スレッドのショートカット（⌘W / ⌘⇧A） ──
+}
+
+/// レールの前後の行き先（`projects` の添字）。`rail` はレールに並ぶ slot の添字（上から順）、
+/// `anchor` は今いる枠。枠が無い（統合先の無い Task に居る）時は、↓ なら先頭・↑ なら末尾から
+/// 入る。今の枠のほかに行き先が無ければ `None`（何もしない）。
+fn adjacent_rail_slot(rail: &[usize], anchor: Option<usize>, step: isize) -> Option<usize> {
+    let position = anchor.and_then(|anchor| rail.iter().position(|&index| index == anchor));
+    let Some(position) = position else {
+        return if step >= 0 { rail.first() } else { rail.last() }.copied();
+    };
+    if rail.len() < 2 {
+        return None;
+    }
+    let target = (position as isize + step).rem_euclid(rail.len() as isize) as usize;
+    rail.get(target).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adjacent_rail_slot;
+
+    /// レール = [0, 1, 4]（2・3 は末尾に足された Task worktree でレールに出ない）。
+    #[test]
+    fn adjacent_rail_slot_skips_slots_that_are_not_on_the_rail() {
+        let rail = [0, 1, 4];
+        assert_eq!(
+            adjacent_rail_slot(&rail, Some(1), 1),
+            Some(4),
+            "Task を飛ばす"
+        );
+        assert_eq!(
+            adjacent_rail_slot(&rail, Some(4), 1),
+            Some(0),
+            "末尾から先頭へ"
+        );
+        assert_eq!(
+            adjacent_rail_slot(&rail, Some(0), -1),
+            Some(4),
+            "先頭から末尾へ"
+        );
+        assert_eq!(adjacent_rail_slot(&rail, Some(4), -1), Some(1));
+    }
+
+    #[test]
+    fn adjacent_rail_slot_without_a_place_on_the_rail_enters_from_the_edge() {
+        let rail = [0, 1, 4];
+        assert_eq!(adjacent_rail_slot(&rail, None, 1), Some(0));
+        assert_eq!(adjacent_rail_slot(&rail, None, -1), Some(4));
+        assert_eq!(adjacent_rail_slot(&[3], None, 1), Some(3));
+        assert_eq!(adjacent_rail_slot(&[], None, 1), None);
+    }
+
+    #[test]
+    fn adjacent_rail_slot_with_one_project_stays() {
+        assert_eq!(adjacent_rail_slot(&[0], Some(0), 1), None);
+        assert_eq!(adjacent_rail_slot(&[0], Some(0), -1), None);
+    }
 }
