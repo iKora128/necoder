@@ -5,11 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-10-07
+
+> **This is a test release.** It contains everything in [v0.1.25](https://github.com/iKora128/necoder/releases/tag/v0.1.25), which was also a test release. It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.
+
+This release fixes moving along the rail. The keys that switch projects no longer step into the worktrees of Fleet Tasks.
+
 ### Fixed
 
 - **Rail: moving between projects skips Task worktrees**: ⌃⌘↑↓, ↑↓ after clicking the rail, and ⌘1–⌘9 now count only the projects shown on the rail. Before, they also counted the worktrees of Tasks made by Captain or + Task, which are not on the rail. Moving down the rail could then land inside a Task's worktree while the rail still lit the same project. From inside a Task, these keys count from that project's place on the rail. Task rows on the Fleet sidebar no longer show ⌘N, because Tasks have no number on the rail. Click a row to open a Task.
 
 ### 日本語
+
+> **テストリリースです。** [v0.1.25](https://github.com/iKora128/necoder/releases/tag/v0.1.25)（これもテストリリース）の変更をすべて含みます。自動更新では配信しません。試してくださる方は、この Release ページから手動で入れてください。不具合を見つけたら Issue で教えてもらえると助かります。
+
+レールの移動を直した版です。プロジェクトを切り替えるキーが、Fleet の Task の worktree に入らなくなりました。
 
 #### 修正
 
