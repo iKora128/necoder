@@ -66,7 +66,7 @@ agent:
   pill_agent_locked: The agent can't be changed after the conversation starts. Create a new thread to use another AI
   pill_mode: Permission mode (edit/run approval level)
   pill_model: Model
-  pill_effort: Reasoning effort
+  pill_effort: Effort
   pill_awaiting_agent: Available once the agent connects
   card_chip_tip: Model, effort, Fast and other settings  ⌘/
   card_tab_hint: to switch
@@ -904,8 +904,8 @@ settings:
   connections_agents_sub: The chosen connection applies from the next session the agent starts (running threads keep theirs). When Claude Code uses another company's connection, the settings chip under the composer reads "Claude Code · <connection>".
   connections_other_agents: Codex, GitHub Copilot, Qwen Code, Kimi CLI, Grok Build and other added agents can't take a connection yet.
   connection_refusal_protocol: "only takes %{protocol} endpoints"
-  connection_refusal_only_deepseek: DeepSeek Harness only takes the DeepSeek API connection (choose other providers in dsh's own settings)
-  connection_refusal_opencode: not one of OpenCode's built-in providers (add it in OpenCode's settings)
+  connection_refusal_only_deepseek: DeepSeek Harness only takes the DeepSeek API connection (choose other companies in dsh's own settings)
+  connection_refusal_opencode: not a company OpenCode knows out of the box (add it in OpenCode's settings)
   connection_refusal_opencode_url: OpenCode can't take a connection with an edited base URL (it connects to its own default endpoint)
   connection_refusal_missing_key: the key is not in the keychain (paste it from Settings › Connections › Edit…)
   connection_protocol_anthropic: Anthropic-compatible
@@ -946,7 +946,7 @@ settings:
   connection_key: API key
   connection_paste_key: Paste from clipboard
   connection_key_note: The key goes into the OS keychain, never into settings.json, and is never shown (only its last 4 characters).
-  connection_docs: "Provider's guide: %{url}"
+  connection_docs: "The company's setup guide: %{url}"
   connection_saving: Saving…
   mcp_source_necoder: necoder settings
   mcp_source_codex: found in Codex CLI
@@ -1911,7 +1911,7 @@ usage:
   stats_empty: Nothing recorded yet. Turns are recorded once an agent reports usage.
   stats_loading: Loading…
   stats_failed: "Couldn't read usage: %{error}"
-  stats_note: Tokens and estimated cost are what each agent reported per turn. Cost is Claude Code's estimate (USD), not the amount you are billed (your provider's billing page is the source of truth). Unreported values show — (not 0), and totals that only some turns reported are marked ≥. Codex reports no cost, and its tokens cover only the last request of each turn. Local logs such as ~/.claude are not read.
+  stats_note: Tokens and estimated cost are what each agent reported per turn. Cost is Claude Code's estimate (USD), not the amount you are billed (each company's billing page is the source of truth). Unreported values show — (not 0), and totals that only some turns reported are marked ≥. Codex reports no cost, and its tokens cover only the last request of each turn. Local logs such as ~/.claude are not read.
 ports:
   title: Open ports
   loading: Reading…

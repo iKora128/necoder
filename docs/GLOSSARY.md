@@ -178,6 +178,7 @@
 - **session** — `ProjectSession`（1 project の UI/controller 束）と ACP `session`（LLM 接続）は別物。前者を「session」と略さない。
 - **workspace ≠ フォルダ** — 窓/シェル全体。1 フォルダ = project。
 - **panel** — ドックの `*_panel`（agent / git / todo …）を指す。Fleet のタイルは **cell**（"panel" と呼ばない）。
+- **provider / プロバイダ** — 向きが二通りある。zeron の UI の provider はハーネス＝necoder の**エージェント**（`AgentKind`）、ACP の `providers/*` と issue #38 の provider は**接続**の側。UI の宛先は**エージェント・接続・モデル・思考量**の 4 語で言い、provider / プロバイダは UI に出さない（code の識別子と ACP のメソッド名だけ・2026-10-02 本人）。
 
 ## 廃止・禁止語（見つけたら置換）
 
@@ -198,6 +199,9 @@
 | necoder 独自のモデル綴り（`claude-opus-5` 等の静的一覧） | ACP の広告 | 第三の語彙を作ると必ず広告と食い違う。接続前は候補を出さない |
 | トークン台帳 / `token_ledger` | 使用量（`turn_usage`） | `threads.tokens_used` は文脈窓の使用量で累計ではなかった（O11 で削除） |
 | クォータ / quota（UI の語として） | レート制限 / 使用量 | adapter の `_meta.quota` は「そのターンに使ったトークン」で上限ではない。上限は レート制限、使った量は 使用量 |
+| provider / プロバイダ（UI の語として） | エージェント（ハーネスの意味）/ 接続（API と契約の意味） | 向きが二通りある（上の「二義に注意」）。code の識別子と ACP のメソッド名（`providers/set` 等）にだけ残す（2026-10-02 本人） |
+| 推論の深さ（effort） | 思考量（英語 UI は Effort） | 宛先の 4 語に揃える（2026-10-02 本人）。設定のカードと同じ語 |
+| プリセット（UI の語・接続のひな形の意味） | ひな形 | issue #38 §2.2 の語だが、Chat のプリセット（`SessionPreset`）と同じ語になる（2026-10-02 本人）。code の `connections::Preset` はそのまま |
 
 ## 正の所在（どこを直すか）
 
