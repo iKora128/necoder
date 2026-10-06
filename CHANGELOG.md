@@ -5,20 +5,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.25] - 2026-10-06
+
+> **This is a test release.** It contains everything in v0.1.24, and some of the new features have not been checked on a real machine yet. It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.
+
+This release adds **connections**, which run an agent on another company's API or coding plan instead of its own login. A queued message can now steer the running turn instead of interrupting it, and the Agent, Model and Effort pills under the composer are now one **settings card** that also offers on/off settings such as Fast mode. Settings › AI Agents lists every agent on one card.
+
 ### Added
 
 - **Manual: Pi and DeepSeek Harness**: The manual now explains how to add Pi and DeepSeek Harness, how to sign in to each, and what works differently from the built-in agents. The DeepSeek Harness example sets `DSH_MODEL`, the variable `dsh-acp` reads, instead of `DEEPSEEK_MODEL`.
-- **Connections**: Run an agent on another company's API or coding plan instead of its own login. In Settings › Connections, add a connection from a template (GLM Coding Plan, Kimi Code, Kimi API, MiniMax, Qwen Coding Plan, Qwen API, Xiaomi MiMo, DeepSeek API, OpenRouter, Ollama, or any other OpenAI- or Anthropic-compatible API), paste its API key from the clipboard, and choose which connection each agent uses. The key goes into the OS keychain and never into settings.json, and it is never shown on screen. necoder never calls an API with it; it only hands it to the agent it starts. Claude Code gets the connection through its adapter's `providers/set` (older adapters get environment variables), OpenCode through its built-in provider, and DeepSeek Harness through its DeepSeek route. The settings chip under the composer names the connection, for example "Claude Code · GLM Coding Plan". Connections are not passed to agents started over SSH, and Linux can't store keys yet.
+- **Connections**: Run an agent on another company's API or coding plan instead of its own login. In Settings › Connections, add a connection from a template (GLM Coding Plan, Kimi Code, Kimi API, MiniMax, Qwen Coding Plan, Qwen API, Xiaomi MiMo, DeepSeek API, OpenRouter, Ollama, or any other OpenAI- or Anthropic-compatible API), paste its API key from the clipboard, and choose which connection each agent uses. The key goes into the OS keychain and never into settings.json, and it is never shown on screen. necoder never calls an API with it; it only hands it to the agent it starts. Claude Code gets the connection through its adapter's `providers/set` (older adapters get environment variables), OpenCode as one of the companies it knows out of the box, and DeepSeek Harness through its DeepSeek route. The settings chip under the composer names the connection, for example "Claude Code · GLM Coding Plan". Connections are not passed to agents started over SSH, and Linux can't store keys yet.
 - **AI Agents: check an SSH host**: At the top of Settings › AI Agents, pick the host of an SSH project open in this window to see whether each agent runs there and which version it has. necoder runs one read-only command over that project's connection (`command -v`, `package.json` versions, the npx cache, and whether sign-in files and API key variables exist). It doesn't start any CLI, read credentials, or open a new SSH connection.
+- **Explorer: a menu on the blank area**: Right-click outside the rows, even in an empty folder, to open a menu for that folder: the root in the tree view, the column's folder in the column view, and the current folder in the icon view. It offers New file, New folder, Reveal in Finder, Find in folder and Copy path (Upload into this folder… on an SSH project).
 
 ### Changed
 
 - **Fleet: integrate when the base has unrelated local changes**: Integrate no longer stops just because the base (your main worktree) has uncommitted changes or untracked files. If the Task does not touch the files you changed, it integrates and leaves your changes exactly as they were. It still stops when the Task touches a file you changed, when a file the Task adds would land on an untracked file, or when the base has staged changes. The toast and the Attention card now name those files.
+- **Fleet: Tasks an agent creates appear on the Fleet**: A Task an agent creates with `fleet_create_task` (MCP) or `ne fleet create` now gets a card on the Fleet, like one made with + Task. Created from inside a Task, it becomes that Task's child, starts from that Task's branch, and its worktree sits next to the main worktree's other Tasks. `fleet_create_task` takes an optional `prompt`, the first instruction for the new Task's agent; without it, the agent isn't started.
 - **"Now" on a queued message steers the running turn**: If the agent supports it (Claude Code and Codex), the button on a queued message is now **Steer now**. It hands the message to the running turn instead of interrupting it, so work in progress, such as a running command, is not thrown away. The command finishes, and then the agent reads your message. The message appears in the conversation where the agent took it, and the turn continues as one turn. Agents that do not support it keep **Interrupt & send**. Slash commands are always sent that way, because they only work at the start of a turn.
 - **Settings card under the composer**: The Agent, Model and Effort pills under the composer are now one chip. Click it or press ⌘/ in the composer to open a card. The card shows every setting the agent advertises, including on/off settings such as Claude Code's and Codex's Fast mode, which you could not choose before. Press ↑↓ for the model list, ←→ to change the effort, Tab to switch the agent (before the conversation starts) and Esc to close. The effort is a digital meter whose LEDs light up to the chosen level; the agent's own default sits off the scale. The chip shows only values that differ from the agent's defaults, such as `Opus 4.8 · High · ⚡`. The permission mode stays as its own pill next to the chip. Fast mode and other settings are remembered per agent, like the model and effort.
 - **Model lists follow the connection and the login**: The model, effort and mode choices shown before a session starts are kept per connection and per login. A new tab no longer offers another connection's models, or the models of an account you have logged out of.
 - **AI Agents: one list**: Built-in agents, agents you added with your own command, and agents added from the ACP registry now sit on one card. Each row says whether the agent runs on this machine or what's missing (node, uv, the CLI, a sign-in, or your command), the version you have next to the registry's (and whether the next start moves to it), and whether it's on. Versions are read from files only. Click a row to see its role (default, Captain), launch settings, account, and the commands to sign in and install, with Copy.
 - **AI Agents: the last agent stays on**: You can't turn off or remove the last agent that's on, so the composer always has an agent to pick.
+
+### Fixed
+
+- **Fleet: Tasks from a Captain's split stay in the lineage**: Tasks made from an approved split could be treated as another project and left out of the main worktree's lineage, because an old repository id stored in the task ledger overwrote the one git reports. necoder now keeps git's id and rewrites the stored one.
+- **Fleet: Tasks stay in the lineage after `git init`**: If you opened a folder that wasn't a git repository and an agent then ran `git init`, Tasks cut afterwards were left out of the main worktree's lineage until you restarted necoder. necoder now reads the repository id again when the folder becomes a git repository.
+- **Explorer: typing a name after choosing from a menu**: After New file or Rename… in a right-click menu, typing could go nowhere, because the click also reached the explorer and took the focus back. In the column and icon views, New file and Rename… now show a name field too, and menus stay inside the window.
 
 ### Security
 
@@ -26,20 +40,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ### 日本語
 
+> **テストリリースです。** v0.1.24 の変更をすべて含み、新しい機能の中にはまだ実機で確かめていない所があります。自動更新では配信しません。試してくださる方は、この Release ページから手動で入れてください。不具合を見つけたら Issue で教えてもらえると助かります。
+
+エージェントを、自分のログインではなく各社の API やコーディングプランで動かせる**接続**を足した版です。送信待ちの文は、実行中のターンを中断せずに差し込めるようになりました。composer の下の Agent・Model・Effort のピルは 1 枚の**設定のカード**にまとまり、Fast mode のような on/off の設定も選べます。設定 › AI エージェントは、全エージェントを 1 枚の一覧に並べます。
+
 #### 追加
 
 - **マニュアル：Pi と DeepSeek Harness**：Pi と DeepSeek Harness の足し方、それぞれのログインのしかた、組み込みのエージェントとの違いをマニュアルに書きました。DeepSeek Harness の例は、`dsh-acp` が読まない `DEEPSEEK_MODEL` をやめて `DSH_MODEL` にしました。
-- **接続**：エージェントを、自分のログインではなく各社の API やコーディングプランで動かせます。設定 › 接続 で、ひな形（GLM Coding Plan・Kimi Code・Kimi API・MiniMax・Qwen Coding Plan・Qwen API・Xiaomi MiMo・DeepSeek API・OpenRouter・Ollama・その他の OpenAI 互換 / Anthropic 互換）から接続を足し、API キーをクリップボードから貼って、エージェントごとに使う接続を選びます。キーは OS のキーチェーンに入り、settings.json には書かず、画面にも出しません。necoder はこのキーで API を呼ばず、起こすエージェントに渡すだけです。Claude Code にはアダプタの `providers/set`（古いアダプタには環境変数）、OpenCode には組み込みのプロバイダ、DeepSeek Harness には DeepSeek の経路で渡します。composer の下の設定のチップに「Claude Code · GLM Coding Plan」のように接続の名前が出ます。SSH 先で起こすエージェントには渡しません。Linux はまだキーを保存できません。
+- **接続**：エージェントを、自分のログインではなく各社の API やコーディングプランで動かせます。設定 › 接続 で、ひな形（GLM Coding Plan・Kimi Code・Kimi API・MiniMax・Qwen Coding Plan・Qwen API・Xiaomi MiMo・DeepSeek API・OpenRouter・Ollama・その他の OpenAI 互換 / Anthropic 互換）から接続を足し、API キーをクリップボードから貼って、エージェントごとに使う接続を選びます。キーは OS のキーチェーンに入り、settings.json には書かず、画面にも出しません。necoder はこのキーで API を呼ばず、起こすエージェントに渡すだけです。Claude Code にはアダプタの `providers/set`（古いアダプタには環境変数）、OpenCode には OpenCode が最初から知っている会社として、DeepSeek Harness には DeepSeek の経路で渡します。composer の下の設定のチップに「Claude Code · GLM Coding Plan」のように接続の名前が出ます。SSH 先で起こすエージェントには渡しません。Linux はまだキーを保存できません。
 - **AI エージェント：SSH 先の状態を見る**：設定 › AI エージェントの上で、この窓で開いている SSH のプロジェクトの接続先を選ぶと、その機械でエージェントが動くかと版が見られます。そのプロジェクトの接続で読み取りだけのコマンドを 1 回流します（`command -v`・`package.json` の版・npx のキャッシュ・ログインの資格情報のファイルと API キーの環境変数が在るか）。CLI は起動せず、資格情報も読まず、新しい SSH 接続も張りません。
+- **エクスプローラ：余白の右クリック**：行の外を右クリックすると、空のフォルダでも、そのフォルダのメニューが出ます（ツリーはルート、カラムはその段のフォルダ、アイコンは今のフォルダ）。項目は 新規ファイル・新規フォルダ・Finder で表示・フォルダ内を検索・パスをコピー（SSH のプロジェクトでは このフォルダへアップロード…）です。
 
 #### 変更
 
 - **Fleet：統合先の手元の変更と重ならなければ統合する**：統合先（main の作業ツリー）に未コミットの変更や未追跡のファイルがあるだけでは、統合を断らなくなりました。Task が手元の変更と同じファイルを触らなければ統合し、手元の変更はそのまま残ります。Task が手元で変えたファイルを触る時、Task が足すファイルの場所に未追跡のファイルがある時、統合先にステージした変更がある時は、今までどおり止まります。その時はトーストと要対応のカードでファイルを名指しします。
+- **Fleet：エージェントが切った Task も Fleet に出る**：エージェントが `fleet_create_task`（MCP）や `ne fleet create` で作った Task にも、＋ Task と同じように Fleet のカードが付きます。Task の中から作ると、その Task の子になり、その Task のブランチから始まり、worktree はメインの作業ツリーのほかの Task と同じ場所に置きます。`fleet_create_task` には、担当への最初の指示を渡す `prompt` を足しました（無ければ担当は起こしません）。
 - **送信待ちの「今すぐ」が実行中のターンに差し込むように**：エージェントが対応していれば（Claude Code と Codex）、送信待ちの行のボタンが **今すぐ差し込む** になります。ターンを中断せずに文を渡すので、走っているコマンドなどの途中の作業を捨てません。コマンドは最後まで走り、そのあとでエージェントが文を読みます。文はエージェントが受け取った位置で会話に入り、ターンは 1 つのまま続きます。対応していないエージェントは今までどおり **中断して今すぐ** です。スラッシュコマンドはターンの頭でしか効かないので、いつもこちらで送ります。
 - **composer の下の設定のカード**：composer の下にあった Agent・Model・Effort のピルを、チップ 1 つにまとめました。チップを押すか、composer の中で ⌘/ を押すとカードが開きます。カードには、エージェントが送ってくる設定がすべて並びます。これまで選べなかった Claude Code と Codex の Fast mode のような on/off の設定も含みます。↑↓ でモデルの一覧、←→ で思考量、Tab でエージェントの切り替え（会話を始める前だけ）、Esc で閉じます。思考量は、選んだ段まで LED が灯るデジタルメーターで表します（エージェントに任せる Default は目盛りの外）。チップには、エージェントの既定から外れた値だけを `Opus 4.8 · High · ⚡` のように出します。権限モードはチップの右に、今までどおりピルで残します。Fast mode などの設定も、モデルや思考量と同じくエージェントごとに覚えます。
 - **モデルの一覧は接続とログインごと**：セッションを開く前に出すモデル・思考量・モードの選択肢を、接続ごと・ログインごとに分けて覚えます。新しいタブに、別の接続のモデルや、ログアウトしたアカウントのモデルを出しません。
 - **AI エージェント：1 枚の一覧に**：組み込み・自分のコマンドで足した物・ACP レジストリから足した物を 1 枚のカードに並べました。行ごとに、このマシンで動くか（足りない物：node・uv・CLI 本体・ログイン・自分のコマンド）、今の版とレジストリの版（次の起動で合わせるか）、使う / 使わないを出します。版はファイルから読むだけです。行を押すと、役割（既定・Captain）・起動の設定・アカウント・ログインと入れ方のコマンド（コピーつき）がまとまって出ます。
 - **AI エージェント：最後の 1 つは外せない**：使うエージェントが最後の 1 つなら、使わないにも外すにもできません。composer で選べるエージェントが無くならないようにするためです。
+
+#### 修正
+
+- **Fleet：Captain の分解案から切った Task が系譜から外れる**：台帳に残っていた古い形式のリポジトリ ID が git の値を上書きし、承認した分解案から作った Task が別のプロジェクトのように扱われて、統合先の系譜に載らないことがありました。git の値を正にし、台帳の値を書き直します。
+- **Fleet：`git init` の後に切った Task が系譜から外れる**：git でないフォルダを開いた後でエージェントが `git init` すると、その後に切った Task が、necoder を起動し直すまで統合先の系譜から外れていました。フォルダが git のリポジトリになったら、リポジトリ ID を読み直します。
+- **エクスプローラ：メニューから選んだ後の名前の入力**：右クリックのメニューで 新規ファイル や 名前を変更… を選ぶと、押した操作が下のエクスプローラにも届いてフォーカスを取り返し、打っても名前が入らないことがありました。カラムとアイコンの表示でも 新規ファイル と 名前を変更… の入力欄が出るようにし、メニューは窓の端で切れないようにしました。
 
 #### セキュリティ
 
