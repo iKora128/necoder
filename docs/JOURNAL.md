@@ -3987,3 +3987,13 @@
 - Pre-release にする方法: release.yml は Pre-release を付けずに Release を作るので、タグを push した直後に `gh release create --prerelease` で Release を先に作り、CI（`softprops/action-gh-release`）にはそこへ dmg と zip を足させる。
 - relay は v0.1.24 から変えていないので、Worker のデプロイは要らない。
 - 次: 本人の手番（RELEASE.md §1 の 5・6）。dmg を実際に入れて開く・公証ビルドでゴミ箱と `claude` の子プロセスが動くかを見る。
+
+## 2026-10-07 — レールの移動が Task の worktree に入り込む不具合
+
+- 発端: 本人「同じ workspace でも Captain が勝手に作った task（worktree）まで含まれていて、左のワークスペースの移動が worktree 内の移動も含まれる。想定内の実装ではない。修正して即 main に」。
+- 原因: レールの描画は Task worktree を除いている（`render_rail` の `is_integration` の絞り込み・2026-07-24）。ところが ⌃⌘↑↓・レールの ↑↓（`switch_adjacent_project`）と ⌘1..9（`ActivateProjectN`）は `projects` の添字をそのまま数えていた。Task の slot は末尾に足されるので、最後のプロジェクトから ↓ で Task へ入り、レールの点灯は同じリポジトリのまま中身だけ worktree に替わる。Task を作った後に開いたプロジェクトは、⌘N の番号もずれていた。
+- やったこと: `rail_slots`（レールに並ぶ slot）・`rail_anchor`（Task はそのリポジトリの統合先の枠）・`adjacent_rail_slot`（純関数）で、前後の移動と ⌘1..9 をレールの枠だけに絞った。Task に居る時は、レールで点いている枠から数える。Fleet サイドバーの Task 行の `⌘N`（F1 で生の添字に合わせた表示）は、Task がレールの番号を持たなくなったので外した。UI-SPEC のキー表・FLEET-V2 §3.0 / §3.2 / §7・MANUAL §3・CHANGELOG を合わせた。
+- ついでに: main の CI（Windows）を赤くしていた `acp_client` の `a_custom_agent_opens_a_session` を直した。10-02 と 10-06 の 2 回とも、テストのバイナリの起動から 10 秒強で落ちている。偽エージェント（python）の起動が並行するテストと重なり、10 秒の期限を超える時間切れだった。期限を 60 秒にした（通れば着いた時点で返る）。`deploy.rs` の同じ形のテストも同じにした。
+- 検証: 新テスト `rail_keys_skip_task_worktrees`（a / b / a の Task 2 本 / c の並びで、↓↑・⌃⌘↑↓・Task からの移動・⌘3 / ⌘4）と `adjacent_rail_slot` の単体テスト。移動だけ旧実装に戻すと「b の次が Task（添字 2）」で落ちることを確かめた。`cargo test --workspace`（使い捨て HOME・62 バイナリ全通過）・触った行の rustfmt と clippy。隔離 offscreen で Fleet（擬似 Task 5 本）を撮り、レールの枠が 1 つだけで Task が並ばないこと、Task 行から ⌘N が消えても行が崩れないことを目視した。
+- 学び/罠: レールに出す / 出さないの判定を描画側だけに持つと、キー操作の入口が取り残される。レールの枠の並びは `rail_slots` を通して数える。
+- 次: 本人の実機で、Task がある状態の ⌃⌘↑↓ とレールの ↑↓ を確かめる。

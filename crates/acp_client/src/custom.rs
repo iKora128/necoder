@@ -1203,7 +1203,9 @@ for line in sys.stdin:
             .expect("組める");
         let opened = futures::executor::block_on(crate::probe_session(
             &resolved,
-            std::time::Duration::from_secs(10),
+            // 期限は時間切れで落ちないための上限で、通れば着いた時点で返る。Windows の CI では python の
+            // 起動が並行するテストと重なって 10 秒を超え、2 回落ちた（2026-10-02・10-06）。
+            std::time::Duration::from_secs(60),
         ));
         assert!(opened, "initialize → session/new まで通る");
     }
