@@ -176,11 +176,12 @@ impl Workspace {
                         .projects
                         .get(active)
                         .map(|slot| slot.task_space.repository_id.clone());
-                    self.project_sessions
-                        .projects
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, slot)| slot.task_space.is_integration())
+                    // 並べる枠はキー操作（⌘1..9・⌃⌘↑↓・↑/↓）と同じ `rail_slots`。描画だけで絞ると、
+                    // キー操作が見えない Task へ入り込む（2026-10-07）。
+                    let projects = &self.project_sessions.projects;
+                    self.rail_slots()
+                        .into_iter()
+                        .filter_map(|index| projects.get(index).map(|slot| (index, slot)))
                         .map(move |(index, slot)| {
                             (index, slot, active_slot_is_task, active_repository.clone())
                         })

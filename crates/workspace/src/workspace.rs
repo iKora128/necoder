@@ -2593,33 +2593,34 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::select_next_thread))
             .on_action(cx.listener(Self::select_prev_thread))
             .on_action(cx.listener(Self::new_window))
-            // ⌘1..9 = レールのプロジェクト N 番へ切替（窓内切替・ウィンドウモデル §5）
+            // ⌘1..9 = レールのプロジェクト N 番へ切替（窓内切替・ウィンドウモデル §5）。数えるのは
+            // レールに出ている枠だけ（Task worktree は数えない・`switch_rail_project_flashed`）。
             .on_action(cx.listener(|this, _: &ActivateProject1, window, cx| {
-                this.switch_project_flashed(0, window, cx)
+                this.switch_rail_project_flashed(0, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject2, window, cx| {
-                this.switch_project_flashed(1, window, cx)
+                this.switch_rail_project_flashed(1, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject3, window, cx| {
-                this.switch_project_flashed(2, window, cx)
+                this.switch_rail_project_flashed(2, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject4, window, cx| {
-                this.switch_project_flashed(3, window, cx)
+                this.switch_rail_project_flashed(3, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject5, window, cx| {
-                this.switch_project_flashed(4, window, cx)
+                this.switch_rail_project_flashed(4, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject6, window, cx| {
-                this.switch_project_flashed(5, window, cx)
+                this.switch_rail_project_flashed(5, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject7, window, cx| {
-                this.switch_project_flashed(6, window, cx)
+                this.switch_rail_project_flashed(6, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject8, window, cx| {
-                this.switch_project_flashed(7, window, cx)
+                this.switch_rail_project_flashed(7, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| {
-                this.switch_project_flashed(8, window, cx)
+                this.switch_rail_project_flashed(8, window, cx)
             }))
             // レール上下への循環切替（⌃⌘↑↓）。番号（⌘1..9）を覚えずに隣へ流せる。
             // 行き先を見ずに切り替えるキー操作なので、着地先の名前を中央にフラッシュする。
@@ -4191,6 +4192,105 @@ mod tests {
             assert!(
                 !workspace.chrome.rail_focus.is_focused(window),
                 "Escape でレールからフォーカスが外れる"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// レールのキー操作（↑/↓・⌃⌘↑↓・⌘1..9）は**レールに出ている枠だけ**を数える。Captain や
+    /// ＋ Task が作った Task worktree は slot の末尾に足されるがレールには出ないので、そこへは
+    /// 入らない（2026-10-07 本人指摘: 移動が worktree の中まで含んでいた）。
+    #[gpui::test]
+    fn rail_keys_skip_task_worktrees(cx: &mut gpui::TestAppContext) {
+        fn key(stroke: &str) -> KeyDownEvent {
+            KeyDownEvent {
+                keystroke: gpui::Keystroke::parse(stroke).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "necoder_rail_skips_tasks_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // slot の並び = a / b / a の Task 2 本 / c（Task を作った後に c を開いた並び）。
+        // レールに出るのは a・b・c の 3 枠。
+        let roots: Vec<PathBuf> = ["a", "b", "a-task-1", "a-task-2", "c"]
+            .iter()
+            .map(|name| root.join(name))
+            .collect();
+        for path in &roots {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(roots.clone(), Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            for (index, repository) in ["repo-a", "repo-b", "repo-a", "repo-a", "repo-c"]
+                .iter()
+                .enumerate()
+            {
+                workspace.project_sessions.projects[index]
+                    .task_space
+                    .repository_id = repository.to_string();
+            }
+            for index in [2, 3] {
+                workspace.project_sessions.projects[index].task_space.kind = SpaceKind::Task;
+            }
+            assert_eq!(workspace.rail_slots(), vec![0, 1, 4]);
+            assert_eq!(workspace.project_sessions.active, 0);
+
+            let rail = workspace.chrome.rail_focus.clone();
+            window.focus(&rail, cx);
+            workspace.on_rail_key_down(&key("down"), window, cx);
+            assert_eq!(workspace.project_sessions.active, 1, "a → b");
+            workspace.on_rail_key_down(&key("down"), window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 4,
+                "b の次は c。間の Task worktree へは入らない"
+            );
+            workspace.on_rail_key_down(&key("down"), window, cx);
+            assert_eq!(workspace.project_sessions.active, 0, "末尾から先頭へ回る");
+            workspace.on_rail_key_down(&key("up"), window, cx);
+            assert_eq!(workspace.project_sessions.active, 4, "↑ も Task を飛ばす");
+
+            // ⌃⌘↑↓ も同じ巡り方。Task に居る時は、レールで点いている a の枠から数える。
+            workspace.switch_project(2, window, cx);
+            assert_eq!(workspace.project_sessions.active, 2);
+            workspace.switch_adjacent_project(1, window, cx);
+            assert_eq!(workspace.project_sessions.active, 1, "a の Task の次は b");
+            workspace.switch_project(3, window, cx);
+            workspace.switch_adjacent_project(-1, window, cx);
+            assert_eq!(workspace.project_sessions.active, 4, "a の Task の前は c");
+
+            // ⌘1..9 はレールの n 番目。⌘3 = c（slot の 3 番目の Task ではない）・⌘4 は枠が無い。
+            workspace.switch_rail_project_flashed(0, window, cx);
+            assert_eq!(workspace.project_sessions.active, 0);
+            workspace.switch_rail_project_flashed(2, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 4,
+                "⌘3 はレール 3 枠目の c"
+            );
+            workspace.switch_rail_project_flashed(3, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 4,
+                "⌘4 はレールに 4 枠目が無いので動かない（Task へ行かない）"
             );
         });
         let _ = std::fs::remove_dir_all(&root);
