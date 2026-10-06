@@ -149,7 +149,7 @@ b { font-weight: 600; }
 .task .meta .d.add { color: var(--ok); } .task .meta .d.del { color: var(--err); }
 .task.integ .nm { color: var(--fg1); }
 .task .by { color: var(--fg2); font-size: 9.5px; font-weight: 400; }
-.task .key { grid-column: 3; grid-row: 2; justify-self: end; font-size: 9.5px; color: var(--fg2); }
+/* Task 行に ⌘N は出さない（⌘1..9 はレールのプロジェクトの番号で、Task はレールに載らない・2026-10-07） */
 
 /* 状態グリフ（色は識別・状態は形と動き） */
 .stg { flex: none; width: 14px; text-align: center; font-size: 11px; line-height: 1; color: var(--tc, var(--fg2)); }
@@ -459,7 +459,6 @@ body.l1 .task.pinned::after { display: none; }
           <div class="dg"><span class="ask">rope に置き換えて undo を Transaction 単位に</span></div>
           <div class="dg">Edit buffer.rs · plan 3/5</div>
           <div class="meta">23.4k · <span class="d add">+214</span> <span class="d del">−87</span></div>
-          <div class="key">⌘1</div>
         </div>
         <div class="task pinned" data-id="t2" style="--tc:var(--th2)" onclick="focusTask('t2')">
           <span class="stg block">◐</span>
@@ -467,7 +466,6 @@ body.l1 .task.pinned::after { display: none; }
           <div class="dg"><span class="ask">タブの上線をスレッド色に</span></div>
           <div class="dg">承認待ち — Write settings.rs</div>
           <div class="meta">8.1k · <span class="d add">+38</span> <span class="d del">−6</span></div>
-          <div class="key">⌘2</div>
         </div>
         <div class="task pinned" data-id="t3" style="--tc:var(--th3)" onclick="focusTask('t3')">
           <span class="stg done">✓</span>
@@ -475,7 +473,6 @@ body.l1 .task.pinned::after { display: none; }
           <div class="dg"><span class="ask">window/app/main の起動経路を通す</span></div>
           <div class="dg">完了・未確認 — レビュー待ち</div>
           <div class="meta">12.0k · <span class="d add">+120</span> <span class="d del">−4</span></div>
-          <div class="key">⌘3</div>
         </div>
 
       </div>
