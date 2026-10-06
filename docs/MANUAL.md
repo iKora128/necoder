@@ -527,7 +527,7 @@ Claude Code などのエージェントを、自分のログイン（サブス�
 - 接続を使うスレッドは、composer の下の設定のチップに **Claude Code · GLM Coding Plan** のように接続の名前が出る（中身が Claude でないことを隠さない）。チップを押して開くカードのエージェントの行にも出る
 - 渡せるエージェントと接続:
   - **Claude Code**: Anthropic 互換の接続。アダプタが `providers/set` に対応していればそれで渡し、古いアダプタには `ANTHROPIC_BASE_URL` と `ANTHROPIC_AUTH_TOKEN` で渡す
-  - **OpenCode**: ひな形が OpenCode の組み込みのプロバイダに当たる接続（GLM・Kimi・MiniMax・Qwen・MiMo・DeepSeek・OpenRouter）。OpenCode は自分の既定の口で繋ぐので、ベース URL を書き換えた接続は渡せない。Ollama・その他の互換 API は OpenCode の設定で足す
+  - **OpenCode**: OpenCode が最初から知っている会社のひな形から作った接続（GLM・Kimi・MiniMax・Qwen・MiMo・DeepSeek・OpenRouter）。OpenCode は自分の既定の口で繋ぐので、ベース URL を書き換えた接続は渡せない。Ollama・その他の互換 API は OpenCode の設定で足す
   - **DeepSeek Harness**（settings.json に `dsh-acp` で足した物）: DeepSeek API の接続だけ（ほかの会社は dsh の設定で選ぶ）
   - それ以外のエージェント（Codex・GitHub Copilot・Qwen Code・Kimi CLI・Grok Build・足したほかのエージェント）には、まだ渡せない
 - **リモート（SSH 先で起こすエージェント）には渡さない。** SSH のプロジェクトのスレッドは、SSH 先のエージェント自身のログインで動く（transcript に一度だけ出る）

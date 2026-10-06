@@ -67,7 +67,7 @@ agent:
   pill_agent_locked: エージェントは会話開始後に変更できません。別の AI を使うには新しいスレッドを作成してください
   pill_mode: 権限モード（編集・実行の許可レベル）
   pill_model: モデル
-  pill_effort: 推論の深さ（effort）
+  pill_effort: 思考量
   pill_awaiting_agent: 接続すると選べます（エージェントが候補を送ってきます）
   card_chip_tip: モデル・思考量・Fast などの設定  ⌘/
   card_tab_hint: で切り替え
@@ -906,7 +906,7 @@ settings:
   connections_other_agents: Codex・GitHub Copilot・Qwen Code・Kimi CLI・Grok Build と、足したほかのエージェントには、まだ接続を渡せません。
   connection_refusal_protocol: "%{protocol}の口だけを受け付けます"
   connection_refusal_only_deepseek: DeepSeek Harness には DeepSeek API の接続だけを渡せます（ほかの会社は dsh の設定で選びます）
-  connection_refusal_opencode: OpenCode の組み込みのプロバイダに当たらないので渡せません（OpenCode の設定で足してください）
+  connection_refusal_opencode: OpenCode が最初から知っている会社に当たらないので渡せません（OpenCode の設定で足してください）
   connection_refusal_opencode_url: ベース URL を書き換えた接続は OpenCode に渡せません（OpenCode は自分の既定の口で繋ぎます）
   connection_refusal_missing_key: キーがキーチェーンにありません（設定 › 接続 の「変える…」で貼ってください）
   connection_protocol_anthropic: Anthropic 互換
