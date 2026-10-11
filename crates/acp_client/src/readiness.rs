@@ -1268,7 +1268,7 @@ mod tests {
             if !Path::new(shell).exists() {
                 continue;
             }
-            let output = std::process::Command::new(shell)
+            let output = child_process::command(shell)
                 .arg("-c")
                 .arg(remote_script(&wanted))
                 .env_clear()

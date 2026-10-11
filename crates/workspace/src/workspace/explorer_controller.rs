@@ -1367,7 +1367,7 @@ impl Workspace {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(13.0), px(13.0))),
                 }),
-                is_movable: false,
+                is_movable: crate::WINDOW_IS_MOVABLE,
                 ..Default::default()
             },
             move |window, cx| {

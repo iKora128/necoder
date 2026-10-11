@@ -1742,7 +1742,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .args([
                     "-c",
                     "user.name=necoder",
@@ -1794,7 +1794,7 @@ mod tests {
         std::fs::create_dir_all(base.join("repo")).unwrap();
         let base = paths::canonicalize(&base).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .args([
                     "-c",
                     "user.name=necoder",

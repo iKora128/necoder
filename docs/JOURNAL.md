@@ -4004,3 +4004,26 @@
 - 中身: v0.1.25 からは #57 だけ（レールの移動が Task の worktree に入らない・Windows の CI の時間切れ）。
 - relay は v0.1.24 から変えていないので、Worker のデプロイは要らない。
 - 次: 本人が正式版にするかを決める。決めたら上の 1 行で切り替え、CHANGELOG の断り書きを v0.1.24 の時のような「v0.1.24 からの主な変更」に書き換える。
+
+## 2026-10-11 — AI エージェントを必須にしない + Windows の窓の移動・コンソール窓
+
+- 発端: Windows 11 のユーザーの X の投稿（2026-10-06）。「コマンドプロンプトが出る」「メインウィンドウを動かせない（最大化・Win+矢印はできる）」「Codex を使いたいのに Claude 必須だった」。本人「README を直すより作りがおかしい。全部直したい、OFF にできるように柔軟に」。
+- 原因:
+  - コンソール: `main.rs` に `windows_subsystem` が無い（WINDOWS-PORT の罠の表に積み残し）。付けるだけだと、134 か所の素の `Command::new` が子プロセスごとに黒窓を開く。
+  - 窓の移動: 固定 rev の gpui は Windows の `start_window_move` が空。残る経路の `HTCAPTION` は `is_movable: false` で殺されていた。
+  - Claude 必須: 組み込みの既定が `"Claude Code"`、既定は外せない、「既定にする」は導入済みにしか出ない、の 3 つが重なり、何も入っていない人には Claude Code のスイッチが外せないまま残った。
+- やったこと:
+  - `crates/child_process` を新設し、子プロセスは全部 `child_process::command` で作る（Windows で `CREATE_NO_WINDOW`）。
+  - `main.rs` に `windows_subsystem = "windows"`。端末から CLI を叩いた時は `console.rs` が親のコンソールへ繋ぐ（パイプで渡された MCP・askpass は触らない）。
+  - `WINDOW_IS_MOVABLE`（Windows だけ true）。Windows の `Drag` は titlebar の空きだけに付ける。
+  - 既定のエージェントを `settings::resolve_default_agent` に一本化。空 = 自動、使わない物は飛ばす、全部オフなら無し。`DisableRefusal` を廃止し、Captain だった物は任命を解く。`start_session` で使わない物を起こさない。
+  - `claude -p` 決め打ちだった 4 機能（コミットメッセージ・⌘I 2 種・今日の計画）を `project::oneshot_text_on` + 既定のエージェントのテンプレートへ寄せた。
+  - README / MANUAL / ようこそ / 空のエディタの文言、CHANGELOG、DECISIONS、WINDOWS-PORT を更新した。
+- 検証:
+  - `cargo test --workspace` は緑（使い捨ての HOME）。clippy は自分の行に警告なし。
+  - `child_process` と `console.rs` は `x86_64-pc-windows-msvc` で型チェックが通る。necoder 全体は zstd の C が手元で組めないので Windows CI 待ち。
+  - 隔離 offscreen で設定の AI エージェントのページを撮った。自動の既定に「★ 既定（自動）」が付く。Claude Code をオフにすると Codex に移り、新しいスレッドも Codex で開く。自動の既定にも「既定にする」が出る。
+- 学び/罠:
+  - gpui の `window_control_area` は描いた順に最初に当たった物を返す。titlebar 全体に `Drag` を付けると、子のボタンの領域が永久に当たらない。D5-b の「発火しなかった」もこれの見立て（未検証）。
+  - zsh は `$t:locales` を `:l` 修飾子として読む。git の `rev:path` は `"${t}:path"` と書く。
+- 次: Windows 実機で、窓のドラッグ・ダブルクリック最大化・スナップ・titlebar のボタンのクリック・黒窓が出ないこと・端末からの `necoder config` の出力を確かめる。

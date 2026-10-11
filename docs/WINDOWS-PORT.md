@@ -257,6 +257,23 @@ gpui の `window_control_area`（`WM_NCHITTEST` で `HTCLOSE` 等を返す仕組
 引き換えに **Windows 11 のスナップレイアウト**（最大化ボタンのホバーで出る配置メニュー）は出ない。
 後日 hit-test 経路が動く形が分かったら戻す価値がある。
 
+> **発火しなかった理由の見立て（2026-10-09・未検証）**: gpui は `window_control_area` の領域を**描いた順に**
+> 探し、最初に当たった物を返す。titlebar 全体に `Drag` を付けていたので、ボタンの上でも先に titlebar の
+> `Drag` が当たり、`is_movable: false` のせいで「何も返さない」になっていた。下の窓の移動の修正で
+> Windows の `Drag` は空き（spacer）だけに移したので、ボタンに `Close` / `Max` / `Min` を付ければ
+> スナップレイアウトが戻る可能性がある（実機で確かめてから）。
+
+**窓の移動（2026-10-09 修正・実機の確認は未）**: Windows 11 で「最大化と Win+矢印は効くのに、ドラッグで
+窓を動かせない」と報告された。固定 rev の gpui には Windows の `start_window_move` が無く（既定の空実装）、
+窓を動かす経路は `Drag` の上で `WM_NCHITTEST` に `HTCAPTION` を返すことだけ。gpui はそれを
+`is_movable` が true の時しか返さない。直し方:
+
+- `WindowOptions::is_movable` は `workspace::WINDOW_IS_MOVABLE`（**Windows だけ true**・mac は従来どおり false）
+- Windows では `Drag` を titlebar 全体ではなく**空き（spacer）だけ**に付ける。全体に付けると、ピルや
+  ボタンの上でも `HTCAPTION` が返り、押した瞬間に OS の移動が始まってクリックが届かない
+- ダブルクリックの最大化・Aero スナップは OS が `HTCAPTION` に対して出す（gpui の
+  `titlebar_double_click` は Windows では空なので二重にならない）
+
 **`zoom_window()` は「元に戻す」ができない**。gpui の Windows 実装は `ShowWindowAsync(SW_MAXIMIZE)` を
 投げるだけで復元の口が無い（`gpui_windows` の `zoom()`）。最大化済みなら `SW_RESTORE` を自前で
 呼ぶ（`restore_maximized_window()`・`workspace` は名前付きパイプで既に `windows-sys` に依存している）。
@@ -620,8 +637,8 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
 | **ファイルロック** | 開いているファイルは削除・リネームが**失敗する**。mac と挙動が違う | 保存（temp + rename）・watch・git 操作 |
 | **CRLF** | 既定の改行が CRLF。git の autocrlf も絡む | editor_core・保存・git gutter |
 | **`.cmd` / `.bat`** | `CreateProcess` は直接実行できない（PATH 解決も `PATHEXT` 依存） | ACP エージェント起動・外部ツール |
-| **コンソール窓** | GUI アプリから子プロセスを起こすと黒窓が一瞬光る | ターミナル以外の全 shell-out（`CREATE_NO_WINDOW` を付ける） |
-| **`windows_subsystem`** | 付けないと GUI アプリでもコンソールが開く。付けると stdout が消える | `main.rs`・ログ設計（logging の Windows 実装と一緒に決める） |
+| **コンソール窓** | GUI アプリから子プロセスを起こすと黒窓が一瞬光る | **済（2026-10-09）**: 子プロセスは全部 `child_process::command` で作る（Windows で `CREATE_NO_WINDOW`）。素の `Command::new` を足さない。ターミナルは ConPTY なので対象外 |
+| **`windows_subsystem`** | 付けないと GUI アプリでもコンソールが開く。付けると stdout が消える | **済（2026-10-09）**: `main.rs` に `windows_subsystem = "windows"`。端末から叩いた CLI は `console.rs` が親のコンソールへ繋ぎ直す（パイプで渡された MCP・askpass は触らない）。実機の確認は未 |
 | **環境変数** | 大文字小文字非区別。`HOME` は**存在しない**（`USERPROFILE`） | paths crate |
 
 ### スクショを撮るプロセスは **DPI 認識**を宣言すること（2026-08-23 に誤診まで踏んだ）

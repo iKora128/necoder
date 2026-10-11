@@ -461,14 +461,21 @@ impl Workspace {
         if panel.read(cx).plan_busy {
             return;
         }
-        panel.update(cx, |panel, cx| panel.set_plan_busy(true, cx));
         let accent = self.project_sessions.projects[session_index].color;
+        let template = match agent_panel::default_oneshot_or_reason(cx) {
+            Ok(template) => template,
+            Err(reason) => {
+                self.push_toast(SharedString::from(reason), accent, cx);
+                return;
+            }
+        };
+        panel.update(cx, |panel, cx| panel.set_plan_busy(true, cx));
         let root = worktree.root().to_path_buf();
         let host = worktree.host().clone();
         cx.spawn(async move |workspace, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { project::todos::daily_plan_on(host.as_ref(), &root) })
+                .spawn(async move { project::todos::daily_plan_on(host.as_ref(), &root, template) })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
                 panel.update(cx, |panel, cx| panel.set_plan_busy(false, cx));

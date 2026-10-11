@@ -78,7 +78,7 @@ fn install_package(
         .prefix("install-")
         .tempdir_in(&root)?;
     std::fs::write(staging.path().join("package.json"), r#"{"private":true}"#)?;
-    let mut child = Command::new(npm)
+    let mut child = child_process::command(npm)
         .args([
             "install",
             "--global=false",

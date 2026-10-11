@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Changed
+
+- **No AI agent is required**: any agent can be turned off in Settings → AI Agents, including the default one and the last one. With every agent off, necoder works as a plain editor. The default agent is no longer fixed to Claude Code. Unless you pick one with "Make default", necoder uses the first agent that is ready (for example Codex, if that is the only one installed) and marks it "★ Default (auto)". Turning off the Captain's agent also ends that appointment. An agent that is off is never started, whichever path asks for it.
+- **AI helpers follow the default agent**: the AI commit message, `⌘I` inline edit and terminal command, and today's plan used to call the `claude` CLI directly. They now use the default agent, and work when it is Claude Code or Codex.
+- **README and the welcome screen** now say that the CLI of any one agent is enough.
+
+### Fixed
+
+- **Windows: the main window can be moved by dragging the title bar**. Before, only maximizing and Win+arrow worked. Double-clicking the empty part of the title bar maximizes and restores the window, and Snap works when you drag it. Not yet checked on a real Windows machine.
+- **Windows: no console window**. necoder.exe no longer opens a black console window next to the app, and the git and agent processes it starts no longer flash one. Running `necoder` subcommands from a terminal still prints to that terminal. Not yet checked on a real Windows machine.
+
+### 日本語
+
+#### 変更
+
+- **AI エージェントはどれも必須ではなくなりました**：設定 → AI エージェント で、既定のものや最後の 1 つも含めて、どれでもオフにできます。全部オフにすれば普通のエディタとして使えます。既定のエージェントは Claude Code 固定ではなくなりました。「既定にする」で選んでいなければ、使える状態のエージェントのうち一覧で最初のものを使い（例: Codex だけ入っていれば Codex）、「★ 既定（自動）」と表示します。Captain のエージェントをオフにすると、Captain の任命も解けます。オフのエージェントは、どこから頼まれても起動しません。
+- **AI の補助機能は既定のエージェントを使います**：コミットメッセージ生成、`⌘I` のインライン編集とターミナルのコマンド生成、今日の計画は、これまで `claude` CLI を直接呼んでいました。今後は既定のエージェントを使い、それが Claude Code か Codex のときに動きます。
+- **README とようこそ画面**に、どれか 1 つのエージェントの CLI があれば使えることを書きました。
+
+#### 修正
+
+- **Windows：タイトルバーをドラッグしてメインウィンドウを動かせるようになりました**。これまでは最大化と Win+矢印しか効きませんでした。タイトルバーの空いた所をダブルクリックすると最大化と元に戻すができ、ドラッグでスナップも効きます。Windows の実機ではまだ確かめていません。
+- **Windows：コンソール窓が出なくなりました**。necoder.exe を開いても黒いコンソール窓が横に付かず、necoder が起こす git やエージェントのプロセスでも点滅しません。端末から `necoder` のサブコマンドを実行したときは、これまでどおり端末に出力します。Windows の実機ではまだ確かめていません。
+
 ## [0.1.26] - 2026-10-07
 
 > **This is a test release.** It contains everything in [v0.1.25](https://github.com/iKora128/necoder/releases/tag/v0.1.25), which was also a test release. It is not delivered through auto-update. If you would like to try it, install it manually from this Release page. Bug reports in an Issue are very welcome.

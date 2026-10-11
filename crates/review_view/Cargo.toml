@@ -9,6 +9,7 @@ publish = false
 path = "src/review_view.rs"
 
 [dependencies]
+child_process.workspace = true
 gpui.workspace = true
 host.workspace = true
 i18n.workspace = true

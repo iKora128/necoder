@@ -169,7 +169,12 @@ impl Workspace {
         div()
             .id("titlebar")
             .bg(tint)
-            .window_control_area(WindowControlArea::Drag)
+            // OS に返すドラッグ領域。Windows では下の空き（spacer）だけに置く — titlebar 全体に置くと
+            // `HTCAPTION` がピルやボタンの上でも返り、押した瞬間に OS の移動が始まってクリックが届かない。
+            // mac は gpui がこの値を読まない（自前ドラッグ）。Linux は従来どおり titlebar 全体。
+            .when(!cfg!(target_os = "windows"), |titlebar| {
+                titlebar.window_control_area(WindowControlArea::Drag)
+            })
             .flex()
             .items_center()
             .gap_2()
@@ -216,7 +221,16 @@ impl Workspace {
             })
             // モード切替（FLEET-V2 §3.0）: どのプロジェクトかの隣に、どちらの面に居るかを置く。
             .child(self.render_mode_switch(cx))
-            .child(div().flex_1().h_full()) // 空き＝ドラッグ領域（titlebar 全体で処理）
+            // 空き＝ドラッグ領域。mac / Linux は titlebar 全体で処理し、Windows はここを
+            // `HTCAPTION` にして OS に動かしてもらう（ダブルクリックの最大化・スナップも OS が出す）。
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .when(cfg!(target_os = "windows"), |spacer| {
+                        spacer.window_control_area(WindowControlArea::Drag)
+                    }),
+            )
             // 実行中スレッドの beacon（窓上部から常に見える＝方向感覚の核・UI-SPEC §3）
             .child(self.render_beacons(cx))
             // 通知の履歴（ベル・O13）。未読があれば件数。

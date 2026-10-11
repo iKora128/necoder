@@ -84,7 +84,10 @@ agent:
   card_list_models: Models
   card_list_agents: Agents
   err_no_project: Can't send — no project selected
-  err_no_acp: claude-agent-acp not found (check node/npx)
+  err_no_acp: "This agent's CLI was not found. Install it from Settings › AI Agents"
+  err_no_agent_enabled: "No AI agent is turned on. Turn one on under Settings › AI Agents"
+  err_agent_turned_off: "%{agent} is turned off. Pick another agent from the agent pill in the composer, or turn it back on under Settings › AI Agents"
+  oneshot_unsupported: "This feature works when the default agent is Claude Code or Codex (current default: %{agent}). You can change the default under Settings › AI Agents"
   connection_remote_skipped: "Connection \"%{connection}\" isn't passed to remote (SSH) agents. This thread runs on the remote agent's own login"
   connection_unsupported: "Can't pass connection \"%{connection}\" to %{agent} (no known way to inject it). Switch back to \"Own login\" in Settings › Connections"
   connection_refused: "Not starting because connection \"%{connection}\" can't be used: %{reason}"
@@ -279,7 +282,7 @@ inline:
   title: ⌘I edit
   title_terminal: ⌘I command
   instruction_placeholder: Instruction (Enter=generate / Esc=close)
-  busy: Generating… (claude -p)
+  busy: Generating…
   accept: Apply ⏎
   reject: Discard esc
   no_change: (no changes)
@@ -290,7 +293,7 @@ todos:
   empty: No .necoder/todos.md yet (✨ drafts today's plan)
   plan: ✨ Plan today
   plan_busy: Generating…
-  plan_tip: Draft today's tasks from ROADMAP and git status (claude -p)
+  plan_tip: Draft today's tasks from ROADMAP and git status (default agent)
   add_tip: Add a task
   plan_added: Added %{count} items for today
   send_tip: Send this task to the active thread (auto-checks when done)
@@ -775,7 +778,6 @@ settings:
   permission_default_agent: Agent default
   permission_default_bypass: Don't ask (Yolo)
   permission_remembered: Modes chosen in the pill (click to forget)
-  agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
   agent_remove: Remove
   agent_remove_binary_failed: "Couldn't delete the binary downloaded for %{agent}: %{reason}"
   agent_host_label: "Host"
@@ -837,7 +839,7 @@ settings:
   agent_distribution_uvx: "uvx · %{package}"
   agent_distribution_binary: "binary · %{platform} · with sha256"
   agent_distribution_binary_unverified: "binary · %{platform} · no sha256"
-  agent_disable_last: "Can't turn off: the last agent stays on (the composer would have nothing to pick). Turn another agent on first"
+  captain_released: "%{agent} is turned off, so it is no longer the Captain"
   captain_dismiss: "⚑ Captain (click to dismiss)"
   custom_not_in_registry: "Not found in the registry (%{id}). Refresh it from Add agent"
   custom_no_distribution: "No build for this machine (%{platform})"
@@ -886,10 +888,11 @@ settings:
   launch_save: Save
   make_default: Set as default
   is_default: ★ Default
+  is_default_auto: ★ Default (auto)
   make_captain: Make Captain
   is_captain: ⚑ Captain
   welcome_title: Welcome 🎨
-  welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.
+  welcome_sub: Install and log in to the CLI of any one AI agent (Claude Code, Codex and others) to get started. You can also turn them all off and use necoder as a plain editor. You can change this anytime from ⚙.
   get_started: Get started →
   mcp_heading: MCP servers
   mcp_sub: Tools you hand to the agent. Only the ones you enable are visible to new threads.
@@ -1196,7 +1199,7 @@ git:
   close_tip: Close  ⌃⇧G
   branch_placeholder: New branch name (⏎ create / Esc cancel)
   message_placeholder: Message (⌘⏎ to commit)
-  ai_message_tip: Generate message with AI (claude)
+  ai_message_tip: Generate message with AI (default agent)
   commit: ✓ Commit
   staged: Staged
   changes: Changes
@@ -1620,7 +1623,7 @@ welcome:
   title: necoder — orient by color
   open_project: Open a project / worktree
   open_file: Open a file
-  new_thread: Start an AI thread (Claude Code)
+  new_thread: Start an AI thread (default agent)
   palette: All commands
 ssh:
   label: Remote SSH

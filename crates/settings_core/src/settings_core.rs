@@ -434,6 +434,9 @@ pub struct Settings {
     /// `agent_servers` で足したエージェントの表示名）。
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
+    ///
+    /// **空 = 自動**（組み込みの既定）。使えるエージェントから選ぶ（`settings::resolve_default_agent`）。
+    /// 特定のエージェントを必須にしないため、組み込みの既定に名前を書かない。
     pub default_agent: String,
     /// エージェントごとに覚えた選択（`agent_id` → `config_id` → **value_id**）。
     /// 例: `{"claude": {"model": "opus[1m]", "effort": "xhigh", "mode": "bypassPermissions"}}`。
@@ -573,7 +576,7 @@ impl Default for Settings {
             captain_agent: None,
             agent_tabs_view: "bar".to_string(),
             work_tabs_position: "top".to_string(),
-            default_agent: "Claude Code".to_string(),
+            default_agent: String::new(),
             agent_config_defaults: BTreeMap::new(),
             agent_servers: BTreeMap::new(),
             connections: BTreeMap::new(),
@@ -706,7 +709,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "reduce_motion": false,
   "tier2_summaries": true,
   "agent_tabs_view": "bar",
-  "default_agent": "Claude Code",
+  "default_agent": "",
   "confirm_worktree_delete": true,
   "confirm_quit": "running",
   "keep_awake": "working",

@@ -293,7 +293,7 @@ pub(crate) fn project_for_cwd(cwd: &Path, roots: &[PathBuf]) -> Option<usize> {
 /// 手元のポートを集める（背景で呼ぶ）。`own_pid` = necoder 自身。
 fn collect_ports(own_pid: u32, roots: &[PathBuf]) -> Result<Vec<PortRow>, String> {
     let run = |program: &str, args: &[&str]| -> Result<String, String> {
-        let output = std::process::Command::new(program)
+        let output = child_process::command(program)
             .args(args)
             .output()
             .map_err(|error| format!("{program}: {error}"))?;
@@ -335,7 +335,7 @@ fn collect_ports(own_pid: u32, roots: &[PathBuf]) -> Result<Vec<PortRow>, String
 
 /// 止める直前の確かめ直し: まだ necoder の子孫か（pid の使い回しで別のプロセスを止めない）。
 fn still_ours(pid: u32, own_pid: u32) -> bool {
-    std::process::Command::new("ps")
+    child_process::command("ps")
         .args(["-A", "-o", "pid=,ppid="])
         .output()
         .map(|output| {
@@ -1112,18 +1112,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_child_dev_server_is_found_with_its_project() {
-        if std::process::Command::new("lsof")
-            .arg("-v")
-            .output()
-            .is_err()
-        {
+        if child_process::command("lsof").arg("-v").output().is_err() {
             return; // lsof が無い環境
         }
         let root = std::env::temp_dir().join(format!("necoder_ports_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let root = paths::canonicalize(&root).unwrap();
-        let child = std::process::Command::new("python3")
+        let child = child_process::command("python3")
             .current_dir(&root)
             .args([
                 "-c",

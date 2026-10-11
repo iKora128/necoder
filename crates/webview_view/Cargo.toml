@@ -9,6 +9,7 @@ publish = false
 path = "src/webview_view.rs"
 
 [dependencies]
+child_process.workspace = true
 futures.workspace = true
 gpui.workspace = true
 i18n.workspace = true

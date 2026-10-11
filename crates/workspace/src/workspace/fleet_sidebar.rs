@@ -1670,7 +1670,7 @@ mod tests {
         let external = base.join("orca-made");
         std::fs::create_dir_all(&main).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)

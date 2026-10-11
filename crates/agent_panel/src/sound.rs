@@ -143,8 +143,8 @@ fn materialize(voice: &str, cue: Cue) -> Option<PathBuf> {
 fn play_file(path: &PathBuf, volume: &str) {
     #[cfg(target_os = "macos")]
     {
-        use std::process::{Command, Stdio};
-        let result = Command::new("/usr/bin/afplay")
+        use std::process::Stdio;
+        let result = child_process::command("/usr/bin/afplay")
             .args(["-v", volume])
             .arg(path)
             .stdin(Stdio::null())

@@ -385,6 +385,17 @@ const BOTTOM_DOCK_HEIGHT: f32 = 240.0;
 const BOTTOM_DOCK_MIN: f32 = 60.0;
 const BOTTOM_DOCK_MAX: f32 = 900.0;
 const TITLEBAR_HEIGHT: f32 = 38.0;
+/// 窓を開くときの `WindowOptions::is_movable`。**Windows だけ true**。
+///
+/// mac は自前 titlebar のドラッグを `start_window_move` で行うので false（true だと macOS が
+/// titlebar を system 所有扱いし、クリック遅延やダブルクリック判定が狂う）。
+///
+/// Windows は固定 rev の gpui に `start_window_move` の実装が無く（既定の空実装）、
+/// 窓を動かす経路は「`WindowControlArea::Drag` の上で `WM_NCHITTEST` に `HTCAPTION` を返す」
+/// だけ。gpui はこれを `is_movable` が true のときしか返さないので、false のままだと
+/// **窓をドラッグで動かす手段が無い**（2026-10-09 Windows 11 のユーザー報告。最大化と
+/// Win+矢印は効くのに移動だけできない、という症状）。
+pub const WINDOW_IS_MOVABLE: bool = cfg!(target_os = "windows");
 const TABSTRIP_HEIGHT: f32 = 34.0;
 const BREADCRUMB_HEIGHT: f32 = 26.0;
 const STATUSBAR_HEIGHT: f32 = 26.0;
@@ -2854,7 +2865,7 @@ mod tests {
         });
 
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&project)
                 .args(args)
                 .output()
@@ -5578,7 +5589,7 @@ mod tests {
         let project = root.join("repo");
         std::fs::create_dir_all(&project).unwrap();
         let git = |args: &[&str]| {
-            let status = std::process::Command::new("git")
+            let status = child_process::command("git")
                 .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
                 .args(args)
                 .current_dir(&project)

@@ -85,7 +85,10 @@ agent:
   card_list_models: モデル
   card_list_agents: エージェント
   err_no_project: プロジェクトが未確定のため送れません
-  err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
+  err_no_acp: "このエージェントの CLI が見つかりません。設定 › AI エージェント の「導入」から入れてください"
+  err_no_agent_enabled: "使う AI エージェントがありません。設定 › AI エージェント でどれか 1 つをオンにしてください"
+  err_agent_turned_off: "%{agent} は使わない設定です。入力欄のエージェントのピルで別のエージェントを選ぶか、設定 › AI エージェント でオンに戻してください"
+  oneshot_unsupported: "この機能は既定のエージェントが Claude Code か Codex のときに使えます（いまの既定: %{agent}）。設定 › AI エージェント で既定を変えられます"
   connection_remote_skipped: "接続「%{connection}」はリモート（SSH 先）のエージェントには渡しません。このスレッドは SSH 先のエージェント自身のログインで動きます"
   connection_unsupported: "%{agent} には接続「%{connection}」を渡せません（渡し方が分かっていません）。設定 › 接続 で「自分のログイン」に戻してください"
   connection_refused: "接続「%{connection}」を渡せないので起動しません: %{reason}"
@@ -280,7 +283,7 @@ inline:
   title: ⌘I 編集
   title_terminal: ⌘I コマンド生成
   instruction_placeholder: 編集指示（Enter=生成 / Esc=閉じる）
-  busy: 生成中…（claude -p）
+  busy: 生成中…
   accept: 適用 ⏎
   reject: 破棄 esc
   no_change: （変更なし）
@@ -291,7 +294,7 @@ todos:
   empty: .necoder/todos.md がありません（✨で今日の計画を作れます）
   plan: ✨ 今日の計画
   plan_busy: 生成中…
-  plan_tip: ROADMAP と git status から今日のタスク下書きを生成（claude -p）
+  plan_tip: ROADMAP と git status から今日のタスク下書きを生成（既定のエージェント）
   add_tip: タスクを追加
   plan_added: 今日の計画を %{count} 件追加しました
   send_tip: このタスクをアクティブスレッドへ送る（完了時に自動チェック）
@@ -776,7 +779,6 @@ settings:
   permission_default_agent: エージェントの既定
   permission_default_bypass: 聞かずに進める（Yolo）
   permission_remembered: ピルで選んだモード（押すと忘れる）
-  agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
   agent_remove: 外す
   agent_remove_binary_failed: "%{agent} の落とした binary を消せませんでした: %{reason}"
   agent_host_label: "ホスト"
@@ -838,7 +840,7 @@ settings:
   agent_distribution_uvx: "uvx · %{package}"
   agent_distribution_binary: "binary · %{platform} · sha256 あり"
   agent_distribution_binary_unverified: "binary · %{platform} · sha256 なし"
-  agent_disable_last: "外せません: 最後の 1 つは使うままにします（composer で選べるエージェントが無くなります）。先に別のエージェントを使うにしてください"
+  captain_released: "%{agent} を使わないにしたので、Captain の任命を解きました"
   captain_dismiss: "⚑ Captain（押すとやめる）"
   custom_not_in_registry: "レジストリに見つかりません（%{id}）。エージェントを追加 で取り直してください"
   custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
@@ -887,10 +889,11 @@ settings:
   launch_save: 保存
   make_default: 既定にする
   is_default: ★ 既定
+  is_default_auto: ★ 既定（自動）
   make_captain: Captain にする
   is_captain: ⚑ Captain
   welcome_title: ようこそ 🎨
-  welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
+  welcome_sub: 使う AI エージェント（Claude Code・Codex など）の CLI をどれか 1 つ入れてログインすれば始められます。全部オフにしてエディタとしてだけ使うこともできます。あとから ⚙ でいつでも変えられます。
   get_started: これで始める →
   mcp_heading: MCP サーバ
   mcp_sub: エージェントに持たせる道具。有効にしたものだけが新しいスレッドから見えます。
@@ -1197,7 +1200,7 @@ git:
   close_tip: 閉じる  ⌃⇧G
   branch_placeholder: 新しいブランチ名（⏎ で作成・Esc で取消）
   message_placeholder: メッセージ（⌘⏎ でコミット）
-  ai_message_tip: AI でメッセージ生成（claude）
+  ai_message_tip: AI でメッセージ生成（既定のエージェント）
   commit: ✓ コミット
   staged: ステージ済み
   changes: 変更
@@ -1621,7 +1624,7 @@ welcome:
   title: necoder — 色による方向感覚
   open_project: プロジェクト / worktree を開く
   open_file: ファイルを開く
-  new_thread: AI スレッドを開始（Claude Code）
+  new_thread: AI スレッドを開始（既定のエージェント）
   palette: すべてのコマンド
 ssh:
   label: リモート SSH

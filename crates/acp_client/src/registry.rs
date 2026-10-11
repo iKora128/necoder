@@ -21,7 +21,6 @@
 use anyhow::{Context as _, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 /// 取得先。`NECODER_ACP_REGISTRY_URL` で差し替え可（テスト・社内ミラー用）。
@@ -435,7 +434,7 @@ pub fn is_stale() -> bool {
 pub fn fetch_and_cache() -> Result<Registry> {
     let url =
         std::env::var("NECODER_ACP_REGISTRY_URL").unwrap_or_else(|_| REGISTRY_URL.to_string());
-    let output = Command::new("curl")
+    let output = child_process::command("curl")
         .args([
             "-fsSL",
             "--max-time",

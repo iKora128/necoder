@@ -164,7 +164,7 @@ pub(crate) fn format_memory(kib: u64) -> String {
 /// 手元のプロセスを読む（背景で呼ぶ）。`own_pid` = necoder 自身。
 fn collect_resources(own_pid: u32, roots: &[PathBuf]) -> Result<ResourceSnapshot, String> {
     let run = |program: &str, args: &[&str]| -> Result<String, String> {
-        let output = std::process::Command::new(program)
+        let output = child_process::command(program)
             .args(args)
             .output()
             .map_err(|error| format!("{program}: {error}"))?;
@@ -636,7 +636,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).expect("作業フォルダを作れる");
         let root = paths::canonicalize(&root).expect("正規化できる");
-        let Ok(mut child) = std::process::Command::new("sleep")
+        let Ok(mut child) = child_process::command("sleep")
             .current_dir(&root)
             .arg("30")
             .spawn()
@@ -655,11 +655,7 @@ mod tests {
             .unwrap_or_else(|| panic!("子が一覧にある: {snapshot:?}"));
         assert_eq!(group.command, "sleep");
         assert!(group.rss_kb > 0);
-        if std::process::Command::new("lsof")
-            .arg("-v")
-            .output()
-            .is_ok()
-        {
+        if child_process::command("lsof").arg("-v").output().is_ok() {
             assert_eq!(group.project, Some(1), "作業フォルダのプロジェクト");
         }
         assert!(snapshot.own_rss_kb > 0, "テストのプロセス自身");

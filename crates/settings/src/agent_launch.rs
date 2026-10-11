@@ -252,27 +252,25 @@ impl SettingsView {
         .detach();
     }
 
-    /// 足したエージェントの「外す」: `agent_servers.<id>` を消す（一覧から消える）。既定のエージェント・
-    /// Captain・使う最後の 1 つは外せない（使う / 使わないのスイッチと同じ理由・[`disable_refusal`]）。
+    /// 足したエージェントの「外す」: `agent_servers.<id>` を消す（一覧から消える）。使う / 使わないの
+    /// スイッチと同じく断らない — 既定だった物なら既定は自動に戻り（一覧に無い名前は自動・
+    /// [`crate::resolve_default_agent`]）、Captain だった物なら任命を解く。
     pub(crate) fn remove_custom_agent(&mut self, agent_id: &str, cx: &mut Context<Self>) {
-        if let Some(refusal) = disable_refusal(&get(cx), &agent_catalog(cx), agent_id) {
-            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(
-                refusal.message(),
-            )));
-            return;
-        }
+        let release = releases_captain(&get(cx), &agent_catalog(cx), agent_id);
         let result = set_agent_server(cx, agent_id, None);
         let removed = result.is_ok();
         self.report_save(result, cx);
         if removed {
+            if release {
+                self.release_captain(cx);
+            }
             self.remove_agent_binaries(agent_id, cx);
         }
         cx.notify();
     }
 
     /// 開いた行の中の「起動」: 今の起動 + 「変える…」（+ 組み込みは上書きがある時だけ「既定に戻す」）。
-    /// 足したエージェント（`removable`）は「既定に戻す」の代わりに「外す」を出す（外せない時は 45%・押すと
-    /// 理由のトースト）。
+    /// 足したエージェント（`removable`）は「既定に戻す」の代わりに「外す」を出す。
     pub(crate) fn launch_controls(
         &self,
         index: usize,
@@ -284,8 +282,6 @@ impl SettingsView {
     ) -> Div {
         let theme = self.theme.clone();
         let current = settings.agent_servers.get(agent_id.as_ref());
-        let locked =
-            removable && disable_refusal(settings, &agent_catalog(cx), &agent_id).is_some();
         let link = |id: (&'static str, usize), label: String| {
             div()
                 .id(id)
@@ -329,14 +325,12 @@ impl SettingsView {
             })
             .when(removable, |line| {
                 line.child(
-                    link(("agent-remove", index), i18n::t!("settings.agent_remove"))
-                        .when(locked, |link| link.opacity(0.45))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |view, _, _window, cx| {
-                                view.remove_custom_agent(&agent_id, cx)
-                            }),
-                        ),
+                    link(("agent-remove", index), i18n::t!("settings.agent_remove")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| {
+                            view.remove_custom_agent(&agent_id, cx)
+                        }),
+                    ),
                 )
             })
     }

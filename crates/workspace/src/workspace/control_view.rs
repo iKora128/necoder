@@ -123,7 +123,7 @@ impl Workspace {
         if !settings::get(cx).tier2_summaries || !self.chrome.fleet_mode {
             return;
         }
-        let Some(template) = agent_panel::oneshot_template(&settings::get(cx).default_agent) else {
+        let Some(template) = agent_panel::default_oneshot_template(cx) else {
             return; // oneshot 対応外の既定 Agent → 事実文のまま（自然フォールバック）
         };
         let Some(slot) = self

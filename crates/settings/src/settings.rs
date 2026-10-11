@@ -28,7 +28,7 @@ mod remote;
 
 pub use agent_launch::set_agent_server;
 pub use agents_page::AgentHost;
-use agents_page::{disable_refusal, RemoteFacts};
+use agents_page::{releases_captain, RemoteFacts};
 pub use connections::{connection_harnesses, connection_name, refusal_text};
 
 pub use settings_core::{
@@ -325,7 +325,53 @@ fn label_enabled_in(settings: &Settings, catalog: &acp_client::AgentCatalog, lab
         .is_none_or(|agent| settings.agent_enabled(agent.id()))
 }
 
-/// composer のピル・＋ Task の並べて比べるに出すエージェント（表示名）: ログインを確かめられた組み込み
+/// 既定のエージェント（新しいスレッド・Captain の提案・タイトル付けなどの道具役が使う）。
+/// `None` = 使うエージェントが 1 つも無い（AI 機能を全部オフにしている）。
+///
+/// 決め方は [`resolve_default_agent`]。**どれかを必須にはしない** — 未導入の Claude Code が既定として
+/// 外せず残る、という作りを 2026-10-09 にやめた（Codex だけ使いたい人が「Claude 必須」と読んだ）。
+pub fn default_agent(cx: &App) -> Option<acp_client::Agent> {
+    resolve_default_agent(
+        &get(cx),
+        &agent_catalog(cx),
+        &acp_client::authenticated_agent_labels(),
+    )
+}
+
+/// 既定のエージェントを決める本体（設定・一覧・ログインを確かめられた組み込みの表示名を渡せる）。
+///
+/// 1. `default_agent`（設定画面の「既定にする」で書かれた値）が**使う**エージェントならそれ。
+///    人が決めた既定はドリフトしない（DECISIONS §8）。
+/// 2. 空・一覧に無い・使わないにしたなら**自動**: ログインを確かめられた組み込み → 足したエージェント →
+///    使うエージェントの先頭、の順で一覧の並びの最初。人が何も決めていないので、入れた物が選ばれる。
+pub fn resolve_default_agent(
+    settings: &Settings,
+    catalog: &acp_client::AgentCatalog,
+    signed_in: &[&str],
+) -> Option<acp_client::Agent> {
+    let enabled = |agent: &acp_client::Agent| settings.agent_enabled(agent.id());
+    if let Some(chosen) = catalog.by_label(&settings.default_agent) {
+        if enabled(&chosen) {
+            return Some(chosen);
+        }
+    }
+    let agents: Vec<acp_client::Agent> = catalog.agents().into_iter().filter(enabled).collect();
+    agents
+        .iter()
+        .find(|agent| agent.builtin().is_some() && signed_in.contains(&agent.label()))
+        .or_else(|| agents.iter().find(|agent| agent.custom().is_some()))
+        .or_else(|| agents.first())
+        .cloned()
+}
+
+/// 既定が人の決めた物ではなく自動で選ばれているか（設定画面の「★ 既定（自動）」）。
+pub fn default_agent_is_automatic(settings: &Settings, catalog: &acp_client::AgentCatalog) -> bool {
+    catalog
+        .by_label(&settings.default_agent)
+        .is_none_or(|chosen| !settings.agent_enabled(chosen.id()))
+}
+
+/// composer のピル・＋ Task の並べて比べるに出すエージェント（表示名）:ログインを確かめられた組み込み
 /// と、設定で足した物（ログインは確かめようがないので全部）。使わないもの（O16）は除く。
 pub fn selectable_agent_labels(cx: &App) -> Vec<SharedString> {
     let settings = get(cx);
@@ -596,8 +642,8 @@ pub enum SettingsViewEvent {
         key: &'static str,
         value: String,
     },
-    /// 設定を保存できなかった（settings.json を読めない等）・変えられなかった（既定のエージェントは
-    /// 外せない等）。文は [`save_failure_message`] か、断った理由。トーストは shell が出す。
+    /// 設定を保存できなかった（settings.json を読めない等）・変えられなかった。文は
+    /// [`save_failure_message`] か、断った理由。トーストは shell が出す。
     SaveFailed(SharedString),
     /// 書体を選ぶ（O27）。`key` は `ui_font_family` / `code_font_family` / `terminal_font_family`。
     /// 入っている書体の一覧と絞り込みは shell のピッカーが担う（窓が要る）。
@@ -1128,24 +1174,40 @@ impl SettingsView {
     }
 
     /// エージェントを使う / 使わない（O16）。使うに戻したら、その 1 つもログインを確かめ直す
-    /// （使わない間は確かめていない）。既定のエージェント・Captain・使う最後の 1 つは使わないにできない
-    /// （書く前に断って理由をトーストに出す・[`disable_refusal`]）。
+    /// （使わない間は確かめていない）。**どれでも・全部でも使わないにできる** — 既定のエージェントは
+    /// 使うエージェントから選び直され（[`resolve_default_agent`]）、Captain だった物は任命を解く
+    /// （[`releases_captain`]）。
     fn toggle_agent_enabled(&mut self, agent_id: &str, cx: &mut Context<Self>) {
         let settings = get(cx);
-        if let Some(refusal) = disable_refusal(&settings, &agent_catalog(cx), agent_id) {
-            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(
-                refusal.message(),
-            )));
-            return;
-        }
         let next = toggled_disabled_agents(&settings.disabled_agents, agent_id);
         let enabling = !next.iter().any(|id| id == agent_id);
+        let release = !enabling && releases_captain(&settings, &agent_catalog(cx), agent_id);
         let result = set_user_value(cx, "disabled_agents", serde_json::json!(next));
+        let saved = result.is_ok();
         self.report_save(result, cx);
+        if saved && release {
+            self.release_captain(cx);
+        }
         if enabling {
             self.refresh_availability(cx);
         }
         cx.notify();
+    }
+
+    /// Captain の任命を解いて知らせる（Captain のエージェントを使わないにした・外した時）。
+    pub(crate) fn release_captain(&mut self, cx: &mut Context<Self>) {
+        let Some(label) = get(cx).captain_agent else {
+            return;
+        };
+        let result = set_user_value(cx, "captain_agent", serde_json::Value::Null);
+        let saved = result.is_ok();
+        self.report_save(result, cx);
+        if saved {
+            cx.emit(SettingsViewEvent::Notice(SharedString::from(i18n::t!(
+                "settings.captain_released",
+                "agent" => label
+            ))));
+        }
     }
 
     /// Captain の任命 / 解任（FLEET-V2 §5.7）。同じエージェントをもう一度押すと解任（`null`）。
@@ -4219,13 +4281,18 @@ mod tests {
                 })
             );
 
-            // 既定のエージェントは外せない。
+            // 既定・Captain だった物も外せる。既定は自動に戻り、Captain は任命が解ける。
             view.set_default_agent("DeepSeek Harness", cx);
-            view.remove_custom_agent("dsh", cx);
-            assert!(get(cx).agent_servers.contains_key("dsh"));
-            view.set_default_agent("Claude Code", cx);
+            view.toggle_captain("DeepSeek Harness", None, cx);
+            assert_eq!(get(cx).captain_agent.as_deref(), Some("DeepSeek Harness"));
+            assert!(!default_agent_is_automatic(&get(cx), &agent_catalog(cx)));
             view.remove_custom_agent("dsh", cx);
             assert!(!get(cx).agent_servers.contains_key("dsh"), "外すと消える");
+            assert_eq!(get(cx).captain_agent, None, "Captain の任命は解ける");
+            assert!(
+                default_agent_is_automatic(&get(cx), &agent_catalog(cx)),
+                "一覧に無い名前の既定は自動"
+            );
             assert!(agent_catalog(cx).customs().is_empty());
             assert!(
                 get(cx).agent_servers.contains_key("codex"),
@@ -4237,17 +4304,17 @@ mod tests {
     }
 
     /// #38 H2: 使う / 使わないは settings.json の `disabled_agents` に往復する（書いたファイルを読み直しても
-    /// 同じ）。使わない物は composer に出さない。使う最後の 1 つは、スイッチでも「外す」でも外せない
-    /// （書く前に断り、理由をトーストに出す）。
+    /// 同じ）。使わない物は composer に出さない。**最後の 1 つも・既定のエージェントも外せる**
+    /// （全部オフ = AI 機能を使わない。断りのトーストは出さない・2026-10-09）。
     #[gpui::test]
-    fn disabled_agents_round_trip_and_the_last_agent_stays_on(cx: &mut gpui::TestAppContext) {
+    fn disabled_agents_round_trip_and_every_agent_can_be_turned_off(cx: &mut gpui::TestAppContext) {
         let path = std::env::temp_dir().join(format!(
             "necoder-settings-last-agent-{}.json",
             std::process::id()
         ));
         std::fs::write(
             &path,
-            r#"{ "onboarded": true, "default_agent": "Claude Code",
+            r#"{ "onboarded": true, "default_agent": "DeepSeek Harness",
                 "disabled_agents": ["claude", "codex", "copilot", "qwen", "opencode", "kimi", "grok"],
                 "agent_servers": {
                     "dsh": { "name": "DeepSeek Harness", "command": "definitely-not-dsh-acp" } } }"#,
@@ -4279,80 +4346,98 @@ mod tests {
             .map(|agent| agent.id.to_string())
             .collect();
         view.update(cx, |view, cx| {
-            // 既定のエージェント（Claude Code）も使わないにしてある＝使うのは dsh だけ。
+            // 使うのは dsh だけで、それが既定。それでも使わないにできる。
+            assert_eq!(
+                default_agent(cx).map(|agent| agent.id().to_string()),
+                Some("dsh".to_string())
+            );
             view.toggle_agent_enabled("dsh", cx);
-            view.remove_custom_agent("dsh", cx);
-            assert_eq!(get(cx).disabled_agents, all_builtins, "書かない");
-            assert_eq!(on_disk(&path), all_builtins);
-            assert!(get(cx).agent_servers.contains_key("dsh"), "外さない");
-            assert!(selectable_agent_labels(cx)
-                .iter()
-                .any(|label| label.as_ref() == "DeepSeek Harness"));
-
-            // もう 1 つ使うにすれば、dsh を使わないにできる。
-            view.toggle_agent_enabled("kimi", cx);
-            view.availability_pending = false;
-            view.toggle_agent_enabled("dsh", cx);
-            let mut expected: Vec<String> = all_builtins
-                .iter()
-                .filter(|id| *id != "kimi")
-                .cloned()
-                .collect();
+            let mut expected = all_builtins.clone();
             expected.push("dsh".to_string());
             assert_eq!(get(cx).disabled_agents, expected);
             assert_eq!(on_disk(&path), expected, "ファイルに書いて読み直しても同じ");
+            assert_eq!(
+                default_agent(cx),
+                None,
+                "全部オフ = 既定のエージェントは無い"
+            );
             assert!(
                 !selectable_agent_labels(cx)
                     .iter()
                     .any(|label| label.as_ref() == "DeepSeek Harness"),
                 "使わない物は composer に出さない"
             );
+            assert_eq!(
+                get(cx).default_agent,
+                "DeepSeek Harness",
+                "人が決めた既定は書き換えない（使うに戻せばまた既定）"
+            );
+
             view.toggle_agent_enabled("dsh", cx);
             view.availability_pending = false;
             assert!(!on_disk(&path).contains(&"dsh".to_string()), "戻せる");
+            assert_eq!(
+                default_agent(cx).map(|agent| agent.id().to_string()),
+                Some("dsh".to_string()),
+                "使うに戻すと、人が決めた既定に戻る"
+            );
         });
-        assert_eq!(
-            *refusals.borrow(),
-            vec![
-                i18n::t!("settings.agent_disable_last"),
-                i18n::t!("settings.agent_disable_last"),
-            ]
-        );
+        assert!(refusals.borrow().is_empty(), "断らない");
         std::fs::remove_file(&path).ok();
     }
 
-    /// 既定のエージェント・Captain は「最後の 1 つ」より先に、その理由で断る。もう使わない物は断らない。
+    /// 既定のエージェントの決め方: 人が決めた物が使えるならそれ。空・使わないなら、ログインを確かめられた
+    /// 組み込み → 足した物 → 使う物の先頭。全部オフなら無い。Captain を使わないにすると任命が解ける。
     #[test]
-    fn the_refusal_names_the_reason() {
-        let mut settings = Settings {
-            default_agent: "Claude Code".to_string(),
-            captain_agent: Some("Codex".to_string()),
-            ..Settings::default()
-        };
+    fn the_default_agent_follows_the_switches() {
+        let id = |agent: Option<acp_client::Agent>| agent.map(|agent| agent.id().to_string());
+        let mut settings = Settings::default();
+        assert_eq!(
+            settings.default_agent, "",
+            "組み込みの既定は自動（どれも必須にしない）"
+        );
         let catalog = agent_catalog_for(&settings);
+        assert!(default_agent_is_automatic(&settings, &catalog));
         assert_eq!(
-            disable_refusal(&settings, &catalog, "claude"),
-            Some(agents_page::DisableRefusal::DefaultOrCaptain)
+            id(resolve_default_agent(&settings, &catalog, &[])),
+            Some("claude".to_string()),
+            "何も入っていなければ一覧の先頭"
         );
         assert_eq!(
-            disable_refusal(&settings, &catalog, "codex"),
-            Some(agents_page::DisableRefusal::DefaultOrCaptain)
+            id(resolve_default_agent(&settings, &catalog, &["Codex"])),
+            Some("codex".to_string()),
+            "Codex だけ入っているなら Codex"
         );
-        assert_eq!(disable_refusal(&settings, &catalog, "kimi"), None);
+
+        settings.default_agent = "Codex".to_string();
+        assert!(!default_agent_is_automatic(&settings, &catalog));
+        assert_eq!(
+            id(resolve_default_agent(&settings, &catalog, &["Claude Code"])),
+            Some("codex".to_string()),
+            "人が決めた既定はログインの有無で動かさない"
+        );
+
+        settings.disabled_agents = vec!["codex".to_string()];
+        assert!(default_agent_is_automatic(&settings, &catalog));
+        assert_eq!(
+            id(resolve_default_agent(
+                &settings,
+                &catalog,
+                &["Codex", "Kimi CLI"]
+            )),
+            Some("kimi".to_string()),
+            "使わないにした既定は飛ばして、使える物から選ぶ"
+        );
+
         settings.disabled_agents = acp_client::AGENTS
             .iter()
-            .filter(|agent| agent.id != "kimi")
             .map(|agent| agent.id.to_string())
             .collect();
-        assert_eq!(
-            disable_refusal(&settings, &catalog, "kimi"),
-            Some(agents_page::DisableRefusal::Last)
-        );
-        assert_eq!(
-            disable_refusal(&settings, &catalog, "claude"),
-            None,
-            "もう使わない物（使うにする）は断らない"
-        );
+        assert_eq!(resolve_default_agent(&settings, &catalog, &["Codex"]), None);
+
+        settings.captain_agent = Some("Codex".to_string());
+        assert!(releases_captain(&settings, &catalog, "codex"));
+        assert!(!releases_captain(&settings, &catalog, "claude"));
     }
 
     /// #38 H2: AI エージェントのページは、このマシン・行を開いた所・SSH 先（偽の SSH 先 = 一時フォルダの

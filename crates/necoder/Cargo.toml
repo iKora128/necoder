@@ -18,6 +18,7 @@ screenshot = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
 runtime-shaders = ["gpui_platform/runtime_shaders"]
 
 [dependencies]
+child_process.workspace = true
 paths.workspace = true
 cli_shim.workspace = true
 # `necoder skills …`（エージェント向け skill の配布と一覧。設定画面と共有）
@@ -43,6 +44,10 @@ serde_json.workspace = true
 # Finder/Dock から届く file:// URL の解釈（on_open_urls → パス化。percent-decode 込み）
 url.workspace = true
 image = { workspace = true, optional = true }
+
+# 端末から CLI として使う時に親のコンソールへ繋ぐ（console.rs・GUI サブシステムのため）。
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 # Dock / AppleScript の「終了」を ⌘Q と同じ確認へ回すフック（quit_hook.rs・O4）。
 [target.'cfg(target_os = "macos")'.dependencies]

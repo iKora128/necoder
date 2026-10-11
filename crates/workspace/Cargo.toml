@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+child_process.workspace = true
 paths.workspace = true
 anyhow.workspace = true
 gpui.workspace = true

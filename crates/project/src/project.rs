@@ -1755,33 +1755,19 @@ pub fn open_pr_web_on(host: &dyn Host, dir: &Path) -> Result<()> {
     ensure_command_success(&output, "リポジトリを開けません")
 }
 
-// ── AI コミットメッセージ生成（M8: AI-agent-native。Claude Code CLI に diff を渡す） ──
+// ── AI コミットメッセージ生成（M8: AI-agent-native。既定のエージェントの CLI に diff を渡す） ──
 
-/// tracked 変更（`git diff HEAD`）を Claude Code CLI に渡してコミットメッセージを 1 本生成する。
-/// `claude` 未導入 / 差分なし / 失敗時は Err。host 経由なので remote でも（claude があれば）動く。
-pub fn ai_commit_message(dir: &Path) -> Result<String> {
-    ai_commit_message_on(&LocalHost, dir)
-}
-
-pub fn ai_commit_message_on(host: &dyn Host, dir: &Path) -> Result<String> {
-    let instruction = COMMIT_MESSAGE_PROMPT;
-    let script = format!("git --no-pager diff HEAD | claude -p \"{instruction}\"");
-    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
-    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
-    anyhow::ensure!(
-        host.has_posix_shell(),
-        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
-    );
-    let output = host
-        .run_command(&host.shell_script(script.as_str(), dir))
-        .context("コミットメッセージ生成の実行に失敗（claude CLI 未導入？）")?;
-    ensure_command_success(&output, "生成に失敗")?;
-    let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    anyhow::ensure!(
-        !message.is_empty(),
-        "生成結果が空（差分が無い？先に stage/編集を）"
-    );
-    Ok(message)
+/// tracked 変更（`git diff HEAD`）を既定のエージェントの CLI に渡してコミットメッセージを 1 本生成する。
+/// `template` = 既定のエージェントの一発生成テンプレート（[`oneshot_text_on`]・Claude Code / Codex）。
+/// 差分なし / CLI 未導入 / 失敗時は Err。host 経由なので remote でも（CLI があれば）動く。
+pub fn ai_commit_message_on(host: &dyn Host, dir: &Path, template: &str) -> Result<String> {
+    let output = run_git(host, dir, ["diff", "HEAD"]).context("git diff を実行できません")?;
+    ensure_command_success(&output, "差分を取れません")?;
+    let diff = String::from_utf8_lossy(&output.stdout).to_string();
+    anyhow::ensure!(!diff.trim().is_empty(), "差分が無い（先に stage/編集を）");
+    let message = oneshot_text_on(host, dir, &diff, template, COMMIT_MESSAGE_PROMPT)?;
+    anyhow::ensure!(!message.trim().is_empty(), "生成結果が空");
+    Ok(message.trim().to_string())
 }
 
 /// worktree の一望情報（⌘O ダッシュボード・M12-12）。
@@ -1832,46 +1818,20 @@ fn parse_status_branch(stdout: &str) -> WorktreeStatus {
 }
 
 /// 選択コードを自然言語の指示で書き換える（⌘I インライン編集・M12-8）。
-/// `claude -p` に「指示 + 対象コード」を**一時ファイル経由**で渡し、書き換え後の
-/// コードだけを受け取る。指示・コードはファイル経由なので shell 引用の心配が無い。
-/// host 経由なので remote でも（claude があれば）動く。
+/// 既定のエージェントの CLI（`template`・[`oneshot_text_on`]）に「指示 + 対象コード」を**一時ファイル経由**で
+/// 渡し、書き換え後のコードだけを受け取る。指示・コードはファイル経由なので shell 引用の心配が無い。
+/// host 経由なので remote でも（CLI があれば）動く。
 pub fn inline_rewrite_on(
     host: &dyn Host,
     dir: &Path,
     instruction: &str,
     code: &str,
+    template: &str,
 ) -> Result<String> {
     // 指示は 1 行に正規化（ペイロードの構造を単純に保つ）。
     let instruction = instruction.replace(['\n', '\r'], " ");
     let payload = format!("指示: {instruction}\n--- 対象コード ---\n{code}");
-    let unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/necoder-inline-{unix_ms}.txt"));
-    host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
-        .context("インライン編集の一時ファイル作成に失敗")?;
-    let prompt = INLINE_REWRITE_PROMPT;
-    let script = format!(
-        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
-        temp = temp.display()
-    );
-    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
-    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
-    anyhow::ensure!(
-        host.has_posix_shell(),
-        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
-    );
-    let output = host
-        .run_command(&host.shell_script(script.as_str(), dir))
-        .context("インライン編集の実行に失敗（claude CLI 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "生成に失敗: {}",
-        git_fail_message(&output)
-    );
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let text = strip_code_fence(&raw);
+    let text = oneshot_text_on(host, dir, &payload, template, INLINE_REWRITE_PROMPT)?;
     // 末尾改行は元コードに合わせる（LLM は末尾改行を付けがち → 差分ノイズを消す）。
     let text = if code.ends_with('\n') {
         format!("{}\n", text.trim_end_matches('\n'))
@@ -1884,37 +1844,15 @@ pub fn inline_rewrite_on(
 
 /// 自然言語からシェルコマンドを 1 行生成する（⌘I ターミナル同型・M12-8）。
 /// 生成コマンドは**挿入のみ**（実行は呼び出し側でユーザーの Enter に委ねる）。
-pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Result<String> {
+pub fn inline_command_on(
+    host: &dyn Host,
+    dir: &Path,
+    instruction: &str,
+    template: &str,
+) -> Result<String> {
     let instruction = instruction.replace(['\n', '\r'], " ");
     let payload = format!("やりたいこと: {instruction}");
-    let unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/necoder-inline-cmd-{unix_ms}.txt"));
-    host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
-        .context("コマンド生成の一時ファイル作成に失敗")?;
-    let prompt = INLINE_COMMAND_PROMPT;
-    let script = format!(
-        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
-        temp = temp.display()
-    );
-    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
-    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
-    anyhow::ensure!(
-        host.has_posix_shell(),
-        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
-    );
-    let output = host
-        .run_command(&host.shell_script(script.as_str(), dir))
-        .context("コマンド生成の実行に失敗（claude CLI 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "生成に失敗: {}",
-        git_fail_message(&output)
-    );
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let text = strip_code_fence(&raw);
+    let text = oneshot_text_on(host, dir, &payload, template, INLINE_COMMAND_PROMPT)?;
     // 最初の非空行だけ（複数行で返ってきても 1 コマンドに絞る）。
     let command = text
         .lines()
@@ -1928,7 +1866,7 @@ pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Resu
 
 /// 会話の冒頭から簡潔なスレッドタイトルを1行もらう（AI 自動命名・#6）。
 /// `inline_command_on` と同型（一時ファイル経由で shell 引用を回避・host 経由なので remote でも動く）。
-/// 失敗（claude 未導入・空応答）は `Err`。呼び出し側は静かに既定名のままにする。
+/// 失敗（CLI 未導入・空応答）は `Err`。呼び出し側は静かに既定名のままにする。
 pub fn name_thread_on(
     host: &dyn Host,
     dir: &Path,
@@ -1938,7 +1876,7 @@ pub fn name_thread_on(
     oneshot_line_on(host, dir, excerpt, template, THREAD_TITLE_PROMPT, 24)
 }
 
-// necoder が自分の用事で `claude -p` / `codex exec` に渡す決まった指示。
+// necoder が自分の用事で既定のエージェントの CLI（`claude -p` / `codex exec`）に渡す決まった指示。
 // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
 
 /// インライン編集（[`inline_rewrite_on`]）の指示。
@@ -1975,10 +1913,7 @@ pub fn helper_prompts() -> [&'static str; 5] {
 }
 
 /// 汎用の 1 行生成（スレッド命名・Tier 2 遷移スナップショット要約が共用・FLEET-CONTROL-PLAN P4）。
-/// `template` = 既定 Agent ごとの shell テンプレート（{prompt}=指示・{excerpt}=入力ファイル・
-/// {out}=最終メッセージ出力先）。stdout にクリーンな 1 行が載るよう各 CLI 差を吸収する
-/// （claude -p は素で stdout・codex exec は agent 実行で stdout が汚いため --output-last-message + cat）。
-/// `prompt` に引用符 / $ / バッククォートを含めないこと（sh -c の二重引用符に素で埋める）。
+/// [`oneshot_text_on`] の結果から最初の非空行を取り、引用符を外して `max_chars` で切る。
 pub fn oneshot_line_on(
     host: &dyn Host,
     dir: &Path,
@@ -1986,6 +1921,36 @@ pub fn oneshot_line_on(
     template: &str,
     prompt: &str,
     max_chars: usize,
+) -> Result<String> {
+    let text = oneshot_text_on(host, dir, input, template, prompt)?;
+    // 最初の非空行・前後の引用符/括弧/空白を除去・max_chars で clamp（LLM の饒舌さ対策）。
+    let line: String = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '「' | '」' | '『' | '』' | '　' | ' '))
+        .chars()
+        .take(max_chars)
+        .collect();
+    anyhow::ensure!(!line.trim().is_empty(), "oneshot の結果が空");
+    Ok(line.trim().to_string())
+}
+
+/// 汎用の一発生成（コミットメッセージ・インライン編集・コマンド生成・今日の計画・命名・要約が共用）。
+/// `input` を一時ファイルに書いて既定のエージェントの CLI の stdin に流し、出力の全文を返す
+/// （``` フェンスは外す）。
+///
+/// `template` = 既定のエージェントごとの shell テンプレート（`AgentKind::oneshot`・{prompt}=指示・
+/// {excerpt}=入力ファイル・{out}=最終メッセージ出力先）。stdout にクリーンな結果が載るよう各 CLI 差を
+/// 吸収する（claude -p は素で stdout・codex exec は agent 実行で stdout が汚いため --output-last-message + cat）。
+/// `prompt` に引用符 / $ / バッククォートを含めないこと（sh -c の二重引用符に素で埋める）。
+pub fn oneshot_text_on(
+    host: &dyn Host,
+    dir: &Path,
+    input: &str,
+    template: &str,
+    prompt: &str,
 ) -> Result<String> {
     let unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2012,26 +1977,14 @@ pub fn oneshot_line_on(
     );
     let output = host
         .run_command(&host.shell_script(script.as_str(), dir))
-        .context("oneshot の実行に失敗（既定 Agent の CLI 未導入？）")?;
+        .context("生成の実行に失敗（既定のエージェントの CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
-        "oneshot に失敗: {}",
+        "生成に失敗: {}",
         git_fail_message(&output)
     );
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let text = strip_code_fence(&raw);
-    // 最初の非空行・前後の引用符/括弧/空白を除去・max_chars で clamp（LLM の饒舌さ対策）。
-    let line: String = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .trim_matches(|c: char| matches!(c, '"' | '\'' | '「' | '」' | '『' | '』' | '　' | ' '))
-        .chars()
-        .take(max_chars)
-        .collect();
-    anyhow::ensure!(!line.trim().is_empty(), "oneshot の結果が空");
-    Ok(line.trim().to_string())
+    Ok(strip_code_fence(&raw))
 }
 
 /// 出力が ``` フェンスで包まれていたら中身だけ取り出す（そのままなら素通し）。
@@ -2883,7 +2836,7 @@ pub fn move_to_trash_local(path: &Path) -> Result<Option<PathBuf>> {
         path.display()
     );
     if Path::new("/usr/bin/trash").exists() {
-        let output = std::process::Command::new("/usr/bin/trash")
+        let output = child_process::command("/usr/bin/trash")
             .arg("-v")
             .arg(path)
             .output()
@@ -2900,7 +2853,7 @@ pub fn move_to_trash_local(path: &Path) -> Result<Option<PathBuf>> {
         .to_string()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    let output = std::process::Command::new("/usr/bin/osascript")
+    let output = child_process::command("/usr/bin/osascript")
         .args([
             "-e",
             &format!(
@@ -2952,7 +2905,7 @@ fn parse_trash_destination(printed: &str, original: &Path) -> Option<PathBuf> {
 /// Finder で対象を表示（親フォルダを開いて選択状態にする）。macOS の `open -R`。
 pub fn reveal_in_finder_local(path: &Path) -> Result<()> {
     anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
-    let status = std::process::Command::new("/usr/bin/open")
+    let status = child_process::command("/usr/bin/open")
         .arg("-R")
         .arg(path)
         .status()
@@ -2964,7 +2917,7 @@ pub fn reveal_in_finder_local(path: &Path) -> Result<()> {
 /// OS の既定アプリで開く（ファイル=関連付けアプリ / フォルダ=Finder）。macOS の `open`。
 pub fn open_with_default_app_local(path: &Path) -> Result<()> {
     anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
-    let status = std::process::Command::new("/usr/bin/open")
+    let status = child_process::command("/usr/bin/open")
         .arg(path)
         .status()
         .context("open の起動に失敗")?;
@@ -3214,7 +3167,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let run = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&dir)
                 .args(args)
                 .output()
@@ -3305,7 +3258,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-    use std::process::Command;
 
     fn scratch(tag: &str) -> PathBuf {
         let dir =
@@ -3321,7 +3273,7 @@ mod tests {
         let main = base.join("main");
         std::fs::create_dir_all(&main).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(args)
                 .output()
@@ -3521,7 +3473,7 @@ mod tests {
         let root = scratch("discard");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(args)
                 .output()
@@ -3657,7 +3609,7 @@ mod tests {
         let clone = base.join("clone");
         std::fs::create_dir_all(&base).unwrap();
         let git_in = |dir: &Path, args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(args)
                 .output()
@@ -3743,7 +3695,7 @@ mod tests {
         let root = scratch("gitstatus");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(args)
                 .output()
@@ -3799,7 +3751,7 @@ mod tests {
         let root = scratch("crlf-gutter");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(args)
                 .output()
@@ -3846,7 +3798,7 @@ mod tests {
         let root = scratch("gitops");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(args)
                 .output()
@@ -3917,7 +3869,7 @@ mod tests {
         let root = scratch("worktree");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(args)
                 .output()
@@ -3989,7 +3941,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&wt);
         std::fs::create_dir_all(&root).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(args)
                 .output()
@@ -4039,7 +3991,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&wt);
         std::fs::create_dir_all(&root).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args([
                     "-c",
@@ -4102,7 +4054,7 @@ mod tests {
 
     /// 統合の試験で使う git（作者と改行変換を固定する）。
     fn integration_git(dir: &Path, args: &[&str]) -> std::process::Output {
-        Command::new("git")
+        child_process::command("git")
             .current_dir(dir)
             .args([
                 "-c",
@@ -4426,7 +4378,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&bare).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(args)
                 .output()
@@ -4487,7 +4439,7 @@ mod tests {
         let root = scratch("gitgraph");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(args)
                 .output()
@@ -4551,7 +4503,7 @@ mod tests {
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -4648,7 +4600,7 @@ mod tests {
         let root = base.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -4668,7 +4620,7 @@ mod tests {
         git(&["commit", "-qam", "second"]);
         git(&["branch", "feature/existing"]);
         let head_of = |dir: &Path| {
-            let output = std::process::Command::new("git")
+            let output = child_process::command("git")
                 .current_dir(dir)
                 .args(["rev-parse", "HEAD"])
                 .output()
@@ -4754,7 +4706,7 @@ mod tests {
         let root = base.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -4834,7 +4786,7 @@ mod tests {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -4869,7 +4821,7 @@ mod tests {
         assert!(target.join("README.md").exists(), "根のファイルは取り出す");
         assert!(!target.join("api").exists(), "書いていないフォルダは取り出さない");
         assert!(root.join("api/src/b.txt").exists(), "統合先はそのまま");
-        let status = std::process::Command::new("git")
+        let status = child_process::command("git")
             .current_dir(&target)
             .args(["status", "--porcelain"])
             .output()
@@ -4895,7 +4847,7 @@ mod tests {
         std::fs::create_dir_all(root.join("secrets")).unwrap();
         std::fs::create_dir_all(root.join("build")).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -4989,7 +4941,7 @@ mod tests {
         std::fs::create_dir_all(root.join("tracked")).unwrap();
         std::fs::create_dir_all(root.join(".necoder")).unwrap();
         let git_in = |dir: &Path, args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -5186,7 +5138,7 @@ mod tests {
             std::fs::create_dir_all(root.join(folder)).unwrap();
         }
         let git_in = |dir: &Path, args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -5284,7 +5236,7 @@ mod tests {
         let root = base.join("repo");
         std::fs::create_dir_all(root.join(".necoder")).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -5340,7 +5292,7 @@ mod tests {
         let root = scratch(tag);
         std::fs::create_dir_all(root.join("hooks")).ok()?;
         let git = |args: &[&str]| {
-            Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(args)
                 .output()
@@ -5372,7 +5324,7 @@ mod tests {
     // 使うのはフックを走らせるテスト（`#[cfg(unix)]`）だけ。Windows の `-D warnings` で未使用にしない。
     #[cfg(unix)]
     fn commit_count(root: &Path) -> usize {
-        let output = Command::new("git")
+        let output = child_process::command("git")
             .current_dir(root)
             .args(["rev-list", "--count", "HEAD"])
             .output()
@@ -5515,13 +5467,13 @@ mod tests {
         };
         let bare = scratch("hooks_push_remote");
         std::fs::create_dir_all(&bare).unwrap();
-        let bare_init = Command::new("git")
+        let bare_init = child_process::command("git")
             .current_dir(&bare)
             .args(["init", "-q", "--bare"])
             .output()
             .unwrap();
         assert!(bare_init.status.success());
-        Command::new("git")
+        child_process::command("git")
             .current_dir(&root)
             .args(["remote", "add", "origin", &bare.to_string_lossy()])
             .output()

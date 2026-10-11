@@ -29,7 +29,7 @@ use std::path::PathBuf;
 // 以下は unix 経路（`$SHELL -l -i -c`）でしか使わない。cfg を付けないと Windows で
 // 「未使用 import」の警告になる（W2 の受入条件は警告 0）。
 #[cfg(unix)]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 #[cfg(unix)]
 use std::sync::mpsc;
 #[cfg(unix)]
@@ -110,7 +110,7 @@ fn load_from_login_shell() -> Option<String> {
 #[cfg(unix)]
 fn run_login_shell() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let output = Command::new(&shell)
+    let output = child_process::command(&shell)
         .args([
             "-l",
             "-i",

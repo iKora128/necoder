@@ -101,6 +101,7 @@ dependencies = [
  "anyhow",
  "async-io",
  "blocking",
+ "child_process",
  "futures",
  "host",
  "keyring",
@@ -232,6 +233,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chat_core",
+ "child_process",
  "editor_view",
  "futures",
  "gpui",
@@ -1206,6 +1208,10 @@ dependencies = [
  "serde_json",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "child_process"
+version = "0.1.26"
 
 [[package]]
 name = "chrono"
@@ -3148,6 +3154,7 @@ name = "host"
 version = "0.1.26"
 dependencies = [
  "anyhow",
+ "child_process",
  "ignore",
  "libc",
  "paths",
@@ -4332,6 +4339,7 @@ version = "0.1.26"
 dependencies = [
  "agent_skills",
  "anyhow",
+ "child_process",
  "cli_shim",
  "editor_view",
  "futures",
@@ -4351,6 +4359,7 @@ dependencies = [
  "storage",
  "theme_core",
  "url",
+ "windows-sys 0.61.2",
  "workspace",
 ]
 
@@ -5364,6 +5373,7 @@ name = "project"
 version = "0.1.26"
 dependencies = [
  "anyhow",
+ "child_process",
  "host",
  "ignore",
  "imara-diff",
@@ -5858,6 +5868,7 @@ dependencies = [
 name = "review_view"
 version = "0.1.26"
 dependencies = [
+ "child_process",
  "editor_view",
  "futures",
  "gpui",
@@ -6413,6 +6424,7 @@ dependencies = [
  "acp_client",
  "agent_skills",
  "anyhow",
+ "child_process",
  "cli_shim",
  "editor_view",
  "gpui",
@@ -8606,6 +8618,7 @@ name = "webview_view"
 version = "0.1.26"
 dependencies = [
  "block2 0.6.2",
+ "child_process",
  "futures",
  "gpui",
  "i18n",
@@ -9429,6 +9442,7 @@ dependencies = [
  "agent_panel",
  "anyhow",
  "chat_core",
+ "child_process",
  "editor_core",
  "editor_view",
  "explorer",

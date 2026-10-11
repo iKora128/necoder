@@ -51,6 +51,24 @@ pub use acp_client::PermissionKind as AgentPermissionKind;
 pub fn oneshot_template(label: &str) -> Option<&'static str> {
     acp_client::AgentKind::by_label(label).and_then(|kind| kind.oneshot())
 }
+
+/// **既定のエージェント**の oneshot テンプレート（タイトル・要約・ブランチ名などの道具役）。
+/// 使うエージェントが無い・既定に一発生成の CLI が無いなら `None`（呼び手は機能を黙って省く）。
+pub fn default_oneshot_template(cx: &App) -> Option<&'static str> {
+    default_oneshot_or_reason(cx).ok()
+}
+
+/// 人が頼んだ道具役（コミットメッセージ・⌘I・今日の計画）向け: 既定のエージェントの一発生成テンプレートか、
+/// 使えない理由の文（使うエージェントが無い・既定のエージェントに一発生成の CLI が無い）。
+pub fn default_oneshot_or_reason(cx: &App) -> Result<&'static str, String> {
+    let Some(agent) = settings::default_agent(cx) else {
+        return Err(i18n::t!("agent.err_no_agent_enabled"));
+    };
+    agent
+        .builtin()
+        .and_then(|kind| kind.oneshot())
+        .ok_or_else(|| i18n::t!("agent.oneshot_unsupported", "agent" => agent.label()))
+}
 use editor_view::{ComposerEvent, EditorView};
 use futures::channel::mpsc;
 use futures::StreamExt;
@@ -3391,10 +3409,7 @@ PYEOF"#;
         let host = self.dest_host.clone();
         // タイトル生成はユーザーの既定 Agent の vendor CLI で（Claude 決め打ちをやめる・#6）。
         // 既定 agent に一発生成 CLI が無ければタイトルは既定名のまま（壊さない）。
-        let agent_label = settings::get(cx).default_agent.clone();
-        let Some(oneshot) =
-            acp_client::AgentKind::by_label(&agent_label).and_then(|kind| kind.oneshot())
-        else {
+        let Some(oneshot) = default_oneshot_template(cx) else {
             return;
         };
         let thread_id = thread.id.clone();
@@ -3590,7 +3605,7 @@ PYEOF"#;
             .threads
             .get(thread_index)
             .map(|thread| thread.agent.clone())
-            .unwrap_or_else(|| SharedString::from("Claude Code"));
+            .unwrap_or_else(|| default_agent_name(cx));
         usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx)
     }
 
@@ -6324,7 +6339,7 @@ PYEOF"#;
             Some(thread) => self.prospective_stock_key(thread, cx),
             None => StockKey {
                 usage: usage::UsageKey::for_agent(
-                    SharedString::from("Claude Code"),
+                    default_agent_name(cx),
                     self.dest_host_label.clone(),
                     cx,
                 ),
@@ -7668,8 +7683,7 @@ PYEOF"#;
             .threads
             .get(thread_index)
             .map(|thread| thread.agent.clone())
-            // 既定は AgentKind の label と完全一致させる（"Claude" だと by_label が None＝解決不能）。
-            .unwrap_or_else(|| "Claude Code".into());
+            .unwrap_or_else(|| default_agent_name(cx));
         // このセッションの配送先は**位置ではなく安定 id で追う**。タブは並べ替え/クローズで index が
         // 動くので、生成時の thread_index を握ると走行中セッションのイベント（特に `TurnEnded {
         // Interrupted }`）が今その位置に居る別タブへ着弾する（＝「他を中断したら別タブも中断」の正体）。
@@ -7682,6 +7696,15 @@ PYEOF"#;
         // 組み込み・設定で足したエージェント（H1）のどちらも、今の設定の一覧から引く。
         let agent = settings::agent_by_label(cx, &agent_label)
             .ok_or_else(|| i18n::t!("agent.err_no_acp"))?;
+        // 使わないにしたエージェントは起こさない（O16）。新しいスレッド・IPC・Captain・先張りの
+        // どの道から来てもここを通る。全部オフなら「1 つも無い」、そうでなければピルで選び直せる旨。
+        if !settings::get(cx).agent_enabled(agent.id()) {
+            return Err(if settings::default_agent(cx).is_none() {
+                i18n::t!("agent.err_no_agent_enabled")
+            } else {
+                i18n::t!("agent.err_agent_turned_off", "agent" => agent.label())
+            });
+        }
         // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
         let agent_override = agent_server_override(agent.id(), cx);
@@ -9060,10 +9083,7 @@ PYEOF"#;
             return;
         };
         let host = self.dest_host.clone();
-        let agent_label = settings::get(cx).default_agent.clone();
-        let Some(template) =
-            acp_client::AgentKind::by_label(&agent_label).and_then(|kind| kind.oneshot())
-        else {
+        let Some(template) = default_oneshot_template(cx) else {
             return; // oneshot テンプレ無し → Tier 1 のみに自然フォールバック
         };
         let thread_id = thread.id.clone();
@@ -14270,14 +14290,19 @@ fn human_elapsed(secs: u64) -> String {
     }
 }
 
-/// 初期スレッド群。先頭は mock v0.3 の会話例を種として持つ（ACP 配線までのプレースホルダ）。
-/// 設定の既定エージェント（選べるエージェントの表示名・足したエージェントも可。無効/未設定なら
-/// "Claude Code"）。
+/// 新しいスレッドのエージェント（表示名）= 既定のエージェント（[`settings::default_agent`]）。
+/// 使うエージェントが 1 つも無いときは一覧の先頭を名前だけ入れる — 起こそうとした時点で
+/// [`AgentPanel::start_session`] が「使うエージェントがありません」と断る（黙って起こさない）。
 fn default_agent_name(cx: &App) -> SharedString {
-    let name = settings::get(cx).default_agent;
-    match settings::agent_by_label(cx, &name) {
+    match settings::default_agent(cx) {
         Some(agent) => SharedString::from(agent.label().to_string()),
-        None => SharedString::from("Claude Code"),
+        None => SharedString::from(
+            settings::agent_catalog(cx)
+                .labels()
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+        ),
     }
 }
 
@@ -18841,7 +18866,11 @@ for line in sys.stdin:
             assert_eq!(panel.threads[panel.active].effort.as_ref(), "xhigh");
 
             // §8: グローバル既定 default_agent はピル操作で動かない。
-            assert_eq!(settings::get(cx).default_agent, "Claude Code");
+            assert_eq!(
+                settings::get(cx).default_agent,
+                "",
+                "ピル操作で書かれない（自動のまま）"
+            );
         });
         let _ = std::fs::remove_file(path);
     }
