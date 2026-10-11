@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-10-11
+
+This is the first regular release since v0.1.24, delivered through auto-update. It includes everything from the test releases [v0.1.25](https://github.com/iKora128/necoder/releases/tag/v0.1.25) and [v0.1.26](https://github.com/iKora128/necoder/releases/tag/v0.1.26). If you are updating from v0.1.24, their notes list every change. If something does not work, please let us know in an Issue.
+
+This release makes every AI agent optional. Before, Claude Code was the fixed default and could not be turned off, so it looked required even if you only wanted Codex. On Windows, the main window can now be moved, and no console window opens next to the app.
+
+### Highlights since v0.1.24
+
+- **Any one agent is enough**: Turn any agent on or off, including the default one. The default agent is picked from the agents that are ready, unless you choose one.
+- **Connections**: Run an agent on another company's API or coding plan instead of its own login.
+- **Steer the running turn**: A queued message can be handed to the running turn instead of interrupting it (Claude Code and Codex).
+- **Settings card under the composer**: The Agent, Model and Effort pills are one chip that opens every setting the agent offers.
+- **AI Agents on one list**: Built-in, registry and your own agents on one card, with what each one needs, and a check of an SSH host.
+- **Fleet**: Tasks that an agent creates appear on the Fleet, and Integrate works when the base has unrelated local changes.
+- **Rail**: Moving between projects skips the worktrees of Tasks.
+- **Windows**: The window can be moved, and no console window opens.
+
 ### Changed
 
 - **No AI agent is required**: any agent can be turned off in Settings → AI Agents, including the default one and the last one. With every agent off, necoder works as a plain editor. The default agent is no longer fixed to Claude Code. Unless you pick one with "Make default", necoder uses the first agent that is ready (for example Codex, if that is the only one installed) and marks it "★ Default (auto)". Turning off the Captain's agent also ends that appointment. An agent that is off is never started, whichever path asks for it.
@@ -17,6 +34,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 - **Windows: no console window**. necoder.exe no longer opens a black console window next to the app, and the git and agent processes it starts no longer flash one. Running `necoder` subcommands from a terminal still prints to that terminal. Not yet checked on a real Windows machine.
 
 ### 日本語
+
+v0.1.24 以来の正式版で、自動更新で配信します。テストリリースの [v0.1.25](https://github.com/iKora128/necoder/releases/tag/v0.1.25)・[v0.1.26](https://github.com/iKora128/necoder/releases/tag/v0.1.26) の変更をすべて含みます。v0.1.24 から更新した方は、それぞれのリリースノートに変更の一覧があります。うまく動かない所があれば Issue で教えてください。
+
+AI エージェントをどれも必須にしない版です。これまでは Claude Code が既定に固定されていてオフにできず、Codex だけ使いたい人にも必須に見えていました。Windows では、メインウィンドウを動かせるようになり、コンソール窓も出なくなりました。
+
+#### v0.1.24 からの主な変更
+
+- **エージェントはどれか 1 つで足ります**：既定のものも含めて、どのエージェントもオン/オフできます。既定のエージェントは、選んでいなければ使える状態のものから選ばれます。
+- **接続**：エージェントを自分のログインではなく、他社の API やコーディングプランで動かせます。
+- **実行中のターンへの差し込み**：キューに入れたメッセージを、中断せずに実行中のターンへ渡せます（Claude Code と Codex）。
+- **入力欄の下の設定カード**：エージェント・モデル・思考量のピルが 1 つのチップになり、エージェントの全設定を開けます。
+- **AI エージェントの一覧**：組み込み・レジストリ・自分で足したエージェントを 1 枚に並べ、それぞれに足りない物と SSH 先での動作を確かめられます。
+- **Fleet**：エージェントが作った Task も Fleet に出て、統合先に関係のない手元の変更があっても統合できます。
+- **レール**：プロジェクトの移動で Task の worktree に入らなくなりました。
+- **Windows**：ウィンドウを動かせるようになり、コンソール窓が出なくなりました。
 
 #### 変更
 
