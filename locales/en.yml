@@ -122,7 +122,7 @@ agent:
   exit_signal: "Ended by signal %{signal}"
   exit_unknown: Unknown exit
   exit_title: Exited right after starting
-  exit_body: "%{status}. The last lines the agent wrote to stderr (on screen only, not saved; keys it was given are masked)"
+  exit_body: "%{status}. The last lines the agent printed (not saved)"
   exit_no_stderr: (nothing was written to stderr)
   exit_dismiss: Dismiss
   session_resume: Resume
@@ -131,8 +131,8 @@ agent:
   session_resumed: Resumed with the previous conversation
   session_fresh: Started a new session (the previous conversation could not be carried over)
   auth_required_title: ● Sign-in required
-  auth_required_body: The agent's sign-in has expired. Run the command below in a terminal, then press "Reconnect and resend". The last instruction is sent again and the conversation continues
-  auth_required_body_generic: "%{agent}'s sign-in has expired. Sign in again with its CLI, then press \"Reconnect and resend\". The last instruction is sent again and the conversation continues"
+  auth_required_body: "Sign-in expired. Run this command, then press “Reconnect and resend”"
+  auth_required_body_generic: "%{agent}'s sign-in expired. Log in again with its CLI, then press “Reconnect and resend”"
   auth_reconnect_resend: Reconnect and resend
   auth_reconnect: Reconnect
   auth_dismiss: Dismiss
@@ -208,7 +208,7 @@ agent:
   shell_run_cmd: Run ⌘⏎
   shell_hint: Runs in the shell (not sent to the agent; the output goes with your next message)
   shell_hint_no_project: Open a project to run shell commands
-  shell_hint_no_folder: This chat has no folder yet. Send a first message, then shell commands run in its folder
+  shell_hint_no_folder: "Send a first message to use the shell"
   shell_running: Running
   shell_stopping: Stopping…
   shell_stop: Stop
@@ -252,7 +252,7 @@ agent:
   history_omitted: "%{count} earlier items omitted"
   thread_menu_rename: Rename
   thread_menu_continue: Continue in a new session
-  thread_menu_continue_tip: Start a new session in the same tab, prefixed with the gist of this conversation (the latest exchange and what you asked for). Use it when the context has grown large. Unavailable while running or waiting for approval
+  thread_menu_continue_tip: "Continue in a new session with the gist of this conversation"
   thread_menu_close: Close
   handoff_note: Continuing in a new session. Your next message carries excerpts of the previous conversation
   handoff_divider: New session from here
@@ -435,9 +435,9 @@ captain:
   appoint_tab: "Appoint a Captain"
   tab_tip: "Go to the Captain (the coordinator living on main) · ⌘0"
   appoint_title: "Appoint a Captain"
-  appoint_body: "The Captain is a coordinator that lives on main. Give it a goal and it splits the work into Tasks (worktrees), starts them, watches for done / failed / waiting, and reports back. It never writes code itself. Any agent can serve, and you can replace or dismiss it later in Settings."
+  appoint_body: "Give it a goal and it splits the work into Tasks, starts them, and reports back. It writes no code itself."
   appoint_no_agent: "No agent is available. Sign in under Settings → Agents."
-  log_empty: "No decisions yet. Give the Captain a goal and its decisions will be listed here."
+  log_empty: "No decisions yet"
   role: |
     You are the Captain of the necoder fleet.
     Role: read the situation, decide the next move, and direct the fleet with the fleet tools of the MCP server necoder. When a human hands you a goal, split it into Tasks and propose them.
@@ -558,14 +558,14 @@ fleet:
   files_hint: "Click to open in Editor"
   tasks_count: "%{n} Tasks"
   tokens_total: "Σ %{tokens}"
-  tokens_total_tip: "Fleet tokens: the Task rows plus the Captain (the context each conversation holds right now, not a running total. For totals, use \"Usage: Open statistics\" in the palette)"
+  tokens_total_tip: "Context the Tasks and the Captain hold right now"
   filter_placeholder: Filter Tasks
   filter_none: No Tasks match
   sort_rail: "Order: rail"
   sort_recent: "Order: recent"
   sort_attention: "Order: needs you"
   external_header: "Other worktrees (%{count})"
-  external_tip: "Worktrees of this repository that are not Tasks (made by Orca, Claude Code, git worktree add, and so on). Click to collapse"
+  external_tip: "Worktrees that are not Tasks"
   external_adopt: Adopt
   external_adopt_tip: "Open it in the rail as a Task (branch and files stay as they are; it stays a Task after a restart)"
   worktree_vanished: Gone (deleted outside necoder)
@@ -626,10 +626,10 @@ fleet:
   selection_cleanup: Clean up…
   selection_cleanup_tip: "Open the cleanup screen with these Tasks selected (it counts what you would lose before deleting)"
   selection_clear_tip: Clear the selection
-  cleanup_sleep_sub: "Stop %{count} idle agents to free memory. Conversations stay and resume on your next message"
-  cleanup_sleep_family_sub: "Stop %{count} idle agents, including those of %{children} child Tasks, to free memory. Conversations stay and resume on your next message"
+  cleanup_sleep_sub: "Stop %{count} idle agents (conversations are kept)"
+  cleanup_sleep_family_sub: "Stop %{count} idle agents, including %{children} child Tasks (conversations are kept)"
   cleanup_family: Clean up with child Tasks…
-  cleanup_family_sub: "Open Clean up with this Task and its %{children} child Tasks marked (counts what would be lost first)"
+  cleanup_family_sub: "Open cleanup for this Task and %{children} child Tasks"
   cleanup_archive: Finish Task
   cleanup_archive_sub: Removes it from fleet and herd. The worktree stays on disk
   cleanup_remove_worktree: Delete worktree
@@ -756,9 +756,9 @@ titlebar:
   fleet: Fleet
 settings:
   pref_agent_idle_stop: Stop unused agents after (minutes)
-  pref_agent_idle_stop_sub: Each agent holds several hundred MB. The conversation is kept and resumes on the next message. 0 = never
+  pref_agent_idle_stop_sub: "The conversation is kept. 0 = never"
   pref_allow_terminal_send: Let the CLI type into terminals
-  pref_allow_terminal_send_sub: "Lets agents and scripts type into necoder's terminals with `ne terminal send`. What they send runs in that terminal as if you typed it (list, read and wait work even when this is off)"
+  pref_allow_terminal_send_sub: "Lets `ne terminal send` type into a terminal (the text runs as typed)"
   chat_heading: CHAT
   chat_directory: Where chat folders are kept
   chat_directory_default: necoder in your Documents folder (default)
@@ -769,12 +769,11 @@ settings:
   chat_instructions: Custom instructions (apply to every chat)
   chat_instructions_none: None (set chat.instructions in settings.json)
   mcp_claude_connectors: Load claude.ai connectors into Claude threads
-  mcp_claude_connectors_sub: Connectors linked to your account (Figma, Google Calendar, …). Turning this off makes the first reply faster (measured 4.2 s → 1.8 s). Chat mode never loads them
+  mcp_claude_connectors_sub: "Off makes the first reply faster"
   title: Settings
   agents_heading: AI Agents
-  agents_sub: For each host, see whether each agent runs, its version, and whether it's on. necoder never stores credentials.
   permission_default: Default permissions
-  permission_default_sub: The mode new threads start in. Choosing resets the modes remembered from the pill for every agent. "Don't ask" applies only to agents that offer such a mode (such as Claude Code's bypassPermissions). Chat is not affected
+  permission_default_sub: "The permission mode new threads start in"
   permission_default_agent: Agent default
   permission_default_bypass: Don't ask (Yolo)
   permission_remembered: Modes chosen in the pill (click to forget)
@@ -784,7 +783,6 @@ settings:
   agent_host_local: "This machine"
   agent_host_ssh: "SSH"
   agent_host_recheck: "Check again"
-  agent_host_note: "On/off, the default, and launch changes are the same on every host. Open an SSH project to pick its host here too."
   agent_host_failed: "Couldn't read the state on %{host}: %{reason}"
   agent_kind_builtin: "Built in"
   agent_kind_command: "Own command"
@@ -851,9 +849,8 @@ settings:
   add_agent_sha256: The binary is checked against the registry's sha256 after download
   add_agent_no_sha256: No checksum in the registry (no sha256). The downloaded binary is used unchecked
   agents_add: + Add agent
-  agents_add_hint: Pick from every agent in the ACP registry. For one that isn't listed, write your command in agent_servers in settings.json
   add_agent_title: Add agent
-  add_agent_sub: "%{count} agents in the ACP registry. Added agents join the AI agents list, where you turn them on or off, make them the default, and change how they start, just like the built-in ones"
+  add_agent_sub: "%{count} agents in the ACP registry"
   add_agent_search: Search by name, description, build (npx / binary / uvx), or OS
   add_agent_add: Add
   add_agent_added: Added
@@ -868,7 +865,7 @@ settings:
   add_agent_fetching: Fetching…
   add_agent_refresh: Refresh
   add_agent_fetch_failed: "Couldn't fetch: %{reason}"
-  add_agent_custom_hint: For an agent that isn't listed, write your command in agent_servers in settings.json
+  add_agent_custom_hint: "Not listed? Add your own command under agent_servers in settings.json"
   add_agent_open_settings_json: Open settings.json
   add_agent_close: Close
   launch_default: Launch as usual (registry version and command)
@@ -882,7 +879,7 @@ settings:
   launch_command: Command (absolute path or a name on PATH)
   launch_args: Arguments (one per line)
   launch_env_field: Environment variables (one KEY=VALUE per line)
-  launch_note: Applies to agents started from now on. Values stay in settings.json as written, so don't put API keys or other secrets here (use variables that point to a location, like CLAUDE_CONFIG_DIR)
+  launch_note: "Applies from the next launch. Don't put secrets such as API keys here"
   launch_command_missing: Enter a command
   launch_cancel: Cancel
   launch_save: Save
@@ -892,20 +889,18 @@ settings:
   make_captain: Make Captain
   is_captain: ⚑ Captain
   welcome_title: Welcome 🎨
-  welcome_sub: Install and log in to the CLI of any one AI agent (Claude Code, Codex and others) to get started. You can also turn them all off and use necoder as a plain editor. You can change this anytime from ⚙.
+  welcome_sub: "Install and log in to the CLI of any one AI agent to get started"
   get_started: Get started →
   mcp_heading: MCP servers
-  mcp_sub: Tools you hand to the agent. Only the ones you enable are visible to new threads.
-  mcp_empty: No MCP servers yet. Add them under mcp_servers in settings.json, or register them with Codex CLI, Claude Code or Cursor and they show up here.
-  mcp_note: Changes apply to the next thread you open; running sessions are not reconnected.
+  mcp_empty: "No MCP servers"
+  mcp_note: "Applies to threads opened from now on"
   connections_heading: Connections
-  connections_sub: Where agents call model APIs, and the key for that plan (GLM, Kimi, DeepSeek and more). Keys go into the OS keychain, never into settings.json. necoder never calls an API with them; it only hands them to the agent it starts.
-  connections_remote_note: Connections are not passed to remote agents (started over SSH). Only agents started on this machine get them; remote threads use the agent's own login.
+  connections_sub: "Run agents on another company's API or coding plan. Keys are stored in the OS keychain"
   connections_empty: No connections yet. Use "+ Add connection" to pick a template and paste a key.
   connections_add: + Add connection
   connections_agents_heading: Connection per agent
-  connections_agents_sub: The chosen connection applies from the next session the agent starts (running threads keep theirs). When Claude Code uses another company's connection, the settings chip under the composer reads "Claude Code · <connection>".
-  connections_other_agents: Codex, GitHub Copilot, Qwen Code, Kimi CLI, Grok Build and other added agents can't take a connection yet.
+  connections_agents_sub: "Used from the next session"
+  connections_other_agents: "Other agents can't use connections yet"
   connection_refusal_protocol: "only takes %{protocol} endpoints"
   connection_refusal_only_deepseek: DeepSeek Harness only takes the DeepSeek API connection (choose other companies in dsh's own settings)
   connection_refusal_opencode: not a company OpenCode knows out of the box (add it in OpenCode's settings)
@@ -948,7 +943,7 @@ settings:
   connection_base_url: Base URL
   connection_key: API key
   connection_paste_key: Paste from clipboard
-  connection_key_note: The key goes into the OS keychain, never into settings.json, and is never shown (only its last 4 characters).
+  connection_key_note: "The key is stored in the OS keychain. Only its last 4 characters are shown"
   connection_docs: "The company's setup guide: %{url}"
   connection_saving: Saving…
   mcp_source_necoder: necoder settings
@@ -960,48 +955,41 @@ settings:
   mcp_filter_enabled: Enabled only
   mcp_filtered_empty: No MCP servers match this filter.
   prefs_heading: Behavior & editor
-  prefs_sub: settings.json is the source of truth; this just edits it.
   search_placeholder: Search settings
   search_count: "%{count} results"
   search_none: No settings match
   pref_submit_on_enter: Submit on Enter
-  pref_submit_on_enter_sub: "Off = ⌘Enter to send (IME-safe)"
+  pref_submit_on_enter_sub: "Off: send with ⌘Enter"
   pref_soft_wrap: Soft wrap
-  pref_soft_wrap_sub: Can also toggle temporarily with ⌥Z
+  pref_soft_wrap_sub: "Toggle with ⌥Z"
   pref_format_on_save: Format on save
-  pref_format_on_save_sub: Supported languages only; ⌘S formats then saves
   pref_preview_tabs: Preview tabs
-  pref_preview_tabs_sub: "A file single-clicked in the explorer opens in a tab (italic name) that the next single-clicked file replaces. Editing it or double-clicking keeps it"
+  pref_preview_tabs_sub: "A file opened with one click is replaced by the next one"
   pref_auto_save: Auto save
-  pref_auto_save_sub: "Saves when you move to another tab, panel or app. “After a pause” also saves when you stop typing for a second (auto save never formats)"
   auto_save_off: "Off"
   auto_save_focus_change: On focus change
   auto_save_after_delay: After a pause
   pref_agent_auto_name: Auto-name threads
-  pref_agent_auto_name_sub: AI titles new threads from the first exchange
   pref_agent_prewarm: Connect agents up front
-  pref_agent_prewarm_sub: Connects before you send so the model list is ready to pick
+  pref_agent_prewarm_sub: "Connect before you send"
   pref_sound_done: Completion sound
   pref_sound_waiting: Waiting-for-you sound
   pref_sound_volume: Notification sound volume (%)
-  pref_sound_volume_sub: 0 mutes it (the chosen voice is kept); 100 plays the sound as is
   sound_nya: Meow
   sound_nyaan: Long meow
   sound_mew: Chirp
   sound_system: System
   sound_off: Off
   pref_reduce_motion: Reduce motion
-  pref_reduce_motion_sub: Freezes decorative animation such as Braille spinners and the mascot
   pref_font_size: Font size
   pref_tab_size: Tab width
   pref_terminal_font_size: Terminal font size
   pref_terminal_scrollback: Terminal scrollback
-  pref_terminal_scrollback_sub: "Lowering it drops the oldest lines. Change the font with terminal_font_family in settings.json"
   terminal_scrollback_lines: "%{n} lines"
   pref_terminal_cursor: Terminal cursor
   pref_terminal_color_scheme: Terminal colors
   pref_ghostty_import: Import from Ghostty
-  pref_ghostty_import_sub: Use Ghostty's font, size, cursor and colors for the terminal (key bindings and scrollback are left out)
+  pref_ghostty_import_sub: "Imports font, size, cursor and colors"
   ghostty_import: Import
   ghostty_not_found: No Ghostty config was found (~/.config/ghostty/config and so on)
   ghostty_nothing: Ghostty's config has nothing to import
@@ -1010,16 +998,15 @@ settings:
   ghostty_item_size: size
   ghostty_item_cursor: cursor
   ghostty_item_colors: colors
-  terminal_color_scheme_default: Default (follows the app theme). Reads Ghostty themes, Windows Terminal schemes (JSON), iTerm2 .itermcolors and Warp themes (YAML)
+  terminal_color_scheme_default: "Default (app theme)"
   terminal_color_scheme_pick: Choose file…
   terminal_color_scheme_reset: Use default
   pref_terminal_shell: Terminal shell
-  terminal_shell_default: Default (the OS shell). Applies to new local terminals
+  terminal_shell_default: "Default (OS shell)"
   terminal_shell_pick: Choose…
   terminal_shell_reset: Use default
   shell_picker_placeholder: Search shells…
   shell_picker_default: Use default (the OS shell)
-  pref_terminal_cursor_sub: "A shape set by vim or your shell takes precedence"
   terminal_cursor_block: Block
   terminal_cursor_bar: Bar
   terminal_cursor_underline: Underline
@@ -1027,32 +1014,28 @@ settings:
   tabs_view_bar: Bar
   tabs_view_list: List
   pref_system_notifications: System notifications
-  pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
+  pref_system_notifications_sub: "Notifies you when an agent in a window you aren't looking at stops"
   account_default: Default
   account_elsewhere: (elsewhere)
   account_add: + New account
   account_login: Log in
-  account_hint: Switching takes effect for agents started from now on (running threads keep their account). necoder never reads the credentials; the official CLI handles them
+  account_hint: "Applies from the next agent launch"
   pref_confirm_quit: Confirm before quitting
-  pref_confirm_quit_sub: "On ⌘Q or when closing a window, offers “Hide and keep running” while agents or terminals are busy"
+  pref_confirm_quit_sub: "Asks before closing while agents or terminals are running"
   confirm_quit_running: Only while busy
   confirm_quit_never: Never
   pref_keep_awake: Keep awake while agents work
-  pref_keep_awake_sub: "While an agent is working, the computer won't sleep when left alone. The display still turns off, and choosing Sleep or closing a laptop's lid still puts it to sleep"
   keep_awake_working: While working
   keep_awake_off: "Off"
   pref_tabs_position: Default tab position
   tabs_position_top: Top
   tabs_position_left: Left
   appearance_heading: Appearance
-  appearance_sub: Themes apply the moment you click and are saved to settings.json.
   locale_label: Language
-  locale_sub: Switches right away (the macOS menu bar switches on the next launch)
   locale_follow_os: Match the OS
   locale_ja: 日本語
   locale_en: English
   theme_label: Theme
-  theme_sub: Also available via the ⌘K ⌘T selector
   open_json: Open settings.json
   font_ui: UI font
   font_code: Code font
@@ -1060,23 +1043,21 @@ settings:
   font_default: Default (bundled font)
   font_terminal_default: Default (same as the code font)
   density_label: Row spacing
-  density_sub: Row height in the explorer, pickers, search results and the Fleet's Task list
   density_compact: Compact
   density_cozy: Cozy
   font_pick: Choose…
   font_reset: Use default
   font_picker_placeholder: Search fonts…
   font_picker_default: Use default
-  open_json_sub: The single source of truth; saved edits propagate everywhere within ~1s
   open_json_button: Open
   cli_heading: Command line
   remote_heading: Phone connection
   remote_label: Control from your phone
-  remote_sub: Shares all projects open when the QR is issued. Switch projects on your phone to control each independently.
+  remote_sub: "Control every open project from your phone"
   remote_issue: Generate pairing QR
   remote_copy: Copy pairing URL
   remote_hide: Hide QR
-  remote_qr_hint: "Sharing %{count} projects. Valid for 5 minutes. Scan with your phone's camera, or paste the URL into the Home Screen PWA. Keep the QR and URL private."
+  remote_qr_hint: "Sharing %{count} projects. Valid for 5 minutes. Keep it private"
   remote_error: Could not generate a QR (cause unknown). Run `ne remote pair` in a terminal to see the reason.
   remote_err_no_gui: Could not reach necoder itself. Restart necoder and try again.
   remote_err_no_project: No project to share. Open a project first.
@@ -1104,7 +1085,7 @@ settings:
   save_unreadable: "Couldn't read %{file}, so nothing was saved (%{reason})"
   save_failed: "Couldn't save the setting (%{reason})"
   skills_heading: Skills
-  skills_sub: Instructions (SKILL.md) that agents such as Claude Code and Codex read. With the necoder skill, agents learn the necoder CLI for the version you run.
+  skills_sub: "Instructions agents read (SKILL.md)"
   skills_necoder_label: necoder skill
   skills_checking: Checking…
   skills_busy: Working…
@@ -1115,7 +1096,7 @@ settings:
   skills_foreign: "%{path} was not written by necoder, so it is left as is (to overwrite, run `ne skills install --force`)"
   skills_read_error: "Cannot read %{path} (%{error})"
   skills_found: "Skills found (%{count})"
-  skills_empty: No skills found (looked in ~/.claude/skills, ~/.codex/skills, ~/.agents/skills and the project's .claude/skills and .agents/skills)
+  skills_empty: "No skills found"
   skills_skipped: "%{count} skipped because their front matter could not be read (run `ne skills list` for the reasons)"
   skills_scope_shared: Shared (~/.agents)
   skills_scope_claude_project: Claude Code · project
@@ -1159,7 +1140,7 @@ explorer:
   ctx_discard: Discard changes…
   discard_title: "Discard changes to “%{name}”?"
   discard_body: Restores the last committed version, including staged changes. This can't be undone.
-  discard_body_untracked: This file isn't tracked by git, so it will be moved to the Trash (press ⌘Z in the explorer to bring it back).
+  discard_body_untracked: "This file is untracked, so it goes to the Trash (⌘Z restores it)"
   discard_confirm: Discard
   discard_cancel: Cancel
   discard_untracked_remote: Can't clean up untracked files on a remote host (the file was removed from git's index)
@@ -1330,7 +1311,7 @@ design:
   not_ready: Start Design once the page is showing
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
-  unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
+  unsupported_hint: "Right-click → Open in Default App"
 conflict:
   bar: "⑂ %{count} conflicts (line %{line})"
   ours: Current
@@ -1361,7 +1342,7 @@ conflict:
   view_fill_both: From both
   use_result: Use result
 terminal:
-  quick_tip: "Quick commands (quick_commands in settings.json). Pick one to run it in a new terminal"
+  quick_tip: "Quick commands (quick_commands in settings.json)"
   tab_title: Terminal %{n}
   rename_title: Terminal name
   rename_hint: Leave it empty to go back to the title the shell sets
@@ -1374,7 +1355,7 @@ terminal:
   close_busy_named_title: "A process is running in “%{name}”"
   close_busy_many_title: "Processes are running in %{n} terminals"
   tab_needs_project: Terminal tabs open in a project, not in Chat
-  tab_split_hint: Terminals in the editor area can't be split. Right-click the tab › Move to the bottom dock to split it
+  tab_split_hint: "Move it to the bottom dock to split (right-click the tab)"
   float_hide_tip: "Hide (keeps running)  %{key}"
   add_tip: New terminal
   split_tip: "Split side by side (%{key})"
@@ -1850,7 +1831,7 @@ chat:
   err_export_empty: A chat with no messages yet cannot be exported
   delete: Delete chat…
   delete_confirm_title: "Delete “%{name}”?"
-  delete_confirm_body: The conversation history will be removed. Choose what happens to the files left in its folder (they are moved to the Trash, never erased).
+  delete_confirm_body: "The conversation history will be deleted. What about the files in its folder? (They only go to the Trash)"
   delete_keep_files: Keep files
   delete_trash_files: Move files to Trash
   cancel: Cancel
@@ -1884,7 +1865,7 @@ usage:
   window_minutes: "%{minutes}-minute window"
   window_minutes_short: "%{minutes}m"
   resets_in: "resets in %{time}"
-  reset_done: reset (no new value yet)
+  reset_done: "Reset"
   duration_minutes: "%{minutes}m"
   duration_hours: "%{hours}h %{minutes}m"
   duration_hours_only: "%{hours}h"
@@ -1896,9 +1877,7 @@ usage:
   received: "received %{when}"
   status_warning: Near the limit
   status_rejected: Limit reached
-  no_values: No values yet. They appear once an agent reports them
-  note: "Values change only when an agent reports them. What you see here is the last value received. The same agent is listed separately when its SSH host or auth settings (config folder, API keys and so on in the agent_servers env) differ; settings env #… is only a marker to tell them apart, not the key itself."
-  codex_note: Codex does not report limits over ACP, so they are read from the Codex CLI (codex app-server) when you open this panel.
+  no_values: "No values yet"
   codex_loading: Reading Codex limits…
   codex_failed: "Couldn't read Codex limits: %{error}"
   reload: Reload
@@ -1911,23 +1890,22 @@ usage:
   stats_tokens: Tokens
   stats_cost: Est. cost
   stats_total: 30-day total
-  stats_empty: Nothing recorded yet. Turns are recorded once an agent reports usage.
+  stats_empty: "No records yet"
   stats_loading: Loading…
   stats_failed: "Couldn't read usage: %{error}"
-  stats_note: Tokens and estimated cost are what each agent reported per turn. Cost is Claude Code's estimate (USD), not the amount you are billed (each company's billing page is the source of truth). Unreported values show — (not 0), and totals that only some turns reported are marked ≥. Codex reports no cost, and its tokens cover only the last request of each turn. Local logs such as ~/.claude are not read.
+  stats_note: "Estimated cost is not your bill. — means not reported"
 ports:
   title: Open ports
   loading: Reading…
-  empty: Nothing inside necoder is listening (start a dev server in a terminal or through an agent)
+  empty: "No listening ports"
   others: "Other processes (%{count})"
   no_project: Not in a project
   open: Open
   stop: Stop
   stop_failed: "Could not stop pid %{pid}: it already exited or is not a process inside necoder"
-  hint: Read only when opened and on ↻ (lsof / ps; ss / lsof on remotes). Only processes inside necoder can be stopped. Remote ports appear on this machine's localhost after Forward
   unsupported: Not available on this OS yet (macOS / Linux)
   remote_heading: "Remote · %{host}"
-  remote_empty: No listening ports on the remote (only your own user's processes are visible)
+  remote_empty: "No listening ports on the host"
   remote_other_user: Another user's process
   forward: Forward
   stop_forward: Stop
@@ -1940,7 +1918,7 @@ inbox:
   mark_all_read: Mark all read
   mark_read: Mark as read
   mark_unread: Mark as unread
-  empty: No notifications yet (finished, failed and waiting agents show up here)
+  empty: "No notifications yet"
   note: "Latest %{count} in this window, kept while necoder is running"
 resources:
   title: Resources (memory)
@@ -1951,7 +1929,6 @@ resources:
   process: "%{command} (pid %{pid}, %{count} processes)"
   stop_quiet: "Stop idle agents (%{count})"
   stopped: "Stopped %{count} agents (conversations are kept and resume on the next send)"
-  hint: Read only when opened or on ↻. Only quiet agents whose conversation can resume are stopped (terminals and dev servers are left alone)
 cleanup:
   title: Clean up Tasks
   select_finished: Select integrated and finished
@@ -1969,7 +1946,7 @@ cleanup:
   delete: "Delete worktree (%{count}, keep the branch)"
   archived: "Finished %{count} Tasks"
   deleted: "Deleted %{count} worktrees (kept %{kept} that had something to lose)"
-  hint: Only Tasks with no uncommitted changes and no commits missing from the base can have their worktree deleted here (counted again right before deleting). Delete the others one by one from the ⋯ menu
+  hint: "Only Tasks with nothing to lose can be deleted"
 statusbar:
   menu_title: Show in the status bar
   item_color: Project color

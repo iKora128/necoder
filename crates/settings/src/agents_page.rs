@@ -447,7 +447,6 @@ impl SettingsView {
             .flex_col()
             .gap(px(4.))
             .child(chips)
-            .child(note(i18n::t!("settings.agent_host_note"), theme.fg2))
             .when_some(failure, |row, failure| row.child(note(failure, theme.fg1)))
     }
 

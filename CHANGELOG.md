@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Changed
+
+- **Shorter text everywhere**: Settings rows, page headers and the usage, ports and resources popovers no longer carry long explanations. Most rows have no description now, and the rest have one line. Tooltips, empty states and a few messages were shortened too.
+
+### 日本語
+
+#### 変更
+
+- **文言を短くしました**：設定の各行・ページの頭・使用量やポート、リソースのポップオーバーから長い説明を外しました。ほとんどの行は説明なしになり、残したものも 1 行です。ツールチップ、空のときの表示、いくつかのメッセージも短くしました。
+
 ## [0.1.27] - 2026-10-11
 
 This is the first regular release since v0.1.24, delivered through auto-update. It includes everything from the test releases [v0.1.25](https://github.com/iKora128/necoder/releases/tag/v0.1.25) and [v0.1.26](https://github.com/iKora128/necoder/releases/tag/v0.1.26). If you are updating from v0.1.24, their notes list every change. If something does not work, please let us know in an Issue.

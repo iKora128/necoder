@@ -175,13 +175,6 @@ impl SettingsView {
     /// 「接続」のページ。
     pub(crate) fn connections_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
-        let note = |text: String| {
-            div()
-                .px(px(12.))
-                .text_size(px(10.5))
-                .text_color(theme.fg2)
-                .child(SharedString::from(text))
-        };
         let mut list = div().flex().flex_col().gap(px(6.));
         if settings.connections.is_empty() {
             list = list.child(
@@ -208,8 +201,6 @@ impl SettingsView {
                 i18n::t!("settings.connections_heading"),
                 Some(i18n::t!("settings.connections_sub")),
             ))
-            // リモートには渡さない（H3 の範囲外）。読み落とされないよう一覧より上に置く。
-            .child(note(i18n::t!("settings.connections_remote_note")))
             .child(list)
             .child(self.add_connection_row(cx))
             .child(self.agent_connection_rows(settings, cx))

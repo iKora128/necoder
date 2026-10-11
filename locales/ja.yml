@@ -123,7 +123,7 @@ agent:
   exit_signal: "シグナル %{signal} で終了"
   exit_unknown: 終わり方は不明
   exit_title: 起動してすぐ終了しました
-  exit_body: "%{status}。エージェントが stderr に最後に書いた行です（画面だけ・保存しません。渡した鍵などは伏せています）"
+  exit_body: "%{status}。エージェントが最後に出した行です（保存しません）"
   exit_no_stderr: （stderr には何も書かれていませんでした）
   exit_dismiss: 閉じる
   session_resume: 再開
@@ -132,8 +132,8 @@ agent:
   session_resumed: 前回の会話を引き継いで再開しました
   session_fresh: 新しいセッションを開始しました（前回の会話は引き継げませんでした）
   auth_required_title: ● 再ログインが必要
-  auth_required_body: エージェントの認証が切れました。ターミナルで次のコマンドを実行してから「再接続して再送」を押してください。直近の指示をもう一度送り、会話を続けます
-  auth_required_body_generic: "%{agent} の認証が切れました。エージェントの CLI で再ログインしてから「再接続して再送」を押してください。直近の指示をもう一度送り、会話を続けます"
+  auth_required_body: "認証が切れました。次のコマンドでログインし直してから「再接続して再送」を押してください"
+  auth_required_body_generic: "%{agent} の認証が切れました。CLI でログインし直してから「再接続して再送」を押してください"
   auth_reconnect_resend: 再接続して再送
   auth_reconnect: 再接続
   auth_dismiss: 閉じる
@@ -209,7 +209,7 @@ agent:
   shell_run_cmd: 実行 ⌘⏎
   shell_hint: シェルで実行（エージェントには送らない・結果は次の送信に添える）
   shell_hint_no_project: シェルで実行するには、プロジェクトを開いてください
-  shell_hint_no_folder: このチャットにはまだフォルダがありません。最初のメッセージを送ると、そのフォルダでシェルを実行できます
+  shell_hint_no_folder: "最初のメッセージを送るとシェルを使えます"
   shell_running: 実行中
   shell_stopping: 止めています…
   shell_stop: 止める
@@ -253,7 +253,7 @@ agent:
   history_omitted: "以前の %{count} 件は省略しました"
   thread_menu_rename: 名前を変更
   thread_menu_continue: 新しいセッションで続ける
-  thread_menu_continue_tip: 今の会話の要点（直近のやり取りと頼んだこと）を前置きにして、同じタブで新しいセッションを始めます。文脈が大きくなった時に。実行中・承認待ちの間は使えません
+  thread_menu_continue_tip: "今の会話の要点を付けて、新しいセッションで続けます"
   thread_menu_close: 閉じる
   handoff_note: 新しいセッションで続けます。次の送信に前の会話の抜粋を付けます
   handoff_divider: ここから新しいセッション
@@ -436,9 +436,9 @@ captain:
   appoint_tab: "Captain を任命"
   tab_tip: "Captain（main に住む采配役）へ · ⌘0"
   appoint_title: "Captain を任命する"
-  appoint_body: "Captain は main に住む采配役です。目標を渡すと Task（worktree）に分けて起動し、終わり・失敗・承認待ちを見張って報告します。自分ではコードを書きません。どのエージェントでも務まり、あとで設定から交代・解任できます。"
+  appoint_body: "目標を渡すと Task に分けて起動し、結果を見張って報告します。自分ではコードを書きません。"
   appoint_no_agent: "使えるエージェントがありません。設定 → エージェント でサインインしてください。"
-  log_empty: "まだ采配はありません。Captain に目標を渡すと、ここに判断の履歴が並びます。"
+  log_empty: "まだ采配はありません"
   role: |
     あなたは necoder 編隊の Captain（采配役）です。
     役割: 状況を読み、次の采配を決めて、MCP サーバ necoder の fleet 道具で指示する。人間から目標を渡されたら、Task に分けて提案する。
@@ -559,14 +559,14 @@ fleet:
   files_hint: "クリックで Editor に開く"
   tasks_count: "%{n} Tasks"
   tokens_total: "Σ %{tokens}"
-  tokens_total_tip: "Fleet のトークン: Task 行と Captain の合計（いま各会話が持っている文脈の量で、使った量の累計ではない。累計はパレットの「使用量: 統計を開く」）"
+  tokens_total_tip: "Task と Captain がいま持っている文脈の合計"
   filter_placeholder: Task を絞り込む
   filter_none: 一致する Task はありません
   sort_rail: "並び: レール"
   sort_recent: "並び: 最近"
   sort_attention: "並び: 要対応"
   external_header: "外部の worktree（%{count}）"
-  external_tip: このリポジトリの worktree のうち Task になっていないもの（Orca・Claude Code・手で git worktree add したもの等）。押すと畳む
+  external_tip: "Task になっていない worktree"
   external_adopt: 取り込む
   external_adopt_tip: レールに開いて Task にする（ブランチもファイルもそのまま・再起動しても Task のまま）
   worktree_vanished: 消えています（necoder の外で削除）
@@ -627,10 +627,10 @@ fleet:
   selection_cleanup: 片付け…
   selection_cleanup_tip: "片付けの画面を、選んだ Task に印を付けて開く（失うものを数えてから消す）"
   selection_clear_tip: 選択を外す
-  cleanup_sleep_sub: "静かなエージェント %{count} 体を止めてメモリを空ける。会話は残り、次に送ると続きから"
-  cleanup_sleep_family_sub: "静かなエージェント %{count} 体を止めてメモリを空ける（子の Task %{children} 本も）。会話は残り、次に送ると続きから"
+  cleanup_sleep_sub: "静かなエージェント %{count} 体を止める（会話は残ります）"
+  cleanup_sleep_family_sub: "静かなエージェント %{count} 体を止める（子の Task %{children} 本も・会話は残ります）"
   cleanup_family: 子の Task ごと片付ける…
-  cleanup_family_sub: "片付けの画面を、この Task と子の Task %{children} 本に印を付けて開く（失うものを数えてから消す）"
+  cleanup_family_sub: "この Task と子の Task %{children} 本を片付けの画面で開く"
   cleanup_archive: Task を終了
   cleanup_archive_sub: 編隊と herd から消す。worktree はディスクに残る
   cleanup_remove_worktree: worktree を削除
@@ -757,9 +757,9 @@ titlebar:
   chat: Chat
 settings:
   pref_agent_idle_stop: 使っていないエージェントを止めるまで（分）
-  pref_agent_idle_stop_sub: エージェントは 1 本で数百 MB を握ります。止めても会話は残り、次の送信で引き継ぎます。0 = 止めない
+  pref_agent_idle_stop_sub: "止めても会話は残ります。0 = 止めない"
   pref_allow_terminal_send: CLI から端末へ入力を送る
-  pref_allow_terminal_send_sub: "`ne terminal send` で、エージェントやスクリプトが necoder の端末に文字を打てるようにします。送った文字はその端末でそのまま実行されます（一覧・読み取り・待機は off でも使えます）"
+  pref_allow_terminal_send_sub: "`ne terminal send` で端末に文字を打てます（そのまま実行されます）"
   chat_heading: CHAT
   chat_directory: チャットのフォルダの置き場
   chat_directory_default: 書類フォルダの necoder（既定）
@@ -770,12 +770,11 @@ settings:
   chat_instructions: カスタム指示（どのチャットにも効かせる）
   chat_instructions_none: なし（settings.json の chat.instructions に書きます）
   mcp_claude_connectors: claude.ai のコネクタを Claude のスレッドへ読み込む
-  mcp_claude_connectors_sub: アカウントに繋いだコネクタ（Figma・Google Calendar など）。切ると初回応答が速くなります（実測 4.2 秒 → 1.8 秒）。Chat モードは常に読み込みません
+  mcp_claude_connectors_sub: "切ると最初の応答が速くなります"
   title: 設定
   agents_heading: AI エージェント
-  agents_sub: ホストごとに、エージェントが動くか・版・使う / 使わないを見ます。認証情報を necoder は保存しません。
   permission_default: 権限の既定
-  permission_default_sub: 新しいスレッドを始めるモード。選ぶとピルで選んだモードの記憶を全エージェントで消して揃える。「聞かずに進める」はそのモードを持つエージェントだけに効く（Claude Code の bypassPermissions など）。Chat には効かない
+  permission_default_sub: "新しいスレッドを始める権限モード"
   permission_default_agent: エージェントの既定
   permission_default_bypass: 聞かずに進める（Yolo）
   permission_remembered: ピルで選んだモード（押すと忘れる）
@@ -785,7 +784,6 @@ settings:
   agent_host_local: "このマシン"
   agent_host_ssh: "SSH"
   agent_host_recheck: "確かめ直す"
-  agent_host_note: "使う / 使わない・既定・起動の変更はどのホストでも同じです。SSH のプロジェクトを開くと、その接続先もここで選べます。"
   agent_host_failed: "%{host} の状態を読めませんでした: %{reason}"
   agent_kind_builtin: "組み込み"
   agent_kind_command: "自分のコマンド"
@@ -852,9 +850,8 @@ settings:
   add_agent_sha256: binary は落とした後にレジストリの sha256 で照合します
   add_agent_no_sha256: 検証の値がありません（sha256 なし）。落とした binary を照合せずに使います
   agents_add: ＋ エージェントを追加
-  agents_add_hint: ACP レジストリの全件から選んで足す。一覧に無い物は settings.json の agent_servers に自分のコマンドを書いて足せます
   add_agent_title: エージェントを追加
-  add_agent_sub: "ACP レジストリの %{count} 件。足すと AI エージェントの一覧に並び、使う / 使わない・既定・起動の変更は組み込みと同じ行でできます"
+  add_agent_sub: "ACP レジストリの %{count} 件"
   add_agent_search: 名前・説明・配布の形（npx / binary / uvx）・OS で探す
   add_agent_add: 追加
   add_agent_added: 追加済み
@@ -869,7 +866,7 @@ settings:
   add_agent_fetching: 取得しています…
   add_agent_refresh: 取り直す
   add_agent_fetch_failed: "取得できませんでした: %{reason}"
-  add_agent_custom_hint: 一覧に無いエージェントは settings.json の agent_servers に自分のコマンドを書いて足せます
+  add_agent_custom_hint: "一覧に無い物は settings.json の agent_servers に書けます"
   add_agent_open_settings_json: settings.json を開く
   add_agent_close: 閉じる
   launch_default: 起動は既定のまま（レジストリの版とコマンド）
@@ -883,7 +880,7 @@ settings:
   launch_command: コマンド（絶対パスか PATH にある名前）
   launch_args: 引数（1 行に 1 つ）
   launch_env_field: 環境変数（1 行に 1 つ KEY=VALUE）
-  launch_note: 効くのは次に起動するエージェントから。値は settings.json にそのまま残るので、API キーなどの秘密は書かないでください（CLAUDE_CONFIG_DIR のように置き場を指す変数にする）
+  launch_note: "次の起動から効きます。API キーなどの秘密は書かないでください"
   launch_command_missing: コマンドを入れてください
   launch_cancel: キャンセル
   launch_save: 保存
@@ -893,20 +890,18 @@ settings:
   make_captain: Captain にする
   is_captain: ⚑ Captain
   welcome_title: ようこそ 🎨
-  welcome_sub: 使う AI エージェント（Claude Code・Codex など）の CLI をどれか 1 つ入れてログインすれば始められます。全部オフにしてエディタとしてだけ使うこともできます。あとから ⚙ でいつでも変えられます。
+  welcome_sub: "使う AI エージェントの CLI をどれか 1 つ入れてログインすれば始められます"
   get_started: これで始める →
   mcp_heading: MCP サーバ
-  mcp_sub: エージェントに持たせる道具。有効にしたものだけが新しいスレッドから見えます。
-  mcp_empty: MCP サーバがありません。settings.json の mcp_servers に書くか、Codex CLI・Claude Code・Cursor に登録すると、ここに並びます。
-  mcp_note: 変更は次に開くスレッドから効きます（実行中のセッションは繋ぎ直しません）。
+  mcp_empty: "MCP サーバがありません"
+  mcp_note: "次に開くスレッドから効きます"
   connections_heading: 接続
-  connections_sub: エージェントがモデルの API を呼ぶ口と、その契約のキー（GLM・Kimi・DeepSeek など）。キーは OS のキーチェーンに入り、settings.json には書きません。necoder はこのキーで API を呼ばず、エージェントを起こす時に渡すだけです。
-  connections_remote_note: リモート（SSH 先で起こすエージェント）には接続を渡しません。渡すのは手元で起こすエージェントだけで、リモートのスレッドはそのエージェント自身のログインで動きます。
+  connections_sub: "他社の API やコーディングプランでエージェントを動かします。キーは OS のキーチェーンに保存します"
   connections_empty: まだ接続がありません。「＋ 接続を追加」でひな形を選び、キーを貼ります。
   connections_add: ＋ 接続を追加
   connections_agents_heading: エージェントごとの接続
-  connections_agents_sub: 選んだ接続は次に起動するセッションから使います（動いているスレッドはそのまま）。Claude Code に他社の接続を挿すと、composer の設定のチップに「Claude Code · 接続の名前」と出ます。
-  connections_other_agents: Codex・GitHub Copilot・Qwen Code・Kimi CLI・Grok Build と、足したほかのエージェントには、まだ接続を渡せません。
+  connections_agents_sub: "次に起動するセッションから使います"
+  connections_other_agents: "ほかのエージェントには、まだ接続を渡せません"
   connection_refusal_protocol: "%{protocol}の口だけを受け付けます"
   connection_refusal_only_deepseek: DeepSeek Harness には DeepSeek API の接続だけを渡せます（ほかの会社は dsh の設定で選びます）
   connection_refusal_opencode: OpenCode が最初から知っている会社に当たらないので渡せません（OpenCode の設定で足してください）
@@ -949,7 +944,7 @@ settings:
   connection_base_url: ベース URL
   connection_key: API キー
   connection_paste_key: クリップボードから貼る
-  connection_key_note: キーは OS のキーチェーンに入り、settings.json には書きません。画面にも出しません（末尾 4 文字だけ）。
+  connection_key_note: "キーは OS のキーチェーンに保存し、画面には末尾 4 文字だけ出します"
   connection_docs: "各社の手順: %{url}"
   connection_saving: 保存しています…
   mcp_source_necoder: necoder の設定
@@ -961,48 +956,41 @@ settings:
   mcp_filter_enabled: 有効のみ
   mcp_filtered_empty: この条件に合う MCP サーバはありません。
   prefs_heading: 動作とエディタ
-  prefs_sub: 真実は settings.json。ここはそれを操作するだけです。
   search_placeholder: 設定を検索
   search_count: "%{count} 件"
   search_none: 一致する設定はありません
   pref_submit_on_enter: Enter で送信
-  pref_submit_on_enter_sub: オフ=⌘Enter 送信（日本語 IME で誤送信しない安全側）
+  pref_submit_on_enter_sub: "オフ = ⌘Enter で送信"
   pref_soft_wrap: ソフトラップ（折り返し）
-  pref_soft_wrap_sub: ⌥Z で一時トグルもできます
+  pref_soft_wrap_sub: "⌥Z で切り替え"
   pref_format_on_save: 保存時にフォーマット
-  pref_format_on_save_sub: 対応言語のみ・⌘S で整形→保存
   pref_preview_tabs: プレビュータブ
-  pref_preview_tabs_sub: エクスプローラで 1 回クリックしたファイルは、次にクリックしたファイルで置き換わるタブ（名前が斜体）で開きます。編集するか、ダブルクリックで普通のタブになります
+  pref_preview_tabs_sub: "1 回クリックで開いたタブは、次のファイルで置き換わります"
   pref_auto_save: 自動保存
-  pref_auto_save_sub: 他のタブ・パネル・アプリへ移った時に保存します。「手を止めた時」は打つのを 1 秒止めた時にも保存します（自動保存ではフォーマットしません）
   auto_save_off: しない
   auto_save_focus_change: 他へ移った時
   auto_save_after_delay: 手を止めた時
   pref_agent_auto_name: スレッドの自動命名
-  pref_agent_auto_name_sub: 最初のやり取りから AI が題名を付けます
   pref_agent_prewarm: エージェントを先に起動
-  pref_agent_prewarm_sub: 送信を待たずに接続し、モデル一覧をすぐ選べるようにします
+  pref_agent_prewarm_sub: "送信を待たずに接続します"
   pref_sound_done: 完了音
   pref_sound_waiting: 入力待ちの音
   pref_sound_volume: 通知音の大きさ（%）
-  pref_sound_volume_sub: 0 で鳴らしません（選んだ声はそのまま）。100 が音源そのまま
   sound_nya: にゃっ
   sound_nyaan: にゃー
   sound_mew: みゃっ
   sound_system: システム音
   sound_off: オフ
   pref_reduce_motion: 動きを減らす
-  pref_reduce_motion_sub: 点字スピナーや猫などの装飾アニメーションを静止します
   pref_font_size: フォントサイズ
   pref_tab_size: タブ幅
   pref_terminal_font_size: ターミナルの文字の大きさ
   pref_terminal_scrollback: ターミナルで遡れる行数
-  pref_terminal_scrollback_sub: "減らすと古い行から捨てます。フォントは settings.json の terminal_font_family で変えられます"
   terminal_scrollback_lines: "%{n} 行"
   pref_terminal_cursor: ターミナルのカーソル
   pref_terminal_color_scheme: ターミナルの配色
   pref_ghostty_import: Ghostty から取り込む
-  pref_ghostty_import_sub: Ghostty の設定の書体・大きさ・カーソル・配色を、ターミナルの設定にする（キーやスクロールバックは持ってこない）
+  pref_ghostty_import_sub: "書体・大きさ・カーソル・配色を取り込みます"
   ghostty_import: 取り込む
   ghostty_not_found: Ghostty の設定（~/.config/ghostty/config など）が見つかりません
   ghostty_nothing: Ghostty の設定に、取り込める物がありませんでした
@@ -1011,16 +999,15 @@ settings:
   ghostty_item_size: 大きさ
   ghostty_item_cursor: カーソル
   ghostty_item_colors: 配色
-  terminal_color_scheme_default: 既定（アプリのテーマに合わせる）。Ghostty のテーマ・Windows Terminal の配色（JSON）・iTerm2 の .itermcolors・Warp のテーマ（YAML）を読めます
+  terminal_color_scheme_default: "既定（アプリのテーマ）"
   terminal_color_scheme_pick: ファイルを選ぶ…
   terminal_color_scheme_reset: 既定に戻す
   pref_terminal_shell: ターミナルのシェル
-  terminal_shell_default: 既定（OS のシェル）。新しく開く手元の端末から効きます
+  terminal_shell_default: "既定（OS のシェル）"
   terminal_shell_pick: 選ぶ…
   terminal_shell_reset: 既定に戻す
   shell_picker_placeholder: シェルを探す…
   shell_picker_default: 既定に戻す（OS のシェル）
-  pref_terminal_cursor_sub: "vim などが形を指定した時はそちらが優先されます"
   terminal_cursor_block: ブロック
   terminal_cursor_bar: 縦線
   terminal_cursor_underline: 下線
@@ -1028,32 +1015,28 @@ settings:
   tabs_view_bar: 横タブ
   tabs_view_list: 縦リスト
   pref_system_notifications: OS の通知
-  pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
+  pref_system_notifications_sub: "見ていない窓のエージェントが止まった時に知らせます"
   account_default: 既定
   account_elsewhere: （ほかの場所）
   account_add: ＋ 新しいアカウント
   account_login: ログイン
-  account_hint: 切り替えは次に起動するエージェントから（動いているスレッドは今のアカウントのまま）。アカウントの資格情報は necoder が読まず、公式 CLI が扱います
+  account_hint: "次に起動するエージェントから切り替わります"
   pref_confirm_quit: 終了時の確認
-  pref_confirm_quit_sub: ⌘Q・窓を閉じる時、エージェントや端末が動いていれば「隠して動かし続ける」を選べます
+  pref_confirm_quit_sub: "エージェントや端末が動いていれば、閉じる前に訊きます"
   confirm_quit_running: 動いている時だけ
   confirm_quit_never: しない
   pref_keep_awake: 作業中はスリープさせない
-  pref_keep_awake_sub: エージェントが作業している間は、放っておいてもスリープしません。画面は消えます。自分で選んだスリープと、ノートの蓋を閉じた時のスリープは止めません
   keep_awake_working: 作業中の間
   keep_awake_off: しない
   pref_tabs_position: タブの既定位置
   tabs_position_top: 上
   tabs_position_left: 左
   appearance_heading: 外観
-  appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
   locale_label: 表示言語
-  locale_sub: 押した瞬間に切り替わります（macOS のメニューバーは次の起動から）
   locale_follow_os: OS に合わせる
   locale_ja: 日本語
   locale_en: English
   theme_label: テーマ
-  theme_sub: ⌘K ⌘T のセレクタでも切り替えられます
   open_json: settings.json を開く
   font_ui: UI の書体
   font_code: コードの書体
@@ -1061,23 +1044,21 @@ settings:
   font_default: 既定（同梱の書体）
   font_terminal_default: 既定（コードの書体に揃える）
   density_label: 行の間隔
-  density_sub: エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さ
   density_compact: 詰める
   density_cozy: ゆったり
   font_pick: 選ぶ…
   font_reset: 既定に戻す
   font_picker_placeholder: 書体を探す…
   font_picker_default: 既定に戻す
-  open_json_sub: すべての設定の真実。保存すると約1秒で全体へ反映されます
   open_json_button: 開く
   cli_heading: コマンドライン
   remote_heading: スマホ連携
   remote_label: スマホから操作
-  remote_sub: QR発行時に開いている全プロジェクトを共有します。スマホで切り替えて個別に操作できます。
+  remote_sub: "開いている全プロジェクトをスマホから操作できます"
   remote_issue: 接続用QRを発行
   remote_copy: ペアリングURLをコピー
   remote_hide: QRを隠す
-  remote_qr_hint: "%{count} プロジェクトを共有。QRは5分間有効です。スマホのカメラで読み取ってください。ホーム画面のPWAにはURLを貼り付けて接続できます。URLやQRを他人に渡さないでください。"
+  remote_qr_hint: "%{count} プロジェクトを共有。QR は 5 分間有効です。他人に渡さないでください"
   remote_error: QRを発行できませんでした（原因不明）。ターミナルで `ne remote pair` を実行すると理由が出ます。
   remote_err_no_gui: necoder 本体と通信できませんでした。necoder を再起動してからもう一度お試しください。
   remote_err_no_project: 共有できるプロジェクトがありません。先にプロジェクトを開いてください。
@@ -1105,7 +1086,7 @@ settings:
   save_unreadable: "%{file} を読めないので保存しませんでした（%{reason}）"
   save_failed: "設定を保存できませんでした（%{reason}）"
   skills_heading: Skills
-  skills_sub: エージェント（Claude Code / Codex）が読む手順書（SKILL.md）。necoder の skill を入れると、エージェントが necoder の CLI の使い方をこの版に合わせて読めます。
+  skills_sub: "エージェントが読む手順書（SKILL.md）"
   skills_necoder_label: necoder の skill
   skills_checking: 確認中…
   skills_busy: 実行中…
@@ -1116,7 +1097,7 @@ settings:
   skills_foreign: "%{path} は necoder が書いたものではないので上書きしません（上書きするなら `ne skills install --force`）"
   skills_read_error: "%{path} を読めません（%{error}）"
   skills_found: "見つかった skill（%{count} 件）"
-  skills_empty: skill は見つかりませんでした（~/.claude/skills・~/.codex/skills・~/.agents/skills と、プロジェクトの .claude/skills・.agents/skills を探しました）
+  skills_empty: "skill は見つかりませんでした"
   skills_skipped: "%{count} 件は front matter が読めないので一覧から外しました（理由は `ne skills list` で出ます）"
   skills_scope_shared: 共通（~/.agents）
   skills_scope_claude_project: Claude Code・プロジェクト
@@ -1160,7 +1141,7 @@ explorer:
   ctx_discard: 変更を破棄…
   discard_title: "「%{name}」の変更を破棄しますか？"
   discard_body: 最後のコミットの内容に戻します。ステージした変更も消えます。この操作は取り消せません。
-  discard_body_untracked: git の管理外のファイルなので、ゴミ箱へ入れます（エクスプローラで ⌘Z を押すと戻せます）。
+  discard_body_untracked: "管理外のファイルなのでゴミ箱へ入れます（⌘Z で戻せます）"
   discard_confirm: 破棄する
   discard_cancel: キャンセル
   discard_untracked_remote: リモートでは未追跡のファイルを片付けられません（git の管理からは外しました）
@@ -1331,7 +1312,7 @@ design:
   not_ready: ページが表示されてから Design を始めてください
 pdf:
   unsupported: この環境では PDF をタブに表示できません
-  unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます
+  unsupported_hint: "右クリック →「既定アプリで開く」で開けます"
 conflict:
   bar: "⑂ 衝突 %{count} か所（%{line} 行目）"
   ours: 今の側
@@ -1362,7 +1343,7 @@ conflict:
   view_fill_both: 両方から
   use_result: 結果で解決
 terminal:
-  quick_tip: "よく使うコマンド（settings.json の quick_commands）。押すと並ぶので、選ぶと新しいターミナルで走らせる"
+  quick_tip: "よく使うコマンド（settings.json の quick_commands）"
   tab_title: ターミナル %{n}
   rename_title: 端末の名前
   rename_hint: 空にして確定すると、シェルが付けるタイトルに戻ります
@@ -1375,7 +1356,7 @@ terminal:
   close_busy_named_title: "「%{name}」でプロセスが動いています"
   close_busy_many_title: "%{n} 個のターミナルでプロセスが動いています"
   tab_needs_project: ターミナルのタブはプロジェクトで開けます（Chat では開けません）
-  tab_split_hint: エディタ領域のターミナルは分割できません。タブを右クリック › 下ドックへ移すと分割できます
+  tab_split_hint: "下ドックへ移すと分割できます（タブを右クリック）"
   float_hide_tip: "隠す（止めない）  %{key}"
   add_tip: ターミナルを追加
   split_tip: "横に分割（%{key}）"
@@ -1851,7 +1832,7 @@ chat:
   err_export_empty: まだ何も話していないチャットは書き出せません
   delete: チャットを削除…
   delete_confirm_title: "「%{name}」を削除しますか？"
-  delete_confirm_body: 会話の履歴は消えます。フォルダに残っているファイルをどうするか選んでください（ゴミ箱へ移すだけで、完全には消しません）。
+  delete_confirm_body: "会話の履歴は消えます。フォルダのファイルはどうしますか？（ゴミ箱へ移すだけです）"
   delete_keep_files: ファイルは残す
   delete_trash_files: ファイルもゴミ箱へ
   cancel: キャンセル
@@ -1885,7 +1866,7 @@ usage:
   window_minutes: "%{minutes} 分枠"
   window_minutes_short: "%{minutes}m"
   resets_in: "あと %{time}でリセット"
-  reset_done: リセット済み（新しい値はまだ届いていません）
+  reset_done: "リセット済み"
   duration_minutes: "%{minutes} 分"
   duration_hours: "%{hours} 時間 %{minutes} 分"
   duration_hours_only: "%{hours} 時間"
@@ -1897,9 +1878,7 @@ usage:
   received: "受信 %{when}"
   status_warning: 上限が近い
   status_rejected: 上限に達しています
-  no_values: まだ値を受け取っていません。エージェントが知らせてきたら出ます
-  note: "値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。同じエージェントでも、SSH の接続先や認証の設定（agent_servers の env の置き場・API キーなど）が違えば分けて出します（「設定の env #…」は見分けるための印で、キーの値ではありません）。"
-  codex_note: Codex だけは ACP で知らせてこないので、このポップオーバーを開いた時に codex 本体（codex app-server）に訊きます。
+  no_values: "まだ値がありません"
   codex_loading: Codex の値を読み込み中…
   codex_failed: "Codex の値を読めませんでした: %{error}"
   reload: 再読み込み
@@ -1912,23 +1891,22 @@ usage:
   stats_tokens: トークン
   stats_cost: 推定コスト
   stats_total: 30 日の合計
-  stats_empty: まだ記録がありません。エージェントが使用量を知らせたターンから記録します。
+  stats_empty: "まだ記録がありません"
   stats_loading: 読み込み中…
   stats_failed: "使用量を読めませんでした: %{error}"
-  stats_note: トークンと推定コストは、エージェントがターンごとに報告した値です。コストは Claude Code が出す推定（USD）で、実際の請求額ではありません（請求の正は各社の請求画面）。報告の無い値は —（0 ではありません）、一部のターンにしか報告が無い合計には ≥ を付けています。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけです。~/.claude などのローカルのログは読みません。
+  stats_note: "推定コストは実際の請求額ではありません。— は報告の無い値です"
 ports:
   title: 開いているポート
   loading: 読んでいます…
-  empty: necoder の中で待ち受けているポートはありません（端末やエージェントで開発サーバを立てると出ます）
+  empty: "待ち受けているポートはありません"
   others: "ほかのプロセス（%{count}）"
   no_project: どのプロジェクトでもない
   open: 開く
   stop: 止める
   stop_failed: "止められませんでした（pid %{pid}）— もう終わっているか、necoder の中のプロセスではありません"
-  hint: 開いた時と ↻ の時だけ読みます（lsof / ps・接続先は ss / lsof）。止められるのは necoder の中のプロセスだけ。接続先のポートは「転送」で手元の localhost に出します
   unsupported: この OS ではまだ使えません（macOS / Linux）
   remote_heading: "接続先 · %{host}"
-  remote_empty: 接続先で待ち受けているポートはありません（自分のユーザーのプロセスだけ見えます）
+  remote_empty: "接続先で待ち受けているポートはありません"
   remote_other_user: ほかのユーザーのプロセス
   forward: 転送
   stop_forward: やめる
@@ -1941,7 +1919,7 @@ inbox:
   mark_all_read: すべて既読
   mark_read: 既読にする
   mark_unread: 未読に戻す
-  empty: まだ通知はありません（エージェントの完了・失敗・承認待ち・質問待ちがここに残ります）
+  empty: "まだ通知はありません"
   note: "この窓の最新 %{count} 件・起動している間だけ残ります"
 resources:
   title: リソース（メモリ）
@@ -1952,7 +1930,6 @@ resources:
   process: "%{command}（pid %{pid}・%{count} プロセス）"
   stop_quiet: "使っていないエージェントを止める（%{count}）"
   stopped: "エージェントを %{count} 本止めました（会話は残っています・次に送ると続きから）"
-  hint: 読むのは開いた時と ↻ の時だけ。止めるのは静かで会話を引き継げるエージェントだけです（端末・開発サーバは止めません）
 cleanup:
   title: Task の片付け
   select_finished: 統合済み・終了済みを選ぶ
@@ -1970,7 +1947,7 @@ cleanup:
   delete: "worktree を削除（%{count}・ブランチは残す）"
   archived: "Task を %{count} 本終了しました"
   deleted: "worktree を %{count} 本消しました（%{kept} 本は失うものが出たので残しました）"
-  hint: worktree を消せるのは、未コミットの変更も統合先に無いコミットも無い Task だけです（消す直前にもう一度数えます）。失うものがある Task は ⋯ メニューの削除で 1 本ずつ
+  hint: "消せるのは、失うものが無い Task だけです"
 statusbar:
   menu_title: statusbar に出す項目
   item_color: プロジェクトの色

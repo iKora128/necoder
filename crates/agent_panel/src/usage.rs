@@ -1398,7 +1398,7 @@ mod tests {
         );
         assert_eq!(
             resets_in_label(900, 1_000).as_ref(),
-            "reset (no new value yet)"
+            "Reset"
         );
         assert_eq!(tokens_label(850), "850");
         assert_eq!(tokens_label(23_400), "23.4k");

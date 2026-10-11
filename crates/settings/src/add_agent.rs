@@ -234,14 +234,7 @@ impl SettingsView {
                         cx.listener(|view, _, window, cx| view.open_add_agent(window, cx)),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(10.5))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("settings.agents_add_hint"))),
-            )
+
     }
 
     /// 1 件ぶんの行（名前・版・配布の形・説明・対応 OS・ライセンス・このマシンでの注記・右に操作）。
