@@ -1,0 +1,13 @@
+[package]
+name = "child_process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/child_process.rs"
+
+# 依存ゼロ（std だけ）。paths と同じ最下層。子プロセスを起こす crate はどれもここから
+# `Command` を作る（Windows のコンソール窓を出さないため）。
+[dependencies]

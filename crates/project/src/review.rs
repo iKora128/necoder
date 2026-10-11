@@ -1301,7 +1301,6 @@ fn unquote_path(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     /// 行の配列から patch を組む（`\` 継続行だと文脈行の先頭空白が消えるため）。
     fn patch_text(lines: &[&str]) -> String {
@@ -1506,7 +1505,7 @@ mod tests {
     fn review_budgets_bound_what_the_diff_holds() {
         let root = scratch("review_budgets");
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&root)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -1642,7 +1641,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-        Command::new("git")
+        child_process::command("git")
             .current_dir(dir)
             .args(["-c", "user.email=t@t", "-c", "user.name=t"])
             .args(args)

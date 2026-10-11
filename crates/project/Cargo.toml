@@ -9,6 +9,7 @@ publish = false
 path = "src/project.rs"
 
 [dependencies]
+child_process.workspace = true
 paths.workspace = true
 anyhow.workspace = true
 ignore.workspace = true

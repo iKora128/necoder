@@ -170,13 +170,13 @@ pub fn open_in_browser(url: &str) {
         return;
     }
     let mut command = if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
+        child_process::command("open")
     } else if cfg!(target_os = "windows") {
-        let mut command = std::process::Command::new("rundll32");
+        let mut command = child_process::command("rundll32");
         command.arg("url.dll,FileProtocolHandler");
         command
     } else {
-        std::process::Command::new("xdg-open")
+        child_process::command("xdg-open")
     };
     if let Err(error) = command.arg(url).spawn() {
         eprintln!("リンクをブラウザで開けない: {error}");

@@ -9,6 +9,7 @@ publish = false
 path = "src/agent_panel.rs"
 
 [dependencies]
+child_process.workspace = true
 anyhow.workspace = true
 paths.workspace = true
 storage.workspace = true

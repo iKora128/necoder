@@ -34,7 +34,7 @@ So necoder makes what agent-heavy development needs first-class in the editor co
 ## Highlights
 
 - **Color as a sense of direction.** Per-project colors (auto-assigned or picked) flow through the rail, tab underline, caret and thread chips. Color marks identity, never decoration.
-- **AI-agent native (ACP).** Claude Code and other [ACP](https://agentclientprotocol.com) agents run inside: colored threads with destination chips, streaming transcripts (⏺/⎿, ✳ thinking), diff review with accept/reject, checkpoints/rewind, and a todo board the agent checks off by itself. Talks to the `claude` CLI, so your existing Claude Code subscription works as-is; **no separate API key**.
+- **AI-agent native (ACP).** Claude Code and other [ACP](https://agentclientprotocol.com) agents run inside: colored threads with destination chips, streaming transcripts (⏺/⎿, ✳ thinking), diff review with accept/reject, checkpoints/rewind, and a todo board the agent checks off by itself. Talks to the agent CLIs you already use (Claude Code, Codex, GitHub Copilot and more), so your existing subscriptions work as-is; **no separate API key**.
 
   ![Live ACP streaming inside necoder](lp/assets/gif/stream-en.gif)
 
@@ -57,7 +57,7 @@ To open necoder from Terminal, install the `ne` command from **Settings → Comm
 
 **Windows 10+ (x64)**: download `necoder-windows-x64.zip` from [Releases](https://github.com/iKora128/necoder/releases), unzip, run `necoder.exe`. The app notifies you of new versions and opens the release page.
 
-For AI features, install and log in to the [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code); necoder talks to it over ACP.
+For AI features, install and log in to the CLI of **any one** agent you like: Claude Code, Codex, GitHub Copilot, Qwen Code, OpenCode, Kimi CLI or Grok Build. Other ACP agents can be added in Settings. No agent is required: **Settings → AI Agents** shows which ones were found, and each one can be turned on or off. The first one that is ready becomes the default, and you can pick another. With every agent off, necoder works as a plain editor. The small helpers (AI commit message, `⌘I` inline edit, today's plan) use the default agent and work with Claude Code or Codex.
 
 Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live in `~/Library/Application Support/necoder/logs/`, crash reports in `…/necoder/crashes/`.
 
@@ -67,7 +67,7 @@ Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live 
 |---|---|
 | `⌘O` | Open a project / worktree (dashboard) |
 | `⌘P` / `⇧⌘P` | File finder / command palette |
-| `⇧⌘A` | New AI thread (needs `claude` CLI) |
+| `⇧⌘A` | New AI thread (uses your default agent) |
 | `⌘J` | Integrated terminal |
 | `⇧⌘F` | Project-wide search |
 | `⌘K ⌘T` | Theme selector (live preview) |
@@ -153,7 +153,7 @@ necoder は、エージェント中心の開発に要るものをエディタの
 ## ハイライト
 
 - **色による方向感覚**: プロジェクトごとの識別色(自動割当 or 選択)がレール・タブ下線・キャレット・スレッドチップまで流れる。色は**識別のためだけ**に使い、装飾には使わない
-- **AI エージェントネイティブ(ACP)**: Claude Code ほか [ACP](https://agentclientprotocol.com) エージェントが中で動く: 色付きスレッド + 宛先チップ、ストリーミング表示(⏺/⎿、✳ thinking)、diff レビュー(accept/reject)、チェックポイント/巻き戻し、エージェントが管理する Todo ボード。既存の Claude Code サブスクのまま `claude` CLI 経由で、**API キー不要**
+- **AI エージェントネイティブ(ACP)**: Claude Code ほか [ACP](https://agentclientprotocol.com) エージェントが中で動く: 色付きスレッド + 宛先チップ、ストリーミング表示(⏺/⎿、✳ thinking)、diff レビュー(accept/reject)、チェックポイント/巻き戻し、エージェントが管理する Todo ボード。Claude Code・Codex・GitHub Copilot など手持ちのエージェントの CLI 経由で、既存のサブスクのまま **API キー不要**
 
   ![necoder 内での実 ACP ストリーミング](lp/assets/gif/stream-en.gif)
 
@@ -176,7 +176,7 @@ necoder は、エージェント中心の開発に要るものをエディタの
 
 **Windows 10+(x64)**: [Releases](https://github.com/iKora128/necoder/releases) から `necoder-windows-x64.zip` を展開して `necoder.exe` を実行。新版はアプリ内通知からリリースページを開きます。
 
-AI 機能には [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) のインストールとログインが必要です(necoder は ACP で対話します)。
+AI 機能を使うには、好きなエージェントの CLI を**どれか 1 つ**入れてログインしてください。Claude Code・Codex・GitHub Copilot・Qwen Code・OpenCode・Kimi CLI・Grok Build に対応し、ほかの ACP エージェントも設定から足せます。どれも必須ではありません。**設定 → AI エージェント** で見つかったものが分かり、1 つずつオン/オフできます。既定のエージェントは使えるものから自動で選ばれ、自分で選び直すこともできます。全部オフにすれば普通のエディタとして使えます。コミットメッセージ生成・`⌘I` のインライン編集・今日の計画などの補助機能は既定のエージェントを使い、Claude Code か Codex で動きます。
 
 困ったら、アプリ内 **ヘルプ → バグを報告** で issue の下書きができます。ログは `~/Library/Application Support/necoder/logs/`、クラッシュレポートは `…/necoder/crashes/`。
 
@@ -186,7 +186,7 @@ AI 機能には [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) �
 |---|---|
 | `⌘O` | プロジェクト / worktree を開く(ダッシュボード) |
 | `⌘P` / `⇧⌘P` | ファイルファインダ / コマンドパレット |
-| `⇧⌘A` | 新しい AI スレッド(`claude` CLI が必要) |
+| `⇧⌘A` | 新しい AI スレッド(既定のエージェントで開く) |
 | `⌘J` | 統合ターミナル |
 | `⇧⌘F` | プロジェクト全体検索 |
 | `⌘K ⌘T` | テーマセレクタ(ライブプレビュー) |

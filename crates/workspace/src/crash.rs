@@ -190,7 +190,7 @@ fn os_version() -> Option<String> {
     if std::env::consts::OS != "macos" {
         return None;
     }
-    let output = std::process::Command::new("sw_vers")
+    let output = child_process::command("sw_vers")
         .arg("-productVersion")
         .output()
         .ok()?;
@@ -225,7 +225,7 @@ pub fn open_url(url: &str) -> anyhow::Result<()> {
     } else {
         ("xdg-open", &[])
     };
-    let status = std::process::Command::new(command)
+    let status = child_process::command(command)
         .args(fixed_args)
         .arg(url)
         .status()

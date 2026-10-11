@@ -561,9 +561,9 @@ fn extract(
             Ok(())
         }
         ArchiveKind::Zip if zip_with_unzip => {
-            let listing = run(Command::new("unzip").arg("-Z1").arg(archive))?;
+            let listing = run(child_process::command("unzip").arg("-Z1").arg(archive))?;
             check_entries(&lines(&listing))?;
-            run(Command::new("unzip")
+            run(child_process::command("unzip")
                 .args(["-q", "-o"])
                 .arg(archive)
                 .arg("-d")
@@ -571,9 +571,11 @@ fn extract(
             Ok(())
         }
         ArchiveKind::Tar | ArchiveKind::Zip => {
-            let listing = run(Command::new(tar_program()).arg("-tf").arg(archive))?;
+            let listing = run(child_process::command(tar_program())
+                .arg("-tf")
+                .arg(archive))?;
             check_entries(&lines(&listing))?;
-            run(Command::new(tar_program())
+            run(child_process::command(tar_program())
                 .arg("-xf")
                 .arg(archive)
                 .arg("-C")
@@ -651,7 +653,7 @@ fn download_with_curl(url: &str, destination: &Path) -> Result<(), DeployError> 
     if !url.starts_with("https://") {
         return Err(DeployError::InsecureUrl(url.to_string()));
     }
-    let output = Command::new("curl")
+    let output = child_process::command("curl")
         .args([
             "-fsSL",
             "--proto",
@@ -750,7 +752,7 @@ mod tests {
             std::fs::write(&path, text).expect("書ける");
         }
         let archive = scratch.0.join("agent.tar.gz");
-        let status = Command::new(tar_program())
+        let status = child_process::command(tar_program())
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
@@ -950,7 +952,7 @@ mod tests {
         std::fs::create_dir_all(&content).expect("作れる");
         std::os::unix::fs::symlink("/bin/sh", content.join("agent")).expect("symlink を作れる");
         let archive = scratch.0.join("agent.tar.gz");
-        let status = Command::new(tar_program())
+        let status = child_process::command(tar_program())
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
@@ -990,7 +992,7 @@ mod tests {
         std::fs::write(content.join("agent"), "#!/bin/sh\n").expect("書ける");
         std::os::unix::fs::symlink(&outside, content.join("linked")).expect("symlink を作れる");
         let archive = scratch.0.join("agent.tar.gz");
-        let status = Command::new(tar_program())
+        let status = child_process::command(tar_program())
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
@@ -1156,7 +1158,7 @@ mod tests {
         );
         let home = scratch.0.join("home");
         std::fs::create_dir_all(&home).expect("HOME を作れる");
-        let mut child = Command::new(&deployed.command)
+        let mut child = child_process::command(&deployed.command)
             .args(&distribution.args)
             .envs(&distribution.env)
             .env("HOME", &home)

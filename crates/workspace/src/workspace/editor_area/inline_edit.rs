@@ -88,11 +88,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Enter: 指示を `claude -p` へ（背景実行・世代ガード付き）。
+    /// Enter: 指示を既定のエージェントの CLI へ（背景実行・世代ガード付き）。
     pub(crate) fn execute_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
+        let template = agent_panel::default_oneshot_or_reason(cx);
         let root = worktree.root().to_path_buf();
         let host = worktree.host().clone();
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
@@ -108,6 +109,14 @@ impl Workspace {
         if instruction.is_empty() {
             return;
         }
+        let template = match template {
+            Ok(template) => template,
+            Err(reason) => {
+                state.error = Some(reason);
+                cx.notify();
+                return;
+            }
+        };
         state.busy = true;
         state.error = None;
         state.proposal = None;
@@ -128,8 +137,11 @@ impl Workspace {
                             &root,
                             &instruction,
                             &old_text,
+                            template,
                         ),
-                        None => project::inline_command_on(host.as_ref(), &root, &instruction),
+                        None => {
+                            project::inline_command_on(host.as_ref(), &root, &instruction, template)
+                        }
                     }
                 })
                 .await;

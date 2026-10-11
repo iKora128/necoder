@@ -111,7 +111,7 @@ pub fn install_keep_awake(cx: &mut App) {
 #[cfg(target_os = "macos")]
 fn acquire_wake_lock() -> anyhow::Result<Box<dyn WakeLock>> {
     use anyhow::Context as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     /// 抱えている間だけ効く `caffeinate`。落とすと殺して回収する。
     struct Caffeinate(std::process::Child);
@@ -137,7 +137,7 @@ fn acquire_wake_lock() -> anyhow::Result<Box<dyn WakeLock>> {
     // -i = 放っておいた時のスリープを止める（電池でも効く）。-w <pid> = necoder が落ちたら
     // caffeinate も抜ける（放し忘れて永久に起こし続けない保険）。画面（-d）は止めない。
     // -s（AC の時のシステムスリープ）も付けない: 人が選んだスリープまで止めたくない。
-    let child = Command::new("/usr/bin/caffeinate")
+    let child = child_process::command("/usr/bin/caffeinate")
         .args(["-i", "-w", &std::process::id().to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

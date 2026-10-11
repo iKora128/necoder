@@ -3,6 +3,10 @@
 //! `necoder [<path>...]` で各 path をプロジェクト（レール項目）として開く。file を渡すと親を
 //! プロジェクト、その file をエディタに開く。引数無しは前回の窓（necoder.db の `window_sessions`）を全て復元する。
 
+// Windows では GUI アプリとして作る（付けないと黒いコンソール窓が付いてくる・console.rs）。
+// 子プロセスは child_process::command で作り、コンソール窓を出さない。
+#![windows_subsystem = "windows"]
+
 use gpui::{
     actions, point, prelude::*, px, size, App, Bounds, Focusable, TitlebarOptions, WindowBounds,
     WindowOptions,
@@ -15,6 +19,8 @@ use std::path::{Path, PathBuf};
 mod askpass;
 /// ターミナル用 `ne` コマンド（`necoder cli` / `install-cli` / `uninstall-cli`）。
 mod cli;
+/// Windows: 端末から CLI として使う時に親のコンソールへ繋ぐ。
+mod console;
 mod fleet;
 /// MCP サーバ（`necoder mcp`）。AI エージェントがプロジェクトを操作する口。
 mod mcp;
@@ -573,10 +579,8 @@ fn open_planned_windows(
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(13.0), px(13.0))),
                 }),
-                // custom titlebar で自前ドラッグ（start_window_move）を使うため false。
-                // true のままだと macOS が titlebar を system 所有扱いしてクリック遅延や
-                // ダブルクリック判定の不具合になる（gpui WindowOptions のコメント参照）。
-                is_movable: false,
+                // mac は自前ドラッグのため false・Windows は OS のドラッグのため true（定数の doc 参照）。
+                is_movable: workspace::WINDOW_IS_MOVABLE,
                 ..Default::default()
             },
             move |window, cx| {
@@ -653,6 +657,9 @@ fn reopen_windows(cx: &mut App) {
 }
 
 fn main() {
+    // Windows の GUI サブシステムでも、端末から叩いた CLI の出力が端末に出るように（console.rs）。
+    // 何より先に: 以降の出力（askpass の答えを除く）が全部ここに依る。
+    console::attach_parent_console();
     // `ssh` が askpass として起こした自分自身なら、GUI にも log にも触れずに答えだけ返す
     // （stdout は答え専用。redirect_output_for_gui_launch より**前**でなければならない）。
     if askpass::run() {

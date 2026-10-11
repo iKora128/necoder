@@ -2301,7 +2301,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok()?;
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -2617,7 +2617,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok()?;
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)
@@ -3046,7 +3046,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)

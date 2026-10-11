@@ -46,48 +46,22 @@ enum Assessment {
     Known(AgentReadiness),
 }
 
-/// 「使わない」にできない理由。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DisableRefusal {
-    /// 既定のエージェント・Captain（先に別のエージェントを既定にする）。
-    DefaultOrCaptain,
-    /// 使うエージェントの最後の 1 つ（composer で選べる物が無くなる）。
-    Last,
-}
-
-impl DisableRefusal {
-    pub(crate) fn message(self) -> String {
-        match self {
-            DisableRefusal::DefaultOrCaptain => i18n::t!("settings.agent_disable_locked"),
-            DisableRefusal::Last => i18n::t!("settings.agent_disable_last"),
-        }
-    }
-}
-
-/// `agent_id` を「使わない」にできない理由（できる・もう使わないなら `None`）。外す（足したエージェントを
-/// 一覧から消す）も同じ理由で断る。
-pub(crate) fn disable_refusal(
+/// `agent_id` を使わないにする・外すと **Captain の任命が解ける**か。Captain は使わないエージェントで
+/// 起こさないので、任命ごと解いてトーストで知らせる（人が押した設定画面の操作の結果・DECISIONS §8）。
+///
+/// 既定のエージェントは解かない — 既定は [`crate::resolve_default_agent`] が使うエージェントから選び直し、
+/// 使うに戻せばまた人が決めた物が既定に戻る。**どれも「外せない」にはしない**（全部オフ = AI 機能を
+/// 使わない、も選べる・2026-10-09）。
+pub(crate) fn releases_captain(
     settings: &Settings,
     catalog: &acp_client::AgentCatalog,
     agent_id: &str,
-) -> Option<DisableRefusal> {
-    if !settings.agent_enabled(agent_id) {
-        return None;
-    }
-    let names = |label: Option<&str>| {
-        label
-            .and_then(|label| catalog.by_label(label))
-            .is_some_and(|agent| agent.id() == agent_id)
-    };
-    if names(Some(&settings.default_agent)) || names(settings.captain_agent.as_deref()) {
-        return Some(DisableRefusal::DefaultOrCaptain);
-    }
-    let others = catalog
-        .agents()
-        .iter()
-        .filter(|agent| agent.id() != agent_id && settings.agent_enabled(agent.id()))
-        .count();
-    (others == 0).then_some(DisableRefusal::Last)
+) -> bool {
+    settings
+        .captain_agent
+        .as_deref()
+        .and_then(|label| catalog.by_label(label))
+        .is_some_and(|agent| agent.id() == agent_id)
 }
 
 /// 組み込みの起動の上書き（settings.json の `agent_servers.<組み込みの id>`）を acp_client の言葉へ写す。
@@ -546,6 +520,15 @@ impl SettingsView {
         let catalog = agent_catalog(cx);
         let overrides = builtin_overrides(settings);
         let remote = if page { self.agent_host.clone() } else { None };
+        // ★ は「新しいスレッドが実際に使うエージェント」に付ける（人が決めた物か、自動で選ばれた物）。
+        let default = DefaultMark {
+            agent: crate::resolve_default_agent(
+                settings,
+                &catalog,
+                &acp_client::authenticated_agent_labels(),
+            ),
+            automatic: crate::default_agent_is_automatic(settings, &catalog),
+        };
         let mut list = div()
             .flex()
             .flex_col()
@@ -558,7 +541,7 @@ impl SettingsView {
                 index,
                 agent,
                 settings,
-                &catalog,
+                &default,
                 &overrides,
                 remote.as_ref(),
                 page,
@@ -580,7 +563,7 @@ impl SettingsView {
         index: usize,
         agent: &acp_client::Agent,
         settings: &Settings,
-        catalog: &acp_client::AgentCatalog,
+        default: &DefaultMark,
         overrides: &BTreeMap<String, acp_client::AgentOverride>,
         remote: Option<&SharedString>,
         page: bool,
@@ -589,12 +572,16 @@ impl SettingsView {
         let theme = self.theme.clone();
         let id = SharedString::from(agent.id().to_string());
         let enabled = settings.agent_enabled(agent.id());
-        let is_default = settings.default_agent == agent.label();
+        let is_default = default.agent.as_ref() == Some(agent);
+        let default_text = if default.automatic {
+            i18n::t!("settings.is_default_auto")
+        } else {
+            i18n::t!("settings.is_default")
+        };
         let is_captain = settings.captain_agent.as_deref() == Some(agent.label());
         let local = self.local_readiness(agent, overrides);
         let assessment = self.assessment(agent, enabled, local.as_ref(), overrides, remote);
         let expanded = page && self.expanded_agent.as_ref() == Some(&id);
-        let locked = disable_refusal(settings, catalog, agent.id()).is_some();
         let version = match &assessment {
             Assessment::Known(found) => version_text(&found.version),
             _ => None,
@@ -635,7 +622,7 @@ impl SettingsView {
                         SharedString::from(kind_text(agent, self.registry.as_deref())),
                     ))
                     .when(is_default, |line| {
-                        line.child(badge(i18n::t!("settings.is_default"), true))
+                        line.child(badge(default_text.clone(), true))
                     })
                     .when(is_captain && page, |line| {
                         line.child(badge(i18n::t!("settings.is_captain"), false))
@@ -659,7 +646,6 @@ impl SettingsView {
         let switch = self
             .switch(("agent-enabled", index), enabled)
             .flex_none()
-            .when(locked, |switch| switch.opacity(0.45).cursor_default())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, _, _window, cx| {
@@ -710,7 +696,11 @@ impl SettingsView {
                 agent,
                 settings,
                 enabled,
-                is_default,
+                DefaultRole {
+                    badge: is_default.then_some(default_text.as_str()),
+                    // 自動で選ばれた既定も「既定にする」で固定できる（他を入れても動かなくなる）。
+                    can_pin: !is_default || default.automatic,
+                },
                 is_captain,
                 local.as_ref(),
                 remote.is_some(),
@@ -877,7 +867,7 @@ impl SettingsView {
         agent: &acp_client::Agent,
         settings: &Settings,
         enabled: bool,
-        is_default: bool,
+        default_role: DefaultRole<'_>,
         is_captain: bool,
         local: Option<&AgentReadiness>,
         remote: bool,
@@ -902,7 +892,7 @@ impl SettingsView {
                     self.role_controls(
                         index,
                         label.clone(),
-                        is_default,
+                        default_role,
                         is_captain,
                         usable,
                         settings,
@@ -1076,24 +1066,25 @@ impl SettingsView {
         &self,
         index: usize,
         label: SharedString,
-        is_default: bool,
+        default_role: DefaultRole<'_>,
         is_captain: bool,
         usable: bool,
         settings: &Settings,
         cx: &mut Context<Self>,
     ) -> Div {
         let mut controls = div().flex().flex_wrap().items_center().gap(px(6.));
-        if is_default {
+        if let Some(badge) = default_role.badge {
             controls = controls.child(self.detail_button(
                 ("agent-default", index),
-                i18n::t!("settings.is_default"),
+                badge.to_string(),
                 true,
             ));
-        } else if usable {
+        }
+        if default_role.can_pin && usable {
             let label = label.clone();
             controls = controls.child(
                 self.detail_button(
-                    ("agent-default", index),
+                    ("agent-make-default", index),
                     i18n::t!("settings.make_default"),
                     false,
                 )
@@ -1124,7 +1115,7 @@ impl SettingsView {
                 ),
             );
         }
-        if !is_default && !usable {
+        if default_role.badge.is_none() && !usable {
             controls = controls.child(
                 div()
                     .text_color(self.theme.fg2)
@@ -1395,7 +1386,7 @@ mod fake_ssh {
         fn answer(&self, spec: &CommandSpec) -> Result<CommandOutput> {
             // SSH 先へは `sh -lc <script>` で流す。偽のホームではログインシェルの設定を読まない。
             let script = spec.args.last().cloned().unwrap_or_default();
-            let output = std::process::Command::new("/bin/sh")
+            let output = child_process::command("/bin/sh")
                 .arg("-c")
                 .arg(script)
                 .env_clear()
@@ -1649,4 +1640,17 @@ mod tests {
             Some("CLI 本体（copilot）".to_string())
         );
     }
+}
+
+/// 一覧の ★（既定のエージェントと、それが自動で選ばれた物か）。
+pub(crate) struct DefaultMark {
+    agent: Option<acp_client::Agent>,
+    automatic: bool,
+}
+
+/// 開いた行の「役割」の既定の部分: ★ の札（既定なら）と、「既定にする」を出してよいか。
+#[derive(Clone, Copy)]
+pub(crate) struct DefaultRole<'a> {
+    badge: Option<&'a str>,
+    can_pin: bool,
 }

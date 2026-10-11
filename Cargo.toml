@@ -141,11 +141,15 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_SystemInformation",
   # エージェントの作業中はスリープさせない（keep_awake.rs・SetThreadExecutionState）
   "Win32_System_Power",
+  # GUI サブシステムの necoder.exe を端末から CLI として使う時に親のコンソールへ繋ぐ（necoder/src/console.rs）
+  "Win32_System_Console",
 ] }
 
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）
 # paths は依存ゼロの最下層（WINDOWS-PORT.md §D1）。設定・DB・ログの置き場を決める唯一の場所。
 paths = { path = "crates/paths" }
+# 子プロセスの Command を作る唯一の入口（Windows でコンソール窓を出さない）。依存ゼロの最下層。
+child_process = { path = "crates/child_process" }
 cli_shim = { path = "crates/cli_shim" }
 agent_skills = { path = "crates/agent_skills" }
 theme_core = { path = "crates/theme_core" }

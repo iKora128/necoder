@@ -2,7 +2,7 @@
 use super::*;
 use gpui::{canvas, fill, point, rgb, size, Bounds, ClipboardItem};
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Clone)]
 pub(super) struct Pairing {
@@ -107,17 +107,12 @@ fn issue_pairing() -> Result<Pairing, String> {
 }
 
 fn run_pairing() -> anyhow::Result<Pairing> {
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = child_process::command(std::env::current_exe()?);
     command
         .args(["remote", "pair-json", "Phone"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
     let mut child = command.spawn()?;
     let stdout = child
         .stdout

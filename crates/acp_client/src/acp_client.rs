@@ -27,7 +27,7 @@ use futures::{FutureExt, StreamExt};
 use host::{CommandSpec, Host, LocalHost};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
@@ -1697,7 +1697,7 @@ fn command_succeeds(binary: &str, args: &[&str]) -> bool {
     let Some(path) = find_in_path(binary) else {
         return false;
     };
-    let mut child = match Command::new(path)
+    let mut child = match child_process::command(path)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2052,7 +2052,7 @@ pub async fn probe_providers(
 /// エージェントを起動し、ACP の initialize ハンドシェイクまで行う。
 /// 返り値は初期化応答（プロトコル版・エージェント能力）。session/prompt はこの接続に積んでいく（M4 継続）。
 pub async fn connect_and_initialize(command: &AgentCommand) -> Result<v1::InitializeResponse> {
-    let mut child = Command::new(&command.path)
+    let mut child = child_process::command(&command.path)
         .args(&command.args)
         .current_dir(&command.cwd)
         .stdin(Stdio::piped())
@@ -2093,7 +2093,7 @@ pub async fn connect_and_initialize(command: &AgentCommand) -> Result<v1::Initia
 /// 1 回で完結する非ストリーミング版（毎回プロセスを起動する簡易実装）。パネルはこれを GPUI の
 /// バックグラウンドタスクで呼び、結果を transcript に流す。ストリーミング（`read_update` の逐次反映）は継続。
 pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String> {
-    let mut child = Command::new(&command.path)
+    let mut child = child_process::command(&command.path)
         .args(&command.args)
         .current_dir(&command.cwd)
         .stdin(Stdio::piped())

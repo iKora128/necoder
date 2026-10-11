@@ -2227,7 +2227,7 @@ mod tests {
     }
 
     fn git_in(dir: &Path, args: &[&str]) -> std::process::Output {
-        std::process::Command::new("git")
+        child_process::command("git")
             .current_dir(dir)
             .args(["-c", "user.email=t@t", "-c", "user.name=t"])
             .args(args)

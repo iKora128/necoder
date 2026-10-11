@@ -578,12 +578,20 @@ impl Workspace {
         .detach();
     }
 
-    /// AI でコミットメッセージを生成（Claude Code CLI に diff を渡す・背景実行）。
+    /// AI でコミットメッセージを生成（既定のエージェントの CLI に diff を渡す・背景実行）。
     /// 成功したら composer の入力欄に流し込む。AI-agent-native の git 体験。
     pub(crate) fn generate_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_is_busy(cx) {
             return;
         }
+        let template = match agent_panel::default_oneshot_or_reason(cx) {
+            Ok(template) => template,
+            Err(reason) => {
+                let accent = self.accent();
+                self.push_toast(SharedString::from(reason), accent, cx);
+                return;
+            }
+        };
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -597,7 +605,7 @@ impl Workspace {
         cx.spawn(async move |_workspace, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { project::ai_commit_message_on(host.as_ref(), &root) })
+                .spawn(async move { project::ai_commit_message_on(host.as_ref(), &root, template) })
                 .await;
             let _ = handle.update(cx, |workspace, _window, cx| {
                 git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
@@ -608,7 +616,7 @@ impl Workspace {
                     }
                     Err(error) => workspace.toast_git_failure(
                         i18n::t!("git.ai_message_failed"),
-                        "claude -p",
+                        "AI",
                         &error,
                         cx,
                     ),
@@ -834,7 +842,7 @@ mod tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join("hooks")).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -965,7 +973,7 @@ mod tests {
                 session._watch_pump = None;
             }
         });
-        let count = std::process::Command::new("git")
+        let count = child_process::command("git")
             .current_dir(&repo)
             .args(["rev-list", "--count", "HEAD"])
             .output()

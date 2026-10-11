@@ -1209,7 +1209,7 @@ fn search_project_local(
 }
 
 fn run_command_local(spec: &CommandSpec) -> Result<CommandOutput> {
-    let output = Command::new(&spec.program)
+    let output = child_process::command(&spec.program)
         .args(&spec.args)
         .current_dir(&spec.cwd)
         .envs(&spec.env)
@@ -1237,7 +1237,7 @@ fn run_command_cancellable_local(
     if cancel.load(Ordering::Acquire) {
         return Ok(None);
     }
-    let mut child = Command::new(&spec.program)
+    let mut child = child_process::command(&spec.program)
         .args(&spec.args)
         .current_dir(&spec.cwd)
         .envs(&spec.env)
@@ -1341,7 +1341,7 @@ fn run_user_command_local(
     if cancel.load(Ordering::Acquire) {
         return Ok(UserCommandOutput::not_started());
     }
-    let mut command = Command::new(&spec.program);
+    let mut command = child_process::command(&spec.program);
     command
         .args(&spec.args)
         .current_dir(&spec.cwd)
@@ -1770,7 +1770,7 @@ fn spawn_process_local(
     spec: &CommandSpec,
     transport: Option<Arc<SshTransport>>,
 ) -> Result<HostProcess> {
-    let mut child = Command::new(&spec.program)
+    let mut child = child_process::command(&spec.program)
         .args(&spec.args)
         .current_dir(&spec.cwd)
         .envs(&spec.env)
@@ -2473,7 +2473,7 @@ fn session_socket(session: &str) -> Result<PathBuf> {
     if session.len() != 64 || !session.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("session id が不正");
     }
-    let uid = Command::new("id")
+    let uid = child_process::command("id")
         .arg("-u")
         .output()
         .ok()
@@ -2551,7 +2551,7 @@ fn connect_session_proxy(session: &str) -> Result<()> {
         Err(_) => {
             let executable =
                 std::env::current_exe().context("remote server executable path が無い")?;
-            Command::new(executable)
+            child_process::command(executable)
                 .arg("daemon")
                 .arg("--socket")
                 .arg(&socket)
@@ -4154,7 +4154,7 @@ fn free_local_port(preferred: u16) -> Result<u16> {
 }
 
 fn ssh_command() -> Command {
-    let mut command = Command::new("ssh");
+    let mut command = child_process::command("ssh");
     if let Some(config) = std::env::var_os("NECODER_SSH_CONFIG") {
         command.arg("-F").arg(config);
     }
@@ -4306,7 +4306,7 @@ fn local_file_sha256(path: &Path) -> Option<String> {
         ("shasum", vec!["-a".to_string(), "256".to_string(), path]),
     ];
     for (program, args) in candidates {
-        if let Ok(output) = Command::new(program).args(&args).output() {
+        if let Ok(output) = child_process::command(program).args(&args).output() {
             if output.status.success() {
                 if let Some(hex) = parse_sha256_hex(&output.stdout) {
                     return Some(hex);
@@ -5961,7 +5961,7 @@ mod tests {
         assert_eq!(output.stdout.head, b"started\n");
         let child = std::fs::read_to_string(&pid_file).expect("子の PID が書かれている");
         std::fs::remove_file(&pid_file).expect("後始末");
-        let alive = Command::new("kill")
+        let alive = child_process::command("kill")
             .args(["-0", child.trim()])
             .stderr(Stdio::null())
             .status()
@@ -6801,7 +6801,7 @@ Host gpu
 
         // 長い process request 中でも metadata/heartbeat が詰まらないことを実 wire で検証する。
         let gate = root.join("gate.fifo");
-        assert!(Command::new("mkfifo")
+        assert!(child_process::command("mkfifo")
             .arg(&gate)
             .status()
             .unwrap()
@@ -7218,7 +7218,7 @@ mod askpass_tests {
         // SAFETY: このテストは env を書き換える。並行実行される他テストは
         // NECODER_ASKPASS_DISABLE を読まないので影響しない。
         unsafe { std::env::set_var("NECODER_ASKPASS_DISABLE", "1") };
-        let mut command = Command::new("ssh");
+        let mut command = child_process::command("ssh");
         install_askpass(&mut command);
         assert!(
             command.get_envs().next().is_none(),

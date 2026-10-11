@@ -14,7 +14,6 @@
 
 use anyhow::{Context as _, Result};
 use std::path::PathBuf;
-use std::process::Command;
 
 /// リリース確認先（GitHub Releases API）。
 const RELEASES_URL: &str = "https://api.github.com/repos/iKora128/necoder/releases/latest";
@@ -219,7 +218,7 @@ pub fn check_for_update_manual(current_version: &str) -> Result<Option<UpdateInf
         // 配布物の無い OS（Linux 等）。呼び手はボタンを出さない前提だが、来ても壊れない。
         return Ok(None);
     };
-    let output = Command::new("curl")
+    let output = child_process::command("curl")
         .args([
             "-fsSL",
             "--max-time",
@@ -265,7 +264,7 @@ fn parse_content_length(headers: &str) -> Option<u64> {
 
 /// ダウンロードの総バイト数を HEAD で聞く（進捗バーの分母）。取れなければ None＝不定表示。
 fn remote_content_length(url: &str) -> Option<u64> {
-    let output = Command::new("curl")
+    let output = child_process::command("curl")
         .args(["-sIL", "--max-time", "20"])
         .arg(url)
         .output()
@@ -290,7 +289,7 @@ pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> R
     //    （curl の進捗出力を解析するより単純で、-o 先の metadata は常に取れる）。
     report(UpdateProgress::Downloading { fraction: None });
     let total = remote_content_length(dmg_url);
-    let mut child = Command::new("curl")
+    let mut child = child_process::command("curl")
         .args(["-fsSL", "--max-time", "300", "-o"])
         .arg(&staging)
         .arg(dmg_url)
@@ -318,7 +317,7 @@ pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> R
     });
     // 2) Apple 署名/公証の検証（改ざん・未署名はここで弾く）。
     report(UpdateProgress::Verifying);
-    let assess = Command::new("spctl")
+    let assess = child_process::command("spctl")
         .args([
             "--assess",
             "--type",
@@ -337,7 +336,7 @@ pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> R
     // 3) マウント → .app を差し替え → アンマウント。
     report(UpdateProgress::Replacing);
     let mount_point = staging_dir.join("mount");
-    let attach = Command::new("hdiutil")
+    let attach = child_process::command("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
         .arg(&mount_point)
         .arg(&staging)
@@ -348,7 +347,7 @@ pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> R
         let new_app = mount_point.join("necoder.app");
         anyhow::ensure!(new_app.exists(), i18n::t!("update.err_no_app"));
         // ditto は bundle を安全に複製する（メタデータ/署名を保つ）。実行中でも置換可能。
-        let copy = Command::new("ditto")
+        let copy = child_process::command("ditto")
             .arg(&new_app)
             .arg(&bundle)
             .status()
@@ -356,7 +355,7 @@ pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> R
         anyhow::ensure!(copy.success(), i18n::t!("update.err_replace"));
         Ok(())
     })();
-    let _detach = Command::new("hdiutil")
+    let _detach = child_process::command("hdiutil")
         .args(["detach"])
         .arg(&mount_point)
         .status();
@@ -373,7 +372,7 @@ pub fn spawn_relauncher() -> Result<()> {
     // $0 = bundle パス（引数で渡す＝パスのクォート問題を持ち込まない）。
     let script =
         format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open \"$0\"");
-    let mut command = Command::new("/bin/sh");
+    let mut command = child_process::command("/bin/sh");
     command
         .arg("-c")
         .arg(script)

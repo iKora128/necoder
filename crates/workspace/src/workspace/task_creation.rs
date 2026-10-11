@@ -561,10 +561,8 @@ impl Workspace {
         };
         let direct = project::task_slug(&name);
         let template = if direct == "task" {
-            let settings = settings::get(cx);
-            let template = acp_client::AgentKind::by_label(&settings.default_agent)
-                .and_then(|kind| kind.oneshot())
-                .filter(|_| settings.agent_auto_name);
+            let template = agent_panel::default_oneshot_template(cx)
+                .filter(|_| settings::get(cx).agent_auto_name);
             let Some(template) = template else {
                 return;
             };
@@ -911,7 +909,7 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-        std::process::Command::new("git")
+        child_process::command("git")
             .current_dir(dir)
             .args(["-c", "user.email=t@t", "-c", "user.name=t"])
             .args(args)

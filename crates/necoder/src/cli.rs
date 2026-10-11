@@ -66,7 +66,7 @@ fn run_remote(args: &[String]) -> Result<()> {
         script.is_file(),
         "Remote host が未ビルドです: cd relay && npm ci && npm run build（host_not_built）"
     );
-    let status = std::process::Command::new("node")
+    let status = child_process::command("node")
         .arg(script)
         .args(args)
         .status()
@@ -173,7 +173,7 @@ fn open_via_launch_services(paths: &[String]) -> Result<()> {
     for path in &skipped {
         eprintln!("見つからない（スキップ）: {path}");
     }
-    let mut command = std::process::Command::new("/usr/bin/open");
+    let mut command = child_process::command("/usr/bin/open");
     command.arg("-a").arg(&bundle);
     for path in &existing {
         command.arg(path.as_str());
@@ -333,7 +333,7 @@ fn resolve_open_args(args: &[String], cwd: &Path) -> OpenArgs {
 fn launch_detached(paths: &[String]) -> Result<()> {
     let exe = cli_shim::current_binary()?;
     if let Some(bundle) = bundle_root(&exe) {
-        let status = std::process::Command::new("/usr/bin/open")
+        let status = child_process::command("/usr/bin/open")
             .arg("-n") // ssh:// は新プロセスでしか処理できない＝明示的に新インスタンス（--args は既存活性化だと黙って落ちるため）
             .arg(&bundle)
             .arg("--args")
@@ -342,7 +342,7 @@ fn launch_detached(paths: &[String]) -> Result<()> {
             .with_context(|| format!("{} を起動できません", bundle.display()))?;
         anyhow::ensure!(status.success(), "open が失敗しました（{status}）");
     } else {
-        let mut command = std::process::Command::new(&exe);
+        let mut command = child_process::command(&exe);
         command
             .args(paths)
             .stdin(std::process::Stdio::null())

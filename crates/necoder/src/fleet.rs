@@ -1021,7 +1021,7 @@ mod tests {
         let main = base.join("repo");
         std::fs::create_dir_all(&main).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(args)
                 .output()

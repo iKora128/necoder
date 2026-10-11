@@ -355,7 +355,7 @@ impl Workspace {
             );
             return;
         };
-        match std::process::Command::new(&program).args(&args).spawn() {
+        match child_process::command(&program).args(&args).spawn() {
             // 終わるのを背景で待つ（終わった子プロセスを残さない）。
             Ok(mut child) => cx
                 .background_executor()

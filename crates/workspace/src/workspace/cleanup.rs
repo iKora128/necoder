@@ -761,7 +761,7 @@ mod tests {
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).expect("作れる");
         let git = |dir: &Path, args: &[&str]| {
-            std::process::Command::new("git")
+            child_process::command("git")
                 .current_dir(dir)
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
                 .args(args)

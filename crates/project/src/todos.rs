@@ -178,9 +178,10 @@ pub fn append_todos(current: &str, texts: &[String], today: &str) -> String {
 }
 
 /// ✨今日の計画を生成して板へ追記する（件数を返す）。日付はそのマシンの `date +%F`
-/// （remote ならそのマシンの今日＝作業場所の時間が真実）。
-pub fn daily_plan_on(host: &dyn Host, root: &Path) -> Result<usize> {
-    let items = draft_daily_plan_on(host, root)?;
+/// （remote ならそのマシンの今日＝作業場所の時間が真実）。`template` は既定のエージェントの
+/// 一発生成テンプレート（[`crate::oneshot_text_on`]）。
+pub fn daily_plan_on(host: &dyn Host, root: &Path, template: &str) -> Result<usize> {
+    let items = draft_daily_plan_on(host, root, template)?;
     let output = host
         .run_command(&host::CommandSpec::new("date", root).args(["+%F"]))
         .context("日付の取得に失敗")?;
@@ -199,33 +200,30 @@ pub(crate) const DAILY_PLAN_PROMPT: &str = "stdin の素材だけから、今日
     ファイルやリポジトリは開かない。前置き・注記・番号・チェックボックス記法・\
     見出し・説明は一切書かず、タスク本文の行だけを出力して。";
 
-/// ✨今日の計画: `claude -p` に「ROADMAP 断片 + git status + 板の未消化」を渡して
+/// ✨今日の計画: 既定のエージェントの CLI に「ROADMAP 断片 + git status + 板の未消化」を渡して
 /// 今日やるべき 3〜5 項目の下書きをもらう（ai_commit_message と同型・M12-10）。
-pub fn draft_daily_plan_on(host: &dyn Host, root: &Path) -> Result<Vec<String>> {
-    let instruction = DAILY_PLAN_PROMPT;
-    // ROADMAP 冒頭 + git status + 板の未消化を素材として流す（無いものは無視される）。
-    let script = format!(
-        "{{ echo '--- git status ---'; git status --short | head -40; \
+pub fn draft_daily_plan_on(host: &dyn Host, root: &Path, template: &str) -> Result<Vec<String>> {
+    // ROADMAP 冒頭 + git status + 板の未消化を素材として集める（無いものは無視される）。
+    let script = "{ echo '--- git status ---'; git status --short | head -40; \
            echo '--- ROADMAP（先頭200行）---'; head -200 docs/ROADMAP.md 2>/dev/null; \
            echo '--- 板の未消化 ---'; grep -n -- '- \\[ \\]' .necoder/todos.md 2>/dev/null | head -20; \
-        }} | claude -p \"{instruction}\""
-    );
+        }";
     // `head` / `grep` / `{ }` グループ化を使う＝POSIX 前提。Windows ローカルでは明示的に断る。
     anyhow::ensure!(
         host.has_posix_shell(),
         "この機能は POSIX シェル前提のため Windows ではまだ使えません"
     );
     let output = host
-        .run_command(&host.shell_script(script.as_str(), root))
-        .context("今日の計画の実行に失敗（claude CLI 未導入？）")?;
-    anyhow::ensure!(output.success(), "生成に失敗");
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        .run_command(&host.shell_script(script, root))
+        .context("今日の計画の素材を集められません")?;
+    let material = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = crate::oneshot_text_on(host, root, &material, template, DAILY_PLAN_PROMPT)?;
     let items = parse_plan_lines(&stdout);
     anyhow::ensure!(!items.is_empty(), "生成結果が空");
     Ok(items)
 }
 
-/// `claude -p` の出力からタスク行だけ拾う（指示に反して混ざる前置き・注記への防御）。
+/// エージェントの出力からタスク行だけ拾う（指示に反して混ざる前置き・注記への防御）。
 /// 「。」で終わる説明文・※注記・見出し・60 字超は捨てる。
 fn parse_plan_lines(stdout: &str) -> Vec<String> {
     stdout

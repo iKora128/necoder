@@ -26,6 +26,7 @@ name = "settings_preview"
 required-features = ["remote-preview"]
 
 [dependencies]
+child_process.workspace = true
 acp_client.workspace = true
 # Skills 節（エージェントの skill 置き場の一覧と necoder の skill の設置。CLI と共有）
 agent_skills.workspace = true
