@@ -1548,11 +1548,11 @@ mod tests {
         );
         assert_eq!(
             ja(&managed(Npx, Some("1.13.1"), "2.1.0", true, false)).as_deref(),
-            Some("1.13.1 → 2.1.0（次の起動でレジストリの版にします）")
+            Some("1.13.1 → 2.1.0（次回起動時にレジストリのバージョンへ更新）")
         );
         assert_eq!(
             ja(&managed(Npx, None, "0.0.34", true, false)).as_deref(),
-            Some("レジストリ 0.0.34（最初の起動で取得します）")
+            Some("レジストリ 0.0.34（初回起動時に取得）")
         );
         assert_eq!(
             ja(&managed(Npx, Some("1.13.1"), "2.1.0", false, false)).as_deref(),
@@ -1565,19 +1565,19 @@ mod tests {
         );
         assert_eq!(
             ja(&managed(Binary, Some("0.9.0"), "0.9.0", true, true)).as_deref(),
-            Some("0.9.0 · sha256 で照合済み")
+            Some("0.9.0 · sha256 で検証済み")
         );
         assert_eq!(
             ja(&managed(Binary, Some("0.9.0"), "0.9.0", true, false)).as_deref(),
-            Some("0.9.0 · 検証の値がありません")
+            Some("0.9.0 · 検証用ハッシュなし")
         );
         assert_eq!(
             ja(&managed(Binary, Some("0.8.0"), "0.9.0", true, true)).as_deref(),
-            Some("0.8.0 → 0.9.0（次の起動で落として sha256 で照合します）")
+            Some("0.8.0 → 0.9.0（次回起動時にダウンロードして sha256 で検証します）")
         );
         assert_eq!(
             ja(&managed(Binary, None, "0.9.0", true, false)).as_deref(),
-            Some("レジストリ 0.9.0（最初の起動で落とします・検証の値がありません）")
+            Some("レジストリ 0.9.0（初回起動時にダウンロード・検証用ハッシュなし）")
         );
         assert_eq!(
             ja(&VersionInfo::Path {
@@ -1586,7 +1586,7 @@ mod tests {
                 registry: Some("0.84.0".to_string()),
             })
             .as_deref(),
-            Some("0.70.2 · レジストリ 0.84.0（PATH の claude-agent-acp を使います）")
+            Some("0.70.2 · レジストリ 0.84.0（PATH の claude-agent-acp を使用）")
         );
         assert_eq!(
             ja(&VersionInfo::Path {
@@ -1609,7 +1609,7 @@ mod tests {
                 command: "dsh-acp --acp".to_string()
             })
             .as_deref(),
-            Some("自分のコマンドで起動（dsh-acp --acp）")
+            Some("カスタムコマンドで起動（dsh-acp --acp）")
         );
         assert_eq!(ja(&VersionInfo::None), None);
         assert_eq!(
@@ -1636,7 +1636,7 @@ mod tests {
         assert_eq!(
             i18n::translate_in("ja", "settings.agent_missing_cli")
                 .map(|text| text.replace("%{name}", "copilot")),
-            Some("CLI 本体（copilot）".to_string())
+            Some("CLI（copilot）".to_string())
         );
     }
 }

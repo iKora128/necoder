@@ -868,9 +868,9 @@ settings:
   add_agent_custom_hint: "Not listed? Add your own command under agent_servers in settings.json"
   add_agent_open_settings_json: Open settings.json
   add_agent_close: Close
-  launch_default: Launch as usual (registry version and command)
-  launch_env: "Launch: default + environment (%{names})"
-  launch_custom: "Launch: own command (%{command})"
+  launch_default: "Default (registry version and command)"
+  launch_env: "Default + environment (%{names})"
+  launch_custom: "Own command (%{command})"
   launch_edit: Change…
   launch_reset: Use default
   launch_title: "Launching %{agent}"
