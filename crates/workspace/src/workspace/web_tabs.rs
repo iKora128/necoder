@@ -1429,7 +1429,7 @@ mod tests {
         assert!(
             toasts
                 .iter()
-                .any(|toast| toast.contains("添えませんでした")),
+                .any(|toast| toast.contains("添付しませんでした")),
             "{toasts:?}"
         );
 
