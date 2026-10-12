@@ -79,6 +79,9 @@ function controls() {
   $('notifications').disabled = !channel || status !== 'online';
   $('notifications').textContent = t(pushEnabled ? 'notificationsOff' : 'notifications');
   document.querySelectorAll('.project-head .add').forEach(button => { button.disabled = !live(); });
+  $('create-thread').disabled = !live();
+  $('open-thread-settings').disabled = !live() || !detail?.settings;
+  document.querySelectorAll('#thread-settings select').forEach(select => { select.disabled = !live() || select.dataset.locked === 'true'; });
   document.querySelectorAll('[data-mutation]').forEach(button => {
     button.disabled = !live() || (button.dataset.kind === 'allow' && !permissionReviewed);
   });
@@ -297,11 +300,12 @@ function whereText(project) {
 function projectHead(project) {
   const head = node('div', undefined, 'project-head');
   head.append(node('span', project.name, 'name'), node('span', whereText(project), 'branch'));
-  // 新規スレッドは既存スレッドと同じパネルに作る（GUI はスレッド ID でパネルを引く）ので、1 本も無い所には出さない。
+  // 新規スレッドはプロジェクトの Agent パネルに作る。前の版の GUI はスレッド ID でパネルを引くので、
+  // 選択肢（new_thread）を送ってこない版では 1 本も無い所に出さない。
   const anchor = project.threads[0];
-  if (anchor) {
-    const add = node('button', '＋', 'add'); add.type = 'button'; add.setAttribute('aria-label', t('newThread'));
-    add.onclick = () => chooseAgent(project, anchor);
+  if (anchor || project.new_thread) {
+    const add = node('button', `＋ ${t('newShort')}`, 'add'); add.type = 'button'; add.setAttribute('aria-label', t('newThread'));
+    add.onclick = () => openNewThread(project, anchor);
     head.append(add);
   }
   return head;
@@ -320,7 +324,7 @@ function threadRow({ project, thread }, withProject) {
     if (paint(chip, '--project', project.color)) chip.classList.add('colored');
     meta.append(chip, ' · ');
   }
-  meta.append(thread.agent);
+  meta.append([thread.agent, thread.model].filter(Boolean).join(' · '));
   if (state === 'idle') meta.append(` · ${t('idle')}`);
   else { meta.append(' · '); meta.append(node('b', t(STATE_LABEL[state]))); }
   row.append(meta);
@@ -349,6 +353,7 @@ function openThread(task, thread) {
 }
 function closeThread() {
   saveDraft(); draftKey = '';
+  if ($('thread-settings-dialog').open) $('thread-settings-dialog').close();
   view = 'home'; selectedThread = ''; detail = null;
   store(LAST, null); themeColor(BASE);
   showView(); renderHome(); controls();
@@ -364,7 +369,9 @@ function renderThreadHeader() {
   $('thread-project').classList.toggle('colored', paint($('thread-project'), '--project', project.color));
   $('thread-name').textContent = thread.name || t('untitled');
   $('thread-project').textContent = [project.name, whereText(project)].filter(Boolean).join('  ');
-  $('thread-meta').textContent = [thread.agent, thread.tokens_used ? `${thread.tokens_used.toLocaleString()} tokens` : ''].filter(Boolean).map(text => ` · ${text}`).join('');
+  $('thread-meta').textContent = [thread.agent, thread.tokens_used ? `${compact(thread.tokens_used)} tokens` : ''].filter(Boolean).map(text => ` · ${text}`).join('');
+  // 入力欄の左下: このスレッドのモデルと思考量（押すと設定のシート・デスクトップのピルと同じ場所）。
+  $('open-thread-settings').textContent = [thread.model, thread.effort].filter(Boolean).join(' · ') || thread.agent || t('threadSettings');
   // 他で承認・質問を待っているスレッドの数を戻るボタンに出す（ここに居ても気付けるように）。
   const others = snapshot.projects.flatMap(candidate => candidate.threads).filter(candidate => candidate.blocked && candidate.id !== thread.id).length;
   $('back-badge').hidden = !others; $('back-badge').textContent = String(others);
@@ -392,6 +399,8 @@ function renderDetail() {
   renderTranscript();
   renderPermission();
   renderQuestion();
+  $('open-thread-settings').hidden = !detail.settings;
+  if ($('thread-settings-dialog').open) renderThreadSettings();
   controls();
   if (stick) scrollToLatest();
   else if (anchor) keepAnchor(anchor);
@@ -654,7 +663,7 @@ function renderQuestion() {
 }
 function showError(error) {
   const message = error.message;
-  notice(t(message === 'storage_failed' ? 'storageError' : message.includes('unknown') ? 'unknown'
+  notice(t(message === 'storage_failed' ? 'storageError' : message.includes('outcome_unknown') ? 'unknown'
     : message.startsWith('stale') || message === 'host_state_changed' ? 'stale'
     : message === 'authentication_failed' ? 'pairLost' : message === 'offline' ? 'offline' : message));
 }
@@ -771,23 +780,105 @@ $('composer').onsubmit = event => {
   }).catch(showError);
 };
 $('interrupt').onclick = () => mutate('interrupt').catch(showError);
-let agentTarget = null;
-function chooseAgent(project, anchor) {
-  agentTarget = { project, anchor };
-  $('agent-project').textContent = t('newThreadIn').replace('{project}', project.name);
-  const agents = [...new Set(['Claude Code', 'Codex', ...snapshot.projects.flatMap(candidate => candidate.threads.map(thread => thread.agent)).filter(Boolean)])];
-  $('agent-choices').replaceChildren(...agents.map(agent => {
-    const button = node('button', agent); button.type = 'button';
-    button.onclick = () => {
-      $('agent-dialog').close();
-      const target = agentTarget;
-      mutate('new_thread', { agent, task_id: target.project.id, thread_id: target.anchor.id })
-        .then(result => openThread(target.project.id, result.thread_id)).catch(showError);
-    };
-    return button;
-  }));
+// ── 設定（新しいスレッドのシートと、会話の設定のシート）─────────────────────────────
+// 1 区分 = { current, label, choices: [{ id, label, allowed? }] }（GUI の remote.rs）。選択肢はエージェントが
+// 広告した物だけで、まだ無ければ空（候補を作らない）。その時は今の値を文字だけで出す。
+function settingRow(name, setting, onChange, { locked = false, note = '' } = {}) {
+  const row = node('div', undefined, 'setting-row');
+  const id = `setting-${name}-${Math.random().toString(36).slice(2, 8)}`;
+  const label = node('label', t(`setting_${name}`)); label.htmlFor = id;
+  row.append(label);
+  const choices = setting?.choices || [];
+  if (!choices.length || locked) {
+    row.append(node('span', setting?.label || t('unsetValue'), 'setting-value'));
+  } else {
+    const select = document.createElement('select'); select.id = id; select.dataset.setting = name;
+    select.dataset.locked = String(locked);
+    if (!setting.current) {
+      const unset = node('option', t('unsetValue')); unset.value = ''; unset.disabled = true; unset.selected = true; select.append(unset);
+    }
+    for (const choice of choices) {
+      const option = node('option', choice.allowed === false ? `${choice.label}（${t('onMac')}）` : choice.label);
+      option.value = choice.id; option.disabled = choice.allowed === false;
+      option.selected = choice.id === setting.current;
+      select.append(option);
+    }
+    select.onchange = () => onChange(select.value);
+    row.append(select);
+  }
+  if (note) row.append(node('p', note, 'setting-note'));
+  return row;
+}
+function hasLockedMode(setting) { return !!setting?.choices?.some(choice => choice.allowed === false); }
+
+// 新しいスレッド: エージェントを選び、モデル・思考量・権限モードを決めて「作成」。前の版の GUI（new_thread が
+// 無い）ではエージェント名だけで作る。
+let newThread = null;
+function openNewThread(project, anchor) {
+  const offered = project.new_thread?.agents;
+  const agents = offered?.length ? offered
+    : [...new Set(['Claude Code', 'Codex', ...snapshot.projects.flatMap(candidate => candidate.threads.map(thread => thread.agent)).filter(Boolean)])].map(name => ({ name }));
+  const initial = agents.find(agent => agent.default) || agents[0];
+  newThread = { project, anchor, agents, agent: initial?.name, chosen: {} };
+  const head = $('agent-project'); head.textContent = project.name;
+  head.classList.toggle('colored', paint(head, '--project', project.color));
+  renderNewThread();
+  controls();
   $('agent-dialog').showModal();
 }
+function renderNewThread() {
+  const state = newThread; if (!state) return;
+  const agent = state.agents.find(candidate => candidate.name === state.agent);
+  $('agent-choices').replaceChildren(...state.agents.map(candidate => {
+    const button = node('button', undefined, 'agent-choice'); button.type = 'button';
+    button.setAttribute('role', 'radio'); button.setAttribute('aria-checked', String(candidate.name === state.agent));
+    button.append(node('span', candidate.name, 'agent-name'));
+    if (candidate.default) button.append(node('span', t('defaultTag'), 'agent-tag'));
+    button.onclick = () => { state.agent = candidate.name; state.chosen = {}; renderNewThread(); };
+    return button;
+  }));
+  const rows = [], value = name => {
+    const chosen = state.chosen[name];
+    return chosen === undefined ? agent?.[name] : { ...agent[name], current: chosen };
+  };
+  if (agent?.model) {
+    for (const name of ['model', 'effort', 'mode']) {
+      if (name === 'effort' && !agent.effort.choices.length && !agent.effort.current) continue;
+      rows.push(settingRow(name, value(name), picked => { state.chosen[name] = picked; }));
+    }
+  }
+  $('agent-settings').replaceChildren(...rows);
+  const empty = agent?.model && !agent.model.choices.length;
+  $('agent-hint').textContent = [empty ? t('listLater') : '', hasLockedMode(agent?.mode) ? t('modeHint') : ''].filter(Boolean).join('\n');
+}
+$('create-thread').onclick = () => {
+  const state = newThread; if (!state?.agent) return;
+  $('agent-dialog').close();
+  const extra = { agent: state.agent, task_id: state.project.id, ...state.chosen };
+  if (state.anchor) extra.thread_id = state.anchor.id;
+  mutate('new_thread', extra).then(result => openThread(state.project.id, result.thread_id)).catch(showError);
+};
+
+// 会話の設定: 選ぶとすぐ Mac へ送る（デスクトップのピルと同じ・記憶にも書く）。
+function renderThreadSettings() {
+  const settings = detail?.settings; if (!settings) return;
+  const thread = currentThread();
+  $('thread-settings-name').textContent = thread?.name || t('untitled');
+  const change = name => value => mutate('set_setting', { setting: name, value }).catch(showError);
+  const rows = [];
+  const agent = settings.agent;
+  rows.push(agent.fixed || agent.choices.length < 2
+    ? settingRow('agent', { current: agent.current, label: agent.current, choices: [] }, () => {}, { note: agent.fixed ? t('agentFixed') : '' })
+    : settingRow('agent', { current: agent.current, label: agent.current, choices: agent.choices }, change('agent')));
+  rows.push(settingRow('model', settings.model, change('model')));
+  if (settings.effort.choices.length || settings.effort.current) rows.push(settingRow('effort', settings.effort, change('effort')));
+  if (settings.mode) rows.push(settingRow('mode', settings.mode, change('mode')));
+  $('thread-settings').replaceChildren(...rows);
+  $('thread-settings-hint').textContent = [!settings.model.choices.length ? t('listLaterThread') : '', hasLockedMode(settings.mode) ? t('modeHint') : ''].filter(Boolean).join('\n');
+  controls();
+}
+$('open-thread-settings').onclick = () => { renderThreadSettings(); $('thread-settings-dialog').showModal(); };
+$('close-thread-settings').onclick = () => $('thread-settings-dialog').close();
 function renderDiff(text) {
   $('diff-text').replaceChildren(...text.split('\n').map(line => {
     const kind = /^(diff --git|\+\+\+|---)/.test(line) ? 'file' : line.startsWith('@@') ? 'hunk'

@@ -29,9 +29,12 @@ try {
   const params = { instance_id: snapshot.instance_id, task_id: snapshot.projects[0].id, expires_at: Date.now() + 25000 };
   const diff = await ipc(socket, 'remote_get_diff', params);
   assert.ok(diff.diff.includes('+after'));
-  await assert.rejects(ipc(socket, 'remote_new_thread', { ...params, expires_at: 0, agent: 'Codex' }), /command_expired/);
-  await assert.rejects(ipc(socket, 'remote_new_thread', { ...params, instance_id: 'stale', agent: 'Codex' }), /stale_instance/);
-  const thread = await ipc(socket, 'remote_new_thread', { ...params, agent: 'Codex' });
+  // 新しいスレッドのシートに出るエージェント（このマシンでログイン済みの物）で作る。
+  const agent = snapshot.projects[0].new_thread?.agents?.[0]?.name;
+  assert.ok(agent, 'an agent is offered for new threads');
+  await assert.rejects(ipc(socket, 'remote_new_thread', { ...params, expires_at: 0, agent }), /command_expired/);
+  await assert.rejects(ipc(socket, 'remote_new_thread', { ...params, instance_id: 'stale', agent }), /stale_instance/);
+  const thread = await ipc(socket, 'remote_new_thread', { ...params, agent });
   const detail = await ipc(socket, 'remote_thread', { ...params, thread_id: thread.thread_id });
   assert.equal(detail.id, thread.thread_id);
   await assert.rejects(ipc(socket, 'remote_interrupt', { ...params, thread_id: detail.id, turn_id: 'old' }), /stale_turn/);

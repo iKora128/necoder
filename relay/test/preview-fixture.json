@@ -20,7 +20,9 @@
             "digest": "テストが 1 本落ちています。直す前に、実行の許可をください。",
             "permission_id": "perm-a",
             "question_pending": false,
-            "color": "#61afef"
+            "color": "#61afef",
+            "model": "Opus 4.8",
+            "effort": "High"
           },
           {
             "id": "thread-b",
@@ -33,7 +35,9 @@
             "tokens_used": 137611,
             "digest": "一覧と会話の 2 画面に組み直しています。",
             "question_pending": false,
-            "color": "#e5c07b"
+            "color": "#e5c07b",
+            "model": "Fable 5.1",
+            "effort": "Xhigh"
           },
           {
             "id": "thread-c",
@@ -46,9 +50,124 @@
             "tokens_used": 9120,
             "digest": "結論: 色は **識別** だけに使い、状態は形と動きで出します。",
             "question_pending": false,
-            "color": "#c678dd"
+            "color": "#c678dd",
+            "model": "GPT-5.6-Sol",
+            "effort": "Medium"
           }
-        ]
+        ],
+        "new_thread": {
+          "agents": [
+            {
+              "name": "Claude Code",
+              "default": true,
+              "model": {
+                "current": "opus",
+                "label": "Opus 4.8",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default (recommended)"
+                  },
+                  {
+                    "id": "fable",
+                    "label": "Fable 5.1"
+                  },
+                  {
+                    "id": "opus",
+                    "label": "Opus 4.8"
+                  },
+                  {
+                    "id": "opus[1m]",
+                    "label": "Opus 4.8 (1M context)"
+                  },
+                  {
+                    "id": "sonnet",
+                    "label": "Sonnet 5"
+                  },
+                  {
+                    "id": "haiku",
+                    "label": "Haiku 4.5"
+                  }
+                ]
+              },
+              "effort": {
+                "current": "high",
+                "label": "High",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default"
+                  },
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Xhigh"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  }
+                ]
+              },
+              "mode": {
+                "current": "default",
+                "label": "Default",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default",
+                    "allowed": true
+                  },
+                  {
+                    "id": "acceptEdits",
+                    "label": "Accept Edits",
+                    "allowed": true
+                  },
+                  {
+                    "id": "plan",
+                    "label": "Plan Mode",
+                    "allowed": true
+                  },
+                  {
+                    "id": "bypassPermissions",
+                    "label": "Bypass Permissions",
+                    "allowed": false
+                  }
+                ]
+              }
+            },
+            {
+              "name": "Codex",
+              "default": false,
+              "model": {
+                "current": "gpt-5.6-sol",
+                "label": "gpt-5.6-sol",
+                "choices": []
+              },
+              "effort": {
+                "current": "medium",
+                "label": "medium",
+                "choices": []
+              },
+              "mode": {
+                "current": null,
+                "label": null,
+                "choices": []
+              }
+            }
+          ]
+        }
       },
       {
         "id": "project-b",
@@ -69,15 +188,243 @@
             "digest": "どちらの方針で進めますか？",
             "question_pending": true,
             "question_id": "q-d",
-            "color": "#61afef"
+            "color": "#61afef",
+            "model": "Sonnet 5",
+            "effort": "Default"
           }
-        ]
+        ],
+        "new_thread": {
+          "agents": [
+            {
+              "name": "Claude Code",
+              "default": true,
+              "model": {
+                "current": "opus",
+                "label": "Opus 4.8",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default (recommended)"
+                  },
+                  {
+                    "id": "fable",
+                    "label": "Fable 5.1"
+                  },
+                  {
+                    "id": "opus",
+                    "label": "Opus 4.8"
+                  },
+                  {
+                    "id": "opus[1m]",
+                    "label": "Opus 4.8 (1M context)"
+                  },
+                  {
+                    "id": "sonnet",
+                    "label": "Sonnet 5"
+                  },
+                  {
+                    "id": "haiku",
+                    "label": "Haiku 4.5"
+                  }
+                ]
+              },
+              "effort": {
+                "current": "high",
+                "label": "High",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default"
+                  },
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Xhigh"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  }
+                ]
+              },
+              "mode": {
+                "current": "default",
+                "label": "Default",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default",
+                    "allowed": true
+                  },
+                  {
+                    "id": "acceptEdits",
+                    "label": "Accept Edits",
+                    "allowed": true
+                  },
+                  {
+                    "id": "plan",
+                    "label": "Plan Mode",
+                    "allowed": true
+                  },
+                  {
+                    "id": "bypassPermissions",
+                    "label": "Bypass Permissions",
+                    "allowed": false
+                  }
+                ]
+              }
+            },
+            {
+              "name": "Codex",
+              "default": false,
+              "model": {
+                "current": "gpt-5.6-sol",
+                "label": "gpt-5.6-sol",
+                "choices": []
+              },
+              "effort": {
+                "current": "medium",
+                "label": "medium",
+                "choices": []
+              },
+              "mode": {
+                "current": null,
+                "label": null,
+                "choices": []
+              }
+            }
+          ]
+        }
       },
       {
         "id": "project-c",
         "name": "medlocal",
         "branch": "main",
-        "threads": []
+        "threads": [],
+        "new_thread": {
+          "agents": [
+            {
+              "name": "Claude Code",
+              "default": true,
+              "model": {
+                "current": "opus",
+                "label": "Opus 4.8",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default (recommended)"
+                  },
+                  {
+                    "id": "fable",
+                    "label": "Fable 5.1"
+                  },
+                  {
+                    "id": "opus",
+                    "label": "Opus 4.8"
+                  },
+                  {
+                    "id": "opus[1m]",
+                    "label": "Opus 4.8 (1M context)"
+                  },
+                  {
+                    "id": "sonnet",
+                    "label": "Sonnet 5"
+                  },
+                  {
+                    "id": "haiku",
+                    "label": "Haiku 4.5"
+                  }
+                ]
+              },
+              "effort": {
+                "current": "high",
+                "label": "High",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default"
+                  },
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Xhigh"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  }
+                ]
+              },
+              "mode": {
+                "current": "default",
+                "label": "Default",
+                "choices": [
+                  {
+                    "id": "default",
+                    "label": "Default",
+                    "allowed": true
+                  },
+                  {
+                    "id": "acceptEdits",
+                    "label": "Accept Edits",
+                    "allowed": true
+                  },
+                  {
+                    "id": "plan",
+                    "label": "Plan Mode",
+                    "allowed": true
+                  },
+                  {
+                    "id": "bypassPermissions",
+                    "label": "Bypass Permissions",
+                    "allowed": false
+                  }
+                ]
+              }
+            },
+            {
+              "name": "Codex",
+              "default": false,
+              "model": {
+                "current": "gpt-5.6-sol",
+                "label": "gpt-5.6-sol",
+                "choices": []
+              },
+              "effort": {
+                "current": "medium",
+                "label": "medium",
+                "choices": []
+              },
+              "mode": {
+                "current": null,
+                "label": null,
+                "choices": []
+              }
+            }
+          ]
+        }
       }
     ]
   },
@@ -143,6 +490,99 @@
             "kind": "reject"
           }
         ]
+      },
+      "settings": {
+        "agent": {
+          "current": "Claude Code",
+          "fixed": true,
+          "choices": []
+        },
+        "model": {
+          "current": "opus",
+          "label": "Opus 4.8",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default (recommended)"
+            },
+            {
+              "id": "fable",
+              "label": "Fable 5.1"
+            },
+            {
+              "id": "opus",
+              "label": "Opus 4.8"
+            },
+            {
+              "id": "opus[1m]",
+              "label": "Opus 4.8 (1M context)"
+            },
+            {
+              "id": "sonnet",
+              "label": "Sonnet 5"
+            },
+            {
+              "id": "haiku",
+              "label": "Haiku 4.5"
+            }
+          ]
+        },
+        "effort": {
+          "current": "high",
+          "label": "High",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default"
+            },
+            {
+              "id": "low",
+              "label": "Low"
+            },
+            {
+              "id": "medium",
+              "label": "Medium"
+            },
+            {
+              "id": "high",
+              "label": "High"
+            },
+            {
+              "id": "xhigh",
+              "label": "Xhigh"
+            },
+            {
+              "id": "max",
+              "label": "Max"
+            }
+          ]
+        },
+        "mode": {
+          "current": "default",
+          "label": "Default",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default",
+              "allowed": true
+            },
+            {
+              "id": "acceptEdits",
+              "label": "Accept Edits",
+              "allowed": true
+            },
+            {
+              "id": "plan",
+              "label": "Plan Mode",
+              "allowed": true
+            },
+            {
+              "id": "bypassPermissions",
+              "label": "Bypass Permissions",
+              "allowed": false
+            }
+          ]
+        }
       }
     },
     "thread-b": {
@@ -233,7 +673,100 @@
           "kind": "tool",
           "text": "cd /Users/me/necoder/relay && npm run test:browser 2>&1 | tail -5\n\n```console\n  8 passed (12.8s)\n```"
         }
-      ]
+      ],
+      "settings": {
+        "agent": {
+          "current": "Claude Code",
+          "fixed": true,
+          "choices": []
+        },
+        "model": {
+          "current": "fable",
+          "label": "Fable 5.1",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default (recommended)"
+            },
+            {
+              "id": "fable",
+              "label": "Fable 5.1"
+            },
+            {
+              "id": "opus",
+              "label": "Opus 4.8"
+            },
+            {
+              "id": "opus[1m]",
+              "label": "Opus 4.8 (1M context)"
+            },
+            {
+              "id": "sonnet",
+              "label": "Sonnet 5"
+            },
+            {
+              "id": "haiku",
+              "label": "Haiku 4.5"
+            }
+          ]
+        },
+        "effort": {
+          "current": "xhigh",
+          "label": "Xhigh",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default"
+            },
+            {
+              "id": "low",
+              "label": "Low"
+            },
+            {
+              "id": "medium",
+              "label": "Medium"
+            },
+            {
+              "id": "high",
+              "label": "High"
+            },
+            {
+              "id": "xhigh",
+              "label": "Xhigh"
+            },
+            {
+              "id": "max",
+              "label": "Max"
+            }
+          ]
+        },
+        "mode": {
+          "current": "acceptEdits",
+          "label": "Accept Edits",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default",
+              "allowed": true
+            },
+            {
+              "id": "acceptEdits",
+              "label": "Accept Edits",
+              "allowed": true
+            },
+            {
+              "id": "plan",
+              "label": "Plan Mode",
+              "allowed": true
+            },
+            {
+              "id": "bypassPermissions",
+              "label": "Bypass Permissions",
+              "allowed": false
+            }
+          ]
+        }
+      }
     },
     "thread-c": {
       "id": "thread-c",
@@ -258,7 +791,75 @@
           "kind": "auto_prompt",
           "text": "Captain · 2026-10-01 09:12\nTask「ビルド失敗の調査」が承認待ちになりました。"
         }
-      ]
+      ],
+      "settings": {
+        "agent": {
+          "current": "Codex",
+          "fixed": true,
+          "choices": []
+        },
+        "model": {
+          "current": "gpt-5.6-sol",
+          "label": "GPT-5.6-Sol",
+          "choices": [
+            {
+              "id": "gpt-5.6-sol",
+              "label": "GPT-5.6-Sol"
+            },
+            {
+              "id": "gpt-5.6",
+              "label": "GPT-5.6"
+            },
+            {
+              "id": "gpt-5.5-codex",
+              "label": "GPT-5.5-Codex"
+            }
+          ]
+        },
+        "effort": {
+          "current": "medium",
+          "label": "Medium",
+          "choices": [
+            {
+              "id": "low",
+              "label": "Low"
+            },
+            {
+              "id": "medium",
+              "label": "Medium"
+            },
+            {
+              "id": "high",
+              "label": "High"
+            },
+            {
+              "id": "xhigh",
+              "label": "Xhigh"
+            }
+          ]
+        },
+        "mode": {
+          "current": "auto",
+          "label": "Agent",
+          "choices": [
+            {
+              "id": "read-only",
+              "label": "Read Only",
+              "allowed": true
+            },
+            {
+              "id": "auto",
+              "label": "Agent",
+              "allowed": true
+            },
+            {
+              "id": "full-access",
+              "label": "Agent (full access)",
+              "allowed": false
+            }
+          ]
+        }
+      }
     },
     "thread-d": {
       "id": "thread-d",
@@ -299,6 +900,99 @@
             "custom": true
           }
         ]
+      },
+      "settings": {
+        "agent": {
+          "current": "Claude Code",
+          "fixed": true,
+          "choices": []
+        },
+        "model": {
+          "current": "sonnet",
+          "label": "Sonnet 5",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default (recommended)"
+            },
+            {
+              "id": "fable",
+              "label": "Fable 5.1"
+            },
+            {
+              "id": "opus",
+              "label": "Opus 4.8"
+            },
+            {
+              "id": "opus[1m]",
+              "label": "Opus 4.8 (1M context)"
+            },
+            {
+              "id": "sonnet",
+              "label": "Sonnet 5"
+            },
+            {
+              "id": "haiku",
+              "label": "Haiku 4.5"
+            }
+          ]
+        },
+        "effort": {
+          "current": "default",
+          "label": "Default",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default"
+            },
+            {
+              "id": "low",
+              "label": "Low"
+            },
+            {
+              "id": "medium",
+              "label": "Medium"
+            },
+            {
+              "id": "high",
+              "label": "High"
+            },
+            {
+              "id": "xhigh",
+              "label": "Xhigh"
+            },
+            {
+              "id": "max",
+              "label": "Max"
+            }
+          ]
+        },
+        "mode": {
+          "current": "default",
+          "label": "Default",
+          "choices": [
+            {
+              "id": "default",
+              "label": "Default",
+              "allowed": true
+            },
+            {
+              "id": "acceptEdits",
+              "label": "Accept Edits",
+              "allowed": true
+            },
+            {
+              "id": "plan",
+              "label": "Plan Mode",
+              "allowed": true
+            },
+            {
+              "id": "bypassPermissions",
+              "label": "Bypass Permissions",
+              "allowed": false
+            }
+          ]
+        }
       }
     }
   }

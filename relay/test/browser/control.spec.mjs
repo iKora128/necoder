@@ -49,6 +49,35 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   expect(errors).toEqual([]);
 });
 
+test('PWA: 新しいスレッドでエージェント・モデル・思考量を選び、会話の画面で変える', async ({ page, request }) => {
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  await page.goto(pairing.url);
+  await expect(page.locator('#status')).toHaveText('接続済み');
+  await page.locator('.project-head .add').click();
+  // 既定のエージェントが選ばれ、在庫のモデル・思考量・権限モードが並ぶ。聞かずに進めるモードは選べない。
+  await expect(page.locator('.agent-choice[aria-checked=true]')).toContainText('Claude Code');
+  await expect(page.locator('#agent-settings select[data-setting=mode] option[value=bypassPermissions]')).toBeDisabled();
+  // 在庫の無いエージェントは選択肢を作らず、今の値を文字で出す。
+  await page.locator('.agent-choice', { hasText: 'Codex' }).click();
+  await expect(page.locator('#agent-settings select')).toHaveCount(0);
+  await expect(page.locator('#agent-settings')).toContainText('gpt-5.6-sol');
+  await page.locator('.agent-choice', { hasText: 'Claude Code' }).click();
+  await page.locator('#agent-settings select[data-setting=model]').selectOption('sonnet');
+  await page.locator('#agent-settings select[data-setting=effort]').selectOption('low');
+  await page.locator('#create-thread').click();
+  await expect(page.locator('#destination')).toContainText('新しいスレッド');
+  const sent = (await (await request.get('http://127.0.0.1:8792/last')).json()).new_thread;
+  // 変えた物だけ送る（触っていない権限モードは Mac の既定のまま）。
+  expect(sent).toEqual({ agent: 'Claude Code', model: 'sonnet', effort: 'low' });
+  await expect(page.locator('#open-thread-settings')).toHaveText('Sonnet 5 · Low');
+  await page.locator('#open-thread-settings').click();
+  await page.locator('#thread-settings select[data-setting=effort]').selectOption('high');
+  await expect.poll(async () => (await (await request.get('http://127.0.0.1:8792/last')).json()).set_setting).toEqual({ setting: 'effort', value: 'high' });
+  await expect(page.locator('#open-thread-settings')).toHaveText('Sonnet 5 · High');
+  expect(errors).toEqual([]);
+});
+
 test('部屋作成はアカウント不要・壊れた資格情報と異なる Origin を拒否、PWA 配信ヘッダー', async ({ request, page }) => {
   const room = 'a'.repeat(43);
   // アカウント不要の公開リレー: 秘密を持たない相手でも部屋は作れる（濫用対策はレート制限と PoW）。

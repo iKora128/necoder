@@ -16,8 +16,8 @@ export function leadingZeroBits(digest) {
   return bits;
 }
 
-export const ALLOWED = new Set(['snapshot', 'thread', 'get_diff', 'send_message', 'interrupt', 'permission_response', 'new_thread', 'question_response']);
-const MUTATIONS = new Set(['send_message', 'interrupt', 'permission_response', 'new_thread', 'question_response']);
+export const ALLOWED = new Set(['snapshot', 'thread', 'get_diff', 'send_message', 'interrupt', 'permission_response', 'new_thread', 'question_response', 'set_setting']);
+const MUTATIONS = new Set(['send_message', 'interrupt', 'permission_response', 'new_thread', 'question_response', 'set_setting']);
 export function validateCommand(message, device, snapshot) {
   if (!message || message.type !== 'request' || !validSecret(message.id) || !ALLOWED.has(message.method)) throw new Error('invalid_request');
   if (!Number.isSafeInteger(message.expires_at) || message.expires_at <= Date.now() || message.expires_at > Date.now() + 60_000) throw new Error('command_expired');

@@ -4047,3 +4047,18 @@
 - 検証: `cargo test -p agent_panel -p keymap_core -p workspace -p necoder` は緑（使い捨ての HOME）。`cargo check --workspace --all-targets` は警告 0。隔離 offscreen で、見本の広告を流す一時パッチ（コミットしていない）を当てて撮った: ピル 4 つ（`Claude Code ▾ · Default ▾ · Default (recommended) ▾ · Default ▾`）、モデルと思考量のメニューがピルの真上に開き、composer の枠が透けない。
 - 学び/罠: 本人の設定の `agent_config_defaults.claude.fast` は `"false"` だった。カードを消すと Fast mode を切り替える場所が無くなるので、`true` で残っていたら気付かないまま速い（高い）モードが続くところだった。UI を消す時は、その UI でしか変えられない記憶が残らないかを先に見る。
 - 次: Fast mode や Codex の Collaboration mode を、ピルの並びのどこで変えられるようにするかは本人が決める（今はどこからも変えられない）。
+
+## 2026-10-12 — スマホ: 新しいスレッドでエージェント・モデル・設定を選ぶ
+
+- 発端: 本人「スマホ悪くないのですが、デザインもう少し改善したいのと、Claude とかモデル選べなくない？これ大事なので。新しいスレッド作ってさらにモデルや設定を具体的に選べるようにしてほしいな」。前のシートはエージェント名のボタン 2 つ（`Claude Code` / `Codex` 決め打ち + 見えているスレッドのエージェント）だけで、モデル・思考量・権限モードは送れなかった。
+- 見つけた不具合: スマホで既定以外のエージェントを選ぶと、`remote.rs` が `thread.agent` を書き換えるだけで記憶を読み直していなかった（Codex のスレッドが Claude Code のモデルで始まる）。ピルの切り替えと同じ道（`select_option(Agent)`）に寄せて直した。PWA の `showError` が `unknown_agent` を「受付を確認できません」と取り違えていた（`includes('unknown')`）のも直した。
+- やったこと:
+  - GUI（`remote.rs`）: snapshot のプロジェクトごとに `new_thread`（使えるエージェントと、それぞれのモデル・思考量・権限モードの初期値と選択肢）、スレッドごとに `model` / `effort` の表示名、会話の詳細に `settings`。選択肢は在庫（`catalog`）だけで、まだ無いスレッドは `prospective_stock_key_for_agent` で引く。初期値は `add_thread` とピルの切り替えの規則を写した `fresh_settings`。`new_thread` は渡された値を作る前に全部確かめ、ピルと同じ `select_option` で決める（記憶にも書く・Mac のタブは動かさない）。新しい命令 `set_setting`（bridge の許可リストにも足した）。新しいスレッドはいつもプロジェクトの Agent パネル（`fleet_agents[0]`）に作る（前は添えたスレッドのパネル＝Task の中に作ることがあった）。
+  - 聞かずに進めるモード（`bypass` を含む・`full-access`・`yolo`）は、スマホからは今の値の時だけ選べる（`skips_approval`）。デスクトップの `is_bypass_mode` は Codex の `agent-full-access` を拾わないので、スマホの線はそれより広く取った（`is_bypass_mode` 自体は触っていない）。
+  - PWA: 新しいスレッドのシート（エージェントのボタン + モデル / 思考量 / 権限モードの行 + `作成`）、入力欄の左下の `モデル · 思考量 ▾` と「このスレッドの設定」のシート、一覧の行にモデル名、プロジェクトの見出しの `＋ 新規`（スレッドの無いプロジェクトにも）。前の版の GUI の間はエージェント名だけで作る。
+  - 試験: Rust 4 本（シートの中身が在庫と記憶から来る・選んだ設定で作り記憶に書く・作る前に断る・会話の設定はそのスレッドだけ）、ブラウザ 1 本（シートで選んで作り、会話の設定で変える）。偽 GUI と `preview-fixture.json` に新しい項目を足し、`preview.mjs --sheets` は Codex を選んだシートと会話の設定も撮る。
+- 検証: `cargo test -p agent_panel -p workspace -p necoder` は緑（使い捨ての HOME）。`cargo check --workspace --all-targets` は警告 0、clippy は自分の行に無し。relay は `npm test`（23 本）と `npm run check` が緑。ブラウザの試験は chromium / WebKit とも新しい 1 本を含めて通った（配信ヘッダーの 1 本は下の事情で落ちる）。iPhone 13 サイズで撮って目視した。
+- 学び/罠:
+  - `preview.mjs` と `playwright.config.mjs` は中で `npx wrangler dev` を起こす。wrangler を使わないなら、relay を `/tmp` に写し、`vite` と `@cloudflare/vite-plugin` を足して `cloudflare.config.ts`（`entrypoint` / `env` に ASSETS・ROOMS・ROOM_LIMITER・APP_ORIGIN・POW_DIFFICULTY / `exports` に ControlRoom の sqlite）を書けば `cf dev` で :8791 に立つ。`cf dev` は設定ファイルが無いと勝手に作り（Worker の中身の無い設定）、`/api/*` が index.html を返す。vite の dev は `public/_headers` を当てないので、CSP を見る試験だけは落ちる。
+  - snapshot は 1.5 秒ごとに作られる。在庫の引き直しと記憶の読み出し（`settings::get` は丸ごと複製）は軽いが、プロジェクト × エージェントの数だけ走る。
+- 次: PWA は Worker をデプロイして初めてスマホに届く。GUI と bridge の変更は necoder のリリースで届く（どちらが先でも動く: 古い GUI の間はエージェント名だけのシート、古い PWA は新しい GUI でも今までどおり作れる）。デザインの「もう少し改善」は、どこが気になるかを本人に聞く。

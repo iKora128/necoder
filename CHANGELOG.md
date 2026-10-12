@@ -9,7 +9,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 - **The Agent, Model and Effort pills are back**: the settings chip and card under the composer (added in v0.1.25) are gone. The four pills from before are back: agent, permission mode, model and effort. `⌘/` in the composer no longer opens anything. Fast mode and other extra settings have no switch for now. The value you last chose for them is still applied when a session starts.
 
+### Added
+
+- **Phone: choose the agent, model and settings for a new thread**: the new-thread sheet on the phone now lists the agents you can use, with the model, effort and permission mode for each. The choices are the ones the agent itself sent to your Mac. An agent that has not started yet shows its current values, and you can pick its models in the thread after it starts.
+- **Phone: change the model and effort of a thread**: tap the model under the message box to change the model, effort or permission mode. The agent can be changed until the conversation starts.
+
+### Fixed
+
+- **Phone: a new thread for another agent used the default agent's model**. It now starts with the model and effort you last chose for that agent, the same as on the Mac.
+
+### Security
+
+- **The phone cannot switch a thread to a mode that skips approvals** (Bypass Permissions, full access). A thread that is already in such a mode on the Mac keeps it.
+
 ### 日本語
+
+#### 追加
+
+- **スマホ: 新しいスレッドでエージェント・モデル・設定を選べる**：スマホの新しいスレッドのシートに、使えるエージェントと、それぞれのモデル・思考量・権限モードが出ます。選択肢は、エージェントが Mac に送ってきた物です。まだ起動していないエージェントは今の値だけを出し、起動した後に会話の画面で選べます。
+- **スマホ: スレッドのモデルと思考量を変えられる**：入力欄の下のモデルを押すと、モデル・思考量・権限モードを変えられます。エージェントは会話を始める前だけ変えられます。
+
+#### 修正
+
+- **スマホ: 既定以外のエージェントで作ったスレッドが、既定のエージェントのモデルで始まっていた**のを直しました。Mac と同じく、そのエージェントで前に選んだモデルと思考量で始まります。
+
+#### セキュリティ
+
+- **スマホからは、承認を聞かずに進めるモード（Bypass Permissions・full access）に切り替えられません**。Mac で既にそのモードのスレッドは、そのままです。
 
 #### 変更
 

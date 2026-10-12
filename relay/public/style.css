@@ -64,10 +64,10 @@ body[data-status=offline] .status::before, body[data-status=guiOffline] .status:
 .project { position: relative; border-top: 1px solid var(--border); margin-top: 10px; padding-bottom: 4px; }
 .home-list > .project:first-child { border-top: 0; margin-top: 0; }
 .project.colored::before { content: ''; position: absolute; left: 0; top: 20px; bottom: 10px; width: 3px; border-radius: 0 2px 2px 0; background: var(--project); }
-.project-head { display: flex; align-items: center; gap: 8px; padding: 22px 8px 4px 16px; }
+.project-head { display: flex; align-items: center; gap: 8px; padding: 22px 16px 4px 16px; }
 .project-head .name { font-size: 14px; font-weight: 700; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .project-head .branch { flex: 1; min-width: 0; font: 12px var(--mono); color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.project-head .add { flex: none; min-height: 36px; padding: 2px 10px; font-size: 13px; color: var(--fg1); background: none; border-color: transparent; }
+.project-head .add { flex: none; min-height: 34px; padding: 2px 11px; font-size: 13px; font-weight: 600; color: var(--fg0); background: var(--bg2); border-color: var(--border); border-radius: 17px; }
 .row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; column-gap: 10px; row-gap: 1px; width: 100%; text-align: left;
   padding: 10px 16px 11px; min-height: 58px; background: none; border: 0; border-radius: 0; font-weight: 400; }
 .row:active { background: var(--bg3); }
@@ -192,8 +192,30 @@ dialog.sheet.tall[open] { display: flex; flex-direction: column; } /* [open] 無
 .sheet-actions button { flex: 1; }
 .settings-status { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--fg1); margin: 10px 0; }
 .danger { width: 100%; margin-top: 22px; color: var(--err); background: none; }
-.agent-choices { display: grid; gap: 8px; margin-top: 8px; }
-.agent-choices button { text-align: left; }
+/* 新しいスレッド・会話の設定のシート。選んでいる物は面（bg3）と枠で示し、色相は使わない（§1.3）。 */
+.sheet-sub { margin: 0 0 12px; font-size: 13px; color: var(--fg1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin: 4px 0 6px; }
+.agent-choice { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 52px; text-align: left; background: var(--bg1); border: 1px solid var(--border); border-radius: 10px; }
+.agent-choice[aria-checked=true] { background: var(--bg3); border-color: var(--fg1); }
+.agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-tag { flex: none; font-size: 11px; font-weight: 600; color: var(--fg2); }
+.setting-list { margin: 6px 0 4px; }
+.setting-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 52px; padding: 4px 0; border-top: 1px solid var(--border); }
+.setting-row:last-child { border-bottom: 1px solid var(--border); }
+.setting-row label { flex: none; margin: 0; font-size: 14px; color: var(--fg1); }
+.setting-row select, .setting-value { flex: 1; min-width: 0; width: auto; text-align: right; text-align-last: right; }
+.setting-row select { min-height: 44px; padding: 8px 22px 8px 6px; font-size: 15px; font-weight: 600; background: none; border: 0; appearance: none; -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--fg2) 50%), linear-gradient(135deg, var(--fg2) 50%, transparent 50%);
+  background-position: right 8px center, right 3px center; background-size: 5px 5px; background-repeat: no-repeat; }
+.setting-value { font-size: 15px; font-weight: 600; color: var(--fg0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.setting-note { flex-basis: 100%; margin: -6px 0 6px; font-size: 12px; color: var(--fg2); text-align: right; }
+.primary.wide { width: 100%; min-height: 50px; margin-top: 14px; font-size: 15px; border-radius: 10px; }
+/* 入力欄の左下: このスレッドのモデルと思考量（デスクトップの composer のピルと同じ場所）。 */
+.settings-pill { flex: none; max-width: 58%; min-height: 34px; padding: 4px 22px 4px 10px; font-size: 12.5px; font-weight: 600; color: var(--fg1); background: none; border-color: transparent; border-radius: 7px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background-image: linear-gradient(45deg, transparent 50%, var(--fg2) 50%), linear-gradient(135deg, var(--fg2) 50%, transparent 50%);
+  background-position: right 11px center, right 6px center; background-size: 5px 5px; background-repeat: no-repeat; }
+.settings-pill:active { background-color: var(--bg2); }
 #diff-text { flex: 1; margin: 8px 0 0; padding: 10px; overflow: auto; background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; font: 11.5px/1.55 var(--mono); white-space: pre; }
 #diff-text .add { color: var(--ok); } #diff-text .del { color: var(--err); } #diff-text .hunk { color: var(--fg2); } #diff-text .file { color: var(--fg0); font-weight: 700; }
 .legal { display: flex; justify-content: space-between; gap: 12px; margin-top: 18px; padding: 14px 16px calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); font-size: 11px; color: var(--fg2); }
