@@ -3918,6 +3918,20 @@
   - `NECODER_SCREENSHOT` の `@Nms` は撮るのに掛かった時間で、起動からの時間ではない。
 - 次: 本人の実機（本物の SSH 先）で、ホストの切り替えと読み取りの速さ・版の行の言い方を見る。#38 の H3（接続）・H4（composer の 2 軸のチップ）は別 Task。
 
+## 2026-10-02 — テストが起こした rust-analyzer が居残る・終了時に言語サーバを止める
+
+- 発端: ディスクの空きが 5GB まで減ったので片付けをした。そのとき、親のいない rust-analyzer が 123 個見つかった（5〜13 日前のもの・RSS 合計 1GB）。cwd はどれもテストの一時ディレクトリ（`$TMPDIR/necoder_chat_mode_slot_*/project` と `necoder_conflicts_*`）。PID を指定して止めた。本人「直してクレイ！」。
+- 原因:
+  - **rust-analyzer（1.95.0 のツールチェインのもの）は、initialize の握手が済む前に stdin が閉じると終わらない**。`initialize` だけ送って閉じても、何も送らずに閉じても残る。`sample` で見ると、main が `lsp_server::IoThreads::join` で書き手のスレッドを待ち続けていた。`initialized` まで送ってから閉じれば数秒で終わる。initialize の `processId` に渡した親が死んでも終わらない。
+  - `.rs` を開いたテストでは `ensure_lsp` が本物の rust-analyzer を起こし、`initialize` を送ったところでテストが終わる。gpui のテストは Workspace を drop しないので（後始末の `App::quit` はテストのプラットフォームでは何もしない）、`HostProcess` の Drop（kill + wait）も走らない。テストのプロセスが終わったときの EOF を、rust-analyzer は握手の途中で受けて固まっていた。
+  - テストで言語サーバを起こさない除外（`ensure_lsp` の `cfg!(test)`・bacc89b）は 09-27 に parity/integration で入った。main に届いたのは #21 の merge（09-30 15:58）で、それより古い main から切った worktree のテストが起こし続けていた（10-01 に起きた分もあった）。
+- やったこと: Workspace が終了時（`on_app_quit`）に、全 session（レールの各プロジェクトと Chat）の言語サーバを止める（`stop_language_servers`）。アプリでも、`.rs` を開いてから initialize の応答が来るまでの間に終了すると同じように残りうるので、止めるのを EOF 任せにしない。macOS では `applicationWillTerminate` → `App::shutdown` で走る。
+- 検証: 新テスト `quitting_stops_language_servers`。自分の pid を書いて居座る `sh` を言語サーバの代わりとして `LspClient` で起こし、`cx.cx.quit()` で止まるのを見る。フックを外すと落ちることを確かめた。`cargo test --workspace`（使い捨て HOME）は 1161 件通過・失敗 0。流す前も後も rust-analyzer は 0 個（今の main のテストは本物の言語サーバを起こさない）。
+- 次: テストは `$TMPDIR` に `necoder_*` を残す（全テスト 1 回で 37 個・16.5MB。多くは storage のテストの `.db`）。10-02 には 2,791 個・914MB たまっていた。片付けるテストにするかは本人と相談する。
+- 学び/罠:
+  - **gpui::test の後始末は `App::quit` で、テストのプラットフォームでは何もしない**。`on_app_quit` を走らせたいテストは `TestAppContext::quit` を自分で呼ぶ（`VisualTestContext` なら `cx.cx.quit()`）。
+  - 一時ディレクトリで rust-analyzer を手で試すと、既定のツールチェイン（stable・rust-analyzer なし）に解決されてすぐ終わる。`RUSTUP_TOOLCHAIN=1.95.0-aarch64-apple-darwin` を付ける。cargo test の子は rustup が付けた値を継ぐので、テストでは 1.95.0 のものが起きる。
+
 ## 2026-10-03 — 開いた後に `git init` したフォルダでも Task が系譜に載るようにする
 
 - 発端（本人・ドッグフーディング）: engineer_education_tool の開発中に、Captain の分解案から切った Task が統合先の系譜から分離した。
