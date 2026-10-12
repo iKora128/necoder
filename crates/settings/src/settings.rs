@@ -695,14 +695,15 @@ impl SettingsPage {
     }
 
     /// ページ本文の副題のキー（検索でページごと当てる時に見出しと一緒に読む・O27）。
-    fn sub_key(self) -> &'static str {
+    /// 副題の無いページ（見出しと中身で分かる）は `None`。説明は 1 行まで（UI-SPEC §1.5）。
+    fn sub_key(self) -> Option<&'static str> {
         match self {
-            SettingsPage::Agents => "settings.agents_sub",
-            SettingsPage::Connections => "settings.connections_sub",
-            SettingsPage::Mcp => "settings.mcp_sub",
-            SettingsPage::Appearance => "settings.appearance_sub",
-            SettingsPage::Remote => "settings.remote_sub",
-            SettingsPage::Preferences => "settings.prefs_sub",
+            SettingsPage::Connections => Some("settings.connections_sub"),
+            SettingsPage::Remote => Some("settings.remote_sub"),
+            SettingsPage::Agents
+            | SettingsPage::Mcp
+            | SettingsPage::Appearance
+            | SettingsPage::Preferences => None,
         }
     }
 
@@ -2166,26 +2167,20 @@ impl SettingsView {
                             .text_color(theme.fg1)
                             .child(SharedString::from(i18n::t!("settings.appearance_heading"))),
                     )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.fg2)
-                            .child(SharedString::from(i18n::t!("settings.appearance_sub"))),
-                    )
                     // 検索中は結果の面がページ名を出すので、ページの見出しは外す（O27）。
                     .when(self.searching(), |heading| heading.hidden()),
             )
             // チップは数がテーマの数だけ増える＝右列に収まらない。上下 2 段の器を使う。
             .child(self.pref_stack(
                 i18n::t!("settings.theme_label"),
-                Some(i18n::t!("settings.theme_sub")),
+                None,
                 chips.into_any_element(),
             ))
             // 表示言語（O27）。言語名はどの言語でも自分の言語で書く（日本語 / English）。
             .child(self.segmented_row_with(
                 "locale",
                 i18n::t!("settings.locale_label"),
-                Some(i18n::t!("settings.locale_sub")),
+                None,
                 &[
                     (LOCALE_FOLLOW_OS, i18n::t!("settings.locale_follow_os")),
                     ("ja", i18n::t!("settings.locale_ja")),
@@ -2221,7 +2216,7 @@ impl SettingsView {
             .child(self.segmented_row_with(
                 "density",
                 i18n::t!("settings.density_label"),
-                Some(i18n::t!("settings.density_sub")),
+                None,
                 &[
                     ("compact", i18n::t!("settings.density_compact")),
                     ("cozy", i18n::t!("settings.density_cozy")),
@@ -2235,7 +2230,7 @@ impl SettingsView {
             ))
             .child(self.pref_row(
                 i18n::t!("settings.open_json"),
-                Some(i18n::t!("settings.open_json_sub")),
+                None,
                 open_json,
             ))
     }
@@ -2643,7 +2638,7 @@ impl SettingsView {
                         .gap(px(10.))
                         .child(self.section_heading(
                             i18n::t!("settings.agents_heading"),
-                            Some(i18n::t!("settings.agents_sub")),
+                            None,
                         ))
                         // ホスト（このマシン / SSH 先）を切り替えて、その機械での状態を見る（#38 H2）。
                         .child(self.agent_host_row(cx))
@@ -2686,7 +2681,7 @@ impl SettingsView {
                 }
             } else {
                 let heading = i18n::t!(page.heading_key());
-                let sub = i18n::t!(page.sub_key());
+                let sub = page.sub_key().map(|key| i18n::t!(key)).unwrap_or_default();
                 if search_matches(&self.search_query, &[&heading, &sub]) {
                     sections.push((page, None, 1));
                 }
@@ -2818,7 +2813,7 @@ impl SettingsView {
             .gap(px(6.))
             .child(self.section_heading(
                 i18n::t!("settings.mcp_heading"),
-                Some(i18n::t!("settings.mcp_sub")),
+                None,
             ))
             // claude.ai のコネクタは**サーバの一覧ではない**（necoder の設定を通らずに入ってくる物を
             // 切る口）ので、下の件数・絞り込み・一覧の外に置く。
@@ -2979,12 +2974,6 @@ impl SettingsView {
                             .text_color(theme.fg1)
                             .child(SharedString::from(i18n::t!("settings.prefs_heading"))),
                     )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.fg2)
-                            .child(SharedString::from(i18n::t!("settings.prefs_sub"))),
-                    )
                     .when(self.searching(), |heading| heading.hidden()),
             )
             .child(self.toggle_row(
@@ -3007,7 +2996,7 @@ impl SettingsView {
                 "format_on_save",
                 2,
                 i18n::t!("settings.pref_format_on_save"),
-                Some(i18n::t!("settings.pref_format_on_save_sub")),
+                None,
                 settings.format_on_save,
                 cx,
             ))
@@ -3024,7 +3013,7 @@ impl SettingsView {
             .child(self.segmented_row_with(
                 "auto_save",
                 i18n::t!("settings.pref_auto_save"),
-                Some(i18n::t!("settings.pref_auto_save_sub")),
+                None,
                 &[
                     ("off", i18n::t!("settings.auto_save_off")),
                     ("focus_change", i18n::t!("settings.auto_save_focus_change")),
@@ -3038,7 +3027,7 @@ impl SettingsView {
                 "agent_auto_name",
                 3,
                 i18n::t!("settings.pref_agent_auto_name"),
-                Some(i18n::t!("settings.pref_agent_auto_name_sub")),
+                None,
                 settings.agent_auto_name,
                 cx,
             ))
@@ -3054,7 +3043,7 @@ impl SettingsView {
                 "reduce_motion",
                 5,
                 i18n::t!("settings.pref_reduce_motion"),
-                Some(i18n::t!("settings.pref_reduce_motion_sub")),
+                None,
                 settings.reduce_motion,
                 cx,
             ))
@@ -3093,7 +3082,7 @@ impl SettingsView {
             .child(self.number_choice_row(
                 "terminal_scrollback",
                 i18n::t!("settings.pref_terminal_scrollback"),
-                Some(i18n::t!("settings.pref_terminal_scrollback_sub")),
+                None,
                 &[
                     (
                         1_000,
@@ -3118,7 +3107,7 @@ impl SettingsView {
             .child(self.segmented_row_with(
                 "terminal_cursor",
                 i18n::t!("settings.pref_terminal_cursor"),
-                Some(i18n::t!("settings.pref_terminal_cursor_sub")),
+                None,
                 &[
                     ("block", i18n::t!("settings.terminal_cursor_block")),
                     ("bar", i18n::t!("settings.terminal_cursor_bar")),
@@ -3150,14 +3139,14 @@ impl SettingsView {
                 cx,
             ))
             // 通知音の大きさ（O13）。0 は鳴らさない。
-            .child(self.stepper_row_with_sub(
+            .child(self.stepper_row(
                 "sound_volume",
                 i18n::t!("settings.pref_sound_volume"),
-                i18n::t!("settings.pref_sound_volume_sub"),
                 settings.sound_volume as f64,
                 0.0,
                 100.0,
                 10.0,
+                true,
                 cx,
             ))
             .child(self.toggle_row(
@@ -3189,7 +3178,7 @@ impl SettingsView {
                     group.child(self.segmented_row_with(
                         "keep_awake",
                         i18n::t!("settings.pref_keep_awake"),
-                        Some(i18n::t!("settings.pref_keep_awake_sub")),
+                        None,
                         &[
                             ("working", i18n::t!("settings.keep_awake_working")),
                             ("off", i18n::t!("settings.keep_awake_off")),
@@ -3815,7 +3804,7 @@ impl Render for SettingsView {
                 )
                 .child(self.section_heading(
                     i18n::t!("settings.agents_heading"),
-                    Some(i18n::t!("settings.agents_sub")),
+                    None,
                 ))
                 .child(self.agents_list(&settings, false, cx))
                 // Ghostty を使っていれば、ターミナルの書体・配色をここで持ってこられる（O45・H14）。
