@@ -24,15 +24,20 @@ impl Workspace {
     ) {
         if method == "remote_snapshot" {
             let projects: Vec<Value> = self.project_sessions.projects.iter().enumerate().map(|(index, slot)| {
-                let threads: Vec<Value> = self.project_sessions.sessions[index].fleet_agents.iter()
-                    .flat_map(|panel| match panel.read(cx).remote_threads() {
+                let session = &self.project_sessions.sessions[index];
+                let threads: Vec<Value> = session.fleet_agents.iter()
+                    .flat_map(|panel| match panel.read(cx).remote_threads(cx) {
                         Value::Array(threads) => threads,
                         _ => Vec::new(),
                     }).collect();
+                // 新しいスレッドはプロジェクトの Agent パネル（Task の外）に作る。そのシートに出す
+                // エージェントとモデル等の選択肢（無い版の GUI の間、スマホはエージェント名だけで作る）。
+                let new_thread = session.fleet_agents.first()
+                    .map_or(Value::Null, |panel| panel.read(cx).remote_new_thread_options(cx));
                 json!({"id": slot.task_space.id.as_str(), "name": slot.name.as_ref(),
                     "branch": slot.branch, "remote_host": slot.remote_host.as_ref().map(SharedString::as_ref),
                     "color": format!("#{:06x}", theme_core::hex_from_color(slot.color)),
-                    "threads": threads})
+                    "threads": threads, "new_thread": new_thread})
             }).collect();
             if let Err(error) = respond.send(reply(Ok(
                 json!({"instance_id": instance_id(), "projects": projects}),
@@ -80,16 +85,20 @@ impl Workspace {
                 .position(|slot| slot.task_space.id.as_str() == task)
                 .ok_or_else(|| anyhow::anyhow!("task_not_open"))?;
             let thread_id = params["thread_id"].as_str().unwrap_or("");
-            let panel = self.project_sessions.sessions[index]
-                .fleet_agents
-                .iter()
-                .find(|panel| panel.read(cx).contains_thread(thread_id))
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("thread_not_found"))?;
+            let fleet_agents = &self.project_sessions.sessions[index].fleet_agents;
+            // 新しいスレッドはプロジェクトの Agent パネルへ（前の版のスマホは既存のスレッドの ID を添えて
+            // 送ってくるが、そのスレッドが Task のパネルにあっても Task の中には作らない）。
+            let panel = if method == "remote_new_thread" {
+                fleet_agents.first()
+            } else {
+                fleet_agents
+                    .iter()
+                    .find(|panel| panel.read(cx).contains_thread(thread_id))
+            }
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("thread_not_found"))?;
             if method == "remote_thread" {
-                return panel
-                    .read(cx)
-                    .remote_thread(params["thread_id"].as_str().unwrap_or(""));
+                return panel.read(cx).remote_thread(thread_id, cx);
             }
             // 承認/送信はネットワーク断を跨いで遅延実行しない。IPC キュー内の待ちも期限に含める。
             let now = std::time::SystemTime::now()

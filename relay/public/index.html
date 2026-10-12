@@ -55,7 +55,7 @@
     <form id="composer" class="composer">
       <label for="message" class="sr-only" data-t="message"></label>
       <textarea id="message" rows="1" maxlength="8000" enterkeyhint="enter"></textarea>
-      <div class="composer-row"><span id="receipt" role="status"></span><button id="interrupt" class="chip" type="button" data-t="interrupt" hidden></button><button id="send" class="send" type="submit" data-t="send"></button></div>
+      <div class="composer-row"><button id="open-thread-settings" class="settings-pill" type="button" hidden></button><span id="receipt" role="status"></span><button id="interrupt" class="chip" type="button" data-t="interrupt" hidden></button><button id="send" class="send" type="submit" data-t="send"></button></div>
     </form>
   </section>
 
@@ -73,8 +73,17 @@
   </dialog>
   <dialog id="agent-dialog" class="sheet">
     <div class="sheet-head"><h2 data-t="newThread"></h2><button id="close-agent" class="chip" type="button" data-t="close"></button></div>
-    <p id="agent-project" class="hint"></p>
-    <div id="agent-choices" class="agent-choices"></div>
+    <p id="agent-project" class="sheet-sub project-chip"></p>
+    <div id="agent-choices" class="agent-choices" role="radiogroup" data-aria="settingAgent"></div>
+    <div id="agent-settings" class="setting-list"></div>
+    <p id="agent-hint" class="hint"></p>
+    <button id="create-thread" class="primary wide" type="button" data-t="createThread"></button>
+  </dialog>
+  <dialog id="thread-settings-dialog" class="sheet">
+    <div class="sheet-head"><h2 data-t="threadSettings"></h2><button id="close-thread-settings" class="chip" type="button" data-t="close"></button></div>
+    <p id="thread-settings-name" class="sheet-sub"></p>
+    <div id="thread-settings" class="setting-list"></div>
+    <p id="thread-settings-hint" class="hint"></p>
   </dialog>
   <dialog id="scan-dialog"><div class="sheet-head"><h2 data-t="scan"></h2><button id="close-scan" class="chip" type="button" data-t="close"></button></div>
     <video id="scan-video" playsinline muted autoplay></video><p class="hint" data-t="scanHint"></p></dialog>

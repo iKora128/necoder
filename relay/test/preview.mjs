@@ -97,7 +97,17 @@ try {
     await page.locator('#open-settings').click(); await page.waitForTimeout(300); await shot('3-settings');
     await page.locator('#close-settings').click();
     await page.locator('.project-head .add').first().click(); await page.waitForTimeout(300); await shot('3-new-thread');
+    // 2 つ目のエージェント（fixture の Codex は在庫が無い＝選択肢が空の時の出方）。
+    if (await page.locator('.agent-choice').count() > 1) { await page.locator('.agent-choice').nth(1).click(); await page.waitForTimeout(200); await shot('3-new-thread-other'); }
     await page.locator('#close-agent').click();
+    // 会話の設定（入力欄の左下のピルから開く）。
+    await page.locator('[data-thread-name]').first().click(); await page.waitForTimeout(1000);
+    if (await page.locator('#open-thread-settings').isVisible()) {
+      await shot('3-thread-composer');
+      await page.locator('#open-thread-settings').click(); await page.waitForTimeout(300); await shot('3-thread-settings');
+      await page.locator('#close-thread-settings').click();
+    }
+    await page.locator('#back').click(); await page.waitForTimeout(300);
   }
 } finally {
   await browser.close();

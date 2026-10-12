@@ -6173,31 +6173,24 @@ PYEOF"#;
     ///
     /// Agent は認証済みのうち**使う**もの（設定の `disabled_agents` で外したものは出さない・O16）。
     fn selector_choices(&self, selector: Selector, cx: &App) -> Vec<SelectorChoice> {
-        if selector == Selector::Agent {
-            let current = self.selector_value(Selector::Agent);
-            // ログイン済みの組み込み + 設定で足したエージェント（H1）。使わないものは除いてある。
-            let mut options: Vec<SelectorChoice> = settings::selectable_agent_labels(cx)
-                .into_iter()
-                .map(|label| SelectorChoice {
-                    value: label.clone(),
-                    label,
-                })
-                .collect();
-            // 明示既定/復元値は、起動直後の背景認証確認より強い。現在値を選択肢から消さない。
-            if !options.iter().any(|choice| choice.value == current) {
-                options.insert(
-                    0,
-                    SelectorChoice {
-                        value: current.clone(),
-                        label: current,
-                    },
-                );
-            }
-            return options;
+        match self.threads.get(self.active) {
+            Some(thread) => self.selector_choices_for(thread, selector, cx),
+            None if selector == Selector::Agent => agent_choices(SharedString::default(), cx),
+            None => Vec::new(),
         }
-        let Some(thread) = self.threads.get(self.active) else {
-            return Vec::new();
-        };
+    }
+
+    /// [`Self::selector_choices`] を任意のスレッドで引く（スマホの会話の画面は、Mac で見ていないスレッドの
+    /// 選択肢も出す・`remote.rs`）。
+    fn selector_choices_for(
+        &self,
+        thread: &Thread,
+        selector: Selector,
+        cx: &App,
+    ) -> Vec<SelectorChoice> {
+        if selector == Selector::Agent {
+            return agent_choices(thread.agent.clone(), cx);
+        }
         // このスレッドのセッションが開いていれば**そのセッションの広告**が正。まだなら同じ agent の
         // 在庫（別タブ・先張りで受け取った物）で代替する。どちらも無ければ空＝ピルは押せない。
         match selector {
@@ -6250,8 +6243,13 @@ PYEOF"#;
     /// （[`Self::start_session`] と同じ作り方・issue #38 H3）。ログインの指紋はファイルを見ずに、最後に
     /// 確かめた値（[`Self::login_fingerprints`]）を使う（描画から呼ぶ）。
     fn prospective_stock_key(&self, thread: &Thread, cx: &App) -> StockKey {
-        let usage =
-            usage::UsageKey::for_agent(thread.agent.clone(), self.dest_host_label.clone(), cx);
+        self.prospective_stock_key_for_agent(thread.agent.clone(), cx)
+    }
+
+    /// [`Self::prospective_stock_key`] をエージェントの名前から作る（まだ無いスレッドの在庫を引く・スマホの
+    /// 新しいスレッドのシート）。
+    fn prospective_stock_key_for_agent(&self, agent: SharedString, cx: &App) -> StockKey {
+        let usage = usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx);
         let login = self
             .login_fingerprints
             .get(&usage)
@@ -13965,6 +13963,28 @@ fn label_for(choices: &[SelectorChoice], value: &SharedString) -> SharedString {
     }
 }
 
+/// エージェントの選択肢: ログイン済みの組み込み + 設定で足したエージェント（H1）。使わないものは除いてある。
+/// 明示既定/復元値は、起動直後の背景認証確認より強い。現在値（`current`・空なら足さない）を選択肢から消さない。
+fn agent_choices(current: SharedString, cx: &App) -> Vec<SelectorChoice> {
+    let mut options: Vec<SelectorChoice> = settings::selectable_agent_labels(cx)
+        .into_iter()
+        .map(|label| SelectorChoice {
+            value: label.clone(),
+            label,
+        })
+        .collect();
+    if !current.is_empty() && !options.iter().any(|choice| choice.value == current) {
+        options.insert(
+            0,
+            SelectorChoice {
+                value: current.clone(),
+                label: current,
+            },
+        );
+    }
+    options
+}
+
 fn config_choices(configs: &[ConfigOption], category: ConfigCategory) -> Vec<SelectorChoice> {
     configs
         .iter()
@@ -16760,7 +16780,7 @@ PYEOF"#;
                 chat_grantable: Vec::new(),
             });
             let id = panel.threads[active].id.clone();
-            let detail = panel.remote_thread(&id).unwrap();
+            let detail = panel.remote_thread(&id, cx).unwrap();
             assert_eq!(detail["permission"]["options"].as_array().unwrap().len(), 2);
             let mut params = serde_json::json!({ "thread_id": id, "turn_id": detail["turn_id"],
                 "permission_id": "old-permission", "option_id": "permission-test:0" });
@@ -16951,6 +16971,229 @@ PYEOF"#;
         let _ = std::fs::remove_file(path);
     }
 
+    /// スマホの新しいスレッド（`remote.rs`）の試験の下ごしらえ: 足したエージェント 2 つ（Alpha が既定）と
+    /// それぞれの記憶、Alpha の在庫（モデル 3 つ・思考量 3 段・権限モード 3 つ）を持つパネル。
+    fn remote_new_thread_panel<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        label: &str,
+    ) -> (Entity<AgentPanel>, &'a mut gpui::VisualTestContext, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_remote_{label}_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"agent_prewarm":false,"default_agent":"Alpha Harness",
+                "agent_servers":{"alpha":{"name":"Alpha Harness","command":"definitely-not-alpha"},
+                                 "beta":{"name":"Beta Harness","command":"definitely-not-beta"}},
+                "agent_config_defaults":{"alpha":{"model":"a-large","effort":"high","mode":"default"},
+                                         "beta":{"model":"b-small"}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let key = panel.prospective_stock_key(&panel.threads[active], cx);
+            let (command_tx, _command_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[active].stock_key = Some(key);
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.on_event(
+                active,
+                AgentEvent::Configs(vec![
+                    config(
+                        ConfigCategory::Model,
+                        "a-large",
+                        &[
+                            ("a-large", "Alpha Large"),
+                            ("a-small", "Alpha Small"),
+                            ("a-max", "Alpha Max"),
+                        ],
+                    ),
+                    config(
+                        ConfigCategory::ThoughtLevel,
+                        "high",
+                        &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
+                    ),
+                ]),
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::Modes {
+                    modes: vec![
+                        ("default".into(), "Default".into()),
+                        ("plan".into(), "Plan Mode".into()),
+                        ("bypassPermissions".into(), "Bypass Permissions".into()),
+                    ],
+                    current: "default".into(),
+                },
+                cx,
+            );
+            panel.threads[active].command_tx = None;
+        });
+        (panel, cx, path)
+    }
+
+    /// snapshot のシートの中身: 使えるエージェントそれぞれの初期値と、在庫にある選択肢だけ（在庫の無い
+    /// Beta は空＝候補を作らない）。聞かずに進めるモードは、初期値でなければ選べない行。
+    #[gpui::test]
+    fn remote_new_thread_options_come_from_the_stock(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, path) = remote_new_thread_panel(cx, "options");
+        panel.update(cx, |panel, cx| {
+            let options = panel.remote_new_thread_options(cx);
+            let agents = options["agents"].as_array().expect("エージェントの一覧");
+            let alpha = agents
+                .iter()
+                .find(|agent| agent["name"] == "Alpha Harness")
+                .expect("Alpha");
+            assert_eq!(alpha["default"], true);
+            assert_eq!(alpha["model"]["current"], "a-large");
+            assert_eq!(alpha["model"]["label"], "Alpha Large");
+            assert_eq!(alpha["model"]["choices"].as_array().map(Vec::len), Some(3));
+            assert_eq!(alpha["effort"]["label"], "High");
+            assert_eq!(alpha["mode"]["current"], "default");
+            let bypass = alpha["mode"]["choices"]
+                .as_array()
+                .and_then(|choices| {
+                    choices
+                        .iter()
+                        .find(|choice| choice["id"] == "bypassPermissions")
+                })
+                .expect("bypass も行としては出す");
+            assert_eq!(bypass["allowed"], false, "スマホからは上げさせない");
+            let beta = agents
+                .iter()
+                .find(|agent| agent["name"] == "Beta Harness")
+                .expect("Beta");
+            assert_eq!(beta["default"], false);
+            assert_eq!(beta["model"]["current"], "b-small", "Beta の記憶");
+            assert_eq!(
+                beta["model"]["choices"].as_array().map(Vec::len),
+                Some(0),
+                "在庫が無ければ候補を作らない"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// スマホで選んだモデル・思考量・権限モードで作り、記憶にも書く。Mac で見ているタブは動かさない。
+    /// 別のエージェントを選んだら、そのエージェントの記憶で開く（既定のエージェントの値を持ち込まない）。
+    #[gpui::test]
+    fn remote_new_thread_takes_the_chosen_settings(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, path) = remote_new_thread_panel(cx, "chosen");
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let created = panel
+                .remote_command(
+                    "new_thread",
+                    &serde_json::json!({"agent": "Alpha Harness", "model": "a-small",
+                        "effort": "low", "mode": "plan"}),
+                    cx,
+                )
+                .expect("作れる");
+            assert_eq!(panel.active, active, "Mac のタブは動かさない");
+            let id = created["thread_id"].as_str().expect("ID");
+            let index = panel.thread_index_by_id(id).expect("作ったスレッド");
+            let thread = &panel.threads[index];
+            assert_eq!(thread.agent.as_ref(), "Alpha Harness");
+            assert_eq!(thread.model.as_ref(), "a-small");
+            assert_eq!(thread.effort.as_ref(), "low");
+            assert_eq!(thread.permission_mode.as_ref(), "plan");
+            let defaults = settings::get(cx).agent_config_defaults;
+            assert_eq!(
+                defaults["alpha"]["model"], "a-small",
+                "ピルで選んだのと同じく覚える"
+            );
+
+            let created = panel
+                .remote_command(
+                    "new_thread",
+                    &serde_json::json!({"agent": "Beta Harness"}),
+                    cx,
+                )
+                .expect("作れる");
+            let index = panel
+                .thread_index_by_id(created["thread_id"].as_str().expect("ID"))
+                .expect("作ったスレッド");
+            assert_eq!(panel.threads[index].agent.as_ref(), "Beta Harness");
+            assert_eq!(
+                panel.threads[index].model.as_ref(),
+                "b-small",
+                "Beta の記憶（Alpha のモデルを持ち込まない）"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 広告に無い値・聞かずに進めるモードへの引き上げ・使えないエージェントは、作る前に断る（空のタブを
+    /// 残さない）。
+    #[gpui::test]
+    fn remote_new_thread_refuses_before_creating(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, path) = remote_new_thread_panel(cx, "refuse");
+        panel.update(cx, |panel, cx| {
+            let count = panel.threads.len();
+            for (params, error) in [
+                (
+                    serde_json::json!({"agent": "Alpha Harness", "model": "made-up"}),
+                    "setting_unavailable",
+                ),
+                (
+                    serde_json::json!({"agent": "Alpha Harness", "mode": "bypassPermissions"}),
+                    "mode_needs_mac",
+                ),
+                (serde_json::json!({"agent": "Nobody"}), "unknown_agent"),
+            ] {
+                let refused = panel
+                    .remote_command("new_thread", &params, cx)
+                    .expect_err("断る");
+                assert_eq!(refused.to_string(), error);
+            }
+            assert_eq!(panel.threads.len(), count, "空のタブを残さない");
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 会話の画面から設定を変える: モデルは Mac で見ていないスレッドにも効き、Mac のタブは動かさない。
+    /// 会話の後のエージェントと、聞かずに進めるモードへの引き上げは断る。
+    #[gpui::test]
+    fn remote_set_setting_changes_only_that_thread(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, path) = remote_new_thread_panel(cx, "set");
+        panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            panel.add_thread(cx);
+            let second = panel.active;
+            let id = panel.threads[first].id.clone();
+            let detail = panel.remote_thread(&id, cx).expect("詳細");
+            assert_eq!(detail["settings"]["model"]["label"], "Alpha Large");
+            assert_eq!(detail["settings"]["agent"]["fixed"], false, "会話の前は変えられる");
+            let set = |panel: &mut AgentPanel, setting: &str, value: &str, cx: &mut Context<AgentPanel>| {
+                let turn = crate::remote::turn_id(&panel.threads[first]);
+                panel.remote_command(
+                    "set_setting",
+                    &serde_json::json!({"thread_id": id, "turn_id": turn, "setting": setting, "value": value}),
+                    cx,
+                )
+            };
+            set(panel, "model", "a-max", cx).expect("変えられる");
+            assert_eq!(panel.threads[first].model.as_ref(), "a-max");
+            assert_eq!(panel.active, second, "Mac のタブは動かさない");
+            assert_eq!(
+                set(panel, "mode", "bypassPermissions", cx).expect_err("断る").to_string(),
+                "mode_needs_mac"
+            );
+            set(panel, "mode", "plan", cx).expect("下げるのはよい");
+            assert_eq!(panel.threads[first].permission_mode.as_ref(), "plan");
+            panel.threads[first].entries.push(Entry::User("こんにちは".into()));
+            assert_eq!(
+                set(panel, "agent", "Beta Harness", cx).expect_err("断る").to_string(),
+                "agent_fixed"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
     /// スマホ（リモート管制）の質問にも書いて答えられる（O17）: Other 欄つきの質問だけ書け、
     /// 質問ごとに「選ぶ か 書く」のどちらかが要る。書いた文字は Other 欄の名前で返る。
     #[gpui::test]
@@ -16975,7 +17218,7 @@ PYEOF"#;
             pending.remote_id = "q-remote".into();
             panel.threads[active].pending_elicitation = Some(pending);
             let id = panel.threads[active].id.clone();
-            let detail = panel.remote_thread(&id).expect("詳細");
+            let detail = panel.remote_thread(&id, cx).expect("詳細");
             assert_eq!(detail["question"]["fields"][0]["custom"], true);
             assert_eq!(detail["question"]["fields"][1]["custom"], false);
             let answer = |selections: serde_json::Value, custom: serde_json::Value| {
