@@ -4107,4 +4107,5 @@
   - **`cf dev` は `cloudflare.config.ts` が無いと勝手に作る**（Worker の中身の無い設定で、`/api/*` が index.html を返す）。設定ファイルは先に置く。
   - cloudflare.config.ts を読むのは plugin の 2.0 beta（`latest` の 1.x は読まない）。cf も beta なので版を固定した。
   - vite の dev は `public/_headers` を当てない。ヘッダーを見る試験は build + `vite preview` で回す。
+  - **POST の本文を読まずに返すと、次の要求が「fetch failed」になることがある**（vite preview の中継が同じ接続を使い回す・mac の CI と手元で 16 回に 1 回）。部屋の二重作成の 409 は本文を `request.body?.cancel()` で捨ててから返す。本番の edge では起きない。手元で繰り返す時は、試験用のレート制限（60 秒に 100 回）を超えると 429 で落ちる。
   - zsh は `:$n:locales` の `:l` を修飾子として読む（git の `:<stage>:<path>` は `":${n}:locales/…"` と書く）。

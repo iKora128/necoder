@@ -75,7 +75,9 @@ export class ControlRoom extends DurableObject<Env> {
     const url = new URL(request.url);
     let room = await this.ctx.storage.get<Room>('room');
     if (request.method === 'POST' && !url.pathname.endsWith('/ws')) {
-      if (room) return response(409, 'room_exists');
+      // 読まない本文は捨ててから返す（読まずに返すと、手元の実行環境の中継が同じ接続を使い回して次の要求が
+      // 「fetch failed」になる。本番の edge では起きないが、捨てて困ることも無い）。
+      if (room) { await request.body?.cancel(); return response(409, 'room_exists'); }
       if (Number(request.headers.get('Content-Length')) > 2048) return response(413, 'too_large');
       const body = await request.text();
       if (body.length > 2048) return response(413, 'too_large');
