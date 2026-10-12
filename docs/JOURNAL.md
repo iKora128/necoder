@@ -4034,3 +4034,16 @@
 - 中身: #59（AI エージェントをどれも必須にしない・Windows の窓の移動・コンソール窓）。CHANGELOG の頭は v0.1.24 の時と同じ形（正式版の断り書き + v0.1.24 からの主な変更）。
 - relay は v0.1.24 から変えていないので、Worker のデプロイは要らない。
 - 次: 本人が Windows 実機で窓のドラッグ・ダブルクリック最大化・スナップ・titlebar のボタン・黒窓が出ないことを確かめる。報告してくれた人への返信は、それを確かめてから。
+
+## 2026-10-12 — composer の設定のカードをやめ、4 つのピルに戻した
+
+- 発端: 本人「Opus5.5 とかのモデル選ぶところの UI 変えたじゃん？悪くはないんだけど、うーんやっぱ戻そうか。。見慣れないしいいとは思えませんね」。#48（10-02・v0.1.25 から配信）の設定のチップ + カードのこと。
+- やったこと:
+  - composer の下を前の 4 つのピル（エージェント / 権限モード / モデル / 思考量）に戻した。#48 のカードの部分（`config_card.rs`・`config_card/effort_meter.rs`・`mock/config-card.html`・`icons/zap.svg`・⌘/ の `agent::ToggleConfigCard` と keymap の `AgentPanel > (Editor || ConfigCard)`・撮影用 `NECODER_CONFIG_CARD_PROBE`・`agent.card_*` の文言）を消した。
+  - #47 がピルに添えていた「· 接続の名前」は、#47 の元の形（エージェントのピル + tooltip の 1 行）に戻した。描画のコードは統合の後も残っていた（呼ばれていなかっただけ）。試験 `the_config_card_follows_the_connection` は、モデルのピルのメニューで同じことを確かめる `the_model_menu_follows_the_connection` にした。
+  - 残した物: ピルのメニューを `deferred` で最前面に描く修正（#48 で入った・Fleet の埋め込みの背の低い composer で枠が透ける）。acp_client の boolean の受け取りと、その他の設定の記憶をセッションを開く時に合わせる道（e662487）。
+  - 消した物: その他の設定を変える `set_config_option` / `stocked_configs` / `option_value` と、それを通す試験 `toggling_fast_mode_reaches_a_fake_agent`。カードからしか呼ばれておらず、残すと Windows の CI（`-D warnings`）が落ちる。代わりに `remembered_options_ride_on_the_next_thread`（覚えた `fast` が次のスレッドに載る・区分の鍵と混ぜない）。
+  - 文書: UI-SPEC §6（ピルの記述へ・⌘/ の行を削除）、§12 / ARCHITECTURE / DECISIONS / MANUAL / 設定 › 接続 の副題（ja / en）の接続の名前の出る場所、GLOSSARY（設定のカードを廃止語へ）、zeron の調査メモに戻した事実、CHANGELOG の Unreleased。
+- 検証: `cargo test -p agent_panel -p keymap_core -p workspace -p necoder` は緑（使い捨ての HOME）。`cargo check --workspace --all-targets` は警告 0。隔離 offscreen で、見本の広告を流す一時パッチ（コミットしていない）を当てて撮った: ピル 4 つ（`Claude Code ▾ · Default ▾ · Default (recommended) ▾ · Default ▾`）、モデルと思考量のメニューがピルの真上に開き、composer の枠が透けない。
+- 学び/罠: 本人の設定の `agent_config_defaults.claude.fast` は `"false"` だった。カードを消すと Fast mode を切り替える場所が無くなるので、`true` で残っていたら気付かないまま速い（高い）モードが続くところだった。UI を消す時は、その UI でしか変えられない記憶が残らないかを先に見る。
+- 次: Fast mode や Codex の Collaboration mode を、ピルの並びのどこで変えられるようにするかは本人が決める（今はどこからも変えられない）。
