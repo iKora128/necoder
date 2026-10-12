@@ -1545,40 +1545,40 @@ mod tests {
         use DistributionKind::{Binary, Npx, Uvx};
         assert_eq!(
             ja(&managed(Npx, Some("0.84.0"), "0.84.0", true, false)).as_deref(),
-            Some("0.84.0（レジストリと同じ）")
+            Some("0.84.0")
         );
         assert_eq!(
             ja(&managed(Npx, Some("1.13.1"), "2.1.0", true, false)).as_deref(),
-            Some("1.13.1 → 2.1.0（次の起動でレジストリの版にします）")
+            Some("1.13.1 → 2.1.0（次回起動時に更新）")
         );
         assert_eq!(
             ja(&managed(Npx, None, "0.0.34", true, false)).as_deref(),
-            Some("レジストリ 0.0.34（最初の起動で取得します）")
+            Some("0.0.34（初回起動時にダウンロード）")
         );
         assert_eq!(
             ja(&managed(Npx, Some("1.13.1"), "2.1.0", false, false)).as_deref(),
-            Some("1.13.1 · レジストリ 2.1.0"),
+            Some("1.13.1（公開版 2.1.0）"),
             "npx が無ければ「次の起動で」と言わない"
         );
         assert_eq!(
             ja(&managed(Uvx, None, "0.10.1", false, false)).as_deref(),
-            Some("レジストリ 0.10.1")
+            Some("公開版 0.10.1")
         );
         assert_eq!(
             ja(&managed(Binary, Some("0.9.0"), "0.9.0", true, true)).as_deref(),
-            Some("0.9.0 · sha256 で照合済み")
+            Some("0.9.0（検証済み）")
         );
         assert_eq!(
             ja(&managed(Binary, Some("0.9.0"), "0.9.0", true, false)).as_deref(),
-            Some("0.9.0 · 検証の値がありません")
+            Some("0.9.0（検証情報なし）")
         );
         assert_eq!(
             ja(&managed(Binary, Some("0.8.0"), "0.9.0", true, true)).as_deref(),
-            Some("0.8.0 → 0.9.0（次の起動で落として sha256 で照合します）")
+            Some("0.8.0 → 0.9.0（次回起動時に更新・検証）")
         );
         assert_eq!(
             ja(&managed(Binary, None, "0.9.0", true, false)).as_deref(),
-            Some("レジストリ 0.9.0（最初の起動で落とします・検証の値がありません）")
+            Some("0.9.0（初回起動時にダウンロード・検証情報なし）")
         );
         assert_eq!(
             ja(&VersionInfo::Path {
@@ -1587,7 +1587,7 @@ mod tests {
                 registry: Some("0.84.0".to_string()),
             })
             .as_deref(),
-            Some("0.70.2 · レジストリ 0.84.0（PATH の claude-agent-acp を使います）")
+            Some("0.70.2（claude-agent-acp · 公開版 0.84.0）")
         );
         assert_eq!(
             ja(&VersionInfo::Path {
@@ -1596,26 +1596,26 @@ mod tests {
                 registry: Some("1.18.34".to_string()),
             })
             .as_deref(),
-            Some("PATH の opencode · レジストリ 1.18.34")
+            Some("opencode（公開版 1.18.34）")
         );
         assert_eq!(
             ja(&VersionInfo::Registry {
                 version: "1.52.0".to_string()
             })
             .as_deref(),
-            Some("レジストリ 1.52.0")
+            Some("公開版 1.52.0")
         );
         assert_eq!(
             ja(&VersionInfo::OwnCommand {
                 command: "dsh-acp --acp".to_string()
             })
             .as_deref(),
-            Some("自分のコマンドで起動（dsh-acp --acp）")
+            Some("コマンド指定（dsh-acp --acp）")
         );
         assert_eq!(ja(&VersionInfo::None), None);
         assert_eq!(
             en(&managed(Npx, Some("1.13.1"), "2.1.0", true, false)).as_deref(),
-            Some("1.13.1 → 2.1.0 (moves to the registry version on the next start)")
+            Some("1.13.1 → 2.1.0 (updates on next start)")
         );
     }
 
@@ -1637,7 +1637,7 @@ mod tests {
         assert_eq!(
             i18n::translate_in("ja", "settings.agent_missing_cli")
                 .map(|text| text.replace("%{name}", "copilot")),
-            Some("CLI 本体（copilot）".to_string())
+            Some("copilot のインストール".to_string())
         );
     }
 }

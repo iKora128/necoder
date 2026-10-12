@@ -681,13 +681,13 @@ mod tests {
         .expect("見本を読める")
     }
 
-    /// H2-c: uv が無い機械では、uvx の物に「uv が要ります」と出す（足せるが、入れるのは人）。
+    /// H2-c: uv が無い機械では、uvx の物に「uv をインストールしてください」と出す。
     #[test]
     fn uvx_agents_ask_for_uv_when_it_is_missing() {
         let note = plan_note(&Err(acp_client::LaunchError::NeedsUv));
         assert_eq!(note, Some((i18n::t!("settings.custom_needs_uv"), true)));
         assert!(i18n::translate_in("ja", "settings.custom_needs_uv")
-            .is_some_and(|text| text.contains("uv が要ります")));
+            .is_some_and(|text| text.contains("uv をインストールしてください")));
     }
 
     /// H2-b: binary は検証の値の有無を必ず出す（無い物は注意の色で「検証の値がありません」）。
