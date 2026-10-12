@@ -214,20 +214,6 @@ impl Workspace {
             .pt(px(10.))
             .border_t_1()
             .border_color(theme.border)
-            .child(
-                div()
-                    .text_size(px(10.5))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("usage.note"))),
-            )
-            .when(codex_installed, |element| {
-                element.child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.fg2)
-                        .child(SharedString::from(i18n::t!("usage.codex_note"))),
-                )
-            })
             .child(div().flex().child(
                 text_chip("usage-open-stats", i18n::t!("usage.open_stats"), &theme).on_mouse_down(
                     MouseButton::Left,

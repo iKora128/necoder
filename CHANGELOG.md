@@ -8,6 +8,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 ### Changed
 
 - **The Agent, Model and Effort pills are back**: the settings chip and card under the composer (added in v0.1.25) are gone. The four pills from before are back: agent, permission mode, model and effort. `⌘/` in the composer no longer opens anything. Fast mode and other extra settings have no switch for now. The value you last chose for them is still applied when a session starts.
+- **Natural Japanese**: The Japanese UI now uses the words common in other apps, such as ウィンドウ instead of 窓, インストール, ダウンロード and 確認. The AI Agents settings page reads naturally (for example 「不足: CLI（copilot）」 and 「インストール」). About 440 strings changed. English is unchanged apart from the launch line on the AI Agents page.
+- **Shorter text everywhere**: Settings rows, page headers and the usage, ports and resources popovers no longer carry long explanations. Most rows have no description now, and the rest have one line. Tooltips, empty states and a few messages were shortened too.
 
 ### Added
 
@@ -40,6 +42,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 #### 変更
 
 - **Agent・Model・Effort のピルに戻した**：composer の下の設定のチップとカード（v0.1.25 で入れた物）をやめ、前の 4 つのピル（エージェント・権限モード・モデル・思考量）に戻しました。composer の中の ⌘/ は何も開かなくなります。Fast mode などその他の設定を切り替える場所は、今はありません。前に選んだ値は、セッションを始める時にそのまま使います。
+- **日本語を自然にしました**：「窓」を「ウィンドウ」に、「入れる」を「インストール」に、「落とす」を「ダウンロード」に、「確かめる」を「確認」にするなど、ほかのアプリで普通に見かける言い方にそろえました。AI エージェントの設定画面は特に見直しました（例:「足りない物: CLI 本体（copilot）」→「不足: CLI（copilot）」）。約 440 か所です。
+- **文言を短くしました**：設定の各行・ページの頭・使用量やポート、リソースのポップオーバーから長い説明を外しました。ほとんどの行は説明なしになり、残したものも 1 行です。ツールチップ、空のときの表示、いくつかのメッセージも短くしました。
 
 ## [0.1.27] - 2026-10-11
 

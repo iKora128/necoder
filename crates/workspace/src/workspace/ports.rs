@@ -808,12 +808,6 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .child(body),
-            )
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("ports.hint"))),
             );
         Some(
             div()
