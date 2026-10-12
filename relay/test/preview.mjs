@@ -1,6 +1,6 @@
 // PWA の見た目を iPhone サイズで撮る
 // （`node test/preview.mjs [--data <dir>] [--out <dir>] [--thread <名前の一部>,…] [--pages N] [--sheets] [--locale en-US]`）。
-// 隔離: リレーは wrangler dev のテスト設定（:8791）、GUI は偽物（データは JSON）。実ユーザーの
+// 隔離: リレーは cf dev の試験用の設定（`--mode test`・:8791）、GUI は偽物（データは JSON）。実ユーザーの
 // socket / 設定 / 端末には触らない。`--data` には remote_snapshot の結果（snapshot.json）と
 // thread_id → remote_thread の結果（details.json）を置く。省略時は test/preview-fixture.json。
 // **実データの置き場は relay/ の外にする**（build が test/ ごと public/source.tar.gz へ固めて公開する）。
@@ -23,13 +23,13 @@ if (options.data) {
   ({ snapshot, details, later } = JSON.parse(await readFile(new URL('./preview-fixture.json', import.meta.url), 'utf8')));
 }
 
-const relay = spawn('npx', ['wrangler', 'dev', '--config', 'wrangler.test.jsonc', '--port', '8791', '--ip', '127.0.0.1'],
+const relay = spawn('npx', ['cf', 'dev', '--mode', 'test'],
   { stdio: ['ignore', 'ignore', 'inherit'], detached: true });
 const stopRelay = () => { try { process.kill(-relay.pid, 'SIGTERM'); } catch { /* 既に終了 */ } };
 process.once('exit', stopRelay);
 for (let attempt = 0; ; attempt++) {
   try { if ((await fetch('http://localhost:8791/api/health')).ok) break; } catch { /* 起動待ち */ }
-  if (attempt > 120) throw new Error('wrangler dev が起動しない');
+  if (attempt > 120) throw new Error('cf dev が起動しない');
   await new Promise(resolve => setTimeout(resolve, 500));
 }
 

@@ -4062,3 +4062,20 @@
   - `preview.mjs` と `playwright.config.mjs` は中で `npx wrangler dev` を起こす。wrangler を使わないなら、relay を `/tmp` に写し、`vite` と `@cloudflare/vite-plugin` を足して `cloudflare.config.ts`（`entrypoint` / `env` に ASSETS・ROOMS・ROOM_LIMITER・APP_ORIGIN・POW_DIFFICULTY / `exports` に ControlRoom の sqlite）を書けば `cf dev` で :8791 に立つ。`cf dev` は設定ファイルが無いと勝手に作り（Worker の中身の無い設定）、`/api/*` が index.html を返す。vite の dev は `public/_headers` を当てないので、CSP を見る試験だけは落ちる。
   - snapshot は 1.5 秒ごとに作られる。在庫の引き直しと記憶の読み出し（`settings::get` は丸ごと複製）は軽いが、プロジェクト × エージェントの数だけ走る。
 - 次: PWA は Worker をデプロイして初めてスマホに届く。GUI と bridge の変更は necoder のリリースで届く（どちらが先でも動く: 古い GUI の間はエージェント名だけのシート、古い PWA は新しい GUI でも今までどおり作れる）。デザインの「もう少し改善」は、どこが気になるかを本人に聞く。
+
+## 2026-10-12 — Cloudflare の Worker を cf CLI で出す（wrangler をやめる）
+
+- 発端: 本人「wrangler無しで行きたいですね。cf deployでしたいので、全部しっかりお願いしたいです」。リレー（`relay/`）と LP（直下の `wrangler.jsonc` + `worker/index.js` + `lp/`）がどちらも wrangler の設定と `npx wrangler deploy` だった。
+- やったこと:
+  - relay: `wrangler.jsonc` / `wrangler.test.jsonc` を `cloudflare.config.ts`（`cf/config`・`--mode test` で試験用の名前・レート制限・APP_ORIGIN に差し替え）と `vite.config.js`（`@cloudflare/vite-plugin`）に置き換えた。依存から wrangler を外し、`cf` / `vite` / plugin を版で固定した。`npm run deploy` = build + `cf deploy`、`npm run deploy:check` = build + `cf deploy --dry-run`。AGPL のソースの束（`scripts/build.mjs`）に新しい設定ファイルを入れた。Playwright の webServer は `cf build --mode test && vite preview --mode test`、撮影の `test/preview.mjs` は `cf dev --mode test`。
+  - Durable Object は `migrations`（tag v1・new_sqlite_classes）から `exports`（ControlRoom・sqlite）へ。Cloudflare の文書（Durable Object class exports の「Migrate from the legacy migrations flow」）どおり、storage を作った時と同じにすればデータは残る。一方通行。
+  - LP: 設定を `site/`（`cloudflare.config.ts` / `vite.config.js` / `package.json`）にまとめ、Worker を `site/worker.js` へ移した。中身の `lp/` は README の画像・アプリのアイコン・`scripts/lp-build.mjs` が参照するので動かさず、vite の publicDir（`../lp`）で読む。
+  - 本番の今の状態を写した: workers.dev とプレビューの URL は切る・独自ドメイン（control.necoder.com / necoder.com・www）・CPU 10ms（relay）・観測 off・LP の assets（auto-trailing-slash・not found は none・Worker はトップだけ）。secret はどちらにも無い（`cf workers secrets list`）。
+  - CLAUDE.md・DECISIONS・REMOTE-CONTROL・relay/README・UI-SPEC §15・FLEET-CONTROL-PLAN の wrangler の記述を cf に。relay/README のレート制限の数（10 回）を設定の 5 回に直した。
+- 検証: relay で `npm run check` / `npm test`（23）/ `npm run build` / `npm run test:browser`（10・CSP の 1 本も通る）。`cf deploy --dry-run` は relay・LP とも本番と同じ束ね先を出した。LP は手元で配って、ja はそのまま・en は `/en/` へ 302・`lp/_headers` のヘッダーが付くのを見た。配る中身は lp/ の追跡ファイル 49 個と一致。
+- 学び/罠:
+  - **wrangler が node_modules に入っていると、cf はそれを使おうとして止まる**（「wrangler@4.130.0 is installed, but it is not compatible with cf's local runtime」）。外せば cf 自身の実行環境で動く。
+  - **`cf dev` は `cloudflare.config.ts` が無いと勝手に作る**（Worker の中身の無い設定で、`/api/*` が index.html を返す）。設定ファイルは先に置く。
+  - cloudflare.config.ts を読むのは plugin の 2.0 beta（`latest` の 1.x は読まない）。cf も beta なので版を固定した。
+  - vite の dev は `public/_headers` を当てない。ヘッダーを見る試験は build + `vite preview` で回す。
+  - zsh は `:$n:locales` の `:l` を修飾子として読む（git の `:<stage>:<path>` は `":${n}:locales/…"` と書く）。

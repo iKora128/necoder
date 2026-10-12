@@ -31,5 +31,5 @@
 /mock/mascot/neko-anim/video/
 herdr/
 
-# wrangler のローカル状態（Pages デプロイ時に作られる）
-/.wrangler/
+# cf CLI が作業したフォルダに作るビルドの出力（relay/ と site/ は各自の .gitignore でも外している）
+.cloudflare/

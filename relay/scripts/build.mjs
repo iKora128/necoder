@@ -26,6 +26,6 @@ for (const directory of packages) {
 await writeFile(path.join(root, 'dist/THIRD_PARTY_LICENSES.txt'), notices.join('\n\n--------------------\n\n'));
 // AGPL の対応ソース。秘密/開発状態/node_modules を含めず、公開するリレーとホストの全ソースを同梱。
 execFileSync('tar', ['--exclude=public/source.tar.gz', '-czf', path.join(root, 'public/source.tar.gz'),
-  '-C', root, 'src', 'host', 'public', 'scripts', 'test', 'package.json', 'package-lock.json', 'wrangler.jsonc', 'wrangler.test.jsonc', 'tsconfig.json', 'playwright.config.mjs', 'README.md',
+  '-C', root, 'src', 'host', 'public', 'scripts', 'test', 'package.json', 'package-lock.json', 'cloudflare.config.ts', 'vite.config.js', 'tsconfig.json', 'playwright.config.mjs', 'README.md',
   '-C', path.dirname(root), 'LICENSE'], { stdio: 'inherit' });
 console.log('Built host, icons and corresponding source archive.');

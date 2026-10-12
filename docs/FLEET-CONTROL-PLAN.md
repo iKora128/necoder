@@ -184,7 +184,7 @@ Mac ──直接 POST──▶ Apple Push ──▶ スマホ（リレー不経�
 - `idFromName(room_id)` で決定的に同じ部屋へ。**QR はペアリング 1 回きり**で、room id と鍵を両側（Mac は `storage`・スマホは localStorage）に保存し、再接続は同じ room id で繋ぎ直す。撮り直すのはデバイス失効時とスマホ初期化時だけ。
 - **再接続処理は必須**: hibernate は切断ではない（接続は CF 網に維持され、メッセージで再初期化される）が、**Worker のデプロイは全 WebSocket を切断する**し、電波 / スリープ / Wi-Fi 切替でも切れる。
 - 初日に入れる: room ごと・IP ごとのレート制限 / フレームサイズ上限 / room TTL / **Cloudflare の請求アラート**。払うのは本人。
-- `relay_url` の差し替えで self-host（`wrangler deploy` 1 回。アカウントが無いので移行データも無い）。
+- `relay_url` の差し替えで self-host（`cf deploy` 1 回。アカウントが無いので移行データも無い）。
 - 受入: モバイル回線から permission に応答でき、Mac 再起動と Worker デプロイを跨いで自動再接続する。
 
 #### 費用（2026-07-25 時点の単価。着手前に現行 pricing を再確認）
