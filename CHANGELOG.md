@@ -5,20 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
-### Changed
+## [0.1.28] - 2026-10-12
 
-- **The Agent, Model and Effort pills are back**: the settings chip and card under the composer (added in v0.1.25) are gone. The four pills from before are back: agent, permission mode, model and effort. `⌘/` in the composer no longer opens anything. Fast mode and other extra settings have no switch for now. The value you last chose for them is still applied when a session starts.
-- **Natural Japanese**: The Japanese UI now uses the words common in other apps, such as ウィンドウ instead of 窓, インストール, ダウンロード and 確認. The AI Agents settings page reads naturally (for example 「不足: CLI（copilot）」 and 「インストール」). About 440 strings changed. English is unchanged apart from the launch line on the AI Agents page.
-- **Shorter text everywhere**: Settings rows, page headers and the usage, ports and resources popovers no longer carry long explanations. Most rows have no description now, and the rest have one line. Tooltips, empty states and a few messages were shortened too.
+This release brings back the Agent, Model and Effort pills under the message box, lets you choose the agent, model and settings for a new thread from your phone, and makes the Japanese UI shorter and more natural. It is delivered through auto-update. If something does not work, please let us know in an Issue.
 
 ### Added
 
 - **Phone: choose the agent, model and settings for a new thread**: the new-thread sheet on the phone now lists the agents you can use, with the model, effort and permission mode for each. The choices are the ones the agent itself sent to your Mac. An agent that has not started yet shows its current values, and you can pick its models in the thread after it starts.
 - **Phone: change the model and effort of a thread**: tap the model under the message box to change the model, effort or permission mode. The agent can be changed until the conversation starts.
 
+### Changed
+
+- **The Agent, Model and Effort pills are back**: the settings chip and card under the composer (added in v0.1.25) are gone. The four pills from before are back: agent, permission mode, model and effort. `⌘/` in the composer no longer opens anything. Fast mode and other extra settings have no switch for now. The value you last chose for them is still applied when a session starts.
+- **Natural Japanese**: The Japanese UI now uses the words common in other apps, such as ウィンドウ instead of 窓, インストール, ダウンロード and 確認. The AI Agents settings page reads naturally (for example 「不足: CLI（copilot）」 and 「インストール」). About 440 strings changed. English is unchanged apart from the launch line on the AI Agents page.
+- **Shorter text everywhere**: Settings rows, page headers and the usage, ports and resources popovers no longer carry long explanations. Most rows have no description now, and the rest have one line. Tooltips, empty states and a few messages were shortened too.
+
 ### Fixed
 
 - **Phone: a new thread for another agent used the default agent's model**. It now starts with the model and effort you last chose for that agent, the same as on the Mac.
+- **Language servers stop when necoder quits**. rust-analyzer could stay running after quitting if it had not finished starting, and many leftover processes could pile up over days.
 
 ### Security
 
@@ -26,24 +31,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ### 日本語
 
+メッセージ欄の下を Agent・Model・Effort のピルに戻し、スマホから新しいスレッドのエージェント・モデル・設定を選べるようにし、日本語の UI を短く自然にした版です。自動更新で配信します。うまく動かない所があれば Issue で教えてください。
+
 #### 追加
 
 - **スマホ: 新しいスレッドでエージェント・モデル・設定を選べる**：スマホの新しいスレッドのシートに、使えるエージェントと、それぞれのモデル・思考量・権限モードが出ます。選択肢は、エージェントが Mac に送ってきた物です。まだ起動していないエージェントは今の値だけを出し、起動した後に会話の画面で選べます。
 - **スマホ: スレッドのモデルと思考量を変えられる**：入力欄の下のモデルを押すと、モデル・思考量・権限モードを変えられます。エージェントは会話を始める前だけ変えられます。
 
+#### 変更
+
+- **Agent・Model・Effort のピルに戻しました**：composer の下の設定のチップとカード（v0.1.25 で入れた物）をやめ、前の 4 つのピル（エージェント・権限モード・モデル・思考量）に戻しました。composer の中の ⌘/ は何も開かなくなります。Fast mode などその他の設定を切り替える場所は、今はありません。前に選んだ値は、セッションを始める時にそのまま使います。
+- **日本語を自然にしました**：「窓」を「ウィンドウ」に、「入れる」を「インストール」に、「落とす」を「ダウンロード」に、「確かめる」を「確認」にするなど、ほかのアプリで普通に見かける言い方にそろえました。AI エージェントの設定画面は特に見直しました（例:「足りない物: CLI 本体（copilot）」→「不足: CLI（copilot）」）。約 440 か所です。
+- **文言を短くしました**：設定の各行・ページの頭・使用量やポート、リソースのポップオーバーから長い説明を外しました。ほとんどの行は説明なしになり、残したものも 1 行です。ツールチップ、空のときの表示、いくつかのメッセージも短くしました。
+
 #### 修正
 
 - **スマホ: 既定以外のエージェントで作ったスレッドが、既定のエージェントのモデルで始まっていた**のを直しました。Mac と同じく、そのエージェントで前に選んだモデルと思考量で始まります。
+- **necoder を終了すると言語サーバも止まるようにしました**。起動の途中で終了すると rust-analyzer が残り、日を追うごとに残ったプロセスが溜まることがありました。
 
 #### セキュリティ
 
 - **スマホからは、承認を聞かずに進めるモード（Bypass Permissions・full access）に切り替えられません**。Mac で既にそのモードのスレッドは、そのままです。
-
-#### 変更
-
-- **Agent・Model・Effort のピルに戻した**：composer の下の設定のチップとカード（v0.1.25 で入れた物）をやめ、前の 4 つのピル（エージェント・権限モード・モデル・思考量）に戻しました。composer の中の ⌘/ は何も開かなくなります。Fast mode などその他の設定を切り替える場所は、今はありません。前に選んだ値は、セッションを始める時にそのまま使います。
-- **日本語を自然にしました**：「窓」を「ウィンドウ」に、「入れる」を「インストール」に、「落とす」を「ダウンロード」に、「確かめる」を「確認」にするなど、ほかのアプリで普通に見かける言い方にそろえました。AI エージェントの設定画面は特に見直しました（例:「足りない物: CLI 本体（copilot）」→「不足: CLI（copilot）」）。約 440 か所です。
-- **文言を短くしました**：設定の各行・ページの頭・使用量やポート、リソースのポップオーバーから長い説明を外しました。ほとんどの行は説明なしになり、残したものも 1 行です。ツールチップ、空のときの表示、いくつかのメッセージも短くしました。
 
 ## [0.1.27] - 2026-10-11
 
