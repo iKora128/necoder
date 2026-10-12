@@ -32,12 +32,14 @@ Windows 用バイナリの生成と実機検証は、この Mac では行って�
 設定（PC・再接続・通知・言語・接続の削除）は一覧の右上からシートで開く。仕様は [UI-SPEC §15](./UI-SPEC.md)。
 
 - PWA（`relay/public`）の変更は **Worker へのデプロイで初めてスマホに届く**（`.app` には入らない）。
-  `relay/` で `npm run build`（AGPL の `public/source.tar.gz` を作り直す）→ `npx wrangler deploy`。
+  `relay/` で `npm run deploy:check`（`cf deploy --dry-run`）→ `npm run deploy`（`npm run build`＝AGPL の
+  `public/source.tar.gz` を作り直してから `cf deploy`）。Cloudflare の操作は `cf` CLI で行い、wrangler は使わない
+  （2026-10-12〜・Worker の設定は `relay/cloudflare.config.ts`）。
   service worker は network-first なので、デプロイ後にアプリを開き直せば新しい画面になる。
 - スレッド・プロジェクトの色は Mac の necoder が snapshot に載せる（0.1.23 から）。古い版の necoder に
   繋がっている間、スマホは中立色で出る。
 - 見た目は `relay/` で `node test/preview.mjs --thread <名前の一部> --sheets` で撮れる（iPhone 13 サイズ・WebKit）。
-  実ユーザーの socket には触らない（:8791 の wrangler dev と偽 GUI）。実データで見たい時は
+  実ユーザーの socket には触らない（:8791 の `cf dev --mode test` と偽 GUI）。実データで見たい時は
   `remote_snapshot` / `remote_thread` の結果を **relay/ の外**に置いて `--data <dir>` で渡す
   （build が `test/` ごと公開の source.tar.gz に固めるため）。
 

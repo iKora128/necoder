@@ -1,6 +1,6 @@
 // necoder.com — 静的アセット配信 + トップでの言語振り分け。
 //
-// 走るのは `/` だけ（wrangler.jsonc の assets.run_worker_first）。ほかのパスは
+// 走るのは `/` だけ（site/cloudflare.config.ts の assets.runWorkerFirst）。ほかのパスは
 // Worker を通らずそのまま配信される。
 //
 // 振り分けの規則:

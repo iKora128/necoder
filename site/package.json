@@ -1,0 +1,19 @@
+{
+  "name": "necoder-site",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "cf dev",
+    "deploy": "cf deploy",
+    "deploy:check": "cf deploy --dry-run"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "2.0.0-beta.sha-91c870c02",
+    "cf": "1.0.0-beta.14",
+    "vite": "8.3.4"
+  }
+}

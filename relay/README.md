@@ -38,12 +38,18 @@ npm ci
 npm run build
 npm run check
 npm test
-npx wrangler login
-npm run deploy
+cf auth login
+npm run deploy:check   # cf deploy --dry-run（束ね先と Durable Object の宣言を確かめる）
+npm run deploy         # npm run build && cf deploy
 ```
 
+デプロイは Cloudflare の `cf` CLI で行います（wrangler は使いません）。Worker の設定は `cloudflare.config.ts`、
+vite の設定は `vite.config.js` です。自分の origin で運用する時は、`cloudflare.config.ts` の `domains` と
+`APP_ORIGIN` を自分の値に替えてください。`cf` は作業したフォルダに `.cloudflare/`（ビルドの出力）を作ります
+（`.gitignore` 済み）。
+
 部屋作成（`POST /api/rooms/…`）はアカウント不要の開かれた入口なので、濫用対策は 3 枚で持ちます。
-① Workers のレート制限 binding で IP あたり 10 回/60s（`wrangler.jsonc` の `ROOM_LIMITER`）
+① Workers のレート制限 binding で IP あたり 5 回/60s（`cloudflare.config.ts` の `ROOM_LIMITER`）
 ② 未ペア部屋は 300 秒で `alarm()` が `deleteAll()`（量産しても残らない）
 ③ 足りなくなったら `POW_DIFFICULTY` を 20 前後へ上げる（既定 0＝無効）。
 ホストは pair のたびに `/api/health` の `difficulty` を読んで PoW を計算するので、**ホストを配り直さずに**効きます。

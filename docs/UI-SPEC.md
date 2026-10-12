@@ -555,4 +555,4 @@ diff の行に Markdown のコメントを付け、**まとめて 1 通**でエ�
 - **聞かずに進めるモードはスマホから選べない**（両方のシート）: `bypass` を含む・`full-access`（Codex の `agent-full-access` も）・`yolo` のモードは、Mac で今そのモードの時だけ選べる。ほかは選択肢に `（Mac で選ぶ）` を添えて不活性にし、注記「聞かずに進めるモードは Mac で選びます。」。GUI も同じ規則で断る（`mode_needs_mac`）。盗まれた端末から「聞かずに何でも走らせる」スレッドを作らせないため。下げる（Plan などにする）のは自由
 - 承認・質問カードは会話の末尾（入力欄の直上＝親指の届く所）。承認は「確認しました」のチェック後に許可が押せる（既存の安全策のまま）。質問の選択肢はラジオ/チェック、Other 欄つきの質問は「自分で書く」欄つき（O17）。入力欄は画面下に固定・送信ボタンはスレッド色面・実行中は「中断」を並べる
 - 識別色は GUI の snapshot の `color`（スレッド・プロジェクト・0.1.23 から）。**色を送らない版の GUI の間は中立色のまま**（デスクトップと食い違う色を捏造しない）
-- 見た目の確認: `relay/` で `node test/preview.mjs --thread <名前の一部> --sheets --expand`（隔離した wrangler dev + 偽 GUI・合成データ `test/preview-fixture.json`。`--locale en-US` で英語。新しい worktree では先に `npm run build`＝`public/jsqr.mjs` が無いと WebKit の QR 読み取りが落ちる）
+- 見た目の確認: `relay/` で `node test/preview.mjs --thread <名前の一部> --sheets --expand`（隔離した `cf dev --mode test` + 偽 GUI・合成データ `test/preview-fixture.json`。`--locale en-US` で英語。新しい worktree では先に `npm run build`＝`public/jsqr.mjs` が無いと WebKit の QR 読み取りが落ちる）

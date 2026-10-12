@@ -482,3 +482,13 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   決め打ちだったコミットメッセージ・⌘I・今日の計画を、命名・要約と同じ「既定のエージェントの一発生成テンプレート」
   （`project::oneshot_text_on`）に寄せた。テンプレートがあるのは Claude Code と Codex だけなので、それ以外が既定なら
   理由を出して断る。
+- **Cloudflare の Worker は cf CLI で出す・wrangler をやめる — 2026-10-12（本人「wrangler無しで行きたい。cf deploy でしたい」）**:
+  リレー（`relay/`・control.necoder.com）と LP（`site/`・necoder.com）の設定を `wrangler.jsonc` から `cloudflare.config.ts`
+  （`cf/config`）へ移し、ビルドは `@cloudflare/vite-plugin` + vite、デプロイは `cf deploy`、手元は `cf dev` にした。
+  依存から wrangler を外した（入っていると cf がそれを使おうとして版の不一致で止まる）。リレーの Durable Object は
+  `migrations`（tag v1・new_sqlite_classes）から宣言の `exports`（sqlite）へ移した — Cloudflare の文書どおりデータは
+  そのまま残るが、**一方通行**（exports で出した後は migrations に戻せない・exports 以前の版へは戻せない）。
+  試験（Playwright）は `cf build --mode test` + `vite preview` で配る（vite の dev は `_headers` を当てないので、
+  CSP を見る試験が本番と食い違う）。LP の中身の `lp/` は README の画像やアイコンの元も兼ねるので動かさず、
+  `site/` の vite が publicDir として読む。cf と plugin はまだ beta なので版を固定する（`relay/package.json`・
+  `site/package.json`）。

@@ -9,6 +9,8 @@ interface Env {
 interface Room { hostHash: string; phoneHash: string; created: number; expires: number; }
 interface Peer { role: 'host' | 'phone'; window: number; messages: number; bytes: number; }
 const MAX_FRAME = 2_800_000;
+/// 部屋を作る POST の本文の上限（host / phone の token の JSON・2 KB で足りる）。
+const MAX_ROOM_BODY = 2048;
 // PoW の上限。ホストが現実的な時間で解けない難易度を設定事故で入れないための天井。
 const MAX_DIFFICULTY = 26;
 const valid = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
@@ -55,12 +57,19 @@ export default {
     // 部屋ごとに Mac がローカル生成するので、リレーが認証すべき「身元」は存在しない
     // （DECISIONS 2026-07-25「QR がそのまま資格情報＝アカウント不要」）。
     if (request.method === 'POST' && !url.pathname.endsWith('/ws')) {
+      // 本文は最初に（上限つきで）読み切ってから答える。読まずに返すと（レート制限・PoW・二重作成）、
+      // 手元の実行環境（vite preview）が同じ接続を使い回して次の要求が fetch failed になる。部屋の
+      // 資格情報は 2 KB に収まる（DO も同じ上限で確かめる）。
+      if (Number(request.headers.get('Content-Length')) > MAX_ROOM_BODY) { await request.body?.cancel(); return response(413, 'too_large'); }
+      const body = await request.text();
+      if (body.length > MAX_ROOM_BODY) return response(413, 'too_large');
       const bits = difficulty(env);
       if (bits > 0 && !await provenWork(match[1], request.headers.get('X-Necoder-Pow') ?? '', bits))
         return response(400, 'proof_of_work_required');
       const address = request.headers.get('CF-Connecting-IP');
       if (address && !(await env.ROOM_LIMITER.limit({ key: address })).success)
         return response(429, 'rate_limited');
+      return env.ROOMS.getByName(match[1]).fetch(new Request(request, { body }));
     }
     return env.ROOMS.getByName(match[1]).fetch(request);
   },
@@ -75,10 +84,11 @@ export class ControlRoom extends DurableObject<Env> {
     const url = new URL(request.url);
     let room = await this.ctx.storage.get<Room>('room');
     if (request.method === 'POST' && !url.pathname.endsWith('/ws')) {
-      if (room) return response(409, 'room_exists');
-      if (Number(request.headers.get('Content-Length')) > 2048) return response(413, 'too_large');
+      // 本文は入口の Worker が読み切って渡している。ここで読まない分は捨てる。
+      if (room) { await request.body?.cancel(); return response(409, 'room_exists'); }
+      if (Number(request.headers.get('Content-Length')) > MAX_ROOM_BODY) return response(413, 'too_large');
       const body = await request.text();
-      if (body.length > 2048) return response(413, 'too_large');
+      if (body.length > MAX_ROOM_BODY) return response(413, 'too_large');
       let credentials: { host: string; phone: string };
       try { credentials = JSON.parse(body); } catch { return response(400, 'invalid_json'); }
       if (!valid(credentials.host) || !valid(credentials.phone) || credentials.host === credentials.phone) return response(400, 'invalid_credentials');

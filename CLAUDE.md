@@ -28,6 +28,7 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 - `zed/` は参照用クローン（.gitignore 済み）。**変更禁止・勝手に `git pull` しない**（GPUI の API churn で本体が壊れるため。更新はユーザーの判断で行い、追従修正とセットにする）
 - GPUI は **git 依存（rev 固定）**（root Cargo.toml。CI ビルド可能化のため path 依存から移行済み・2026-07-15 現在）。ローカル `zed/` は API 調査・example 参照用。**rev 更新はユーザー判断**（`zed/` の pull と同じ扱い・追従修正とセット）
 - Zed の GPL アプリケーション crate（`acp_thread` / `agent_servers` / `worktree` / `fs` 等）からのコード複製・翻訳・改変は禁止。公開 API の利用例や一般的な設計比較は可だが、実装は公開仕様とライセンス適合を確認した外部ライブラリを使い necoder の型と要件から独立に組み立てる。参照した場合も `ported` / `移植` とは書かず、比較対象と独立実装の境界を記録する（`docs/research/git-terminal-lsp-design-notes.md`）
+- **Cloudflare の Worker は `cf` CLI で出す（wrangler は使わない）**: リレーは `relay/`（`npm run deploy`）、LP は `site/`（`npm run deploy`・中身は `lp/`）。設定はどちらも `cloudflare.config.ts`。先に `npm run deploy:check`（`cf deploy --dry-run`）で束ね先を確かめる。`cf` が作る `.cloudflare/` はコミットしない
 - `gpui` / `gpui_platform` 自体は Apache-2.0 表示だが、現在の固定 revision は GPL-3.0-or-later の推移依存を含む。necoder の AGPL 配布とは互換だが、全依存 permissive や配布物全体の自由な再ライセンスを意味しない（DECISIONS §5 / THIRD_PARTY_NOTICES.md）
 
 ## ビルド・検証ループ（変更のたびに回す）
