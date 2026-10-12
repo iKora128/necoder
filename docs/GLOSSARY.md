@@ -76,7 +76,6 @@
 | ↳ ↳ **ホスト**（設定 › AI エージェントで状態を見る機械。このマシンか、この窓で開いている SSH のプロジェクトの接続先。使う / 使わないは全ホスト共通） | `settings::AgentHost` / `SettingsView::set_agent_hosts` / `acp_client::readiness::probe_remote` | ホスト / このマシン / 確かめ直す | Host / This machine / Check again |
 | ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
 | ↳ **広告された設定**（エージェントが ACP `configOptions` で送る設定。select と boolean。モデル・思考量・権限モードの外は「その他の設定」= Fast mode・Collaboration mode 等。カテゴリ `mode` は権限モードの二重の広告なので出さない。値は select = value_id・boolean = true / false） | `acp_client::ConfigOption`（`ConfigKind::{Select,Boolean}`・`ConfigCategory`）/ 送る値 `acp_client::ConfigValue` / `Thread.options`（その他の設定の望む値） | （設定の名前のまま・Fast mode 等） | (setting name as advertised) |
-| ↳ **設定のカード**（composer の下のチップ 1 つから開く 1 枚。エージェント・モデル・思考量・広告されたその他の設定を全部出す。チップは既定から外れた値だけを要約する。権限モードはカードの外のピル。⌘/・UI-SPEC §6・2026-10-02 本人決定＝`mock/config-card.html` の C-1。← Agent / Model / Effort のピル） | `agent_panel::config_card`（`ConfigCard` / `chip_summary` / action `ToggleConfigCard`・keymap の文脈 `ConfigCard`） | 設定のカード / 思考量 / この会話では固定 | Settings card / Effort / Fixed for this conversation |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |
 | ↳ **シェルモード**（composer の 1 文字目の `!`。人が打ったコマンドをスレッドの作業ディレクトリで走らせ、エージェントには送らない。結果は次の送信に添える。**composer からの人の送信だけ**が解釈する・#37） | `agent_panel::shell`（`shell_command_input` / `ShellRun`）/ `Entry::Shell`（DB の role `shell`）/ `Host::run_user_command` | シェルで実行 | Run in the shell |
@@ -200,7 +199,8 @@
 | トークン台帳 / `token_ledger` | 使用量（`turn_usage`） | `threads.tokens_used` は文脈窓の使用量で累計ではなかった（O11 で削除） |
 | クォータ / quota（UI の語として） | レート制限 / 使用量 | adapter の `_meta.quota` は「そのターンに使ったトークン」で上限ではない。上限は レート制限、使った量は 使用量 |
 | provider / プロバイダ（UI の語として） | エージェント（ハーネスの意味）/ 接続（API と契約の意味） | 向きが二通りある（上の「二義に注意」）。code の識別子と ACP のメソッド名（`providers/set` 等）にだけ残す（2026-10-02 本人） |
-| 推論の深さ（effort） | 思考量（英語 UI は Effort） | 宛先の 4 語に揃える（2026-10-02 本人）。設定のカードと同じ語 |
+| 推論の深さ（effort） | 思考量（英語 UI は Effort） | 宛先の 4 語に揃える（2026-10-02 本人）。思考量のピルと同じ語 |
+| 設定のカード / 設定のチップ（`config_card`・⌘/） | エージェント / モデル / 思考量のピル | 2026-10-02 にピル 3 つをチップ 1 つ + カード 1 枚へまとめたが、本人「見慣れないしいいとは思えない」で 10-12 にピルへ戻した |
 | プリセット（UI の語・接続のひな形の意味） | ひな形 | issue #38 §2.2 の語だが、Chat のプリセット（`SessionPreset`）と同じ語になる（2026-10-02 本人）。code の `connections::Preset` はそのまま |
 
 ## 正の所在（どこを直すか）

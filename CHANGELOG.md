@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Changed
+
+- **The Agent, Model and Effort pills are back**: the settings chip and card under the composer (added in v0.1.25) are gone. The four pills from before are back: agent, permission mode, model and effort. `⌘/` in the composer no longer opens anything. Fast mode and other extra settings have no switch for now. The value you last chose for them is still applied when a session starts.
+
+### 日本語
+
+#### 変更
+
+- **Agent・Model・Effort のピルに戻した**：composer の下の設定のチップとカード（v0.1.25 で入れた物）をやめ、前の 4 つのピル（エージェント・権限モード・モデル・思考量）に戻しました。composer の中の ⌘/ は何も開かなくなります。Fast mode などその他の設定を切り替える場所は、今はありません。前に選んだ値は、セッションを始める時にそのまま使います。
+
 ## [0.1.27] - 2026-10-11
 
 This is the first regular release since v0.1.24, delivered through auto-update. It includes everything from the test releases [v0.1.25](https://github.com/iKora128/necoder/releases/tag/v0.1.25) and [v0.1.26](https://github.com/iKora128/necoder/releases/tag/v0.1.26). If you are updating from v0.1.24, their notes list every change. If something does not work, please let us know in an Issue.

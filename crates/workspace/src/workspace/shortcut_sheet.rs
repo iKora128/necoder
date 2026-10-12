@@ -78,7 +78,6 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     ("agent::SubmitPrompt", "key.submit_prompt"),
     ("agent::CloseActiveThread", "key.close_active_thread"),
     ("agent::FindInTranscript", "key.find_in_transcript"),
-    ("agent::ToggleConfigCard", "key.toggle_config_card"),
     // ── ターミナル ──
     ("terminal::Copy", "key.terminal_copy"),
     ("terminal::Paste", "key.terminal_paste"),
@@ -133,8 +132,6 @@ fn section_label(context: &str) -> SharedString {
     let key = match context {
         "Editor" => Some("key.section_editor"),
         "AgentPanel" => Some("key.section_agent"),
-        // composer と設定のカードの中だけで効くキー（⌘/）。
-        "AgentPanel > (Editor || ConfigCard)" => Some("key.section_composer"),
         "FleetControl" => Some("key.section_control"),
         keymap_core::TERMINAL_CONTEXT => Some("key.section_terminal"),
         "Explorer" => Some("key.section_explorer"),

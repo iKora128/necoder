@@ -13,7 +13,7 @@
 | 候補 | 判断 | その後 |
 |---|---|---|
 | 実行中のターンへの差し込み（steer） | 入れる | [#44](https://github.com/iKora128/necoder/pull/44) で入った |
-| ピッカーを 1 枚のカードにする | 入れる。見た目は本人が迷っているので mock で決める | `mock/config-card.html` の C-1 に決め（10-02）、[#48](https://github.com/iKora128/necoder/pull/48) で入った |
+| ピッカーを 1 枚のカードにする | 入れる。見た目は本人が迷っているので mock で決める | `mock/config-card.html` の C-1 に決め（10-02）、[#48](https://github.com/iKora128/necoder/pull/48) で入った。10-12 に本人「見慣れないしいいとは思えない」で 4 つのピルへ戻した（カードと mock は削除） |
 | #38 H3 の接続を `providers/set` で渡す | 入れる | [#47](https://github.com/iKora128/necoder/pull/47) で入った |
 | Providers 画面の型 | 入れる | [#46](https://github.com/iKora128/necoder/pull/46) で入った |
 | モデル一覧のキャッシュを認証の文脈で分ける | 入れる（H3 と一緒に） | [#47](https://github.com/iKora128/necoder/pull/47) の「在庫の鍵」で入った |
@@ -113,7 +113,7 @@ zeron は 2026-08-08 に Claude Code と Codex を ACP アダプタ（claude-age
 
    今の necoder がエージェントの設定から出すのは、Model と Effort だけだ。ピルはエージェント、権限モード、Model、Effort の 4 種類しか無く（`crates/agent_panel/src/agent_panel.rs:123-128` の `enum Selector`）、ほかの select には出す場所が無い。boolean は読み込みの時点で捨てている（`crates/acp_client/src/acp_client.rs:1590`「Boolean は今は UI で扱わない」）。このため Claude の Fast モードを出せない。チップには既定から外れた値だけを要約して出し（例えば High · 1M · ⚡）、Tab でエージェントを、←→ で思考量を変える。H4 の「ハーネス × 接続 × モデル」のチップも、この形に載せればよい。
 
-   **判断（本人）：入れる。見た目は本人が迷っているので、mock で決める。** その後、同じ日に `mock/config-card.html` の C-1（権限モードだけカードの外のピルに残す）に決め、[#48](https://github.com/iKora128/necoder/pull/48) で「設定のカード」として入った。
+   **判断（本人）：入れる。見た目は本人が迷っているので、mock で決める。** その後、同じ日に `mock/config-card.html` の C-1（権限モードだけカードの外のピルに残す）に決め、[#48](https://github.com/iKora128/necoder/pull/48) で「設定のカード」として入った。**2026-10-12 に戻した**: 本人「悪くはないんだけど…見慣れないしいいとは思えない」。composer の下は前の 4 つのピル（エージェント / 権限モード / モデル / 思考量）に戻し、カード・チップ・⌘/・`mock/config-card.html` を消した。Fast mode などその他の設定を切り替える場所は今は無い（覚えた値はセッションを開く時に合わせ続ける）。
 
 3. **#38 H3 の接続を ACP の `providers/set` で渡す**（手間 M・#38 H3 / H4）
 

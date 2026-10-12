@@ -27,7 +27,6 @@ use acp_client::{
 };
 mod auto_prompt;
 mod chat;
-mod config_card;
 mod history;
 mod idle;
 mod recipes;
@@ -91,15 +90,7 @@ use std::sync::Arc;
 use theme_core::{claude_bullet, thread_color, Theme};
 use ui::{DraggedFile, Tooltip};
 
-actions!(
-    agent,
-    [
-        SubmitPrompt,
-        CloseActiveThread,
-        FindInTranscript,
-        ToggleConfigCard
-    ]
-);
+actions!(agent, [SubmitPrompt, CloseActiveThread, FindInTranscript]);
 
 /// ドラッグ中のスレッドタブのゴースト（Chrome 風の並べ替え用。ポインタに追従する小チップ）。
 #[derive(Clone)]
@@ -2467,10 +2458,8 @@ pub struct AgentPanel {
     hovered_link: Option<(RegionId, Range<usize>)>,
     /// 押した時にリンクの上だった（up で選択が空のままなら開く＝ドラッグ選択と両立させる）。
     pressed_link: Option<(RegionId, Range<usize>)>,
-    /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。今のピルは権限モードだけ。
+    /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。
     open_menu: Option<Selector>,
-    /// 設定のカード（チップから開く 1 枚・`config_card.rs`。None = 閉）。
-    config_card: Option<config_card::ConfigCard>,
     /// スレッドタブ（一覧の行）の右クリックメニュー（O15。None = 閉）。
     thread_menu: Option<history::ThreadMenu>,
     /// Add context の候補（プロジェクトのファイル相対パス。workspace が渡す）と開閉。
@@ -3029,7 +3018,6 @@ PYEOF"#;
             hovered_link: None,
             pressed_link: None,
             open_menu: None,
-            config_card: None,
             thread_menu: None,
             context_files: Vec::new(),
             context_menu_open: false,
@@ -5152,7 +5140,6 @@ PYEOF"#;
         }
         self.save_active_draft(cx);
         self.renaming = None; // 別タブへ切替えたら編集中の改名は破棄する
-        self.config_card = None; // 設定のカードは開いた時のスレッドの物
         self.active = index;
         if let Some(thread) = self.threads.get_mut(index) {
             thread.done = None; // 見た＝herdr の Done ラッチ（完了・未確認）を解除
@@ -5188,7 +5175,6 @@ PYEOF"#;
             }
         }
         self.save_active_draft(cx);
-        self.config_card = None; // 設定のカードは開いた時のスレッドの物
         let mut closed = self.threads.remove(index);
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
         closed.running = false;
@@ -5352,7 +5338,6 @@ PYEOF"#;
                     .contains_focused(window, cx)
             })
             || self.elicitation_input_focused(window, cx)
-            || self.config_card_focused(window, cx)
     }
 
     fn save_active_draft(&mut self, cx: &App) {
@@ -6100,10 +6085,6 @@ PYEOF"#;
         } else {
             Some(selector)
         };
-        // 設定のカードとは排他（同じ列の浮かぶ面を 2 枚重ねない）。
-        if self.open_menu.is_some() {
-            self.config_card = None;
-        }
         // 一覧を見ようとした時に、ログインを替えていないか確かめ直す（ターミナルでログインし直した後に
         // 前のログインの一覧を出さない・issue #38 H3）。ファイルの更新時刻を見るだけ。
         if self.open_menu.is_some() && selector != Selector::Agent {
@@ -6263,60 +6244,6 @@ PYEOF"#;
         self.stock(thread, cx)
             .map(|stock| config_choices(&stock.configs, category))
             .unwrap_or_default()
-    }
-
-    /// このスレッドに出す広告の全体。スレッド自身の広告があればそれ、まだなら同じ鍵の在庫
-    /// （別タブ・先張りで受け取った物）。どちらも無ければ空＝何も出さない（捏造しない）。スレッド自身の
-    /// 広告は、接続やログインを替える前のセッションの物なら使わない（[`Self::own_advertisement_current`]・
-    /// [`Self::stocked_config_choices`] と同じ引き方）。
-    fn stocked_configs<'a>(&'a self, thread: &'a Thread, cx: &App) -> &'a [ConfigOption] {
-        if !thread.configs.is_empty() && self.own_advertisement_current(thread, cx) {
-            return &thread.configs;
-        }
-        self.stock(thread, cx)
-            .map(|stock| stock.configs.as_slice())
-            .unwrap_or_default()
-    }
-
-    /// モデル・思考量の外の設定（Fast mode・Codex の Collaboration mode 等）を変える: このスレッドの
-    /// セッションへ `session/set_config_option` を送り、その agent の記憶（sticky）に書く。広告（スレッド
-    /// 自身か在庫）に無い設定・値は受けない。セッションがまだ無ければ、開いた直後に合わせる
-    /// （[`acp_client::SessionPreferences::options`]）。
-    fn set_config_option(&mut self, config_id: &str, value: ConfigValue, cx: &mut Context<Self>) {
-        let Some(thread) = self.threads.get(self.active) else {
-            return;
-        };
-        let offered = self.stocked_configs(thread, cx).iter().any(|config| {
-            config.config_id == config_id
-                && config.category == ConfigCategory::Other
-                && config.offers(&value)
-        });
-        if !offered {
-            return;
-        }
-        let stored = value.to_stored();
-        // 区分の鍵（model / effort / mode）と同じ綴りの設定は区分の記憶を壊すので覚えない。
-        let agent_id = settings::agent_by_label(cx, thread.agent.as_ref())
-            .map(|agent| agent.id().to_string())
-            .filter(|_| !is_category_sticky_key(config_id));
-        if let Some(agent_id) = agent_id {
-            let result = settings::set_agent_config_default(cx, &agent_id, config_id, &stored);
-            self.report_settings_save(result, cx);
-        }
-        if let Some(thread) = self.threads.get_mut(self.active) {
-            thread.options.insert(config_id.to_string(), stored);
-            // 広告がまだ届いていなくても送る（セッションは広告を流してからコマンドを読む）。
-            if let Some(command_tx) = &thread.command_tx {
-                thread.options_in_flight.insert(config_id.to_string());
-                command_tx
-                    .unbounded_send(SessionCommand::SetConfig {
-                        config_id: config_id.to_string(),
-                        value,
-                    })
-                    .ok();
-            }
-        }
-        cx.notify();
     }
 
     /// 今の設定（接続・認証の環境）と宛先でこのスレッドのセッションを立てた時に付く在庫の鍵
@@ -6534,7 +6461,6 @@ PYEOF"#;
         window.focus(&focus, cx);
         self.context_focus = Some(focus);
         self.open_menu = None; // セレクタメニューと排他
-        self.config_card = None; // 設定のカードとも排他
         cx.notify();
     }
 
@@ -13163,8 +13089,7 @@ PYEOF"#;
                     )
                     // 本文が `!` で始まる間: シェルで走ること（走らせられない理由）を 1 行（#37）。
                     .children(self.render_shell_hint(cx))
-                    // 下部コントロール列: 設定のチップ（エージェント・モデル・思考量・Fast 等を 1 枚の
-                    // カードで・`config_card.rs`）+ 権限モードのピル（安全に関わるのでカードの外・C-1）
+                    // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
                     .child(
                         div()
                             .flex()
@@ -13172,9 +13097,9 @@ PYEOF"#;
                             .items_center()
                             .gap(px(6.))
                             .pt(px(6.))
-                            .child(self.render_config_chip(cx))
                             .when(!self.chat_mode, |row| {
-                                row.child(self.render_selector_pill(Selector::Mode, cx))
+                                row.child(self.render_selector_pill(Selector::Agent, cx))
+                                    .child(self.render_selector_pill(Selector::Mode, cx))
                             })
                             // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
                             // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
@@ -13191,7 +13116,9 @@ PYEOF"#;
                                             theme.clone(),
                                         )),
                                 )
-                            }),
+                            })
+                            .child(self.render_selector_pill(Selector::Model, cx))
+                            .child(self.render_selector_pill(Selector::Effort, cx)),
                     )
                     // 送信行: [Enter 挙動トグル] … [送信ボタン（現ヒント付き）]
                     .child(
@@ -13383,8 +13310,6 @@ impl Render for AgentPanel {
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::open_transcript_search))
             .on_action(cx.listener(Self::on_close_thread))
-            // ⌘/ = 設定のカード（composer とカードの中だけ・keymap の `AgentPanel > (Editor || ConfigCard)`）。
-            .on_action(cx.listener(Self::on_toggle_config_card))
             // transcript が focus 中の ⌘A。composer focus 中は EditorView 側が先に消費する。
             .on_action(cx.listener(Self::on_select_all_transcript))
             // transcript 選択の ⌘C（composer が空選択で譲った Copy を root で受ける・M13）。
@@ -14507,15 +14432,6 @@ fn adopt_advertised_options(thread: &mut Thread) {
         }
         thread.options.insert(config.config_id.clone(), advertised);
     }
-}
-
-/// 「その他の設定」の今の値（描画用）。このスレッドが望む値が広告に合えばそれ、無ければ広告の値。
-fn option_value(thread: &Thread, config: &ConfigOption) -> ConfigValue {
-    thread
-        .options
-        .get(&config.config_id)
-        .and_then(|stored| config.value_from_stored(stored))
-        .unwrap_or_else(|| config.current())
 }
 
 /// 新規スレッドへ「前回選んだ状態」を載せる（2026-07-27 ユーザー要望「前に設定した状態を保持して」）。
@@ -17544,13 +17460,13 @@ PYEOF"#;
         let _ = std::fs::remove_file(path);
     }
 
-    /// 接続ごとの在庫（issue #38 H3）× 設定のカード: カードもモデルの在庫を接続ごとに引き（前の接続の
-    /// モデルを出さない・戻せば元の在庫）、エージェントの行とチップに出す接続の名前が付く。カードを
-    /// 開いた時にログインを確かめ直しても、同じログインなら在庫は消えない。
+    /// 接続ごとの在庫（issue #38 H3）× モデルのピルのメニュー: メニューを開くとログインを確かめ直すが、
+    /// 同じログインなら在庫は消えない。接続を替えれば前の接続のモデルを出さず、戻せば元の在庫・
+    /// エージェントのピルに接続の名前が付く。
     #[gpui::test]
-    fn the_config_card_follows_the_connection(cx: &mut gpui::TestAppContext) {
+    fn the_model_menu_follows_the_connection(cx: &mut gpui::TestAppContext) {
         let path = std::env::temp_dir().join(format!(
-            "necoder_agent_card_connection_{}_{}.json",
+            "necoder_agent_menu_connection_{}_{}.json",
             std::process::id(),
             now_unix_ms()
         ));
@@ -17563,17 +17479,22 @@ PYEOF"#;
         .unwrap();
         cx.update(|cx| settings::init(Some(path.clone()), None, cx));
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        let card_models = |panel: &AgentPanel, cx: &App| -> Vec<String> {
+        let menu_models = |panel: &AgentPanel, cx: &App| -> Vec<String> {
             panel
-                .stocked_configs(&panel.threads[panel.active], cx)
-                .iter()
-                .filter(|config| config.category == ConfigCategory::Model)
-                .flat_map(|config| config.choices().iter().map(|choice| choice.name.clone()))
+                .selector_choices(Selector::Model, cx)
+                .into_iter()
+                .map(|choice| choice.label.to_string())
                 .collect()
         };
-        panel.update_in(cx, |panel, window, cx| {
-            // 自分のログインのタブ（セッションはまだ無い）。カードを開いて確かめたログインで控える。
-            panel.open_config_card(window, cx);
+        // モデルのピルを押し直す（閉じていれば開く・開いていれば閉じてから開く）。
+        let reopen_model_menu = |panel: &mut AgentPanel, cx: &mut Context<AgentPanel>| {
+            panel.open_menu = None;
+            panel.toggle_menu(Selector::Model, cx);
+            assert_eq!(panel.open_menu, Some(Selector::Model));
+        };
+        panel.update(cx, |panel, cx| {
+            // 自分のログインのタブ（セッションはまだ無い）。メニューを開いて確かめたログインで控える。
+            reopen_model_menu(panel, cx);
             let active = panel.active;
             panel.on_event(
                 active,
@@ -17584,25 +17505,23 @@ PYEOF"#;
                 )]),
                 cx,
             );
-            panel.close_config_card(window, cx);
-            panel.open_config_card(window, cx);
-            assert_eq!(card_models(panel, cx), vec!["Opus", "Fable"]);
+            reopen_model_menu(panel, cx);
+            assert_eq!(menu_models(panel, cx), vec!["Opus", "Fable"]);
             assert_eq!(panel.active_connection_name(cx), None);
         });
         cx.update(|_window, cx| {
             settings::set_agent_connection(cx, "claude", Some("glm")).expect("書ける")
         });
-        panel.update_in(cx, |panel, window, cx| {
-            panel.close_config_card(window, cx);
-            panel.open_config_card(window, cx);
+        panel.update(cx, |panel, cx| {
+            reopen_model_menu(panel, cx);
             assert!(
-                card_models(panel, cx).is_empty(),
-                "カードにも別の接続のモデルを出さない"
+                menu_models(panel, cx).is_empty(),
+                "メニューにも別の接続のモデルを出さない"
             );
             assert_eq!(
                 panel.active_connection_name(cx).as_deref(),
                 Some("GLM"),
-                "エージェントの行とチップに接続の名前"
+                "エージェントのピルに接続の名前"
             );
         });
         cx.update(|_window, cx| {
@@ -17610,7 +17529,7 @@ PYEOF"#;
         });
         panel.update(cx, |panel, cx| {
             assert_eq!(
-                card_models(panel, cx),
+                menu_models(panel, cx),
                 vec!["Opus", "Fable"],
                 "戻せば元の在庫"
             );
@@ -17764,256 +17683,6 @@ PYEOF"#;
     /// おり、GPUI は action listener を呼ぶ前に伝播を止める。`EditorView::cancel` は複数選択が
     /// 無ければ**何もしない**が、伝播だけは止めていた＝パネル root の Esc（中断）に一生届かず、
     /// 停止ボタンでしか止められなかった。キー配送そのものを通して確かめる。
-    /// ⌘/ は composer（と開いた設定のカード）の中だけでカードに当たり、コードのエディタ（`AgentPanel` の
-    /// 外の `Editor`）では今までどおりコメントの切り替え。どちらも同じ深さで当たるので keymap の並び順が効く。
-    #[gpui::test]
-    fn cmd_slash_opens_the_card_only_inside_the_agent_panel(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
-                .expect("既定 keymap がロードできる");
-            cx.bind_keys(bindings);
-            let keymap = cx.key_bindings();
-            let keymap = keymap.borrow();
-            let keystroke = gpui::Keystroke::parse("cmd-/").expect("キーを読める");
-            let action_for = |contexts: &[&str]| {
-                let stack: Vec<gpui::KeyContext> = contexts
-                    .iter()
-                    .map(|context| gpui::KeyContext::parse(context).expect("文脈を読める"))
-                    .collect();
-                let (bindings, _) =
-                    keymap.bindings_for_input(std::slice::from_ref(&keystroke), &stack);
-                bindings
-                    .first()
-                    .map(|binding| binding.action().name().to_string())
-            };
-            assert_eq!(
-                action_for(&["Workspace", "Editor"]).as_deref(),
-                Some("editor::ToggleComment"),
-                "コードのエディタの ⌘/ は変わらない"
-            );
-            assert_eq!(
-                action_for(&["Workspace", "AgentPanel", "Editor"]).as_deref(),
-                Some("agent::ToggleConfigCard"),
-                "composer の ⌘/ はカード"
-            );
-            assert_eq!(
-                action_for(&["Workspace", "AgentPanel", "ConfigCard"]).as_deref(),
-                Some("agent::ToggleConfigCard"),
-                "開いたカードの中の ⌘/ で閉じる"
-            );
-        });
-    }
-
-    /// 設定のカードのキー（UI-SPEC §6）: ⌘/ で開く → → で思考量を 1 段（その場で送る）→ ↓ でモデルの
-    /// 一覧（隣のモデルに印）→ ⏎ で決めてカードへ戻る → esc で閉じる。esc は**カードだけ**を閉じ、
-    /// 走っているターンは止めない（もう一度の esc で止まる）。保存・送信は value_id のまま。
-    #[gpui::test]
-    fn the_config_card_follows_the_keys(cx: &mut gpui::TestAppContext) {
-        let settings_path = init_test_settings(cx, "card-keys");
-        cx.update(|cx| {
-            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
-                .expect("既定 keymap がロードできる");
-            cx.bind_keys(bindings);
-        });
-        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        let mut command_rx = panel.update_in(cx, |panel, window, cx| {
-            let active = panel.active;
-            let (command_tx, command_rx) = futures::channel::mpsc::unbounded();
-            panel.threads[active].command_tx = Some(command_tx);
-            panel.on_event(
-                active,
-                AgentEvent::Configs(vec![
-                    config(
-                        ConfigCategory::Model,
-                        "default",
-                        &[
-                            ("default", "Default (recommended)"),
-                            ("opus", "Opus 4.8"),
-                            ("sonnet", "Sonnet 5"),
-                        ],
-                    ),
-                    config(
-                        ConfigCategory::ThoughtLevel,
-                        "default",
-                        &[("default", "Default"), ("low", "Low"), ("high", "High")],
-                    ),
-                ]),
-                cx,
-            );
-            panel.focus_composer(window, cx);
-            command_rx
-        });
-        let redraw = |cx: &mut gpui::VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.draw(cx).clear(cx);
-            });
-            cx.run_until_parked();
-        };
-        redraw(cx);
-
-        cx.simulate_keystrokes("cmd-/");
-        redraw(cx);
-        panel.update_in(cx, |panel, window, cx| {
-            assert!(panel.config_card.is_some(), "⌘/ でカードが開く");
-            assert!(panel.config_card_focused(window, cx), "キーはカードへ");
-        });
-
-        cx.simulate_keystrokes("right");
-        redraw(cx);
-        panel.read_with(cx, |panel, _cx| {
-            // Default（目盛りの外・割合 0）から Low（2 段の 1 段目）へ、メーターが動く。
-            let card = panel.config_card.as_ref().expect("開いたまま");
-            assert_eq!(card.effort_motion_target(), Some(0.5));
-        });
-        cx.simulate_keystrokes("down");
-        redraw(cx);
-        panel.read_with(cx, |panel, _cx| {
-            let card = panel.config_card.as_ref().expect("開いたまま");
-            assert_eq!(card.page_name(), "models", "↓ でモデルの一覧");
-            assert_eq!(card.cursor_index(), 1, "印は今のモデル（Default）の隣");
-        });
-        cx.simulate_keystrokes("enter");
-        redraw(cx);
-        panel.update_in(cx, |panel, _window, cx| {
-            let thread = &panel.threads[panel.active];
-            assert_eq!(thread.effort.as_ref(), "low", "→ で 1 段");
-            assert_eq!(thread.model.as_ref(), "opus", "⏎ で印のモデル");
-            assert_eq!(
-                panel.config_card.as_ref().map(|card| card.page_name()),
-                Some("main"),
-                "決めたらカードへ戻る"
-            );
-            let defaults = settings::get(cx).agent_config_defaults;
-            assert_eq!(defaults["claude"]["effort"], "low");
-            assert_eq!(defaults["claude"]["model"], "opus");
-            panel.threads[panel.active].running = true;
-        });
-        let sent: Vec<(String, ConfigValue)> = std::iter::from_fn(|| command_rx.try_recv().ok())
-            .filter_map(|command| match command {
-                SessionCommand::SetConfig { config_id, value } => Some((config_id, value)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            sent,
-            vec![
-                ("ThoughtLevel".to_string(), ConfigValue::Id("low".into())),
-                ("Model".to_string(), ConfigValue::Id("opus".into())),
-            ],
-            "value_id のまま、その場で送る"
-        );
-
-        let cancelled =
-            |command_rx: &mut futures::channel::mpsc::UnboundedReceiver<SessionCommand>| {
-                std::iter::from_fn(|| command_rx.try_recv().ok())
-                    .any(|command| matches!(command, SessionCommand::Cancel))
-            };
-        cx.simulate_keystrokes("escape");
-        redraw(cx);
-        panel.update_in(cx, |panel, window, cx| {
-            assert!(panel.config_card.is_none(), "esc でカードを閉じる");
-            assert!(
-                panel.composer.read(cx).focus_handle(cx).is_focused(window),
-                "閉じたら composer へ戻る"
-            );
-        });
-        assert!(
-            !cancelled(&mut command_rx),
-            "カードを閉じる esc ではターンを止めない"
-        );
-        cx.simulate_keystrokes("escape");
-        assert!(
-            cancelled(&mut command_rx),
-            "次の esc はいつもどおりターンを止める"
-        );
-        let _ = std::fs::remove_file(settings_path);
-    }
-
-    /// 会話を始めた後はエージェントを変えない（Tab は効かない）。広告が無いまま会話が始まったら、チップは
-    /// 押せない（押せるのに何も出ない面を作らない・候補を捏造しない）。広告が届けば開ける。
-    #[gpui::test]
-    fn the_config_card_keeps_the_agent_after_the_conversation_starts(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let path = init_test_settings(cx, "card-fixed");
-        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        panel.update_in(cx, |panel, window, cx| {
-            let active = panel.active;
-            assert!(
-                panel.config_card_openable(cx),
-                "広告が無くても、会話の前ならエージェントを選ぶために開ける"
-            );
-            panel.threads[active]
-                .entries
-                .push(Entry::User("こんにちは".into()));
-            assert!(
-                !panel.config_card_openable(cx),
-                "広告も無く会話の後は開けない"
-            );
-            panel.open_config_card(window, cx);
-            assert!(panel.config_card.is_none());
-
-            panel.on_event(
-                active,
-                AgentEvent::Configs(vec![config(
-                    ConfigCategory::Model,
-                    "opus",
-                    &[("opus", "Opus 4.8"), ("sonnet", "Sonnet 5")],
-                )]),
-                cx,
-            );
-            panel.open_config_card(window, cx);
-            assert!(panel.config_card.is_some(), "広告が届けば開ける");
-            let agent = panel.threads[active].agent.clone();
-            panel.cycle_card_agent(1, cx);
-            assert_eq!(
-                panel.threads[active].agent, agent,
-                "会話の後は Tab でも変えない"
-            );
-        });
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// 会話の前は Tab で次のエージェントへ（今のエージェントのピルと同じ道・カードは開いたまま）。
-    /// 選べる一覧はログインの状態で変わるので、足したエージェント 2 つで必ず 2 つ以上にする。
-    #[gpui::test]
-    fn tab_in_the_config_card_switches_the_agent_before_the_conversation(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let path = std::env::temp_dir().join(format!(
-            "necoder_agent_card_tab_{}_{}.json",
-            std::process::id(),
-            now_unix_ms()
-        ));
-        std::fs::write(
-            &path,
-            r#"{"onboarded":true,"agent_prewarm":false,"default_agent":"Alpha Harness",
-                "agent_servers":{"alpha":{"name":"Alpha Harness","command":"definitely-not-alpha"},
-                                 "beta":{"name":"Beta Harness","command":"definitely-not-beta"}}}"#,
-        )
-        .expect("設定を書ける");
-        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
-        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        panel.update_in(cx, |panel, window, cx| {
-            let active = panel.active;
-            panel.open_config_card(window, cx);
-            assert!(panel.config_card.is_some());
-            let choices = panel.selector_choices(Selector::Agent, cx);
-            assert!(choices.len() >= 2, "{:?}", choices.len());
-            let current = panel.selector_value(Selector::Agent);
-            let index = choices
-                .iter()
-                .position(|choice| choice.value == current)
-                .expect("今のエージェントは一覧に在る");
-            let expected = choices[(index + 1) % choices.len()].value.clone();
-            panel.cycle_card_agent(1, cx);
-            assert_eq!(panel.threads[active].agent, expected);
-            assert!(panel.config_card.is_some(), "カードは開いたまま");
-        });
-        let _ = std::fs::remove_file(path);
-    }
-
     #[gpui::test]
     fn escape_in_composer_interrupts_the_running_turn(cx: &mut gpui::TestAppContext) {
         let settings_path = init_test_settings(cx, "escape-cancel");
@@ -18291,168 +17960,32 @@ PYEOF"#;
         let _ = std::fs::remove_file(path);
     }
 
-    /// 偽の ACP エージェント（Fast mode を boolean で広告する）。受けた `set_config_option` の params を
-    /// 1 行ずつ `argv[1]` のファイルへ書き、応答で更新後の一覧を返す。
-    const FAST_MODE_AGENT: &str = r#"
-import json, sys
-
-record = sys.argv[1]
-current = {"fast": False}
-
-def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-
-def config_options():
-    return [
-        {"id": "model", "name": "Model", "category": "model", "type": "select",
-         "currentValue": "default",
-         "options": [{"value": "default", "name": "Default (recommended)"},
-                     {"value": "opus", "name": "Opus 4.8"}]},
-        {"id": "fast", "name": "Fast mode", "category": "model_config", "type": "boolean",
-         "currentValue": current["fast"],
-         "description": "Faster responses on supported models"},
-    ]
-
-for line in sys.stdin:
-    if not line.strip():
-        continue
-    msg = json.loads(line)
-    method = msg.get("method")
-    rid = msg.get("id")
-    params = msg.get("params") or {}
-    if method == "initialize":
-        send({"jsonrpc": "2.0", "id": rid,
-              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
-    elif method == "session/new":
-        send({"jsonrpc": "2.0", "id": rid,
-              "result": {"sessionId": "sess-1", "configOptions": config_options()}})
-    elif method == "session/set_config_option":
-        with open(record, "a") as out:
-            out.write(json.dumps({key: params[key] for key in ("configId", "type", "value")
-                                  if key in params}, sort_keys=True) + "\n")
-        current[params["configId"]] = params["value"]
-        send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": config_options()}})
-"#;
-
-    /// `Configs` が届くまで待つ（本物の `run_session` は別スレッドで動く）。
-    fn next_configs(
-        events: &mut futures::channel::mpsc::UnboundedReceiver<AgentEvent>,
-    ) -> AgentEvent {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while std::time::Instant::now() < deadline {
-            match events.try_recv() {
-                Ok(event @ AgentEvent::Configs(_)) => return event,
-                Ok(_) => {}
-                Err(futures::channel::mpsc::TryRecvError::Closed) => {
-                    panic!("セッションが先に終わった")
-                }
-                Err(futures::channel::mpsc::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10))
-                }
-            }
-        }
-        panic!("Configs が届かない");
-    }
-
-    /// カードで Fast mode（boolean）を切り替えると、本物の `run_session` を通って偽の ACP エージェントに
-    /// `session/set_config_option` の `type: "boolean"` で届き、エージェントの返事（更新後の一覧）で
-    /// スレッドの値が追従する。その agent の記憶（sticky）には `true` で残り、次のスレッドに載る。
+    /// モデル・思考量の外の設定（Fast mode 等）は、前にエージェントへ合わせた値をその agent の記憶
+    /// （`agent_config_defaults.<agent>.<config_id>`）から次のスレッドに載せ、セッションを開いた直後に
+    /// 合わせる（[`acp_client::SessionPreferences::options`]）。区分の鍵（model / effort / mode）とは混ぜない。
     #[gpui::test]
-    fn toggling_fast_mode_reaches_a_fake_agent(cx: &mut gpui::TestAppContext) {
-        let Some(python) = acp_client::find_in_path("python3") else {
-            eprintln!("python3 が PATH に無いためスキップ");
-            return;
-        };
-        let settings_path = init_test_settings(cx, "fast-mode");
-        let record = std::env::temp_dir().join(format!(
-            "necoder_agent_fast_mode_{}_{}.jsonl",
+    fn remembered_options_ride_on_the_next_thread(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_remembered_options_{}_{}.json",
             std::process::id(),
             now_unix_ms()
         ));
-        let command = acp_client::AgentCommand::new(
-            python,
-            vec![
-                "-c".into(),
-                FAST_MODE_AGENT.into(),
-                record.display().to_string(),
-            ],
-            std::env::temp_dir(),
-        );
-        let (command_tx, command_rx) = futures::channel::mpsc::unbounded();
-        let (event_tx, mut event_rx) = futures::channel::mpsc::unbounded();
-        let session = std::thread::spawn(move || {
-            futures::executor::block_on(acp_client::run_session(
-                command,
-                acp_client::SessionPreferences::default(),
-                command_rx,
-                event_tx,
-            ))
-        });
-
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"agent_prewarm":false,
+                "agent_config_defaults":{"claude":{"model":"opus","fast":"true"}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        let active = panel.update(cx, |panel, _cx| {
-            panel.threads[panel.active].command_tx = Some(command_tx);
-            panel.active
-        });
-        let advertised = next_configs(&mut event_rx);
         panel.update(cx, |panel, cx| {
-            panel.on_event(active, advertised, cx);
-            let thread = &panel.threads[active];
-            let fast = thread
-                .configs
-                .iter()
-                .find(|config| config.config_id == "fast")
-                .expect("boolean の設定も届く（捨てない）");
-            assert_eq!(option_value(thread, fast), ConfigValue::Bool(false));
-            // カードの Fast mode の行を押したのと同じ道。
-            panel.toggle_card_option("fast", cx);
-        });
-        let answered = next_configs(&mut event_rx);
-        panel.update(cx, |panel, cx| {
-            panel.on_event(active, answered, cx);
-            let thread = &panel.threads[active];
-            let fast = thread
-                .configs
-                .iter()
-                .find(|config| config.config_id == "fast")
-                .expect("返事の一覧にも在る");
-            assert_eq!(
-                fast.current(),
-                ConfigValue::Bool(true),
-                "エージェント側が on"
-            );
-            assert_eq!(option_value(thread, fast), ConfigValue::Bool(true));
-            assert!(thread.options_in_flight.is_empty(), "返事で確かめ終えた");
-            assert_eq!(
-                settings::get(cx).agent_config_defaults["claude"]["fast"],
-                "true",
-                "その agent の記憶に boolean のまま残る"
-            );
-            // 次のスレッドは覚えた値をセッションを開く時に合わせる（区分の鍵とは混ぜない）。
             panel.add_thread(cx);
             let fresh = &panel.threads[panel.active];
             assert_eq!(fresh.options.get("fast").map(String::as_str), Some("true"));
-            assert!(!fresh.options.contains_key("model"));
-            // 広告に無い設定・種類の合わない値は送らない（捏造しない）。
-            panel.switch_thread(active, cx);
-            panel.set_config_option("context_window", ConfigValue::Id("1m".into()), cx);
-            panel.set_config_option("fast", ConfigValue::Id("on".into()), cx);
-            // セッションを閉じる（送信路を落とすと run_session が抜ける）。
-            panel.threads[active].command_tx = None;
+            assert!(!fresh.options.contains_key("model"), "区分の鍵は混ぜない");
+            assert_eq!(fresh.model.as_ref(), "opus");
         });
-        session
-            .join()
-            .expect("セッションのスレッドが落ちない")
-            .expect("セッションは正常に終わる");
-        let received = std::fs::read_to_string(&record).expect("偽エージェントの記録を読める");
-        assert_eq!(
-            received.lines().collect::<Vec<_>>(),
-            vec![r#"{"configId": "fast", "type": "boolean", "value": true}"#],
-            "boolean のまま 1 回だけ届く"
-        );
-        let _ = std::fs::remove_file(record);
-        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(path);
     }
 
     /// O16: 使わないと決めたエージェントはエージェントの選択肢に出さない。いまのスレッドの値だけは
