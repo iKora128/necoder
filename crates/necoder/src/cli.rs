@@ -430,6 +430,42 @@ fn run_uninstall() -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn existing_directories_resolve_from_the_callers_working_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("necoder_cli_paths_{}", std::process::id()));
+        let child = directory.join("folder with spaces 日本語 #1");
+        std::fs::create_dir_all(&child).expect("作れる");
+        let expected = paths::canonicalize_or_keep(&child).display().to_string();
+        for (cwd, argument) in [
+            (child.as_path(), ".".to_string()),
+            (
+                directory.as_path(),
+                "folder with spaces 日本語 #1".to_string(),
+            ),
+            (directory.as_path(), child.display().to_string()),
+            (
+                child.as_path(),
+                "../folder with spaces 日本語 #1".to_string(),
+            ),
+        ] {
+            let open = resolve_open_args(&[argument], cwd);
+            assert_eq!(open.paths, vec![expected.clone()]);
+            assert!(open.positions.is_empty());
+            assert!(!open.has_remote);
+        }
+        #[cfg(unix)]
+        {
+            let link = directory.join("link");
+            std::os::unix::fs::symlink(&child, &link).expect("リンクを作れる");
+            assert_eq!(
+                resolve_open_args(&["link/.".into()], &directory).paths,
+                vec![expected]
+            );
+        }
+        std::fs::remove_dir_all(directory).expect("片付けられる");
+    }
+
     // Unix 形式の絶対パス（`/work/…`）を前提に書いている（Windows では `/…` は絶対パスに
     // ならず区切りも `\` になる）。`ne` の Windows 対応は W フェーズ（supported()=false）。
     #[cfg(unix)]

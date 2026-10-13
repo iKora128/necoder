@@ -386,6 +386,21 @@ impl Workspace {
                 self.chrome
                     .pending_external_goto
                     .extend(positions_from_params(&params));
+                // 最小化・非表示中は render が止まる。描画待ちのキューだけに任せず、
+                // effect cycle の末尾で窓を復帰して要求を消化する。
+                if let Some(handle) = self
+                    .window_handle
+                    .and_then(|handle| handle.downcast::<Workspace>())
+                {
+                    cx.defer(move |cx| {
+                        if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                            window.activate_window();
+                            workspace.process_pending_shell_effects(window, cx);
+                        }) {
+                            eprintln!("CLI の open を処理できません: {error:#}");
+                        }
+                    });
+                }
                 // パス 0 件（`ne` 単体）でも前面化はする＝「実行中の necoder を呼び出す」導線。
                 cx.activate(true);
                 cx.notify();
@@ -1504,6 +1519,31 @@ mod tests {
         });
         cx.run_until_parked();
         reply.try_recv().expect("応答がある")
+    }
+
+    #[gpui::test]
+    fn open_request_switches_folder_without_a_render(cx: &mut gpui::TestAppContext) {
+        let directory = scratch("open_folder");
+        let folder = directory.join("another folder 日本語");
+        std::fs::create_dir_all(&folder).expect("フォルダーを作れる");
+        let folder = paths::canonicalize_or_keep(folder);
+        let (workspace, cx) = open_workspace(&directory, cx);
+        workspace.update_in(cx, |workspace, window, _| {
+            workspace.window_handle = Some(window.window_handle());
+        });
+        let response = request(
+            &workspace,
+            cx,
+            "open",
+            serde_json::json!({"paths": [folder]}),
+        );
+        assert_eq!(response["result"]["opened"], 1);
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.chrome.pending_external_open.is_empty());
+            assert!(workspace.overlays.pending_project_switch.is_none());
+            assert_eq!(workspace.active_slot().unwrap().worktree.root(), folder);
+        });
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     /// 下ドックのタブ 1 つ + Task カードに置いた端末 1 つを作り、(タブ, カード) を返す。
