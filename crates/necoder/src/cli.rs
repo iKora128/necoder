@@ -317,12 +317,9 @@ fn resolve_open_args(args: &[String], cwd: &Path) -> OpenArgs {
             }
         }
         // `..`/シンボリックリンクを畳む（存在しないパスは素の絶対形のまま）
-        open.paths.push(
-            std::fs::canonicalize(&absolute)
-                .unwrap_or(absolute)
-                .display()
-                .to_string(),
-        );
+        // Windows の verbatim 形（`\\?\C:\…`）を剥がして、IPC 先の canonical 形と揃える。
+        open.paths
+            .push(paths::canonicalize_or_keep(&absolute).display().to_string());
     }
     open
 }
