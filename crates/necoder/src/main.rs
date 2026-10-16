@@ -621,6 +621,15 @@ fn open_planned_windows(
     primary_window
 }
 
+/// LaunchServices が送る file URL を OS のパスへ戻す（空白・日本語・# も復号する）。
+fn external_url_paths(urls: &[String]) -> Vec<PathBuf> {
+    urls.iter()
+        .filter_map(|raw| url::Url::parse(raw).ok())
+        .filter(|parsed| parsed.scheme() == "file")
+        .filter_map(|parsed| parsed.to_file_path().ok())
+        .collect()
+}
+
 /// Dock のアイコンを押した（macOS の reopen。GPUI は**見えている窓が無い時だけ**ここへ来る）。
 /// 窓が 1 つも無ければ前回の窓を開き直し（無引数の起動と同じ復元）、隠れている・最小化している
 /// だけならそれを前に戻す。「隠して動かし続ける」（O4）の戻り道でもある。
@@ -1836,41 +1845,31 @@ fn main() {
                 .detach();
             }
         }
-        // Finder/Dock から届いた file:// URL を workspace へ流す（登録は run 前・main 冒頭）。
-        // `ne` CLI の IPC 不通フォールバック（cli.rs の `open -a`）もこの経路に乗るため、
-        // 最初の窓が閉じられていたら生きている workspace 窓へ引き継いで届ける（取りこぼさない）。
+        // 書類 open は Dock の reopen と別イベント。最後の窓を閉じていても窓を復帰し、
+        // 起動時に捕まえた窓ではなく現在の最前面の Workspace へ届ける。
         let mut open_urls_rx = open_urls_rx;
-        let mut open_urls_window = window;
         cx.spawn(async move |cx| {
             use futures::StreamExt as _;
             while let Some(urls) = open_urls_rx.next().await {
-                let paths: Vec<std::path::PathBuf> = urls
-                    .iter()
-                    .filter_map(|raw| url::Url::parse(raw).ok())
-                    .filter(|parsed| parsed.scheme() == "file")
-                    .filter_map(|parsed| parsed.to_file_path().ok())
-                    .collect();
+                let paths = external_url_paths(&urls);
                 if paths.is_empty() {
                     continue;
                 }
-                let delivered = open_urls_window.update(cx, |workspace, window, cx| {
-                    workspace.open_external_paths(paths.clone(), window, cx);
-                });
-                if delivered.is_ok() {
-                    continue;
-                }
-                // 窓が閉じられていた → 生きている workspace 窓を探して引き継ぐ。
-                // 1 つも無ければ（終了中など）この分は落として次を待つ。
-                let Some(next_window) = cx.update(|cx| {
-                    cx.windows()
+                cx.update(|cx| {
+                    reopen_windows(cx);
+                    let target = cx
+                        .window_stack()
+                        .unwrap_or_else(|| cx.windows())
                         .into_iter()
-                        .find_map(|window| window.downcast::<Workspace>())
-                }) else {
-                    continue;
-                };
-                open_urls_window = next_window;
-                let _ = open_urls_window.update(cx, |workspace, window, cx| {
-                    workspace.open_external_paths(paths, window, cx);
+                        .find_map(|window| window.downcast::<Workspace>());
+                    if let Some(target) = target {
+                        if let Err(error) = target.update(cx, |workspace, window, cx| {
+                            workspace.open_external_paths(paths, window, cx);
+                            window.activate_window();
+                        }) {
+                            eprintln!("外部からのフォルダーを開けません: {error:#}");
+                        }
+                    }
                 });
             }
         })
@@ -1962,6 +1961,17 @@ fn maybe_capture_screenshot(_window: gpui::WindowHandle<Workspace>, _cx: &mut Ap
 mod tests {
     use super::Assets;
     use gpui::AssetSource;
+
+    #[test]
+    fn external_file_urls_preserve_folder_names() {
+        let folder = std::env::temp_dir().join("folder with spaces 日本語 #1");
+        let urls = vec![
+            url::Url::from_directory_path(&folder).expect("絶対パス").into(),
+            "https://example.com/ignored".into(),
+            "invalid url".into(),
+        ];
+        assert_eq!(super::external_url_paths(&urls), vec![folder]);
+    }
 
     /// `assets/icons/` に置いた SVG は全て `Assets` の埋め込み表に登録されていること。
     /// 登録漏れは `svg().path(...)` が黙って何も描かない（2026-09-03 の診断アイコン欠落）ので、ここで落とす。

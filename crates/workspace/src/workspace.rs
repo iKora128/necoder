@@ -5082,6 +5082,28 @@ mod tests {
         (root, workspace, cx)
     }
 
+    #[gpui::test]
+    fn external_folder_open_switches_without_waiting_for_render(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "external_folder");
+        let folder = root.join("another folder 日本語");
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = paths::canonicalize_or_keep(folder);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_chat_mode(true, window, cx);
+            workspace.open_external_paths(vec![folder.clone()], window, cx);
+            assert!(!workspace.chat_mode());
+            assert_eq!(workspace.active_slot().unwrap().worktree.root(), folder);
+            assert!(workspace.overlays.pending_project_switch.is_none());
+            // 既に開いているフォルダーでも Chat から戻る。
+            workspace.set_chat_mode(true, window, cx);
+            workspace.open_external_paths(vec![folder.clone()], window, cx);
+            assert!(!workspace.chat_mode());
+            assert_eq!(workspace.active_slot().unwrap().worktree.root(), folder);
+            assert_eq!(workspace.project_sessions.projects.len(), 2);
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// 3 つのモードは排他で、Chat は開くまで何も作らない。Chat 中は枠（プロジェクト）が無く、
     /// 額縁は無彩色になる。
     #[gpui::test]

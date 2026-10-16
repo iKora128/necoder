@@ -876,6 +876,11 @@ impl Workspace {
         for path in paths {
             if path.is_dir() {
                 self.add_project_slot(path, cx);
+                // 外部 open は Window を持っている。隠れた窓では次の描画が来ないため、
+                // レール追加が予約した切替をここで完了させる。
+                if let Some(index) = self.overlays.pending_project_switch.take() {
+                    self.switch_project(index, window, cx);
+                }
                 continue;
             }
             if self.project_sessions.projects.is_empty() {
