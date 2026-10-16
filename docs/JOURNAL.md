@@ -4117,3 +4117,11 @@
 - 中身: #62（composer の下をピルに戻す）・#63（スマホで新しいスレッドのエージェント・モデル・設定を選ぶ）・#61 と e69bf82（日本語の UI を短く自然に）・#64（終了時に言語サーバを止める）・#65（Worker を cf で出す・利用者には見えない）。
 - relay と LP の Worker は、リリースの前に cf deploy で出してある（本番の Durable Object は前後とも 39 個・データあり 6 個）。スマホで新しいシートの中身（エージェントごとのモデル等）が出るのは、この版の Mac のアプリに更新した後。それまではエージェント名だけのシートで作れる。
 - 次: 本人の実機で、ピル・スマホの新しいスレッドのシートと会話の設定を確かめる（RELEASE.md §1 の 5・6 は本人の手番）。
+
+## 2026-10-16 — テーマの色を設定 › 外観から個別に変える（theme_overrides）
+
+- 発端（コントリビュータのドッグフーディング）: Agent パネルで、エージェントのツール実行の行と返答が同じチャット面に並び、見分けにくかった。テーマを作り直さずに、選んでいるテーマの色だけを変えたい。
+- やったこと: テーマ JSON に `chat_step_bg`・`chat_agent_bg`・`chat_user_bg`（既定は塗らない・プロンプトは bg2）を足した。settings.json の `theme_overrides.<テーマ名>.<トークン>` で色を上書きし、Workspace は上書き前のテーマ（`theme_base`）に当て直す（`apply_base_theme`）。設定 › 外観 のテーマのチップの下に「色を個別に変える」を足した（トークンごとの行・幅を固定したリセット欄・カラーピッカー: 彩度と明度の四角、色相のバー、テーマのデフォルトと今の色の見本、hex 入力）。
+- 罠: GPUI の要素の `on_mouse_move` / `on_mouse_up` は、その要素がマウスの下にあると判定された時しか呼ばれず、設定ペインの root では受け取れなかった → ドラッグ中だけ canvas の paint で `window.on_mouse_event` を登録した。`svg()` は親の文字色を引き継がず、自分の `text_color` が無いと描かれない。observer がテーマ名で引き直すと、Windows / Linux で設定画面から選んだユーザーテーマ（themes の置き場が config_dir と state_dir で違う）が necoder Dark に戻る → 名前が同じ時は `theme_base` に当て直すだけにした。
+- 検証: `cargo test --workspace` green（1261 本）。追加: `every_color_field_has_a_token`（Theme の色のフィールドを足したら ThemeToken の追加漏れでコンパイルが落ちる）・settings_core の書き込みと削除・設定画面のドラッグと hex 入力・`theme_overrides_reapply_without_reloading_the_theme`（直しを外すと落ちることを確かめた）。macOS の Dev ビルド（`bundle-mac.sh release dev`）で、外観設定とチャットの塗りを目で確かめた。
+- 次: Windows / Linux の実機で、設定画面から選んだユーザーテーマの色を変えても戻らないか。

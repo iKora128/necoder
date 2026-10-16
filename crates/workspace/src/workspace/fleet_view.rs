@@ -1360,7 +1360,9 @@ impl Workspace {
             // ⚙ は編隊でも中央を占有する（solo の render_center と同じ扱い）。
             let view = self.chrome.settings_view.clone();
             let accent = self.accent();
-            view.update(cx, |view, _| view.set_visuals(self.theme.clone(), accent));
+            view.update(cx, |view, _| {
+                view.set_visuals(self.theme.clone(), self.theme_base.clone(), accent)
+            });
             center = center.child(div().flex_1().min_h_0().child(view));
         } else {
             center = center

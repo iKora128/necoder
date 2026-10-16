@@ -1353,7 +1353,8 @@ impl Workspace {
         origin: Option<gpui::Point<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        let theme = self.theme.clone();
+        // 新しい窓は上書き前のテーマを受け取り、自分で上書きを当てる。
+        let theme = self.theme_base.clone();
         let storage = self.persistence.storage.clone();
         let bounds = match origin {
             Some(origin) => Bounds::new(origin, size(px(1280.0), px(800.0))),

@@ -602,7 +602,7 @@ impl Workspace {
             })
             .collect();
         self.overlays.picker_themes = themes;
-        self.overlays.theme_before_preview = Some(self.theme.clone());
+        self.overlays.theme_before_preview = Some(self.theme_base.clone());
         self.open_picker(
             PickerMode::Themes,
             i18n::t!("theme.picker_placeholder"),
@@ -616,6 +616,14 @@ impl Workspace {
     pub(crate) fn themes_dir(&self) -> Option<PathBuf> {
         self.persistence.session_writer.as_ref()?;
         paths::state_dir().map(|dir| dir.join("themes"))
+    }
+
+    /// 上書き前のテーマに settings の `theme_overrides` を当てて適用する（テーマを読んだ経路はここを通す）。
+    pub(crate) fn apply_base_theme(&mut self, base: Theme, cx: &mut Context<Self>) {
+        let mut theme = base.clone();
+        settings::apply_theme_overrides(&mut theme, cx);
+        self.theme_base = base;
+        self.apply_theme(theme, cx);
     }
 
     /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。
@@ -702,7 +710,7 @@ impl Workspace {
     pub(crate) fn preview_theme(&mut self, id: usize, cx: &mut Context<Self>) {
         if let Some((_, source)) = self.overlays.picker_themes.get(id) {
             if let Ok(theme) = Theme::load(source) {
-                self.apply_theme(theme, cx);
+                self.apply_base_theme(theme, cx);
             }
         }
     }
@@ -715,7 +723,7 @@ impl Workspace {
             return;
         };
         let name = theme.name.to_string();
-        self.apply_theme(theme, cx);
+        self.apply_base_theme(theme, cx);
         self.overlays.theme_before_preview = None;
         // set_user_value = 永続化 + global 即時 reload（設定画面のテーマチップも同じ描画で追従する）。
         let result = settings::set_user_value(cx, "theme", serde_json::Value::String(name));
@@ -938,7 +946,7 @@ impl Workspace {
                 // テーマセレクタを中止したらプレビューを元へ戻す。
                 if self.overlays.picker_mode == PickerMode::Themes {
                     if let Some(theme) = self.overlays.theme_before_preview.take() {
-                        self.apply_theme(theme, cx);
+                        self.apply_base_theme(theme, cx);
                     }
                 }
                 self.close_picker(window, cx);

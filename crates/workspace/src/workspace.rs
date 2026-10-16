@@ -1731,7 +1731,10 @@ enum ManualUpdateCheck {
 
 pub struct Workspace {
     project_sessions: ProjectSessions,
+    /// 画面に当てているテーマ（`theme_base` に settings の `theme_overrides` を当てたもの）。
     theme: Theme,
+    /// 上書きを当てる前のテーマ。色の上書きだけが変わった時は、これに当て直す（テーマを読み直さない）。
+    theme_base: Theme,
     focus_handle: FocusHandle,
     chrome: ChromeState,
     overlays: WorkspaceOverlays,
@@ -5987,5 +5990,62 @@ mod tests {
         assert_eq!(filter_completion_indices(&items, "PO"), vec![2]); // 大小無視
         assert!(filter_completion_indices(&items, "zz").is_empty());
         assert_eq!(filter_completion_indices(&items, "").len(), 4);
+    }
+
+    /// テーマの色の上書き（`theme_overrides`）だけが変わった時は、テーマを読み直さずに当て直す。
+    /// themes フォルダから引けないテーマ（Windows / Linux で設定画面から選んだユーザーテーマは、
+    /// 置き場の違いでここに当たる）を使っていても、necoder Dark へ戻らない。
+    #[gpui::test]
+    fn theme_overrides_reapply_without_reloading_the_theme(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_theme_overrides_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+
+        let mut custom = Theme::dark();
+        custom.name = "Midnight".into();
+        workspace.update(cx, |workspace, cx| workspace.apply_base_theme(custom, cx));
+        cx.update(|_window, cx| {
+            settings::set_user_value(cx, "theme", json!("Midnight")).unwrap();
+            settings::set_theme_override(cx, "Midnight", "bg1", Some("#101010")).unwrap();
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.theme.name.as_ref(),
+                "Midnight",
+                "読み直して necoder Dark へ戻らない"
+            );
+            assert_eq!(workspace.theme.bg1, theme_core::color_from_hex(0x101010));
+            assert_eq!(
+                workspace.theme_base.bg1,
+                Theme::dark().bg1,
+                "上書き前のテーマは変えない"
+            );
+        });
+
+        cx.update(|_window, cx| settings::forget_theme_overrides(cx, "Midnight").unwrap());
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.theme.bg1, Theme::dark().bg1, "上書きを消すと戻る");
+        });
+
+        // 他のテストと同じ teardown race 回避（watcher を root 削除より先に落とす）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 }

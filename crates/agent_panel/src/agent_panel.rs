@@ -10526,7 +10526,7 @@ PYEOF"#;
                     .items_stretch()
                     .rounded(px(7.))
                     .overflow_hidden()
-                    .bg(theme.bg2)
+                    .bg(theme_core::ThemeToken::ChatUserBg.effective(theme))
                     .border_1()
                     .border_color(theme.border)
                     .child(div().w(px(2.)).flex_none().bg(color.alpha(0.65)))
@@ -10630,6 +10630,7 @@ PYEOF"#;
                 result,
                 result_lines,
                 diffs,
+                parent,
                 ..
             } => {
                 let result_language = infer_language_from_tool_argument(args.as_ref())
@@ -10848,6 +10849,18 @@ PYEOF"#;
                     .flex()
                     .gap(px(8.))
                     .text_size(px(12.5))
+                    // テーマが手順の面（chat_step_bg）を決めた時だけ塗る。既定は塗らない＝従来の見た目。
+                    // サブエージェントの手順（親の手順の中に畳む行）は親の面の中にあるので塗らない。
+                    .when_some(
+                        theme.chat_step_bg.filter(|_| parent.is_none()),
+                        |element, background| {
+                            element
+                                .bg(background)
+                                .rounded(px(7.))
+                                .px(px(10.))
+                                .py(px(6.))
+                        },
+                    )
                     .child(div().flex_none().text_color(claude_bullet()).child("⏺"))
                     .child(body)
                     .into_any_element()
@@ -10867,6 +10880,14 @@ PYEOF"#;
                     .gap(px(6.))
                     .text_size(px(12.5))
                     .text_color(theme.fg0)
+                    // テーマが回答の面（chat_agent_bg）を決めた時だけ塗る。既定は塗らない＝従来の見た目。
+                    .when_some(theme.chat_agent_bg, |element, background| {
+                        element
+                            .bg(background)
+                            .rounded(px(7.))
+                            .px(px(10.))
+                            .py(px(6.))
+                    })
                     .children(self.render_markdown(index, shown.as_ref(), cx))
                     .into_any_element()
             }

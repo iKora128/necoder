@@ -84,7 +84,7 @@ impl Workspace {
             settings::SettingsViewEvent::SelectTheme(source) => match Theme::load(source) {
                 Ok(theme) => {
                     let name = theme.name.to_string();
-                    self.apply_theme(theme, cx);
+                    self.apply_base_theme(theme, cx);
                     // set_user_value = 永続化 + global 即時 reload（チップの選択中表示も同じ描画で更新）。
                     let result =
                         settings::set_user_value(cx, "theme", serde_json::Value::String(name));
@@ -1989,7 +1989,9 @@ impl Workspace {
             // 設定ホーム（レール ⚙ で開閉）。第1セクション=Agents。
             let view = self.chrome.settings_view.clone();
             let accent = self.accent();
-            view.update(cx, |view, _| view.set_visuals(self.theme.clone(), accent));
+            view.update(cx, |view, _| {
+                view.set_visuals(self.theme.clone(), self.theme_base.clone(), accent)
+            });
             let body = div().flex_1().min_h_0().child(view);
             if self.tabs.is_empty() {
                 body.into_any_element()

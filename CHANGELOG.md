@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Added
+
+- **Customize theme colors**: Settings › Appearance has a "Customize colors" section under the theme chips. Click a color of the selected theme to open a color picker, drag and release or type a hex and press Enter, and the color is saved for that theme only (`theme_overrides` in settings.json). "Reset" returns a color to the theme default. No new theme file is created.
+- **Chat backgrounds**: themes can paint the agent's tool runs (`chat_step_bg`), the agent's replies (`chat_agent_bg`) and your prompts (`chat_user_bg`). Nothing changes unless a theme or an override sets them.
+
+### 日本語
+
+#### 追加
+
+- **テーマの色を個別に変えられる**：設定 › 外観 のテーマのチップの下に「色を個別に変える」を足しました。選んでいるテーマの色を押すとカラーピッカーが開き、ドラッグして離すか、hex を打って Enter で、そのテーマだけの色になります（settings.json の `theme_overrides`）。「リセット」でテーマのデフォルトに戻ります。テーマのファイルは増えません。
+- **チャットの背景**：テーマで、エージェントのツール実行（`chat_step_bg`）、エージェントの返答（`chat_agent_bg`）、プロンプト（`chat_user_bg`）の背景を塗れるようにしました。テーマか上書きで決めない限り、見た目は変わりません。
+
 ## [0.1.28] - 2026-10-12
 
 This release brings back the Agent, Model and Effort pills under the message box, lets you choose the agent, model and settings for a new thread from your phone, and makes the Japanese UI shorter and more natural. It is delivered through auto-update. If something does not work, please let us know in an Issue.
