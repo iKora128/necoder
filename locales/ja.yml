@@ -1025,6 +1025,38 @@ settings:
   locale_ja: 日本語
   locale_en: English
   theme_label: テーマ
+  theme_details: 色を個別に変える
+  theme_group_chat: チャット
+  theme_group_surface: 背景
+  theme_group_text: 文字
+  theme_group_status: 状態の色
+  theme_group_syntax: 構文の色
+  theme_token_chat_step_bg: エージェントのツール実行の背景
+  theme_token_chat_agent_bg: エージェントの返答の背景
+  theme_token_chat_user_bg: プロンプトの背景
+  theme_token_bg0: ウィンドウの外枠とドック（bg0）
+  theme_token_bg1: エディタとチャットの背景（bg1）
+  theme_token_bg2: カードと入力欄（bg2）
+  theme_token_bg3: ホバーと選択（bg3）
+  theme_token_border: 罫線
+  theme_token_fg0: 主な文字（fg0）
+  theme_token_fg1: 補助の文字（fg1）
+  theme_token_fg2: 控えめな文字と行番号（fg2）
+  theme_token_ok: 成功と追加
+  theme_token_warn: 警告と変更
+  theme_token_err: エラーと削除
+  theme_token_syntax_keyword: キーワード
+  theme_token_syntax_function: 関数
+  theme_token_syntax_type: 型
+  theme_token_syntax_string: 文字列
+  theme_token_syntax_number: 数値
+  theme_token_syntax_comment: コメント
+  theme_token_syntax_macro: マクロ
+  theme_token_syntax_punctuation: 記号
+  theme_reset_one: リセット
+  theme_reset_all: テーマのデフォルトにリセット
+  theme_color_close: 閉じる（Esc）
+  theme_color_default: テーマのデフォルト（クリックで戻す）
   open_json: settings.json を開く
   font_ui: "UI のフォント"
   font_code: "コードのフォント"

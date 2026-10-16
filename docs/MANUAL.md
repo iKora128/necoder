@@ -976,6 +976,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | キー | 既定 | 意味 |
 |---|---|---|
 | `theme` | `necoder-dark` | テーマ名 |
+| `theme_overrides` | `{}` | テーマごとの色の上書き（`{ "High Contrast Dark": { "bg1": "#101418", "chat_step_bg": "#0f1a24" } }`）。テーマ名は `theme` に保存される値（組み込みは `necoder-dark` などの id、同梱と自作のテーマは表示名）。キーは色トークンの名前で、構文の色は `syntax.keyword` のようにドットでつなぐ。設定 › 外観 の「色を個別に変える」でも書ける |
 | `font_size` / `tab_size` | `13` / `4` | 文字サイズ / タブ幅 |
 | `ui_font_family` | 空 | UI の書体（空 = 同梱の IBM Plex Sans JP。入っている書体の名前を書く。設定 › 外観 の「選ぶ…」でも選べる） |
 | `code_font_family` | 空 | コードの書体（空 = 同梱の Guguru Sans Code。エディタ・差分・パス・ターミナルの既定。等幅の書体を書く） |
@@ -1013,6 +1014,8 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 - **⌘K ⌘T** でテーマ選択（選んでいる間はライブプレビュー）
 - 同梱: necoder Dark / Light・Solarized Dark / Light・Gruvbox Dark・Catppuccin Mocha・High Contrast Dark
 - 自作テーマ: 色トークンを上書きする JSON を `~/Library/Application Support/necoder/themes/*.json` に置く
+- 色を個別に変える: 設定 › 外観 のテーマのチップの下にある「色を個別に変える」を開くと、選んでいるテーマの色が並ぶ。行を押すとカラーピッカーが開き、ドラッグして離すか、hex を打って Enter で、そのテーマだけの色になる（settings.json の `theme_overrides`）。「リセット」でテーマのデフォルトに戻る
+- チャットの背景: テーマ JSON の `chat_step_bg`（エージェントのツール実行の行）・`chat_agent_bg`（エージェントの返答）・`chat_user_bg`（プロンプト）で塗れる。書かなければ今までどおり（ツール実行と返答は塗らない・プロンプトは bg2）
 
 テーマ（画面の配色）とプロジェクト色（識別）は別の設定で、どのテーマでもプロジェクト色は同じ場所に出る。
 

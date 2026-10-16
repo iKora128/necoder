@@ -1024,6 +1024,38 @@ settings:
   locale_ja: 日本語
   locale_en: English
   theme_label: Theme
+  theme_details: Customize colors
+  theme_group_chat: Chat
+  theme_group_surface: Surfaces
+  theme_group_text: Text
+  theme_group_status: Status colors
+  theme_group_syntax: Syntax colors
+  theme_token_chat_step_bg: Agent tool run background
+  theme_token_chat_agent_bg: Agent reply background
+  theme_token_chat_user_bg: Prompt background
+  theme_token_bg0: Window frame and docks (bg0)
+  theme_token_bg1: Editor and chat surface (bg1)
+  theme_token_bg2: Cards and inputs (bg2)
+  theme_token_bg3: Hover and selection (bg3)
+  theme_token_border: Borders
+  theme_token_fg0: Main text (fg0)
+  theme_token_fg1: Secondary text (fg1)
+  theme_token_fg2: Muted text and line numbers (fg2)
+  theme_token_ok: Success and additions
+  theme_token_warn: Warnings and changes
+  theme_token_err: Errors and deletions
+  theme_token_syntax_keyword: Keyword
+  theme_token_syntax_function: Function
+  theme_token_syntax_type: Type
+  theme_token_syntax_string: String
+  theme_token_syntax_number: Number
+  theme_token_syntax_comment: Comment
+  theme_token_syntax_macro: Macro
+  theme_token_syntax_punctuation: Punctuation
+  theme_reset_one: Reset
+  theme_reset_all: Reset to theme defaults
+  theme_color_close: Close (Esc)
+  theme_color_default: Theme default (click to restore)
   open_json: Open settings.json
   font_ui: UI font
   font_code: Code font

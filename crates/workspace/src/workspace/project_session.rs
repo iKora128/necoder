@@ -599,6 +599,10 @@ impl Workspace {
         window_persistence: Option<WindowPersistence>,
         cx: &mut Context<Self>,
     ) -> Self {
+        // `theme` は上書き前のテーマ。窓の中の部品には、上書きを当てたテーマを配る。
+        let theme_base = theme;
+        let mut theme = theme_base.clone();
+        settings::apply_theme_overrides(&mut theme, cx);
         let mut projects = Vec::new();
         // 復元で開いた（= まだ host に何も聞いていない）project の添字。窓が出た後に
         // 背景で中身を埋める（`hydrate_restored_projects`）。
@@ -857,6 +861,7 @@ impl Workspace {
                 chat_active: false,
             },
             theme,
+            theme_base,
             focus_handle,
             chrome: ChromeState {
                 embedded_synced: None,
@@ -1185,13 +1190,21 @@ impl Workspace {
         // 設定が変わったら全エディタへ実効値を配り直す + 再描画（font_size/tab_size/soft_wrap の live 反映）。
         // theme も追従する（settings.json 手編集・CLI・別窓のどれでも ~1.2s poll で波及。チップ/
         // セレクタ経由は apply_theme 済みで名前が一致するため no-op＝多重適用しない）。
+        // 色の上書き（theme_overrides）だけが変わった時は、上書き前のテーマへ当て直す（読み直さない）。
         cx.observe_global::<settings::SettingsGlobal>(|workspace, cx| {
             let name = settings::get(cx).theme;
-            if workspace.theme.name.as_ref() != name {
-                let theme = theme_core::resolve(&name, workspace.themes_dir().as_deref());
-                if theme.name != workspace.theme.name {
-                    workspace.apply_theme(theme, cx);
+            let mut base = workspace.theme_base.clone();
+            if base.name.as_ref() != name {
+                let resolved = theme_core::resolve(&name, workspace.themes_dir().as_deref());
+                if resolved.name != base.name {
+                    base = resolved;
                 }
+            }
+            let mut theme = base.clone();
+            settings::apply_theme_overrides(&mut theme, cx);
+            if theme != workspace.theme {
+                workspace.theme_base = base;
+                workspace.apply_theme(theme, cx);
             }
             workspace.apply_editor_settings(cx);
             cx.notify();

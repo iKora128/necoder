@@ -57,6 +57,13 @@ pub struct Theme {
     pub warn: Hsla, // 診断・git（警告 / 変更）
     pub err: Hsla,  // 診断・git（エラー）
 
+    /// Agent パネルの手順（⏺ のツール行）の面。`None` = 塗らない（チャット面 bg1 のまま）。
+    pub chat_step_bg: Option<Hsla>,
+    /// Agent パネルのエージェント回答の面。`None` = 塗らない（チャット面 bg1 のまま）。
+    pub chat_agent_bg: Option<Hsla>,
+    /// Agent パネルのユーザープロンプトの面。`None` = bg2。
+    pub chat_user_bg: Option<Hsla>,
+
     pub syntax: SyntaxColors,
 }
 
@@ -82,6 +89,9 @@ impl Theme {
             ok: hex(0x7bc96f),
             warn: hex(0xe5c07b),
             err: hex(0xe06c75),
+            chat_step_bg: None,
+            chat_agent_bg: None,
+            chat_user_bg: None,
             syntax: SyntaxColors {
                 keyword: hex(0xc678dd),
                 function: hex(0x61afef),
@@ -112,6 +122,9 @@ impl Theme {
             ok: hex(0x3e9d32),
             warn: hex(0xbf8803),
             err: hex(0xe45649),
+            chat_step_bg: None,
+            chat_agent_bg: None,
+            chat_user_bg: None,
             syntax: SyntaxColors {
                 keyword: hex(0xa626a4),
                 function: hex(0x4078f2),
@@ -242,6 +255,9 @@ struct ThemeOverrides {
     ok: Option<String>,
     warn: Option<String>,
     err: Option<String>,
+    chat_step_bg: Option<String>,
+    chat_agent_bg: Option<String>,
+    chat_user_bg: Option<String>,
     syntax: Option<SyntaxOverrides>,
 }
 
@@ -281,6 +297,9 @@ impl ThemeOverrides {
         override_color(&mut theme.ok, self.ok);
         override_color(&mut theme.warn, self.warn);
         override_color(&mut theme.err, self.err);
+        override_optional_color(&mut theme.chat_step_bg, self.chat_step_bg);
+        override_optional_color(&mut theme.chat_agent_bg, self.chat_agent_bg);
+        override_optional_color(&mut theme.chat_user_bg, self.chat_user_bg);
         if let Some(syntax) = self.syntax {
             override_color(&mut theme.syntax.keyword, syntax.keyword);
             override_color(&mut theme.syntax.function, syntax.function);
@@ -302,8 +321,15 @@ fn override_color(field: &mut Hsla, value: Option<String>) {
     }
 }
 
+/// 既定で塗らない（`None`）トークン用。`value` が有効な hex なら `field` を `Some` で上書き。
+fn override_optional_color(field: &mut Option<Hsla>, value: Option<String>) {
+    if let Some(color) = value.as_deref().and_then(parse_hex) {
+        *field = Some(color);
+    }
+}
+
 /// `#rrggbb` / `#rrggbbaa`（`#` 省略可）を [`Hsla`] に。不正は `None`。
-fn parse_hex(value: &str) -> Option<Hsla> {
+pub fn parse_hex(value: &str) -> Option<Hsla> {
     let body = value.trim().trim_start_matches('#');
     match body.len() {
         6 => u32::from_str_radix(body, 16)
@@ -392,6 +418,194 @@ pub fn resolve(name: &str, themes_dir: Option<&Path>) -> Theme {
         }
     }
     Theme::dark()
+}
+
+// ── 外観設定からの個別上書き（settings.json の theme_overrides）──
+
+/// 外観設定で個別に上書きできる色トークン。[`ThemeToken::key`] は settings.json の
+/// `theme_overrides.<テーマ名>` のキー（構文色は `syntax.keyword` のようにドットで区切る）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ThemeToken {
+    Bg0,
+    Bg1,
+    Bg2,
+    Bg3,
+    Fg0,
+    Fg1,
+    Fg2,
+    Border,
+    Ok,
+    Warn,
+    Err,
+    SyntaxKeyword,
+    SyntaxFunction,
+    SyntaxType,
+    SyntaxString,
+    SyntaxNumber,
+    SyntaxComment,
+    SyntaxMacro,
+    SyntaxPunctuation,
+    ChatStepBg,
+    ChatAgentBg,
+    ChatUserBg,
+}
+
+impl ThemeToken {
+    /// 上書きできるトークンのすべて（外観設定は、まとまりの中をこの順で並べる）。
+    pub const ALL: [ThemeToken; 22] = [
+        ThemeToken::Bg0,
+        ThemeToken::Bg1,
+        ThemeToken::Bg2,
+        ThemeToken::Bg3,
+        ThemeToken::Border,
+        ThemeToken::Fg0,
+        ThemeToken::Fg1,
+        ThemeToken::Fg2,
+        ThemeToken::Ok,
+        ThemeToken::Warn,
+        ThemeToken::Err,
+        ThemeToken::SyntaxKeyword,
+        ThemeToken::SyntaxFunction,
+        ThemeToken::SyntaxType,
+        ThemeToken::SyntaxString,
+        ThemeToken::SyntaxNumber,
+        ThemeToken::SyntaxComment,
+        ThemeToken::SyntaxMacro,
+        ThemeToken::SyntaxPunctuation,
+        ThemeToken::ChatUserBg,
+        ThemeToken::ChatStepBg,
+        ThemeToken::ChatAgentBg,
+    ];
+
+    /// settings.json の `theme_overrides.<テーマ名>` で使うキー。
+    pub fn key(self) -> &'static str {
+        match self {
+            ThemeToken::Bg0 => "bg0",
+            ThemeToken::Bg1 => "bg1",
+            ThemeToken::Bg2 => "bg2",
+            ThemeToken::Bg3 => "bg3",
+            ThemeToken::Fg0 => "fg0",
+            ThemeToken::Fg1 => "fg1",
+            ThemeToken::Fg2 => "fg2",
+            ThemeToken::Border => "border",
+            ThemeToken::Ok => "ok",
+            ThemeToken::Warn => "warn",
+            ThemeToken::Err => "err",
+            ThemeToken::SyntaxKeyword => "syntax.keyword",
+            ThemeToken::SyntaxFunction => "syntax.function",
+            ThemeToken::SyntaxType => "syntax.type",
+            ThemeToken::SyntaxString => "syntax.string",
+            ThemeToken::SyntaxNumber => "syntax.number",
+            ThemeToken::SyntaxComment => "syntax.comment",
+            ThemeToken::SyntaxMacro => "syntax.macro",
+            ThemeToken::SyntaxPunctuation => "syntax.punctuation",
+            ThemeToken::ChatStepBg => "chat_step_bg",
+            ThemeToken::ChatAgentBg => "chat_agent_bg",
+            ThemeToken::ChatUserBg => "chat_user_bg",
+        }
+    }
+
+    /// [`ThemeToken::key`] の逆引き。知らないキーは `None`。
+    pub fn from_key(key: &str) -> Option<ThemeToken> {
+        ThemeToken::ALL.into_iter().find(|token| token.key() == key)
+    }
+
+    /// 画面に描かれる色。チャット用トークンが未設定なら、代わりに描かれる面の色を返す。
+    pub fn effective(self, theme: &Theme) -> Hsla {
+        match self {
+            ThemeToken::Bg0 => theme.bg0,
+            ThemeToken::Bg1 => theme.bg1,
+            ThemeToken::Bg2 => theme.bg2,
+            ThemeToken::Bg3 => theme.bg3,
+            ThemeToken::Fg0 => theme.fg0,
+            ThemeToken::Fg1 => theme.fg1,
+            ThemeToken::Fg2 => theme.fg2,
+            ThemeToken::Border => theme.border,
+            ThemeToken::Ok => theme.ok,
+            ThemeToken::Warn => theme.warn,
+            ThemeToken::Err => theme.err,
+            ThemeToken::SyntaxKeyword => theme.syntax.keyword,
+            ThemeToken::SyntaxFunction => theme.syntax.function,
+            ThemeToken::SyntaxType => theme.syntax.type_,
+            ThemeToken::SyntaxString => theme.syntax.string,
+            ThemeToken::SyntaxNumber => theme.syntax.number,
+            ThemeToken::SyntaxComment => theme.syntax.comment,
+            ThemeToken::SyntaxMacro => theme.syntax.macro_,
+            ThemeToken::SyntaxPunctuation => theme.syntax.punctuation,
+            ThemeToken::ChatStepBg => theme.chat_step_bg.unwrap_or(theme.bg1),
+            ThemeToken::ChatAgentBg => theme.chat_agent_bg.unwrap_or(theme.bg1),
+            ThemeToken::ChatUserBg => theme.chat_user_bg.unwrap_or(theme.bg2),
+        }
+    }
+
+    /// `theme` のこのトークンを `color` にする（チャット用トークンは塗る側へ切り替わる）。
+    pub fn set(self, theme: &mut Theme, color: Hsla) {
+        match self {
+            ThemeToken::Bg0 => theme.bg0 = color,
+            ThemeToken::Bg1 => theme.bg1 = color,
+            ThemeToken::Bg2 => theme.bg2 = color,
+            ThemeToken::Bg3 => theme.bg3 = color,
+            ThemeToken::Fg0 => theme.fg0 = color,
+            ThemeToken::Fg1 => theme.fg1 = color,
+            ThemeToken::Fg2 => theme.fg2 = color,
+            ThemeToken::Border => theme.border = color,
+            ThemeToken::Ok => theme.ok = color,
+            ThemeToken::Warn => theme.warn = color,
+            ThemeToken::Err => theme.err = color,
+            ThemeToken::SyntaxKeyword => theme.syntax.keyword = color,
+            ThemeToken::SyntaxFunction => theme.syntax.function = color,
+            ThemeToken::SyntaxType => theme.syntax.type_ = color,
+            ThemeToken::SyntaxString => theme.syntax.string = color,
+            ThemeToken::SyntaxNumber => theme.syntax.number = color,
+            ThemeToken::SyntaxComment => theme.syntax.comment = color,
+            ThemeToken::SyntaxMacro => theme.syntax.macro_ = color,
+            ThemeToken::SyntaxPunctuation => theme.syntax.punctuation = color,
+            ThemeToken::ChatStepBg => theme.chat_step_bg = Some(color),
+            ThemeToken::ChatAgentBg => theme.chat_agent_bg = Some(color),
+            ThemeToken::ChatUserBg => theme.chat_user_bg = Some(color),
+        }
+    }
+
+    /// `to` のこのトークンだけを `from` の値へ戻す（チャット用トークンは「塗らない」も含めて写す）。
+    /// 上書き前のテーマから戻せば、このトークンを戻した時に画面へ出る色を [`Self::effective`] で引ける。
+    pub fn restore(self, from: &Theme, to: &mut Theme) {
+        match self {
+            ThemeToken::ChatStepBg => to.chat_step_bg = from.chat_step_bg,
+            ThemeToken::ChatAgentBg => to.chat_agent_bg = from.chat_agent_bg,
+            ThemeToken::ChatUserBg => to.chat_user_bg = from.chat_user_bg,
+            token => token.set(to, token.effective(from)),
+        }
+    }
+}
+
+/// settings.json の `theme_overrides.<テーマ名>`（キー → `#rrggbb`）をテーマへ当てる。
+/// 知らないキーと読めない色は飛ばす（手編集の誤りで外観全体を壊さない）。
+pub fn apply_overrides<'a>(
+    theme: &mut Theme,
+    overrides: impl IntoIterator<Item = (&'a str, &'a str)>,
+) {
+    for (key, value) in overrides {
+        if let (Some(token), Some(color)) = (ThemeToken::from_key(key), parse_hex(value)) {
+            token.set(theme, color);
+        }
+    }
+}
+
+/// Hsla を `#rrggbb`（不透明）か `#rrggbbaa`（透明度あり）の文字列へ。settings.json へ書くときに使う。
+pub fn hex_string(color: Hsla) -> String {
+    let rgba = Rgba::from(color);
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let (red, green, blue, alpha) = (
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+        channel(rgba.a),
+    );
+    if alpha == u8::MAX {
+        format!("#{red:02x}{green:02x}{blue:02x}")
+    } else {
+        format!("#{red:02x}{green:02x}{blue:02x}{alpha:02x}")
+    }
 }
 
 /// プロジェクトの識別（レール項目・ピル左縁 等に流れる）。UI-SPEC §1.2 / §2。
@@ -661,6 +875,7 @@ mod tests {
         std::fs::write(
             &path,
             r##"{ "name": "Midnight", "appearance": "light", "bg0": "#000000",
+                 "chat_step_bg": "#112233",
                  "syntax": { "keyword": "#ff0088ff" } }"##,
         )
         .unwrap();
@@ -672,6 +887,9 @@ mod tests {
         assert_eq!(theme.bg1, Theme::light().bg1); // 未指定 → 土台のまま
         assert_eq!(theme.syntax.keyword, h(0xff0088)); // alpha=ff → 不透明
         assert_eq!(theme.syntax.string, Theme::light().syntax.string); // 未指定 → 土台
+        assert_eq!(theme.chat_step_bg, Some(h(0x112233))); // 指定 → その色で塗る
+        assert_eq!(theme.chat_agent_bg, None); // 未指定 → 塗らない
+        assert_eq!(Theme::dark().chat_step_bg, None); // 組み込みは塗らない＝従来の見た目
 
         // 一覧に組み込み 2 種 + 同梱 5 種 + ユーザー 1 種が並ぶ（ユーザーは末尾）。
         let list = available_themes(Some(&dir));
@@ -686,5 +904,138 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_keys_round_trip_and_are_unique() {
+        let mut keys = std::collections::HashSet::new();
+        for token in ThemeToken::ALL {
+            assert_eq!(ThemeToken::from_key(token.key()), Some(token));
+            assert!(keys.insert(token.key()), "キーが重複: {}", token.key());
+        }
+        assert_eq!(ThemeToken::from_key("nope"), None);
+    }
+
+    #[test]
+    fn overrides_replace_only_listed_tokens() {
+        let mut theme = Theme::dark();
+        apply_overrides(
+            &mut theme,
+            [
+                ("bg1", "#101010"),
+                ("syntax.keyword", "#ff0000"),
+                ("chat_user_bg", "#00ff00"),
+                ("unknown", "#123456"), // 知らないキーは飛ばす
+                ("fg0", "not-a-color"), // 読めない色は飛ばす
+            ],
+        );
+        assert_eq!(theme.bg1, h(0x101010));
+        assert_eq!(theme.syntax.keyword, h(0xff0000));
+        assert_eq!(theme.chat_user_bg, Some(h(0x00ff00)));
+        assert_eq!(theme.fg0, Theme::dark().fg0);
+        assert_eq!(theme.bg2, Theme::dark().bg2);
+    }
+
+    #[test]
+    fn chat_tokens_fall_back_to_the_surface_they_replace() {
+        let theme = Theme::dark();
+        assert_eq!(ThemeToken::ChatStepBg.effective(&theme), theme.bg1);
+        assert_eq!(ThemeToken::ChatAgentBg.effective(&theme), theme.bg1);
+        assert_eq!(ThemeToken::ChatUserBg.effective(&theme), theme.bg2);
+        assert_eq!(hex_string(h(0x1b1e25)), "#1b1e25");
+        assert_eq!(hex_string(h(0x1b1e25).alpha(0.5)), "#1b1e2580");
+        assert_eq!(
+            parse_hex("#1b1e2580").map(hex_string).as_deref(),
+            Some("#1b1e2580")
+        );
+    }
+
+    #[test]
+    fn every_color_field_has_a_token() {
+        // Theme に色のフィールドを足したら、下の分解がコンパイルで落ちる＝ThemeToken にも足すこと。
+        let mut theme = Theme::dark();
+        let mut assigned = std::collections::BTreeSet::new();
+        for (index, token) in ThemeToken::ALL.into_iter().enumerate() {
+            let color = (index as u32 + 1) * 0x0a0b0c;
+            token.set(&mut theme, h(color));
+            assigned.insert(color);
+        }
+        let Theme {
+            name: _,
+            appearance: _,
+            bg0,
+            bg1,
+            bg2,
+            bg3,
+            fg0,
+            fg1,
+            fg2,
+            border,
+            ok,
+            warn,
+            err,
+            chat_step_bg,
+            chat_agent_bg,
+            chat_user_bg,
+            syntax:
+                SyntaxColors {
+                    keyword,
+                    function,
+                    type_,
+                    string,
+                    number,
+                    comment,
+                    macro_,
+                    punctuation,
+                },
+        } = theme;
+        let optional = [chat_step_bg, chat_agent_bg, chat_user_bg];
+        assert!(
+            optional.iter().all(Option::is_some),
+            "チャット用トークンも塗る側へ変わる"
+        );
+        let fields: std::collections::BTreeSet<u32> = [
+            bg0,
+            bg1,
+            bg2,
+            bg3,
+            fg0,
+            fg1,
+            fg2,
+            border,
+            ok,
+            warn,
+            err,
+            keyword,
+            function,
+            type_,
+            string,
+            number,
+            comment,
+            macro_,
+            punctuation,
+        ]
+        .into_iter()
+        .chain(optional.into_iter().flatten())
+        .map(hex_from_color)
+        .collect();
+        assert_eq!(
+            fields, assigned,
+            "どの色のフィールドも ThemeToken から変えられる"
+        );
+    }
+
+    #[test]
+    fn restore_copies_one_token_including_unpainted_chat_tokens() {
+        let base = Theme::dark();
+        let mut theme = Theme::dark();
+        ThemeToken::Bg1.set(&mut theme, h(0x101010));
+        ThemeToken::ChatStepBg.set(&mut theme, h(0x202020));
+        ThemeToken::ChatStepBg.restore(&base, &mut theme);
+        assert_eq!(theme.chat_step_bg, None, "塗らない状態へ戻る");
+        // 戻した時に出る色は、上書きした bg1（チャット面）。
+        assert_eq!(ThemeToken::ChatStepBg.effective(&theme), h(0x101010));
+        ThemeToken::Bg1.restore(&base, &mut theme);
+        assert_eq!(theme.bg1, base.bg1);
     }
 }

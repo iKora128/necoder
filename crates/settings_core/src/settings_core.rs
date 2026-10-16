@@ -373,6 +373,9 @@ pub struct McpServerSetting {
 pub struct Settings {
     /// テーマ名（theme_core の組み込み名 or ユーザーテーマ）。
     pub theme: String,
+    /// テーマごとの色の上書き（`theme_overrides.<テーマ名>.<トークン>` = `#rrggbb`・外観設定の「詳細」）。
+    /// 型の誤った手編集で設定全体を読めなくしないよう JSON のまま持ち、読める物だけを使う側で拾う。
+    pub theme_overrides: Value,
     pub density: Density,
     pub font_size: f32,
     pub tab_size: usize,
@@ -556,6 +559,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "necoder-dark".to_string(),
+            theme_overrides: Value::Object(serde_json::Map::new()),
             density: Density::Compact,
             font_size: 13.0,
             tab_size: 4,
@@ -648,6 +652,22 @@ pub enum AutoSave {
 }
 
 impl Settings {
+    /// `theme_overrides.<theme_name>` の（トークンのキー, 色）。文字列でない値は飛ばす。
+    pub fn theme_override_pairs(&self, theme_name: &str) -> Vec<(String, String)> {
+        self.theme_overrides
+            .get(theme_name)
+            .and_then(Value::as_object)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|color| (key.clone(), color.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// エージェント（`AgentKind::id`）を使うか（`disabled_agents` に無ければ使う・O16）。
     pub fn agent_enabled(&self, agent_id: &str) -> bool {
         !self.disabled_agents.iter().any(|id| id == agent_id)
@@ -694,6 +714,7 @@ impl Settings {
 /// 組み込みの既定設定（最下層。ユーザーが見られる正の既定値）。
 pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "theme": "necoder-dark",
+  "theme_overrides": {},
   "density": "compact",
   "font_size": 13.0,
   "tab_size": 4,
@@ -1042,6 +1063,58 @@ pub fn forget_agent_config_default(path: &Path, agent_id: &str, config_id: &str)
         defaults.remove(agent_id);
     }
     write_settings_object(path, root)
+}
+
+/// `theme_overrides.<theme>.<key>` の 1 点を user 設定ファイルへ書く（外観設定の色の上書き）。
+/// `None` はその 1 点を消し、空になったテーマと `theme_overrides` も消す（`{}` を残さない）。
+/// [`persist_agent_config_default`] と同じ理由で **user ファイル自身の値だけ**を読んで更新する。
+pub fn persist_theme_override(
+    path: &Path,
+    theme: &str,
+    key: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    let overrides = object_entry(&mut root, "theme_overrides");
+    match value {
+        Some(color) => {
+            object_entry(overrides, theme)
+                .insert(key.to_string(), Value::String(color.to_string()));
+        }
+        None => {
+            let theme_empty = match overrides.get_mut(theme).and_then(Value::as_object_mut) {
+                Some(entries) => {
+                    entries.remove(key);
+                    entries.is_empty()
+                }
+                None => false,
+            };
+            if theme_empty {
+                overrides.remove(theme);
+            }
+        }
+    }
+    drop_empty_theme_overrides(&mut root);
+    write_settings_object(path, root)
+}
+
+/// `theme_overrides.<theme>` を丸ごと user 設定ファイルから消す（外観設定の「テーマのデフォルトにリセット」）。
+pub fn forget_theme_overrides(path: &Path, theme: &str) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    object_entry(&mut root, "theme_overrides").remove(theme);
+    drop_empty_theme_overrides(&mut root);
+    write_settings_object(path, root)
+}
+
+/// 上書きが 1 つも残っていない `theme_overrides` を消す（`{}` を残さない）。
+fn drop_empty_theme_overrides(root: &mut serde_json::Map<String, Value>) {
+    if root
+        .get("theme_overrides")
+        .and_then(Value::as_object)
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        root.remove("theme_overrides");
+    }
 }
 
 /// 権限モードの既定（`agent_permission_default`）を書き、全エージェントのピルの記憶（`mode`）を消す
@@ -1477,6 +1550,60 @@ mod tests {
         // 未知の名前は「発見済みサーバの on/off だけの行」として足される。
         assert_eq!(written["mcp_servers"]["higgsfield"]["enabled"], true);
         assert!(written["mcp_servers"]["higgsfield"]["command"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persists_and_forgets_theme_overrides_per_theme() {
+        let dir =
+            std::env::temp_dir().join(format!("necoder_theme_overrides_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).expect("作れる");
+        std::fs::write(&path, r#"{ "theme": "High Contrast Dark" }"#).expect("書ける");
+        let read = |path: &Path| -> Value {
+            serde_json::from_str(&std::fs::read_to_string(path).expect("読める")).expect("JSON")
+        };
+
+        persist_theme_override(&path, "High Contrast Dark", "bg1", Some("#101010")).expect("保存");
+        persist_theme_override(&path, "High Contrast Dark", "chat_step_bg", Some("#0f1a24"))
+            .expect("保存");
+        persist_theme_override(&path, "necoder-dark", "fg0", Some("#ffffff")).expect("保存");
+        let written = read(&path);
+        assert_eq!(written["theme"], "High Contrast Dark");
+        assert_eq!(
+            written["theme_overrides"]["High Contrast Dark"]["bg1"],
+            "#101010"
+        );
+        assert_eq!(written["theme_overrides"]["necoder-dark"]["fg0"], "#ffffff");
+
+        // 1 点だけ消すと、同じテーマの他の上書きは残る。
+        persist_theme_override(&path, "High Contrast Dark", "bg1", None).expect("消せる");
+        let written = read(&path);
+        assert!(written["theme_overrides"]["High Contrast Dark"]["bg1"].is_null());
+        assert_eq!(
+            written["theme_overrides"]["High Contrast Dark"]["chat_step_bg"],
+            "#0f1a24"
+        );
+
+        // テーマごと戻すと、そのテーマの上書きだけが消える。全部消えたら theme_overrides も消える。
+        forget_theme_overrides(&path, "High Contrast Dark").expect("戻せる");
+        let written = read(&path);
+        assert!(written["theme_overrides"]["High Contrast Dark"].is_null());
+        assert_eq!(written["theme_overrides"]["necoder-dark"]["fg0"], "#ffffff");
+        persist_theme_override(&path, "necoder-dark", "fg0", None).expect("消せる");
+        assert!(read(&path).get("theme_overrides").is_none());
+
+        // 読み出し側は文字列だけを拾う（手編集の誤りで設定全体を落とさない）。
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "theme_overrides": { "Solarized Dark": { "bg0": "#000000", "bg1": 3 } }
+        }))
+        .expect("読める");
+        assert_eq!(
+            settings.theme_override_pairs("Solarized Dark"),
+            vec![("bg0".to_string(), "#000000".to_string())]
+        );
+        assert!(settings.theme_override_pairs("necoder-dark").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

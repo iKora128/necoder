@@ -25,6 +25,7 @@ mod agent_launch;
 mod agents_page;
 mod connections;
 mod remote;
+mod theme_colors;
 
 pub use agent_launch::set_agent_server;
 pub use agents_page::AgentHost;
@@ -518,6 +519,39 @@ pub fn set_nested_user_value(
     })
 }
 
+/// `theme_overrides.<theme>.<key>` を更新して**即適用 + 永続化**する（`None` = その色をテーマのデフォルトへ戻す）。
+pub fn set_theme_override(
+    cx: &mut App,
+    theme: &str,
+    key: &str,
+    value: Option<&str>,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_theme_override(path, theme, key, value)
+    })
+}
+
+/// `theme_overrides.<theme>` を丸ごと消して、そのテーマの色をすべてテーマのデフォルトへ戻す。
+pub fn forget_theme_overrides(cx: &mut App, theme: &str) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::forget_theme_overrides(path, theme)
+    })
+}
+
+/// 設定の `theme_overrides.<テーマ名>` をテーマへ当てる（テーマを読んだ直後に必ず通す）。
+pub fn apply_theme_overrides(theme: &mut Theme, cx: &App) {
+    let Some(global) = cx.try_global::<SettingsGlobal>() else {
+        return;
+    };
+    let pairs = global.settings().theme_override_pairs(theme.name.as_ref());
+    theme_core::apply_overrides(
+        theme,
+        pairs
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+}
+
 /// `mcp_servers.<name>.enabled` を更新して**即適用 + 永続化**する（設定画面のトグル）。
 /// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。次に開くセッションから効く。
 pub fn set_mcp_enabled(cx: &mut App, name: &str, enabled: bool) -> anyhow::Result<()> {
@@ -730,6 +764,9 @@ fn themes_dir() -> Option<PathBuf> {
 /// 設定ホーム。設定値の保存は自身で行い、Window/Terminal が必要な操作だけ shell へ上げる。
 pub struct SettingsView {
     theme: Theme,
+    /// 上書き（`theme_overrides`）を当てる前のテーマ。外観の「色を個別に変える」の見本が、
+    /// テーマのデフォルトの色をここから引く。
+    theme_base: Theme,
     accent: Hsla,
     auth_states: Vec<acp_client::AgentAuthState>,
     /// このマシンの事実（PATH・入れてある版・ログインの跡・`acp_client::readiness`）。CLI の調査と一緒に
@@ -757,6 +794,10 @@ pub struct SettingsView {
     themes: Vec<(SharedString, theme_core::ThemeSource)>,
     /// 表示中のページ（左ナビの選択）。永続化しない（[`SettingsPage`]）。
     page: SettingsPage,
+    /// 外観 › テーマの「色を個別に変える」を開いているか（ビューのメモリ）。
+    theme_details_open: bool,
+    /// 「色を個別に変える」で色を編んでいるトークン（1 つだけ・`theme_colors`）。
+    color_editor: Option<theme_colors::ColorEditor>,
     /// MCP サーバの一覧（設定 + 他ツールからの発見）。描画毎に 3 本のファイルを読まないよう
     /// キャッシュし、設定を開き直すたび / トグルするたびに [`Self::refresh_availability`] で更新。
     mcp_servers: Vec<acp_client::mcp::McpServerConfig>,
@@ -890,6 +931,7 @@ impl SettingsView {
             }
         });
         let mut view = Self {
+            theme_base: theme.clone(),
             theme,
             accent,
             auth_states: vec![acp_client::AgentAuthState::SignedOut; acp_client::AGENTS.len()],
@@ -899,6 +941,8 @@ impl SettingsView {
             remote_facts: std::collections::HashMap::new(),
             agent_host_generation: 0,
             expanded_agent: None,
+            theme_details_open: false,
+            color_editor: None,
             checking_agents: true,
             availability_generation: 0,
             watching_agents: vec![false; acp_client::AGENTS.len()],
@@ -976,8 +1020,14 @@ impl SettingsView {
         self.select_page(page, cx);
     }
 
-    pub fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
+    /// 窓のテーマ（上書きを当てたもの・当てる前のもの）とアクセントを受け取る（毎描画）。
+    pub fn set_visuals(&mut self, theme: Theme, theme_base: Theme, accent: Hsla) {
+        // 別のテーマに切り替わったら、前のテーマの色を編んでいたピッカーは閉じる。
+        if theme.name != self.theme.name {
+            self.color_editor = None;
+        }
         self.theme = theme;
+        self.theme_base = theme_base;
         self.accent = accent;
     }
 
@@ -2171,11 +2221,22 @@ impl SettingsView {
                     .when(self.searching(), |heading| heading.hidden()),
             )
             // チップは数がテーマの数だけ増える＝右列に収まらない。上下 2 段の器を使う。
-            .child(self.pref_stack(
-                i18n::t!("settings.theme_label"),
-                None,
-                chips.into_any_element(),
-            ))
+            // チップの下に、選択中のテーマの色を 1 つずつ変える「色を個別に変える」を置く（検索中は出さない）。
+            .child(
+                self.pref_stack(
+                    i18n::t!("settings.theme_label"),
+                    None,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(chips)
+                        .when(!self.searching(), |element| {
+                            element.child(self.theme_details(settings, cx))
+                        })
+                        .into_any_element(),
+                ),
+            )
             // 表示言語（O27）。言語名はどの言語でも自分の言語で書く（日本語 / English）。
             .child(self.segmented_row_with(
                 "locale",

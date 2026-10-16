@@ -396,6 +396,10 @@ impl gpui::AssetSource for Assets {
             "icons/pin.svg" => icon!("pin.svg"),
             // エクスプローラの手動更新（ヘッダ右端）・Web タブの再読込。
             "icons/refresh-cw.svg" => icon!("refresh-cw.svg"),
+            // 設定 › 外観の色の個別変更（開閉・ピッカーを閉じる）。
+            "icons/chevron-right.svg" => icon!("chevron-right.svg"),
+            "icons/chevron-down.svg" => icon!("chevron-down.svg"),
+            "icons/x.svg" => icon!("x.svg"),
             // Web タブのツールバー（戻る / 進む / DevTools / 既定のブラウザで開く）。
             "icons/arrow-left.svg" => icon!("arrow-left.svg"),
             "icons/arrow-right.svg" => icon!("arrow-right.svg"),
@@ -527,6 +531,7 @@ fn resolve_theme(cx: &App) -> theme_core::Theme {
         .and_then(Path::parent)
         .map(|dir| dir.join("themes"));
     let theme_name = std::env::var("NECODER_THEME").unwrap_or_else(|_| settings::get(cx).theme);
+    // 色の上書き（theme_overrides）は Workspace が当てる（上書き前のテーマも持つため）。
     theme_core::resolve(&theme_name, themes_dir.as_deref())
 }
 
