@@ -756,9 +756,12 @@ fn search_matches(query: &str, haystacks: &[&str]) -> bool {
     words.peek().is_some() && words.all(|word| haystack.contains(&word.to_lowercase()))
 }
 
-/// テーマ保存ディレクトリ（user settings.json と同じ設定フォルダの `themes/`）。
-fn themes_dir() -> Option<PathBuf> {
-    Some(user_settings_path()?.parent()?.join("themes"))
+/// ユーザーテーマの置き場（user の settings.json と同じフォルダの `themes/`）。起動時の解決・設定画面・
+/// テーマセレクタ・「自分のテーマとして保存」はどれもここだけを見る（OS ごとに置き場を食い違わせない）。
+/// 設定を初期化していなければ `None`（テストは一時フォルダの settings.json の隣になる）。
+pub fn user_themes_dir(cx: &App) -> Option<PathBuf> {
+    let global = cx.try_global::<SettingsGlobal>()?;
+    Some(global.user_path.as_ref()?.parent()?.join("themes"))
 }
 
 /// 設定ホーム。設定値の保存は自身で行い、Window/Terminal が必要な操作だけ shell へ上げる。
@@ -798,6 +801,10 @@ pub struct SettingsView {
     theme_details_open: bool,
     /// 「色を個別に変える」で色を編んでいるトークン（1 つだけ・`theme_colors`）。
     color_editor: Option<theme_colors::ColorEditor>,
+    /// 「自分のテーマとして保存」の名前の入力（開いている間だけ）。
+    theme_save: Option<theme_colors::ThemeSaveForm>,
+    /// 右のページのスクロール。撮影用の命令が一覧の下（保存の入力）まで送るのに使う。
+    page_scroll: gpui::ScrollHandle,
     /// MCP サーバの一覧（設定 + 他ツールからの発見）。描画毎に 3 本のファイルを読まないよう
     /// キャッシュし、設定を開き直すたび / トグルするたびに [`Self::refresh_availability`] で更新。
     mcp_servers: Vec<acp_client::mcp::McpServerConfig>,
@@ -943,11 +950,13 @@ impl SettingsView {
             expanded_agent: None,
             theme_details_open: false,
             color_editor: None,
+            theme_save: None,
+            page_scroll: gpui::ScrollHandle::new(),
             checking_agents: true,
             availability_generation: 0,
             watching_agents: vec![false; acp_client::AGENTS.len()],
             availability_pending: false,
-            themes: theme_core::available_themes(themes_dir().as_deref()),
+            themes: theme_core::available_themes(user_themes_dir(cx).as_deref()),
             page: SettingsPage::Agents,
             mcp_servers: Vec::new(),
             mcp_filter_source: None,
@@ -1025,6 +1034,7 @@ impl SettingsView {
         // 別のテーマに切り替わったら、前のテーマの色を編んでいたピッカーは閉じる。
         if theme.name != self.theme.name {
             self.color_editor = None;
+            self.theme_save = None;
         }
         self.theme = theme;
         self.theme_base = theme_base;
@@ -1033,7 +1043,7 @@ impl SettingsView {
 
     /// テーマ / MCP の一覧を読み直す（同期・fs のみ）。描画毎の fs 走査を避けるキャッシュの更新。
     fn refresh_lists(&mut self, cx: &mut Context<Self>) {
-        self.themes = theme_core::available_themes(themes_dir().as_deref());
+        self.themes = theme_core::available_themes(user_themes_dir(cx).as_deref());
         self.mcp_servers = mcp_servers(cx);
         self.accounts = acp_client::AGENTS
             .iter()
@@ -3923,6 +3933,7 @@ impl Render for SettingsView {
                     .min_w_0()
                     .h_full()
                     .overflow_y_scroll()
+                    .track_scroll(&self.page_scroll)
                     .child(
                         div().flex().justify_center().px(px(28.)).py(px(24.)).child(
                             div()

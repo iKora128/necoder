@@ -1195,7 +1195,7 @@ impl Workspace {
             let name = settings::get(cx).theme;
             let mut base = workspace.theme_base.clone();
             if base.name.as_ref() != name {
-                let resolved = theme_core::resolve(&name, workspace.themes_dir().as_deref());
+                let resolved = theme_core::resolve(&name, workspace.themes_dir(cx).as_deref());
                 if resolved.name != base.name {
                     base = resolved;
                 }

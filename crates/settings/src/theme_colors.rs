@@ -1,16 +1,21 @@
 //! 外観 › テーマの「色を個別に変える」: 選択中のテーマの色をトークンごとに上書きする（settings.json の
 //! `theme_overrides.<テーマ名>`）。テーマファイルは増やさず、上書きしていない色はテーマの値のまま。
+//! 「自分のテーマとして保存」は、上書きを当てたテーマを themes/ の JSON 1 枚へ書き出し、そのテーマへ切り替える。
 
-use crate::{forget_theme_overrides, set_theme_override, SettingsView};
+use crate::{
+    forget_theme_overrides, save_failure_message, set_theme_override, user_themes_dir,
+    SettingsView, SettingsViewEvent,
+};
+use editor_view::{ComposerEvent, EditorView};
 use gpui::{
     canvas, div, linear_color_stop, linear_gradient, prelude::*, px, svg, Bounds, Context,
-    DispatchPhase, Div, FocusHandle, Hsla, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, SharedString, Window,
+    DispatchPhase, Div, Entity, FocusHandle, Focusable, Hsla, KeyDownEvent, MouseButton,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Window,
 };
 use settings_core::Settings;
 use std::cell::Cell;
 use std::rc::Rc;
-use theme_core::ThemeToken;
+use theme_core::{ThemeSource, ThemeToken};
 
 /// 彩度・明度の四角の大きさ。
 const SQUARE_WIDTH: f32 = 220.;
@@ -119,6 +124,13 @@ pub(crate) struct ColorEditor {
     square_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     hue_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     dragging: Option<DragTarget>,
+}
+
+/// 「自分のテーマとして保存」の名前の入力（ビューのメモリ・永続化しない）。
+pub(crate) struct ThemeSaveForm {
+    name: Entity<EditorView>,
+    /// 名前が使えない理由（空・他のテーマと重なる）。保存できた時は入力ごと閉じる。
+    error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +278,7 @@ impl SettingsView {
                     view.theme_details_open = !view.theme_details_open;
                     if !view.theme_details_open {
                         view.color_editor = None;
+                        view.theme_save = None;
                     }
                     cx.notify();
                 }),
@@ -319,7 +332,238 @@ impl SettingsView {
                     )
             })
             .child(SharedString::from(i18n::t!("settings.theme_reset_all")));
-        details.child(div().flex().child(reset_all))
+        let saving = self.theme_save.is_some();
+        let save_as = div()
+            .id("theme-save-as")
+            .px(px(8.))
+            .py(px(3.))
+            .rounded(px(5.))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(11.))
+            .text_color(if saving { theme.fg0 } else { theme.fg1 })
+            .when(saving, |element| element.bg(theme.bg3))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, window, cx| view.toggle_theme_save(window, cx)),
+            )
+            .child(SharedString::from(i18n::t!("settings.theme_save_as")));
+        details = details.child(div().flex().gap(px(6.)).child(save_as).child(reset_all));
+        if let Some(form) = self.theme_save.as_ref() {
+            details = details.child(self.render_theme_save(form, cx));
+        }
+        details
+    }
+
+    /// 今のテーマのチップ（表示名, 出所）。組み込みは id、他は表示名がテーマの名前と同じ。
+    fn current_theme_entry(&self) -> Option<(SharedString, ThemeSource)> {
+        let name = self.theme_base.name.as_ref();
+        self.themes
+            .iter()
+            .find(|(display, source)| {
+                display.as_ref() == name
+                    || matches!(source, ThemeSource::BuiltIn(id) if *id == name)
+            })
+            .cloned()
+    }
+
+    /// 「自分のテーマとして保存」の名前の入力を開く（もう一度押すと閉じる）。自分のテーマを使っている時は
+    /// その名前で始める（そのまま保存すると、そのテーマを書き直す）。他は「<テーマ名> カスタム」で始める。
+    fn toggle_theme_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.theme_save.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let initial = match self.current_theme_entry() {
+            Some((display, ThemeSource::User(_))) => display.to_string(),
+            Some((display, ThemeSource::BuiltIn(_))) => {
+                i18n::t!("settings.theme_save_default_name", "name" => display.as_ref())
+            }
+            None => i18n::t!(
+                "settings.theme_save_default_name",
+                "name" => self.theme_base.name.as_ref()
+            ),
+        };
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let name = cx.new(|cx| {
+            let mut input = EditorView::plain(theme, accent, true, cx);
+            input.set_plain_text(&initial, cx);
+            input
+        });
+        cx.subscribe(&name, |view, _input, event, cx| {
+            if matches!(event, ComposerEvent::Submit) {
+                view.save_theme_as(cx);
+            }
+        })
+        .detach();
+        window.focus(&name.read(cx).focus_handle(cx), cx);
+        self.theme_save = Some(ThemeSaveForm { name, error: None });
+        cx.notify();
+    }
+
+    /// 名前の入力の行: 入力欄 + 保存 + キャンセル（Enter で保存・Esc で閉じる）。名前が使えない時はその下に理由。
+    fn render_theme_save(&self, form: &ThemeSaveForm, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let button = |id: &'static str, text: String, primary: bool| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(if primary { accent } else { theme.border })
+                .when(primary, |element| element.bg(accent.alpha(0.16)))
+                .text_size(px(11.))
+                .text_color(if primary { accent } else { theme.fg1 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3))
+                .child(SharedString::from(text))
+        };
+        let field = div()
+            .w(px(240.))
+            .h(px(30.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg0)
+            .overflow_hidden()
+            .child(form.name.clone());
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" {
+                    view.theme_save = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(field)
+                    .child(
+                        button(
+                            "theme-save-confirm",
+                            i18n::t!("settings.theme_save_confirm"),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, _window, cx| view.save_theme_as(cx)),
+                        ),
+                    )
+                    .child(
+                        button(
+                            "theme-save-cancel",
+                            i18n::t!("settings.theme_save_cancel"),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, _window, cx| {
+                                view.theme_save = None;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            )
+            .when_some(form.error.clone(), |element, error| {
+                element.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.err)
+                        .child(SharedString::from(error)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// 今の色（上書きを当てたテーマ）を、入力した名前の自分のテーマとして themes/ へ書き、そのテーマへ切り替える。
+    /// 元のテーマの上書きは消す（同じ色を 2 か所に残さず、元のテーマは元の色に戻る）。名前は他のテーマと
+    /// 重ねない。ただし今の自分のテーマと同じ名前なら、そのファイルを書き直す。
+    fn save_theme_as(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.theme_save.as_ref() else {
+            return;
+        };
+        let name = form.name.read(cx).plain_text().trim().to_string();
+        if name.is_empty() {
+            self.show_theme_save_error(i18n::t!("settings.theme_save_name_empty"), cx);
+            return;
+        }
+        let Some(dir) = user_themes_dir(cx) else {
+            return;
+        };
+        let mut theme = self.theme.clone();
+        theme.name = name.clone().into();
+        let result = match self.current_theme_entry() {
+            Some((display, ThemeSource::User(path))) if display.as_ref() == name => {
+                theme_core::write_user_theme(&path, &theme).map(|()| path)
+            }
+            _ if theme_core::theme_name_taken(&name, Some(&dir)) => {
+                self.show_theme_save_error(i18n::t!("settings.theme_save_name_taken"), cx);
+                return;
+            }
+            _ => theme_core::save_new_user_theme(&dir, &theme),
+        };
+        let path = match result {
+            Ok(path) => path,
+            Err(error) => {
+                cx.emit(SettingsViewEvent::SaveFailed(save_failure_message(&error)));
+                return;
+            }
+        };
+        let previous = self.theme.name.to_string();
+        let forgotten = forget_theme_overrides(cx, &previous);
+        self.report_save(forgotten, cx);
+        self.theme_save = None;
+        self.color_editor = None;
+        self.themes = theme_core::available_themes(Some(&dir));
+        cx.emit(SettingsViewEvent::SelectTheme(ThemeSource::User(path)));
+        cx.notify();
+    }
+
+    /// 開発用（隔離 offscreen の撮影）: 外観ページで「色を個別に変える」と名前の入力を開き、`name` を入れる。
+    #[cfg(debug_assertions)]
+    pub fn debug_open_theme_save(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page(crate::SettingsPage::Appearance, cx);
+        self.theme_details_open = true;
+        self.theme_save = None;
+        self.toggle_theme_save(window, cx);
+        if !name.is_empty() {
+            if let Some(form) = self.theme_save.as_ref() {
+                form.name
+                    .update(cx, |input, cx| input.set_plain_text(name, cx));
+            }
+        }
+        self.page_scroll.scroll_to_bottom();
+    }
+
+    /// 開発用（隔離 offscreen の撮影）: 名前の入力の「保存」を押す。
+    #[cfg(debug_assertions)]
+    pub fn debug_submit_theme_save(&mut self, cx: &mut Context<Self>) {
+        self.save_theme_as(cx);
+    }
+
+    fn show_theme_save_error(&mut self, error: String, cx: &mut Context<Self>) {
+        if let Some(form) = self.theme_save.as_mut() {
+            form.error = Some(error);
+        }
+        cx.notify();
     }
 
     /// 1 トークン分の行: 色見本 + 名前 + hex + （上書きしていれば）「リセット」。押すとピッカーを開閉する。
@@ -1013,5 +1257,131 @@ mod tests {
         for token in ThemeToken::ALL {
             assert!(GROUPS.contains(&token_group(token)), "{token:?}");
         }
+    }
+
+    /// 設定ビューが出す「このテーマを選んだ」を集める（Workspace の代わり）。
+    fn selected_themes(
+        view: &gpui::Entity<SettingsView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Rc<std::cell::RefCell<Vec<ThemeSource>>> {
+        let selected = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = selected.clone();
+        cx.update(|_window, cx| {
+            cx.subscribe(view, move |_view, event: &SettingsViewEvent, _cx| {
+                if let SettingsViewEvent::SelectTheme(source) = event {
+                    sink.borrow_mut().push(source.clone());
+                }
+            })
+            .detach();
+        });
+        selected
+    }
+
+    fn type_theme_name(
+        view: &gpui::Entity<SettingsView>,
+        cx: &mut gpui::VisualTestContext,
+        name: &str,
+    ) {
+        view.update(cx, |view, cx| {
+            let form = view.theme_save.as_ref().expect("名前の入力が開いている");
+            form.name
+                .update(cx, |input, cx| input.set_plain_text(name, cx));
+        });
+    }
+
+    /// 上書きした色ごと自分のテーマとして書き出し、元のテーマの上書きを消して、そのテーマを選ぶ。
+    #[gpui::test]
+    fn save_as_writes_the_colors_and_moves_the_overrides(cx: &mut gpui::TestAppContext) {
+        let root = temp_root("save-as");
+        let (view, cx, user) = open_picker(cx, &root);
+        let selected = selected_themes(&view, cx);
+        cx.update(|_window, cx| {
+            set_theme_override(cx, "necoder-dark", "bg1", Some("#101010")).expect("保存");
+        });
+        view.update_in(cx, |view, window, cx| {
+            let mut theme = Theme::dark();
+            ThemeToken::Bg1.set(&mut theme, theme_core::color_from_hex(0x101010));
+            view.set_visuals(theme, Theme::dark(), gpui::red());
+            view.toggle_theme_save(window, cx);
+            let form = view.theme_save.as_ref().expect("開いている");
+            assert!(
+                form.name.read(cx).plain_text().contains("necoder Dark"),
+                "元のテーマの名前で始める"
+            );
+        });
+        type_theme_name(&view, cx, "夜の海");
+        view.update(cx, |view, cx| view.save_theme_as(cx));
+        cx.run_until_parked();
+
+        let path = root.join("themes").join("夜の海.json");
+        let saved = Theme::load(&ThemeSource::User(path.clone())).expect("書けている");
+        assert_eq!(saved.name.as_ref(), "夜の海");
+        assert_eq!(saved.bg1, theme_core::color_from_hex(0x101010));
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&user).expect("読める")).expect("JSON");
+        assert!(
+            written.get("theme_overrides").is_none(),
+            "元のテーマの上書きは消える"
+        );
+        assert_eq!(*selected.borrow(), vec![ThemeSource::User(path)]);
+        view.read_with(cx, |view, _| {
+            assert!(view.theme_save.is_none(), "保存したら閉じる");
+            assert!(view
+                .themes
+                .iter()
+                .any(|(display, _)| display.as_ref() == "夜の海"));
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 他のテーマと同じ名前・空の名前では保存しない（理由を出して入力は開いたまま）。
+    #[gpui::test]
+    fn save_as_refuses_taken_and_empty_names(cx: &mut gpui::TestAppContext) {
+        let root = temp_root("save-taken");
+        let (view, cx, _user) = open_picker(cx, &root);
+        let selected = selected_themes(&view, cx);
+        view.update_in(cx, |view, window, cx| view.toggle_theme_save(window, cx));
+        for name in ["solarized dark", "  "] {
+            type_theme_name(&view, cx, name);
+            view.update(cx, |view, cx| view.save_theme_as(cx));
+            view.read_with(cx, |view, _| {
+                let form = view.theme_save.as_ref().expect("開いたまま");
+                assert!(form.error.is_some(), "{name:?} は理由を出す");
+            });
+        }
+        assert!(!root.join("themes").exists(), "何も書かない");
+        assert!(selected.borrow().is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 自分のテーマを使っている時は、その名前のまま保存するとそのファイルを書き直す（ファイルを増やさない）。
+    #[gpui::test]
+    fn save_as_with_the_same_name_rewrites_my_theme(cx: &mut gpui::TestAppContext) {
+        let root = temp_root("save-rewrite");
+        // open_picker が root を作り直すので、テーマはその後に置く。
+        let (view, cx, _user) = open_picker(cx, &root);
+        let themes = root.join("themes");
+        std::fs::create_dir_all(&themes).expect("作れる");
+        let path = themes.join("mine.json");
+        std::fs::write(&path, r##"{ "name": "Mine", "bg0": "#000000" }"##).expect("書ける");
+        view.update_in(cx, |view, window, cx| {
+            view.refresh_lists(cx);
+            let base = Theme::load(&ThemeSource::User(path.clone())).expect("読める");
+            let mut theme = base.clone();
+            ThemeToken::Bg0.set(&mut theme, theme_core::color_from_hex(0x222222));
+            view.set_visuals(theme, base, gpui::red());
+            view.toggle_theme_save(window, cx);
+            let form = view.theme_save.as_ref().expect("開いている");
+            assert_eq!(
+                form.name.read(cx).plain_text(),
+                "Mine",
+                "自分のテーマの名前で始める"
+            );
+        });
+        view.update(cx, |view, cx| view.save_theme_as(cx));
+        let saved = Theme::load(&ThemeSource::User(path)).expect("読める");
+        assert_eq!(saved.bg0, theme_core::color_from_hex(0x222222));
+        assert_eq!(std::fs::read_dir(&themes).expect("読める").count(), 1);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

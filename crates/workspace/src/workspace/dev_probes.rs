@@ -1193,7 +1193,8 @@ impl Workspace {
     /// チャットの行 / `edit:<文字>` = 成果物を書き換える（本番と同じ合図を出す）/ `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
     /// `settings:<page>` / `settings-add:<語>` = 設定の「エージェントを追加」/
     /// `settings-connection:<ひな形の id>` = 設定の「接続を追加」/ `settings-open:<id>` = AI
-    /// エージェントのページで行を開く / `settings-host:<名前>` = 偽の SSH 先を足して選ぶ / `find:<語>` /
+    /// エージェントのページで行を開く / `settings-host:<名前>` = 偽の SSH 先を足して選ぶ /
+    /// `settings-theme-save:<名前>` = 外観の「自分のテーマとして保存」を開く / `settings-theme-submit` = その保存を押す / `find:<語>` /
     /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1307,6 +1308,21 @@ impl Workspace {
                 view.update(cx, |view, cx| {
                     view.debug_open_connection_editor(argument, window, cx)
                 });
+            }
+            // 外観ページで「自分のテーマとして保存」の名前の入力を開く（`settings-theme-save:<名前>`）。
+            "settings-theme-save" => {
+                self.set_chat_mode(false, window, cx);
+                self.chrome.show_settings = true;
+                self.refresh_settings_view(cx);
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| {
+                    view.debug_open_theme_save(argument, window, cx)
+                });
+            }
+            // 名前の入力の「保存」を押す（名前が重なる時の理由・保存した後のチップを撮る）。
+            "settings-theme-submit" => {
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_submit_theme_save(cx));
             }
             // AI エージェントのページで行を開く（`settings-open:codex`・空なら閉じる）。
             "settings-open" => {

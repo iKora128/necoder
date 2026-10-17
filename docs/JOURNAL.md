@@ -4125,3 +4125,12 @@
 - 罠: GPUI の要素の `on_mouse_move` / `on_mouse_up` は、その要素がマウスの下にあると判定された時しか呼ばれず、設定ペインの root では受け取れなかった → ドラッグ中だけ canvas の paint で `window.on_mouse_event` を登録した。`svg()` は親の文字色を引き継がず、自分の `text_color` が無いと描かれない。observer がテーマ名で引き直すと、Windows / Linux で設定画面から選んだユーザーテーマ（themes の置き場が config_dir と state_dir で違う）が necoder Dark に戻る → 名前が同じ時は `theme_base` に当て直すだけにした。
 - 検証: `cargo test --workspace` green（1261 本）。追加: `every_color_field_has_a_token`（Theme の色のフィールドを足したら ThemeToken の追加漏れでコンパイルが落ちる）・settings_core の書き込みと削除・設定画面のドラッグと hex 入力・`theme_overrides_reapply_without_reloading_the_theme`（直しを外すと落ちることを確かめた）。macOS の Dev ビルド（`bundle-mac.sh release dev`）で、外観設定とチャットの塗りを目で確かめた。
 - 次: Windows / Linux の実機で、設定画面から選んだユーザーテーマの色を変えても戻らないか。
+
+## 2026-10-17 — 自分のテーマとして保存・themes/ の置き場を 1 つに
+
+- 発端: #68（テーマの色の上書き）を取り込んだ後、本人「自分のテンプレ保存みたいなできたらいいね」。上書きを残したまま、名前の付いたテーマとして持てるようにする。
+- やったこと: 「色を個別に変える」の下に「自分のテーマとして保存」を足した。名前の入力（EditorView の 1 行・日本語入力が効く）で Enter か「保存」を押すと、上書きを当てた今の色を全トークンそろえた JSON 1 枚として themes/ へ書き（`theme_core::save_new_user_theme`・ファイル名は名前から作り重なれば `-2`）、元のテーマの `theme_overrides` を消して、そのテーマを選ぶ（`SettingsViewEvent::SelectTheme`）。名前が空・他のテーマ（組み込みの id・表示名・themes/ のファイル名、大文字小文字は無視）と重なる時は保存せず、入力の下に理由を出す。今の自分のテーマと同じ名前なら、そのファイルを書き直す。
+- themes/ の置き場: 起動時（main.rs）と設定画面は settings.json の隣、Workspace（⌘K ⌘T・observer）は `state_dir` を見ていた。Windows / Linux では別のフォルダになり、#68 の JOURNAL の罠の元だった。`settings::user_themes_dir`（settings.json の隣）1 つにまとめた。WINDOWS-PORT の表で themes が 2 行に書かれていたのも直した。macOS はどちらも同じフォルダなので挙動は変わらない。旧置き場からの移し替えは入れない。
+- 撮影用: `NECODER_CHAT_PROBE` に `settings-theme-save:<名前>` / `settings-theme-submit` を足した（CHAT.md の表）。設定の右ページに ScrollHandle を持たせ、撮影の命令が一覧の下まで送れるようにした。
+- 検証: `cargo test --workspace` green（1271 本・使い捨ての HOME）。追加: 書き出しと読み直し・番号付け・名前の重なり・ファイル名（theme_core）、保存して上書きが移ること・重なる名前と空の名前・自分のテーマの書き直し（settings）。隔離 offscreen で、名前の入力・重なる名前の理由・保存後の settings.json と themes/ の中身・起動し直した時のチップを目で確かめた。
+- 次: 本人の実機で、保存したテーマが ⌘K ⌘T にも出るか・Windows / Linux の実機で保存したテーマが一覧に出て戻らないか。

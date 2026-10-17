@@ -526,10 +526,7 @@ fn start_control_ipc_for_window(window: &mut gpui::Window, cx: &mut gpui::Contex
 /// theme 名を解決（組み込み → 設定フォルダ themes/ のユーザーテーマ → dark）。
 /// 開発用: NECODER_THEME=<名> で設定を上書き（撮影確認・非破壊）。
 fn resolve_theme(cx: &App) -> theme_core::Theme {
-    let themes_dir = settings_core::user_settings_path()
-        .as_deref()
-        .and_then(Path::parent)
-        .map(|dir| dir.join("themes"));
+    let themes_dir = settings::user_themes_dir(cx);
     let theme_name = std::env::var("NECODER_THEME").unwrap_or_else(|_| settings::get(cx).theme);
     // 色の上書き（theme_overrides）は Workspace が当てる（上書き前のテーマも持つため）。
     theme_core::resolve(&theme_name, themes_dir.as_deref())

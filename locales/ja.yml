@@ -1057,6 +1057,12 @@ settings:
   theme_reset_all: テーマのデフォルトにリセット
   theme_color_close: 閉じる（Esc）
   theme_color_default: テーマのデフォルト（クリックで戻す）
+  theme_save_as: 自分のテーマとして保存
+  theme_save_default_name: "%{name} カスタム"
+  theme_save_confirm: 保存
+  theme_save_cancel: キャンセル
+  theme_save_name_empty: 名前を入力してください
+  theme_save_name_taken: この名前のテーマはすでにあります
   open_json: settings.json を開く
   font_ui: "UI のフォント"
   font_code: "コードのフォント"

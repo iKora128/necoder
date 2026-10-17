@@ -173,7 +173,7 @@ pub fn settings_file() / keymap_file() / db_file() / blobs_dir()
 |---|---|---|---|
 | settings.json / keymap.json / テーマ | `~/Library/Application Support/necoder` | `%APPDATA%\necoder`（Roaming） | `$XDG_CONFIG_HOME/necoder`（既定 `~/.config/necoder`） |
 | necoder.db / blobs | 同上 | `%LOCALAPPDATA%\necoder` | `$XDG_DATA_HOME/necoder` |
-| logs / crashes / themes | 同上 | `%LOCALAPPDATA%\necoder` | `$XDG_STATE_HOME/necoder` |
+| logs / crashes | 同上 | `%LOCALAPPDATA%\necoder` | `$XDG_STATE_HOME/necoder` |
 | shell-path キャッシュ | 同上 | **不要**（Windows に login shell PATH の概念が無い） | `$XDG_CACHE_HOME/necoder` |
 | 制御 IPC | `~/.necoder/gui.sock` | `\\.\pipe\necoder-gui-<user>` | `$XDG_RUNTIME_DIR/necoder/gui.sock` |
 

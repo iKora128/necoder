@@ -589,7 +589,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let themes = theme_core::available_themes(self.themes_dir().as_deref());
+        let themes = theme_core::available_themes(self.themes_dir(cx).as_deref());
         let items = themes
             .iter()
             .enumerate()
@@ -612,10 +612,10 @@ impl Workspace {
         );
     }
 
-    /// テーマ保存ディレクトリ（necoder 状態フォルダの `themes/`）。永続化しない窓（撮影・テスト）では None。
-    pub(crate) fn themes_dir(&self) -> Option<PathBuf> {
+    /// ユーザーテーマの置き場（[`settings::user_themes_dir`]）。永続化しない窓（撮影・テスト）では None。
+    pub(crate) fn themes_dir(&self, cx: &App) -> Option<PathBuf> {
         self.persistence.session_writer.as_ref()?;
-        paths::state_dir().map(|dir| dir.join("themes"))
+        settings::user_themes_dir(cx)
     }
 
     /// 上書き前のテーマに settings の `theme_overrides` を当てて適用する（テーマを読んだ経路はここを通す）。

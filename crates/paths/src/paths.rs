@@ -98,7 +98,7 @@ pub fn data_dir() -> Option<PathBuf> {
     data_dir_on(Platform::current(), &real_var)
 }
 
-/// 状態（logs / crashes / themes）の置き場。Windows では data と同じ Local。
+/// 状態（logs / crashes）の置き場。Windows では data と同じ Local。
 pub fn state_dir() -> Option<PathBuf> {
     state_dir_on(Platform::current(), &real_var)
 }

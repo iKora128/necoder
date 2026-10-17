@@ -9,6 +9,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 - **Customize theme colors**: Settings › Appearance has a "Customize colors" section under the theme chips. Click a color of the selected theme to open a color picker, drag and release or type a hex and press Enter, and the color is saved for that theme only (`theme_overrides` in settings.json). "Reset" returns a color to the theme default. No new theme file is created.
 - **Chat backgrounds**: themes can paint the agent's tool runs (`chat_step_bg`), the agent's replies (`chat_agent_bg`) and your prompts (`chat_user_bg`). Nothing changes unless a theme or an override sets them.
+- **Save as my theme**: "Save as my theme" under the colors writes the current colors to a new theme with the name you give, and switches to it. The overrides on the original theme are cleared, so it goes back to its own colors. The theme is one JSON file in the `themes` folder next to settings.json, and you can share it as is. Saving again with the same name updates your theme.
+
+### Fixed
+
+- **`ne` opens folders right away**: `ne .`, `ne <folder>` and opening a folder from Finder now switch to the folder even when the window is minimized, hidden or closed. On Windows, `ne` sends paths in the same form necoder uses.
+- **User themes on Windows and Linux**: the app, Settings and the theme selector (⌘K ⌘T) now all read user themes from the same folder, next to settings.json. Before, a user theme chosen in Settings could fall back to necoder Dark. macOS is unchanged.
 
 ### 日本語
 
@@ -16,6 +22,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 - **テーマの色を個別に変えられる**：設定 › 外観 のテーマのチップの下に「色を個別に変える」を足しました。選んでいるテーマの色を押すとカラーピッカーが開き、ドラッグして離すか、hex を打って Enter で、そのテーマだけの色になります（settings.json の `theme_overrides`）。「リセット」でテーマのデフォルトに戻ります。テーマのファイルは増えません。
 - **チャットの背景**：テーマで、エージェントのツール実行（`chat_step_bg`）、エージェントの返答（`chat_agent_bg`）、プロンプト（`chat_user_bg`）の背景を塗れるようにしました。テーマか上書きで決めない限り、見た目は変わりません。
+- **自分のテーマとして保存**：色の一覧の下の「自分のテーマとして保存」で、今の色を名前を付けた新しいテーマとして保存し、そのテーマに切り替えます。元のテーマに付けた上書きは消え、元の色に戻ります。テーマは settings.json と同じフォルダの `themes` に JSON 1 枚で保存され、そのまま人に渡せます。同じ名前で保存し直すと、そのテーマを書き直します。
+
+#### 修正
+
+- **`ne` でフォルダーがすぐ開く**：`ne .`・`ne <フォルダー>`・Finder からフォルダーを開いたとき、ウィンドウが最小化・非表示・閉じた状態でも、そのフォルダーに切り替わるようにしました。Windows では、`ne` が送るパスの形式を necoder の中の形に揃えました。
+- **Windows と Linux の自作テーマ**：起動時・設定画面・テーマの選択（⌘K ⌘T）が、どれも settings.json と同じフォルダからテーマを読むようにしました。これまでは、設定画面で選んだ自作テーマが necoder Dark に戻ることがありました。macOS の挙動は変わりません。
 
 ## [0.1.28] - 2026-10-12
 

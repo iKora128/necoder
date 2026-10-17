@@ -1013,7 +1013,8 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 
 - **⌘K ⌘T** でテーマ選択（選んでいる間はライブプレビュー）
 - 同梱: necoder Dark / Light・Solarized Dark / Light・Gruvbox Dark・Catppuccin Mocha・High Contrast Dark
-- 自作テーマ: 色トークンを上書きする JSON を `~/Library/Application Support/necoder/themes/*.json` に置く
+- 自作テーマ: 色トークンを上書きする JSON を `~/Library/Application Support/necoder/themes/*.json` に置く（Windows は `%APPDATA%\necoder\themes`、Linux は `~/.config/necoder/themes`。settings.json と同じフォルダ）
+- 自分のテーマとして保存: 「色を個別に変える」の下の「自分のテーマとして保存」で、今の色を名前を付けたテーマとして themes/ に書き出し、そのテーマに切り替わる。元のテーマに付けていた上書きは消える。書き出した JSON はそのまま人に渡せる。自分のテーマを使っている時に同じ名前で保存すると、そのテーマを書き直す
 - 色を個別に変える: 設定 › 外観 のテーマのチップの下にある「色を個別に変える」を開くと、選んでいるテーマの色が並ぶ。行を押すとカラーピッカーが開き、ドラッグして離すか、hex を打って Enter で、そのテーマだけの色になる（settings.json の `theme_overrides`）。「リセット」でテーマのデフォルトに戻る
 - チャットの背景: テーマ JSON の `chat_step_bg`（エージェントのツール実行の行）・`chat_agent_bg`（エージェントの返答）・`chat_user_bg`（プロンプト）で塗れる。書かなければ今までどおり（ツール実行と返答は塗らない・プロンプトは bg2）
 

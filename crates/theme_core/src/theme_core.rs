@@ -420,6 +420,118 @@ pub fn resolve(name: &str, themes_dir: Option<&Path>) -> Theme {
     Theme::dark()
 }
 
+// ── 自分のテーマとして保存（themes/ へ JSON 1 枚を書く）──
+
+/// テーマを「トークン上書き JSON」の本文へ書き出す。全トークンを書く（元にしたテーマが後で変わっても、
+/// 保存した色は動かない）。チャット用トークンは塗る時だけ書く（書かない＝塗らない）。
+pub fn theme_json(theme: &Theme) -> Result<String> {
+    let mut root = serde_json::Map::new();
+    root.insert("name".into(), theme.name.to_string().into());
+    let appearance = match theme.appearance {
+        Appearance::Dark => "dark",
+        Appearance::Light => "light",
+    };
+    root.insert("appearance".into(), appearance.into());
+    let mut syntax = serde_json::Map::new();
+    for token in ThemeToken::ALL {
+        let color = match token {
+            ThemeToken::ChatStepBg => theme.chat_step_bg,
+            ThemeToken::ChatAgentBg => theme.chat_agent_bg,
+            ThemeToken::ChatUserBg => theme.chat_user_bg,
+            token => Some(token.effective(theme)),
+        };
+        let Some(color) = color else {
+            continue;
+        };
+        let value = serde_json::Value::String(hex_string(color));
+        match token.key().strip_prefix("syntax.") {
+            Some(key) => syntax.insert(key.to_string(), value),
+            None => root.insert(token.key().to_string(), value),
+        };
+    }
+    root.insert("syntax".into(), syntax.into());
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .context("テーマ JSON を書き出せない")?;
+    Ok(text + "\n")
+}
+
+/// 名前が既存のテーマ（組み込みの id・表示名・themes/ のファイル名）と重なるか。大文字と小文字は区別しない。
+/// [`resolve`] は名前とファイル名のどちらでも引くので、重なると別のテーマを開いてしまう。
+pub fn theme_name_taken(name: &str, themes_dir: Option<&Path>) -> bool {
+    let name = name.trim();
+    let same = |other: &str| other.trim().eq_ignore_ascii_case(name);
+    available_themes(themes_dir)
+        .iter()
+        .any(|(display, source)| {
+            same(display)
+                || match source {
+                    ThemeSource::BuiltIn(id) => same(id),
+                    ThemeSource::User(path) => path
+                        .file_stem()
+                        .is_some_and(|stem| same(&stem.to_string_lossy())),
+                }
+        })
+}
+
+/// テーマを `themes_dir` へ新しいファイルとして書き、その場所を返す。ファイル名は名前から作り、
+/// 同じ名前のファイルが既にあれば `-2` から番号を付ける（他のテーマのファイルを上書きしない）。
+pub fn save_new_user_theme(themes_dir: &Path, theme: &Theme) -> Result<PathBuf> {
+    std::fs::create_dir_all(themes_dir)
+        .with_context(|| format!("テーマのフォルダを作れない: {}", themes_dir.display()))?;
+    let stem = theme_file_stem(&theme.name);
+    let mut path = themes_dir.join(format!("{stem}.json"));
+    let mut number = 2;
+    while path.exists() {
+        path = themes_dir.join(format!("{stem}-{number}.json"));
+        number += 1;
+    }
+    write_user_theme(&path, theme)?;
+    Ok(path)
+}
+
+/// テーマを `path` へ書く（自分のテーマを同じ名前で保存し直す時もここ）。
+pub fn write_user_theme(path: &Path, theme: &Theme) -> Result<()> {
+    std::fs::write(path, theme_json(theme)?)
+        .with_context(|| format!("テーマ JSON を書けない: {}", path.display()))
+}
+
+/// テーマ名からファイル名（拡張子なし）を作る。どの OS でも使えない文字は `-` にし、
+/// Windows の予約名（CON など）と空の名前は避ける。日本語はそのまま使う。
+fn theme_file_stem(name: &str) -> String {
+    let replaced: String = name
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
+            {
+                '-'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let stem =
+        replaced.trim_matches(|character: char| character == '.' || character.is_whitespace());
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if stem.is_empty() {
+        "theme".to_string()
+    } else if RESERVED
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(stem))
+    {
+        format!("{stem}-theme")
+    } else {
+        stem.to_string()
+    }
+}
+
 // ── 外観設定からの個別上書き（settings.json の theme_overrides）──
 
 /// 外観設定で個別に上書きできる色トークン。[`ThemeToken::key`] は settings.json の
@@ -1037,5 +1149,68 @@ mod tests {
         assert_eq!(ThemeToken::ChatStepBg.effective(&theme), h(0x101010));
         ThemeToken::Bg1.restore(&base, &mut theme);
         assert_eq!(theme.bg1, base.bg1);
+    }
+
+    /// 保存した JSON を読み直すと、同じ名前・明暗・色のテーマに戻る（塗らないチャットの面は塗らないまま）。
+    #[test]
+    fn saved_theme_reads_back_as_the_same_theme() {
+        let dir = std::env::temp_dir().join(format!("necoder_save_theme_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut theme = Theme::light();
+        theme.name = "自分のテーマ #1".into();
+        ThemeToken::Bg1.set(&mut theme, h(0x101418));
+        ThemeToken::SyntaxKeyword.set(&mut theme, h(0xff0088).alpha(0.5));
+        ThemeToken::ChatStepBg.set(&mut theme, h(0x0f1a24));
+
+        let path = save_new_user_theme(&dir, &theme).expect("保存できる");
+        assert_eq!(path, dir.join("自分のテーマ #1.json"));
+        let loaded = Theme::load(&ThemeSource::User(path)).expect("読み直せる");
+        assert_eq!(loaded.name, theme.name);
+        assert_eq!(loaded.appearance, Appearance::Light);
+        for token in ThemeToken::ALL {
+            assert_eq!(
+                hex_string(token.effective(&loaded)),
+                hex_string(token.effective(&theme)),
+                "{token:?}"
+            );
+        }
+        assert_eq!(loaded.chat_agent_bg, None, "塗らない面は塗らないまま");
+        assert!(loaded.chat_step_bg.is_some());
+
+        // 同じ名前のファイルがあれば番号を付ける（前のファイルを上書きしない）。
+        let second = save_new_user_theme(&dir, &theme).expect("保存できる");
+        assert_eq!(second, dir.join("自分のテーマ #1-2.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_names_cannot_reuse_existing_names_or_file_names() {
+        let dir = std::env::temp_dir().join(format!("necoder_theme_names_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("作れる");
+        std::fs::write(dir.join("midnight-file.json"), r#"{ "name": "Midnight" }"#)
+            .expect("書ける");
+        for taken in [
+            "necoder Dark",
+            "necoder-dark",
+            "solarized dark",
+            "Solarized-Light",
+            " Midnight ",
+            "MIDNIGHT-FILE",
+        ] {
+            assert!(theme_name_taken(taken, Some(&dir)), "{taken}");
+        }
+        assert!(!theme_name_taken("Midnight 2", Some(&dir)));
+        assert!(!theme_name_taken("自分のテーマ", None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_file_names_are_safe_on_every_os() {
+        assert_eq!(theme_file_stem("My Theme"), "My Theme");
+        assert_eq!(theme_file_stem("a/b:c*d?"), "a-b-c-d-");
+        assert_eq!(theme_file_stem("  ..  "), "theme");
+        assert_eq!(theme_file_stem("con"), "con-theme");
+        assert_eq!(theme_file_stem("夜の海"), "夜の海");
     }
 }

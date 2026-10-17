@@ -1056,6 +1056,12 @@ settings:
   theme_reset_all: Reset to theme defaults
   theme_color_close: Close (Esc)
   theme_color_default: Theme default (click to restore)
+  theme_save_as: Save as my theme
+  theme_save_default_name: "%{name} Custom"
+  theme_save_confirm: Save
+  theme_save_cancel: Cancel
+  theme_save_name_empty: Enter a name
+  theme_save_name_taken: A theme with this name already exists
   open_json: Open settings.json
   font_ui: UI font
   font_code: Code font
