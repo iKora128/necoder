@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-10-17
+
+This release lets you change the colors of a theme one by one in Settings › Appearance, save them as your own theme, and makes `ne` open folders right away. It is delivered through auto-update. If something does not work, please let us know in an Issue.
+
 ### Added
 
 - **Customize theme colors**: Settings › Appearance has a "Customize colors" section under the theme chips. Click a color of the selected theme to open a color picker, drag and release or type a hex and press Enter, and the color is saved for that theme only (`theme_overrides` in settings.json). "Reset" returns a color to the theme default. No new theme file is created.
@@ -17,6 +21,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 - **User themes on Windows and Linux**: the app, Settings and the theme selector (⌘K ⌘T) now all read user themes from the same folder, next to settings.json. Before, a user theme chosen in Settings could fall back to necoder Dark. macOS is unchanged.
 
 ### 日本語
+
+設定 › 外観でテーマの色を 1 色ずつ変えて自分のテーマとして保存できるようにし、`ne` でフォルダーがすぐ開くようにした版です。自動更新で配信します。うまく動かない所があれば Issue で教えてください。
 
 #### 追加
 
