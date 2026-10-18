@@ -4,7 +4,7 @@
 
 # necoder
 
-**Orient by color.** A GPUI-native code editor for the agent era.
+**A fast, lightweight code editor built in Rust, made for working with AI agents.**
 
 [![Release](https://img.shields.io/github/v/release/iKora128/necoder)](https://github.com/iKora128/necoder/releases)
 [![CI](https://github.com/iKora128/necoder/actions/workflows/ci.yml/badge.svg)](https://github.com/iKora128/necoder/actions/workflows/ci.yml)
@@ -133,7 +133,7 @@ Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 
 <div align="center">
 
-**色による方向感覚。** エージェント時代のための GPUI ネイティブなコードエディタ。
+**Rust で書かれた、速くて軽いコードエディタ。AI エージェントと一緒に使うために作りました。**
 
 [**ダウンロード**](https://github.com/iKora128/necoder/releases) · [**Web サイト**](https://necoder.com/) · [**English**](#necoder)
 
