@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Changed
+
+- **New tagline**: the About window and the empty editor now say what necoder is in plain words: a fast, lightweight code editor built in Rust, made for working with AI agents.
+
+### 日本語
+
+#### 変更
+
+- **説明の一文を変更**：About のウィンドウと、何も開いていない時のエディタの説明を「Rust で書かれた、速くて軽いコードエディタ。AI エージェントと一緒に使うために作りました。」に変えました。
+
 ## [0.1.29] - 2026-10-17
 
 This release lets you change the colors of a theme one by one in Settings › Appearance, save them as your own theme, and makes `ne` open folders right away. It is delivered through auto-update. If something does not work, please let us know in an Issue.

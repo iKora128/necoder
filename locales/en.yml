@@ -1511,7 +1511,7 @@ update:
   err_replace: Failed to replace the .app
   err_check: Could not fetch release info (network or GitHub API)
 about:
-  tagline: A sense of direction, in color — an AI-agent-native editor
+  tagline: "A fast, lightweight code editor built in Rust,\nmade for working with AI agents."
   check_button: Check for Updates
   checking: Checking for updates…
   up_to_date: You're up to date
@@ -1627,7 +1627,7 @@ menu:
   open_logs: Open Logs Folder
   open_manual: necoder Manual (Japanese)
 welcome:
-  title: necoder — orient by color
+  title: necoder — a fast, lightweight editor for AI agents
   open_project: Open a project / worktree
   open_file: Open a file
   new_thread: Start an AI thread (default agent)

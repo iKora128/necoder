@@ -1512,7 +1512,7 @@ update:
   err_replace: .app の差し替えに失敗しました
   err_check: リリース情報を取得できません（ネットワークまたは GitHub API）
 about:
-  tagline: 色による方向感覚 — AI エージェントネイティブなエディタ
+  tagline: "Rust で書かれた、速くて軽いコードエディタ。\nAI エージェントと一緒に使うために作りました。"
   check_button: アップデートを確認
   checking: 更新を確認中…
   up_to_date: お使いのバージョンは最新です
@@ -1628,7 +1628,7 @@ menu:
   open_logs: ログのフォルダを開く
   open_manual: necoder のマニュアル
 welcome:
-  title: necoder — 色による方向感覚
+  title: necoder — 速くて軽い、AI エージェントと使うエディタ
   open_project: プロジェクト / worktree を開く
   open_file: ファイルを開く
   new_thread: AI スレッドを開始（既定のエージェント）

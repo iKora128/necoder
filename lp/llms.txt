@@ -1,7 +1,7 @@
 # necoder（ねこーだー）
 
-> AI エージェント時代のコードエディタ。プロジェクト・ブランチ・AI スレッドを色で識別し、複数のエージェントを 1 画面で並走させる。Rust + GPUI のネイティブアプリで、Electron は使わない。AGPL-3.0、無料、テレメトリなし。作者は長嶋大地（個人開発）。
-> A code editor for the AI agent era. Projects, branches and AI threads carry a color so you always know where you are, and several agents can run side by side in one window. Native Rust + GPUI, no Electron. AGPL-3.0, free, no telemetry. Built by one person, Daichi Nagashima.
+> Rust で書かれた、速くて軽いコードエディタ。AI エージェントと一緒に使うために作られている。Electron を使わないネイティブアプリ（Rust + GPUI）で、ACP 対応のエージェントが中で動く。プロジェクト・ブランチ・AI スレッドを色で識別し、複数のエージェントを 1 画面で並走させる。AGPL-3.0、無料、テレメトリなし。作者は長嶋大地（個人開発）。
+> A fast, lightweight code editor built in Rust, made for working with AI agents. It is a native app (Rust + GPUI, no Electron), and ACP-compatible agents run inside it. Projects, branches and AI threads carry a color so you always know where you are, and several agents can run side by side in one window. AGPL-3.0, free, no telemetry. Built by one person, Daichi Nagashima.
 
 ## 基本情報 / Basics
 
@@ -18,10 +18,10 @@
 
 ## 何が違うか / What makes it different
 
+- **ネイティブ性能 / Native speed.** Rust で書かれ、Electron を使わない。起動は約 215ms、待機時のメモリは約 120MB（下の「性能」）。OS の WebView を使うのは HTML プレビューだけで、必要になってから作る。
 - **色による方向感覚 / Color as a sense of direction.** プロジェクトとブランチに色が付き、レール・タブ下線・キャレット・AI スレッドのタブまで同じ色が通る。色は識別にだけ使い、装飾には使わない。
 - **AI エージェントネイティブ（ACP） / Agent-native via ACP.** Claude Code や Codex をはじめ、[ACP](https://agentclientprotocol.com) 対応のエージェントがエディタの中で動く。`claude` CLI と話すので、契約中のサブスクリプションがそのまま使え、**別途の API キーは要らない**。
 - **Fleet モード / Fleet.** 複数のエージェントを 1 画面で並走させる。各エージェントは git worktree で隔離されるので同じリポジトリでも衝突しない。Captain（采配役のスレッド）に全体を見させることもできる。
-- **ネイティブ性能 / Native speed.** Electron を使わない。OS の WebView を使うのは HTML プレビューだけで、必要になってから作る。
 
 ## 機能 / Features
 

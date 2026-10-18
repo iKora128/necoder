@@ -15,25 +15,11 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { COPY_PATCHES, arrangeSections } from './lp-copy.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const lpRoot = path.join(repoRoot, 'lp');
 
-// ── キャンバス側に残っている旧名の後追い修正 ────────────────────────────────
-// キャンバスを再書き出しすると復活するので、ここで毎回当て直す。
-// 恒久的にはキャンバス側の原稿を直すこと。
-const COPY_PATCHES = [
-  ['https://github.com/iKora128/shirushi', 'https://github.com/iKora128/necoder'],
-  ['Shirushi.dmg', 'necoder.dmg'],
-  // Windows 対応（W0〜W6 完了・2026-08-25）を配布文言に反映。
-  // 2つ目は `</span>` まで含めて検索し、適用済みテキストに再マッチしないようにしている。
-  ['necoder.dmg をダウンロード', 'Mac / Windows 版をダウンロード'],
-  ['無料 · macOS 13+（Apple Silicon）</span>', '無料 · macOS 13+（Apple Silicon）/ Windows 10+（x64）</span>'],
-  // MedLocal（GENSHI AI の主力プロダクト）を作者セクションに載せる。キャンバス側の原稿には無い。
-  // 2 つ目は <b> を外して medlocal.jp へのリンクにする。どちらも適用済みテキストには再マッチしない。
-  ['医療の現場へ届けるところまでを自分の手で通します。</p>', '医療の現場へ届けるところまでを自分の手で通します。</p>\n          <p style="font-size: 16.5px; line-height: 1.9; margin: 20px 0 0; max-width: 56ch">主力プロダクトは <a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">MedLocal</a> — 院内に置く医療 LLM です。退院サマリーの下書き、外来の音声カルテ、紹介状の OCR を、患者データを院外に出さずに院内のマシンだけで動かします。2026 年 9 月、<a href="https://www.itmedia.co.jp/aiplus/article/2609/17/2000001587/" target="_blank" rel="noopener" style="text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">ITmedia の記事</a> に GENSHI AI 代表として取材を受けました。</p>'],
-  ['<div><b>MedLocal</b><span>', '<div><a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: none">MedLocal</a><span>'],
-];
 
 // Archivo はラテン専用なので、日本語のフォールバックを足す。
 const FONT_STACK_PATCHES = [
@@ -120,11 +106,11 @@ const PAGES = [
     translate: null,
     switchTo: { href: '/?lang=en', hreflang: 'en', label: 'EN', title: 'Read this page in English' },
     meta: {
-      title: 'necoder — AI エージェント時代の、次世代コードエディタ',
+      title: 'necoder — Rust で書かれた、速くて軽いコードエディタ',
       description:
-        '色分け UI で、どの AI が走りどれに指示しているかが一目でわかる。ACP 対応のエージェントが契約中のサブスクのまま動く、Rust + GPUI 製のネイティブコードエディタ。',
+        'Rust で書かれた、速くて軽いコードエディタ。AI エージェントと一緒に使うために作りました。ACP 対応のエージェントが契約中のサブスクのまま動き、プロジェクトもスレッドも色で見分けられます。',
       ogDescription:
-        '色分け UI・ACP 対応エージェント・Rust + GPUI のネイティブ性能。AI と並走するためのコードエディタ。',
+        'Rust 製の速くて軽いコードエディタ。ACP 対応の AI エージェントが中で動き、プロジェクトもスレッドも色で見分けられます。',
       canonical: `${SITE_URL}/`,
       locale: 'ja_JP',
     },
@@ -135,11 +121,11 @@ const PAGES = [
     translate: 'lp/i18n/en.json',
     switchTo: { href: '/?lang=ja', hreflang: 'ja', label: '日本語', title: 'このページを日本語で読む' },
     meta: {
-      title: 'necoder — the next-generation code editor for the AI agent era',
+      title: 'necoder — a fast, lightweight code editor built in Rust',
       description:
-        'A color-coded UI shows which AI is running and which one you are talking to. ACP-compatible agents run on the subscription you already have. Native code editor built in Rust + GPUI.',
+        'A fast, lightweight code editor built in Rust, made for working with AI agents. ACP-compatible agents run on the subscription you already have, and every project and thread has its own color.',
       ogDescription:
-        'Color-coded UI, ACP-compatible agents, native Rust + GPUI performance. A code editor for working alongside AI.',
+        'A fast, lightweight Rust code editor. ACP-compatible AI agents run inside it, and every project and thread has its own color.',
       canonical: `${SITE_URL}/en/`,
       locale: 'en_US',
     },
@@ -253,6 +239,7 @@ for (const [before, after] of [...COPY_PATCHES, ...FONT_STACK_PATCHES]) {
   if (hits > 0) console.log(`  patch ×${hits}: ${before} → ${after}`);
   template = template.replaceAll(before, after);
 }
+template = arrangeSections(template);
 
 // dc-runtime は React を unpkg から読む。__resources に自前パスを入れると
 // そちらを使うので、外部 CDN 依存なしで動く。

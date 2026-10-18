@@ -175,7 +175,7 @@ impl Workspace {
         };
 
         let panel = div()
-            .w(px(300.))
+            .w(px(330.))
             .flex()
             .flex_col()
             .items_center()
@@ -219,10 +219,13 @@ impl Workspace {
                     ))),
             )
             .child(
+                // 2 つの文を改行で分けて中央に揃える（訳によって 1 行が幅を超えても中央のまま折り返す）。
                 div()
                     .pt(px(6.))
+                    .max_w_full()
                     .text_size(px(11.5))
                     .text_color(theme.fg1)
+                    .text_center()
                     .child(SharedString::from(i18n::t!("about.tagline"))),
             )
             .when_some(update_line, |element, (line, color)| {

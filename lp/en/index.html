@@ -2,8 +2,8 @@
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>necoder — the next-generation code editor for the AI agent era</title>
-<meta name="description" content="A color-coded UI shows which AI is running and which one you are talking to. ACP-compatible agents run on the subscription you already have. Native code editor built in Rust + GPUI.">
+<title>necoder — a fast, lightweight code editor built in Rust</title>
+<meta name="description" content="A fast, lightweight code editor built in Rust, made for working with AI agents. ACP-compatible agents run on the subscription you already have, and every project and thread has its own color.">
 <link rel="canonical" href="https://necoder.com/en/">
 <link rel="alternate" hreflang="ja" href="https://necoder.com/">
 <link rel="alternate" hreflang="en" href="https://necoder.com/en/">
@@ -12,8 +12,8 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://necoder.com/en/">
 <meta property="og:site_name" content="necoder">
-<meta property="og:title" content="necoder — the next-generation code editor for the AI agent era">
-<meta property="og:description" content="Color-coded UI, ACP-compatible agents, native Rust + GPUI performance. A code editor for working alongside AI.">
+<meta property="og:title" content="necoder — a fast, lightweight code editor built in Rust">
+<meta property="og:description" content="A fast, lightweight Rust code editor. ACP-compatible AI agents run inside it, and every project and thread has its own color.">
 <meta property="og:image" content="https://necoder.com/assets/img/ogp.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -412,9 +412,9 @@ a:hover { color: var(--color-accent-600); }
 <div style="min-height: 100vh; background: var(--color-bg); color: var(--color-text)">
   <nav class="nav" style="position: sticky; top: 0; z-index: 50; background: var(--color-bg); padding-inline: max(clamp(20px,4vw,56px), calc((100% - 1240px)/2 + clamp(20px,4vw,56px)))">
     <span class="nav-brand" style="display: inline-flex; align-items: center; gap: 10px"><img src="/assets/img/necoder-mark.png" alt="" style="width: 24px; height: 24px">necoder</span>
-    <a href="#iro" style="text-decoration: none">Color</a>
-    <a href="#ai" style="text-decoration: none">AI</a>
     <a href="#perf" style="text-decoration: none">Speed</a>
+    <a href="#ai" style="text-decoration: none">AI</a>
+    <a href="#iro" style="text-decoration: none">Color</a>
     <a href="#fleet" style="text-decoration: none">Fleet</a>
     <a href="#editor" style="text-decoration: none">Editor</a>
     <a href="#author" style="text-decoration: none">Author</a>
@@ -424,12 +424,12 @@ a:hover { color: var(--color-accent-600); }
   </nav>
   <div style="max-width: 1240px; margin: 0 auto; padding: 0 clamp(20px,4vw,56px)">
     <section style="padding: 96px 0 0">
-      <h1 style="font-size: clamp(40px,5.8vw,80px); line-height: 1.08; letter-spacing: -0.02em; margin: 0 0 0 -0.04em">A code editor built<br>for the AI agent era.</h1>
+      <h1 style="font-size: clamp(40px,5.8vw,80px); line-height: 1.08; letter-spacing: -0.02em; margin: 0 0 0 -0.04em">A fast, lightweight<br>code editor built in Rust.</h1>
       <div style="display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 24px 56px; align-items: end; margin-top: 36px">
         <div style="display: grid; gap: 14px; margin: 0; max-width: 60ch">
-          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>Color-coded UI</b> — see at a glance which AI is running, and which one you are talking to</p></div>
+          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>Native performance</b> — no Electron. Built in Rust, low memory and 60fps</p></div>
           <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>Bring your own AI agent</b> — your existing subscription works as-is over ACP, the open agent protocol</p></div>
-          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>Native performance</b> — no Electron. Rust + GPUI, low memory and 60fps</p></div>
+          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>Color-coded UI</b> — see at a glance which AI is running, and which one you are talking to</p></div>
           <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>Multiplexer</b> — Fleet mode, a new idea for the agent era</p></div>
         </div>
         <div style="display: flex; gap: 12px; flex-wrap: wrap; padding-bottom: 4px">
@@ -443,9 +443,52 @@ a:hover { color: var(--color-accent-600); }
       </figure>
     </section>
     <div style="height: 2px; background: var(--color-divider); margin-top: 56px"></div>
-    <section id="iro" style="padding: 96px 0 0">
+    <section id="perf" style="padding: 96px 0 0">
       <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
         <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">01</span>
+        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">Native speed in every interaction</h2>
+      </div>
+      <p style="font-size: 16px; line-height: 1.95; margin: 20px 0 0; max-width: 54ch">Written in Rust and drawn straight on the GPU. No Electron, no webview — launch, scrolling and typing all stay light.</p>
+      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 36px; border: 2px solid var(--color-divider)">
+        <div style="padding: 28px 24px"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">215ms</p><p style="font-size: 13px; margin: 12px 0 0">launch → ready to type</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">cold start</p></div>
+        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">122MB</p><p style="font-size: 13px; margin: 12px 0 0">idle memory</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">RSS right after launch</p></div>
+        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">10ms</p><p style="font-size: 13px; margin: 12px 0 0">⌘P filtering</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">measured over 50,000 files</p></div>
+        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">60fps</p><p style="font-size: 13px; margin: 12px 0 0">drawn on the GPU</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">Native UI</p></div>
+      </div>
+      <p class="text-muted" style="font-size: 12px; margin: 14px 0 0">Measured on an M1 Mac</p>
+    </section>
+    <section id="ai" style="padding: 110px 0 0">
+      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
+        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">02</span>
+        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">Your own AI agents, running as they are</h2>
+      </div>
+      <div style="display: grid; grid-template-columns: minmax(0,7fr) minmax(0,5fr); gap: 28px clamp(24px,4vw,72px); align-items: center; margin-top: 32px">
+        <figure style="margin: 0">
+          <div style="border: 2px solid var(--color-text)"><img src="/assets/img/streaming.png" alt="An AI thread mid-generation: a ⏺ Read File step, the mascot typing, and the always-visible token meter" style="width: 100%; display: block" loading="lazy"></div>
+          <figcaption style="font-size: 12px; margin-top: 10px">A thread mid-generation. nyaco sits at the top right, the token meter stays at the bottom.</figcaption>
+        </figure>
+        <div>
+          <p style="font-size: 16px; line-height: 1.95; margin: 0">Claude Code, Codex and any other ACP-compatible agent work out of the box. They run on the subscription you already have — no extra API key.</p>
+          <div style="display: flex; gap: 20px; align-items: center; margin-top: 20px; flex-wrap: wrap">
+            <img class="agent-icon" src="/assets/icon/claude.svg" alt="Claude" title="Claude Code" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/github-copilot.svg" alt="Copilot" title="GitHub Copilot" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/opencode.svg" alt="OpenCode" title="OpenCode" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/moonshot-ai.svg" alt="Kimi" title="Kimi" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/qwen.svg" alt="Qwen" title="Qwen" style="width: 26px; height: 26px">
+            <span class="text-muted" style="font-size: 13px">and other ACP-compatible agents</span>
+          </div>
+          <div style="display: grid; gap: 12px; margin-top: 20px">
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">The destination, always shown</b> — you can always see which thread and which branch you are sending to</p></div>
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Token usage, always shown</b> — per-thread consumption and the running total, always in view</p></div>
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Diff review and checkpoints</b> — review the changes before taking them in, and roll back whenever you want</p></div>
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Todo board</b> — tasks live in a Markdown file, and the agent ticks off what it finishes</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="iro" style="padding: 110px 0 0">
+      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
+        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">03</span>
         <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">Color tells you where you are</h2>
       </div>
       <div style="display: grid; grid-template-columns: minmax(0,5fr) minmax(0,7fr); gap: 28px clamp(24px,4vw,72px); align-items: center; margin-top: 32px">
@@ -479,49 +522,6 @@ a:hover { color: var(--color-accent-600); }
           <figcaption style="font-size: 12px; margin-top: 10px">Five project colors. ⌘O lists every project and worktree; ⌘1..9 switches instantly.</figcaption>
         </figure>
       </div>
-    </section>
-    <section id="ai" style="padding: 110px 0 0">
-      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
-        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">02</span>
-        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">Your own AI agents, running as they are</h2>
-      </div>
-      <div style="display: grid; grid-template-columns: minmax(0,7fr) minmax(0,5fr); gap: 28px clamp(24px,4vw,72px); align-items: center; margin-top: 32px">
-        <figure style="margin: 0">
-          <div style="border: 2px solid var(--color-text)"><img src="/assets/img/streaming.png" alt="An AI thread mid-generation: a ⏺ Read File step, the mascot typing, and the always-visible token meter" style="width: 100%; display: block" loading="lazy"></div>
-          <figcaption style="font-size: 12px; margin-top: 10px">A thread mid-generation. nyaco sits at the top right, the token meter stays at the bottom.</figcaption>
-        </figure>
-        <div>
-          <p style="font-size: 16px; line-height: 1.95; margin: 0">Claude Code, Codex and any other ACP-compatible agent work out of the box. They run on the subscription you already have — no extra API key.</p>
-          <div style="display: flex; gap: 20px; align-items: center; margin-top: 20px; flex-wrap: wrap">
-            <img class="agent-icon" src="/assets/icon/claude.svg" alt="Claude" title="Claude Code" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/github-copilot.svg" alt="Copilot" title="GitHub Copilot" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/opencode.svg" alt="OpenCode" title="OpenCode" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/moonshot-ai.svg" alt="Kimi" title="Kimi" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/qwen.svg" alt="Qwen" title="Qwen" style="width: 26px; height: 26px">
-            <span class="text-muted" style="font-size: 13px">and other ACP-compatible agents</span>
-          </div>
-          <div style="display: grid; gap: 12px; margin-top: 20px">
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">The destination, always shown</b> — you can always see which thread and which branch you are sending to</p></div>
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Token usage, always shown</b> — per-thread consumption and the running total, always in view</p></div>
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Diff review and checkpoints</b> — review the changes before taking them in, and roll back whenever you want</p></div>
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Todo board</b> — tasks live in a Markdown file, and the agent ticks off what it finishes</p></div>
-          </div>
-        </div>
-      </div>
-    </section>
-    <section id="perf" style="padding: 110px 0 0">
-      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
-        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">03</span>
-        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">Native speed in every interaction</h2>
-      </div>
-      <p style="font-size: 16px; line-height: 1.95; margin: 20px 0 0; max-width: 54ch">Written in Rust and drawn straight on the GPU by GPUI. No Electron, no webview — launch, scrolling and typing all stay light.</p>
-      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 36px; border: 2px solid var(--color-divider)">
-        <div style="padding: 28px 24px"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">215ms</p><p style="font-size: 13px; margin: 12px 0 0">launch → ready to type</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">cold start</p></div>
-        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">122MB</p><p style="font-size: 13px; margin: 12px 0 0">idle memory</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">RSS right after launch</p></div>
-        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">10ms</p><p style="font-size: 13px; margin: 12px 0 0">⌘P filtering</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">measured over 50,000 files</p></div>
-        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">60fps</p><p style="font-size: 13px; margin: 12px 0 0">drawn on the GPU</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">GPUI native UI</p></div>
-      </div>
-      <p class="text-muted" style="font-size: 12px; margin: 14px 0 0">Measured on an M1 Mac</p>
     </section>
     <section id="fleet" style="padding: 110px 0 0">
       <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">

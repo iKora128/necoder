@@ -2,8 +2,8 @@
 <html lang="ja"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>necoder — AI エージェント時代の、次世代コードエディタ</title>
-<meta name="description" content="色分け UI で、どの AI が走りどれに指示しているかが一目でわかる。ACP 対応のエージェントが契約中のサブスクのまま動く、Rust + GPUI 製のネイティブコードエディタ。">
+<title>necoder — Rust で書かれた、速くて軽いコードエディタ</title>
+<meta name="description" content="Rust で書かれた、速くて軽いコードエディタ。AI エージェントと一緒に使うために作りました。ACP 対応のエージェントが契約中のサブスクのまま動き、プロジェクトもスレッドも色で見分けられます。">
 <link rel="canonical" href="https://necoder.com/">
 <link rel="alternate" hreflang="ja" href="https://necoder.com/">
 <link rel="alternate" hreflang="en" href="https://necoder.com/en/">
@@ -12,8 +12,8 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://necoder.com/">
 <meta property="og:site_name" content="necoder">
-<meta property="og:title" content="necoder — AI エージェント時代の、次世代コードエディタ">
-<meta property="og:description" content="色分け UI・ACP 対応エージェント・Rust + GPUI のネイティブ性能。AI と並走するためのコードエディタ。">
+<meta property="og:title" content="necoder — Rust で書かれた、速くて軽いコードエディタ">
+<meta property="og:description" content="Rust 製の速くて軽いコードエディタ。ACP 対応の AI エージェントが中で動き、プロジェクトもスレッドも色で見分けられます。">
 <meta property="og:image" content="https://necoder.com/assets/img/ogp.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -412,9 +412,9 @@ a:hover { color: var(--color-accent-600); }
 <div style="min-height: 100vh; background: var(--color-bg); color: var(--color-text)">
   <nav class="nav" style="position: sticky; top: 0; z-index: 50; background: var(--color-bg); padding-inline: max(clamp(20px,4vw,56px), calc((100% - 1240px)/2 + clamp(20px,4vw,56px)))">
     <span class="nav-brand" style="display: inline-flex; align-items: center; gap: 10px"><img src="/assets/img/necoder-mark.png" alt="" style="width: 24px; height: 24px">necoder</span>
-    <a href="#iro" style="text-decoration: none">色</a>
-    <a href="#ai" style="text-decoration: none">AI</a>
     <a href="#perf" style="text-decoration: none">性能</a>
+    <a href="#ai" style="text-decoration: none">AI</a>
+    <a href="#iro" style="text-decoration: none">色</a>
     <a href="#fleet" style="text-decoration: none">Fleet</a>
     <a href="#editor" style="text-decoration: none">エディタ</a>
     <a href="#author" style="text-decoration: none">作者</a>
@@ -424,12 +424,12 @@ a:hover { color: var(--color-accent-600); }
   </nav>
   <div style="max-width: 1240px; margin: 0 auto; padding: 0 clamp(20px,4vw,56px)">
     <section style="padding: 96px 0 0">
-      <h1 style="font-size: clamp(40px,5.8vw,80px); line-height: 1.08; letter-spacing: -0.02em; margin: 0 0 0 -0.04em">AIエージェント時代の、<br>次世代コードエディタ。</h1>
+      <h1 style="font-size: clamp(40px,5.8vw,80px); line-height: 1.08; letter-spacing: -0.02em; margin: 0 0 0 -0.04em">Rust で書かれた、<br>速くて軽いコードエディタ。</h1>
       <div style="display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 24px 56px; align-items: end; margin-top: 36px">
         <div style="display: grid; gap: 14px; margin: 0; max-width: 60ch">
-          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>色分け UI</b> — どの AI が走り、どれに指示しているか、一目でわかる</p></div>
+          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>ハイパフォーマンス</b> — Electron とはおさらば。Rust 製で低メモリ · 60fps</p></div>
           <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>手持ちの AI エージェント</b> — 契約中のサブスクが ACP（標準プロトコル）でそのまま動く</p></div>
-          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>ハイパフォーマンス</b> — Electron とはおさらば。Rust + GPUI で低メモリ · 60fps</p></div>
+          <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>色分け UI</b> — どの AI が走り、どれに指示しているか、一目でわかる</p></div>
           <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>マルチプレクサ</b> — AI 時代の新概念、Fleet モード</p></div>
         </div>
         <div style="display: flex; gap: 12px; flex-wrap: wrap; padding-bottom: 4px">
@@ -443,9 +443,52 @@ a:hover { color: var(--color-accent-600); }
       </figure>
     </section>
     <div style="height: 2px; background: var(--color-divider); margin-top: 56px"></div>
-    <section id="iro" style="padding: 96px 0 0">
+    <section id="perf" style="padding: 96px 0 0">
       <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
         <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">01</span>
+        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">ネイティブの速さを、すべての操作に</h2>
+      </div>
+      <p style="font-size: 16px; line-height: 1.95; margin: 20px 0 0; max-width: 54ch">Rust で書かれ、GPU で直接描画します。Electron も webview も使わないため、起動からスクロール、入力まで一貫して軽快です。</p>
+      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 36px; border: 2px solid var(--color-divider)">
+        <div style="padding: 28px 24px"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">215ms</p><p style="font-size: 13px; margin: 12px 0 0">起動 → 入力可能</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">コールドスタート</p></div>
+        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">122MB</p><p style="font-size: 13px; margin: 12px 0 0">待機時メモリ</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">起動直後の RSS</p></div>
+        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">10ms</p><p style="font-size: 13px; margin: 12px 0 0">⌘P の絞り込み</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">50,000 ファイルで実測</p></div>
+        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">60fps</p><p style="font-size: 13px; margin: 12px 0 0">GPU 直描画</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">ネイティブ UI</p></div>
+      </div>
+      <p class="text-muted" style="font-size: 12px; margin: 14px 0 0">M1 Mac での実測値</p>
+    </section>
+    <section id="ai" style="padding: 110px 0 0">
+      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
+        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">02</span>
+        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">手持ちの AI エージェントが、そのまま動く</h2>
+      </div>
+      <div style="display: grid; grid-template-columns: minmax(0,7fr) minmax(0,5fr); gap: 28px clamp(24px,4vw,72px); align-items: center; margin-top: 32px">
+        <figure style="margin: 0">
+          <div style="border: 2px solid var(--color-text)"><img src="/assets/img/streaming.png" alt="生成中の AI スレッド。⏺ Read File ステップ、打鍵中のマスコット、常時表示のトークンメーター" style="width: 100%; display: block" loading="lazy"></div>
+          <figcaption style="font-size: 12px; margin-top: 10px">生成中のスレッド。右上に nyaco、下に常時トークンメーター。</figcaption>
+        </figure>
+        <div>
+          <p style="font-size: 16px; line-height: 1.95; margin: 0">Claude Code や Codex をはじめ、ACP 対応のエージェントをそのまま利用できます。契約中のサブスクリプションで動き、追加の API キーは必要ありません。</p>
+          <div style="display: flex; gap: 20px; align-items: center; margin-top: 20px; flex-wrap: wrap">
+            <img class="agent-icon" src="/assets/icon/claude.svg" alt="Claude" title="Claude Code" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/github-copilot.svg" alt="Copilot" title="GitHub Copilot" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/opencode.svg" alt="OpenCode" title="OpenCode" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/moonshot-ai.svg" alt="Kimi" title="Kimi" style="width: 26px; height: 26px">
+            <img class="agent-icon" src="/assets/icon/qwen.svg" alt="Qwen" title="Qwen" style="width: 26px; height: 26px">
+            <span class="text-muted" style="font-size: 13px">ほか、ACP 対応エージェントに対応</span>
+          </div>
+          <div style="display: grid; gap: 12px; margin-top: 20px">
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">送信先の表示</b> — どのスレッド・どのブランチに送るかを常に確認できます</p></div>
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">トークン使用量の表示</b> — スレッドごとの消費量と全体の合計を常に確認できます</p></div>
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">diff レビューとチェックポイント</b> — 変更を確認してから取り込み、いつでも巻き戻せます</p></div>
+            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Todo ボード</b> — タスクは Markdown ファイルで管理され、完了した項目はエージェントが自分でチェックします</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="iro" style="padding: 110px 0 0">
+      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
+        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">03</span>
         <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">色で、いまいる場所がわかる</h2>
       </div>
       <div style="display: grid; grid-template-columns: minmax(0,5fr) minmax(0,7fr); gap: 28px clamp(24px,4vw,72px); align-items: center; margin-top: 32px">
@@ -479,49 +522,6 @@ a:hover { color: var(--color-accent-600); }
           <figcaption style="font-size: 12px; margin-top: 10px">5 プロジェクトの識別色。⌘O で全プロジェクト / worktree を一覧、⌘1..9 で瞬間切替。</figcaption>
         </figure>
       </div>
-    </section>
-    <section id="ai" style="padding: 110px 0 0">
-      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
-        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">02</span>
-        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">手持ちの AI エージェントが、そのまま動く</h2>
-      </div>
-      <div style="display: grid; grid-template-columns: minmax(0,7fr) minmax(0,5fr); gap: 28px clamp(24px,4vw,72px); align-items: center; margin-top: 32px">
-        <figure style="margin: 0">
-          <div style="border: 2px solid var(--color-text)"><img src="/assets/img/streaming.png" alt="生成中の AI スレッド。⏺ Read File ステップ、打鍵中のマスコット、常時表示のトークンメーター" style="width: 100%; display: block" loading="lazy"></div>
-          <figcaption style="font-size: 12px; margin-top: 10px">生成中のスレッド。右上に nyaco、下に常時トークンメーター。</figcaption>
-        </figure>
-        <div>
-          <p style="font-size: 16px; line-height: 1.95; margin: 0">Claude Code や Codex をはじめ、ACP 対応のエージェントをそのまま利用できます。契約中のサブスクリプションで動き、追加の API キーは必要ありません。</p>
-          <div style="display: flex; gap: 20px; align-items: center; margin-top: 20px; flex-wrap: wrap">
-            <img class="agent-icon" src="/assets/icon/claude.svg" alt="Claude" title="Claude Code" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/github-copilot.svg" alt="Copilot" title="GitHub Copilot" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/opencode.svg" alt="OpenCode" title="OpenCode" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/moonshot-ai.svg" alt="Kimi" title="Kimi" style="width: 26px; height: 26px">
-            <img class="agent-icon" src="/assets/icon/qwen.svg" alt="Qwen" title="Qwen" style="width: 26px; height: 26px">
-            <span class="text-muted" style="font-size: 13px">ほか、ACP 対応エージェントに対応</span>
-          </div>
-          <div style="display: grid; gap: 12px; margin-top: 20px">
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">送信先の表示</b> — どのスレッド・どのブランチに送るかを常に確認できます</p></div>
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">トークン使用量の表示</b> — スレッドごとの消費量と全体の合計を常に確認できます</p></div>
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">diff レビューとチェックポイント</b> — 変更を確認してから取り込み、いつでも巻き戻せます</p></div>
-            <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 8px; height: 8px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-2px)"></span><p style="font-size: 14.5px; line-height: 1.75; margin: 0; color: color-mix(in srgb, var(--color-text) 78%, transparent)"><b style="color: var(--color-text)">Todo ボード</b> — タスクは Markdown ファイルで管理され、完了した項目はエージェントが自分でチェックします</p></div>
-          </div>
-        </div>
-      </div>
-    </section>
-    <section id="perf" style="padding: 110px 0 0">
-      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
-        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">03</span>
-        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">ネイティブの速さを、すべての操作に</h2>
-      </div>
-      <p style="font-size: 16px; line-height: 1.95; margin: 20px 0 0; max-width: 54ch">Rust で書かれ、GPUI が GPU で直接描画します。Electron も webview も使わないため、起動からスクロール、入力まで一貫して軽快です。</p>
-      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 36px; border: 2px solid var(--color-divider)">
-        <div style="padding: 28px 24px"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">215ms</p><p style="font-size: 13px; margin: 12px 0 0">起動 → 入力可能</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">コールドスタート</p></div>
-        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">122MB</p><p style="font-size: 13px; margin: 12px 0 0">待機時メモリ</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">起動直後の RSS</p></div>
-        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">10ms</p><p style="font-size: 13px; margin: 12px 0 0">⌘P の絞り込み</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">50,000 ファイルで実測</p></div>
-        <div style="padding: 28px 24px; border-left: 2px solid var(--color-divider)"><p style="font-family: var(--font-heading); font-weight: 800; font-size: clamp(30px,3vw,44px); line-height: 1; color: var(--color-accent); margin: 0; font-feature-settings: 'tnum' 1">60fps</p><p style="font-size: 13px; margin: 12px 0 0">GPU 直描画</p><p class="text-muted" style="font-size: 11.5px; margin: 4px 0 0">GPUI ネイティブ UI</p></div>
-      </div>
-      <p class="text-muted" style="font-size: 12px; margin: 14px 0 0">M1 Mac での実測値</p>
     </section>
     <section id="fleet" style="padding: 110px 0 0">
       <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">

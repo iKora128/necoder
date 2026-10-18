@@ -9,15 +9,15 @@
   "ダウンロード": "Download",
   "テーマを切り替え": "Toggle theme",
 
-  "AIエージェント時代の、": "A code editor built",
-  "次世代コードエディタ。": "for the AI agent era.",
+  "Rust で書かれた、": "A fast, lightweight",
+  "速くて軽いコードエディタ。": "code editor built in Rust.",
 
   "色分け UI": "Color-coded UI",
   "— どの AI が走り、どれに指示しているか、一目でわかる": "— see at a glance which AI is running, and which one you are talking to",
   "手持ちの AI エージェント": "Bring your own AI agent",
   "— 契約中のサブスクが ACP（標準プロトコル）でそのまま動く": "— your existing subscription works as-is over ACP, the open agent protocol",
   "ハイパフォーマンス": "Native performance",
-  "— Electron とはおさらば。Rust + GPUI で低メモリ · 60fps": "— no Electron. Rust + GPUI, low memory and 60fps",
+  "— Electron とはおさらば。Rust 製で低メモリ · 60fps": "— no Electron. Built in Rust, low memory and 60fps",
   "マルチプレクサ": "Multiplexer",
   "— AI 時代の新概念、Fleet モード": "— Fleet mode, a new idea for the agent era",
 
@@ -46,7 +46,7 @@
   "— タスクは Markdown ファイルで管理され、完了した項目はエージェントが自分でチェックします": "— tasks live in a Markdown file, and the agent ticks off what it finishes",
 
   "ネイティブの速さを、すべての操作に": "Native speed in every interaction",
-  "Rust で書かれ、GPUI が GPU で直接描画します。Electron も webview も使わないため、起動からスクロール、入力まで一貫して軽快です。": "Written in Rust and drawn straight on the GPU by GPUI. No Electron, no webview — launch, scrolling and typing all stay light.",
+  "Rust で書かれ、GPU で直接描画します。Electron も webview も使わないため、起動からスクロール、入力まで一貫して軽快です。": "Written in Rust and drawn straight on the GPU. No Electron, no webview — launch, scrolling and typing all stay light.",
   "起動 → 入力可能": "launch → ready to type",
   "コールドスタート": "cold start",
   "待機時メモリ": "idle memory",
@@ -54,7 +54,7 @@
   "⌘P の絞り込み": "⌘P filtering",
   "50,000 ファイルで実測": "measured over 50,000 files",
   "GPU 直描画": "drawn on the GPU",
-  "GPUI ネイティブ UI": "GPUI native UI",
+  "ネイティブ UI": "Native UI",
   "M1 Mac での実測値": "Measured on an M1 Mac",
 
   "Fleet モード — エージェントのマルチプレクサ": "Fleet mode — a multiplexer for agents",
@@ -117,7 +117,7 @@
   "作者": "Author",
   " — どの AI が走り、どれに指示しているか、一目でわかる": " — see at a glance which AI is running, and which one you are talking to",
   " — 契約中のサブスクが ACP（標準プロトコル）でそのまま動く": " — your existing subscription works as-is over ACP, the open agent protocol",
-  " — Electron とはおさらば。Rust + GPUI で低メモリ · 60fps": " — no Electron. Rust + GPUI, low memory and 60fps",
+  " — Electron とはおさらば。Rust 製で低メモリ · 60fps": " — no Electron. Built in Rust, low memory and 60fps",
   " — AI 時代の新概念、Fleet モード": " — Fleet mode, a new idea for the agent era",
   " — どのスレッド・どのブランチに送るかを常に確認できます": " — you can always see which thread and which branch you are sending to",
   " — スレッドごとの消費量と全体の合計を常に確認できます": " — per-thread consumption and the running total, always in view",
