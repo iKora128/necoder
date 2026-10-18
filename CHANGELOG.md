@@ -5,11 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-10-18
+
+A small release that updates how necoder describes itself in the About window and the empty editor. It is delivered through auto-update.
+
 ### Changed
 
 - **New tagline**: the About window and the empty editor now say what necoder is in plain words: a fast, lightweight code editor built in Rust, made for working with AI agents.
 
 ### 日本語
+
+About のウィンドウと空のエディタに出る、necoder の説明の一文を変えた小さな版です。自動更新で配信します。
 
 #### 変更
 
