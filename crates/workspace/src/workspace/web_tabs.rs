@@ -748,9 +748,7 @@ impl Workspace {
             // 入力欄を開いて文字を入れた状態（確定はしない）を撮る。
             "picker" => {
                 self.open_localhost_preview(&OpenLocalhostPreview, window, cx);
-                if let Some(picker) = self.overlays.picker.clone() {
-                    picker.update(cx, |picker, cx| picker.set_query(argument, cx));
-                }
+                self.set_picker_query(argument, cx);
             }
             "viewport" => {
                 if let Some(web) = active_web {

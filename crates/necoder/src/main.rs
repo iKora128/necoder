@@ -1001,6 +1001,27 @@ fn main() {
                         }
                     }
                 }
+                // 開発用: NECODER_LAUNCHER_PROBE=<ms>[;<絞り込み>] でレールの「＋」ランチャーを開く
+                // （入力欄と最近使った項目の絞り込みの描画検証）。`;` の後ろは入力欄に入れる文字。
+                if let Ok(probe) = std::env::var("NECODER_LAUNCHER_PROBE") {
+                    let (delay, query) = match probe.split_once(';') {
+                        Some((delay, query)) => (delay.to_string(), Some(query.to_string())),
+                        None => (probe, None),
+                    };
+                    if let Ok(delay_ms) = delay.parse::<u64>() {
+                        if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                            cx.spawn(async move |_workspace, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                let _ = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_open_launcher(query.as_deref(), window, cx);
+                                });
+                            })
+                            .detach();
+                        }
+                    }
+                }
                 // 開発用: NECODER_FLASH_PROBE=<ms> でプロジェクト切替フラッシュを繰り返し表示する
                 // （offscreen 撮影がどのタイミングでも掴めるよう <ms> 間隔でループ・描画検証専用）。
                 if let Ok(interval) = std::env::var("NECODER_FLASH_PROBE") {

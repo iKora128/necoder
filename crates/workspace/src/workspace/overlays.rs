@@ -472,7 +472,7 @@ impl Workspace {
             PickerItem::new(2, i18n::t!("launcher.connect_remote")),
         ];
 
-        // 最近（local + remote を opened_at 降順でマージ・上位 20）。
+        // 最近（local + remote を opened_at 降順でマージ・上位 LAUNCHER_RECENT_LIMIT）。
         enum Recent {
             Local {
                 path: PathBuf,
@@ -509,7 +509,7 @@ impl Workspace {
             Recent::Remote { at, .. } => *at,
         };
         recents.sort_by(|a, b| opened_at(b).cmp(&opened_at(a)));
-        recents.truncate(20);
+        recents.truncate(LAUNCHER_RECENT_LIMIT);
 
         let registry = cx.try_global::<agent_panel::RunningRegistry>();
         let running_dots = |root: &Path| -> Vec<Hsla> {
@@ -534,6 +534,7 @@ impl Workspace {
                     items.push(
                         PickerItem::new(id, name)
                             .with_detail(path.display().to_string())
+                            .with_match_detail()
                             .with_accent(accent)
                             .with_dots(dots),
                     );
@@ -547,6 +548,7 @@ impl Workspace {
                     items.push(
                         PickerItem::new(id, name)
                             .with_detail(format!("{host}:{path}"))
+                            .with_match_detail()
                             .with_accent(accent),
                     );
                     rows.push(OpenRow::RecentRemote(uri));
@@ -746,13 +748,139 @@ impl Workspace {
             .active_slot()
             .map(|slot| slot.color)
             .unwrap_or_else(|| project_color(0));
-        let picker = cx.new(|cx| Picker::new(placeholder, items, theme, accent, cx));
-        window.focus(&picker.read(cx).focus_handle(), cx);
-        self.overlays.picker_observation =
-            Some(cx.subscribe_in(&picker, window, Self::on_picker_event));
+        // 入力欄は IME の正しい 1 行入力（日本語の変換・貼り付け・選択しての置き換えが効く）。
+        // ⏎ は Submit で受ける（変換確定の ⏎ では出ない）。
+        let input = cx.new(|cx| {
+            let mut input = EditorView::plain(theme.clone(), accent, true, cx);
+            input.set_typography(PICKER_INPUT_FONT_SIZE, 4, cx);
+            input
+        });
+        let picker = cx.new(|cx| {
+            let mut picker = Picker::new(placeholder, items, theme, accent, cx);
+            picker.set_input(input.clone().into(), cx);
+            picker
+        });
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        self.overlays.picker_subscriptions = vec![
+            cx.subscribe_in(&picker, window, Self::on_picker_event),
+            cx.observe(&input, |workspace, input, cx| {
+                workspace.on_picker_input_changed(&input, cx)
+            }),
+            cx.subscribe(&input, |workspace, _input, event: &ComposerEvent, cx| {
+                if *event == ComposerEvent::Submit {
+                    if let Some(picker) = workspace.overlays.picker.clone() {
+                        picker.update(cx, |picker, cx| picker.confirm_selected(cx));
+                    }
+                }
+            }),
+        ];
         self.overlays.picker_mode = mode;
         self.overlays.picker = Some(picker);
+        self.overlays.picker_input = Some(input);
         cx.notify();
+    }
+
+    /// Picker の入力欄が変わった（打鍵・貼り付け・取り消し・変換）。変換中は絞り込まずに確定を待つ
+    /// （ローマ字・かなの途中で並びを跳ねさせない）。キャレットの点滅など中身が同じ通知は無視する。
+    fn on_picker_input_changed(&mut self, input: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let Some(picker) = self.overlays.picker.clone() else {
+            return;
+        };
+        let (empty, composing, query) = {
+            let input = input.read(cx);
+            (
+                input.buffer().len_bytes() == 0,
+                input.has_marked_text(),
+                input.first_line_text(),
+            )
+        };
+        picker.update(cx, |picker, cx| {
+            picker.set_input_empty(empty, cx);
+            if !composing && picker.query() != query {
+                picker.set_query(query, cx);
+            }
+        });
+    }
+
+    /// Picker の語をプログラムから入れる（開発プローブ用）。入力欄にも同じ語を入れて見た目を揃え、
+    /// 絞り込みはその場で済ませる（直後の確定が絞り込んだ後の行を選ぶ）。
+    pub(crate) fn set_picker_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        if let Some(input) = self.overlays.picker_input.clone() {
+            input.update(cx, |input, cx| input.set_plain_text(query, cx));
+        }
+        if let Some(picker) = self.overlays.picker.clone() {
+            picker.update(cx, |picker, cx| {
+                picker.set_input_empty(query.is_empty(), cx);
+                picker.set_query(query, cx);
+            });
+        }
+    }
+
+    /// Picker の入力欄で変換中（未確定の文字がある）か。
+    fn picker_input_composing(&self, cx: &App) -> bool {
+        self.overlays
+            .picker_input
+            .as_ref()
+            .is_some_and(|input| input.read(cx).has_marked_text())
+    }
+
+    /// Picker を置く面。入力欄の束（↑↓・⇧⏎・tab・esc・⌘⏎・⌘V）を入力欄より先に受けて、
+    /// 選択の移動・確定・閉じるへ回す（入力欄は 1 行なので改行やインデントは入れない）。
+    pub(crate) fn render_picker(
+        &self,
+        picker: Entity<Picker>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let up = picker.clone();
+        let down = picker.clone();
+        let secondary = picker.clone();
+        div()
+            .absolute()
+            .inset_0()
+            .capture_action(move |_: &editor_view::MoveUp, _window, cx| {
+                cx.stop_propagation();
+                up.update(cx, |picker, cx| picker.select_previous(cx));
+            })
+            .capture_action(move |_: &editor_view::MoveDown, _window, cx| {
+                cx.stop_propagation();
+                down.update(cx, |picker, cx| picker.select_next(cx));
+            })
+            .capture_action(|_: &editor_view::InsertNewline, _window, cx| {
+                cx.stop_propagation();
+            })
+            .capture_action(|_: &editor_view::TabIndent, _window, cx| {
+                cx.stop_propagation();
+            })
+            .capture_action(|_: &editor_view::Outdent, _window, cx| {
+                cx.stop_propagation();
+            })
+            // ⌘V は 1 行目だけ（改行を含む語は 1 行の欄に入れない）。
+            .capture_action(cx.listener(|this, _: &editor_view::Paste, _window, cx| {
+                cx.stop_propagation();
+                let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+                    return;
+                };
+                let line = text.lines().next().unwrap_or_default().to_string();
+                if let Some(input) = this.overlays.picker_input.clone() {
+                    input.update(cx, |input, cx| input.insert_text(&line, cx));
+                }
+            }))
+            // ⌘⏎ = 副確定（新しいウィンドウで開く等）。入力欄の Editor 文脈では agent::SubmitPrompt。
+            .capture_action(move |_: &agent_panel::SubmitPrompt, _window, cx| {
+                cx.stop_propagation();
+                secondary.update(cx, |picker, cx| picker.confirm_selected_secondary(cx));
+            })
+            // esc（入力欄は複数カーソルを畳む時以外 `editor::Cancel` を親へ流す）。変換中の esc は
+            // 変換の取り消し（IME の物）。
+            .on_action(cx.listener(|this, _: &editor_view::Cancel, _window, cx| {
+                if this.picker_input_composing(cx) {
+                    return;
+                }
+                if let Some(picker) = this.overlays.picker.clone() {
+                    picker.update(cx, |picker, cx| picker.dismiss(cx));
+                }
+            }))
+            .child(picker)
     }
 
     pub(crate) fn on_picker_event(
@@ -962,7 +1090,8 @@ impl Workspace {
 
     pub(crate) fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.picker = None;
-        self.overlays.picker_observation = None;
+        self.overlays.picker_input = None;
+        self.overlays.picker_subscriptions.clear();
         match self.active_editor() {
             Some(editor) => {
                 let handle = editor.read(cx).focus_handle(cx);
@@ -1560,6 +1689,12 @@ pub(crate) const PALETTE_CUSTOM_AGENT_ROW: usize = 100_000;
 
 /// ⌘P の並びの加点（D19）。あいまい一致のスコアはおおむね数十〜数百の幅なので、桁を分けて
 /// 「最近開いたファイルは一致したものの中で必ず上」「無視されたファイル（2 回目）は必ず下」にする。
+/// Picker の入力欄の字の大きさ（リストの行 12.5px より一回り大きく）。
+const PICKER_INPUT_FONT_SIZE: f32 = 13.0;
+
+/// 「＋」ランチャーに並べる最近使った項目の数。打てば名前とパスで絞り込むので多めに持つ。
+const LAUNCHER_RECENT_LIMIT: usize = 100;
+
 const FINDER_RECENT_BOOST: i32 = 10_000;
 const FINDER_IGNORED_BOOST: i32 = -10_000;
 

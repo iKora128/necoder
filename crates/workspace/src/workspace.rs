@@ -1619,7 +1619,10 @@ struct WorkspaceOverlays {
     /// [`overlays::PALETTE_CUSTOM_AGENT_ROW`] からの通し番号（コマンドの登録簿の番号と重ならない）。
     picker_agent_threads: Vec<SharedString>,
     theme_before_preview: Option<Theme>,
-    picker_observation: Option<Subscription>,
+    /// Picker の入力欄（IME の正しい `EditorView::plain`）。中身を Picker のクエリへ写す。
+    picker_input: Option<Entity<EditorView>>,
+    /// Picker の通知と入力欄の購読（閉じると一緒に落ちる）。
+    picker_subscriptions: Vec<Subscription>,
     color_picker: Option<ColorPickerState>,
     rail_menu: Option<RailMenuState>,
     /// エディタタブの右クリックメニュー。
@@ -2749,7 +2752,7 @@ impl Render for Workspace {
             // どこからでも呼べる端末（O24・C13）。パレットやダイアログはこの上に出す。
             .children(self.render_floating_terminal(cx))
             .when_some(self.overlays.picker.clone(), |this, picker| {
-                this.child(picker)
+                this.child(self.render_picker(picker, cx))
             })
             .children(self.render_search_panel(cx))
             .children(self.render_completion(cx))

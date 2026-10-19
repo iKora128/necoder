@@ -703,7 +703,13 @@ mod tests {
             r#"{"onboarded":true,"agent_prewarm":false}"#,
         )
         .expect("設定を書ける");
-        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            // ↑↓・esc は入力欄（Editor 文脈）の束で届く（本番と同じ既定 keymap）。
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
         let (workspace, cx) = cx.add_window_view(|_window, cx| {
             Workspace::new(projects.clone(), Theme::dark(), None, cx)
         });
@@ -776,6 +782,113 @@ mod tests {
 
         cx.simulate_keystrokes("escape");
         assert!(lit(cx).is_empty(), "閉じたら消える");
+        std::fs::remove_dir_all(&root).ok();
+    }
+    /// 「＋」/「最近使った項目を開く…」の入力欄（本人要望・2026-10-19）: 開くと入力欄にフォーカスが
+    /// あり、打った文字で名前とパスの両方から絞り込む。↓ で選んで ⏎ で確定、esc で閉じる。
+    #[gpui::test]
+    fn the_launcher_filters_recent_projects_as_you_type(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_rail_launcher_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let project = root.join("current");
+        std::fs::create_dir_all(&project).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        // 最近の 3 件（storage の代わりに行を直に並べる）。
+        let recents = [
+            ("necoder", "/Users/me/Work/necoder"),
+            ("api", "/Users/me/Work/necoder-api"),
+            ("notes", "/Users/me/Documents/notes"),
+        ];
+        workspace.update_in(cx, |workspace, window, cx| {
+            let items = recents
+                .iter()
+                .enumerate()
+                .map(|(id, (name, path))| {
+                    PickerItem::new(id, *name)
+                        .with_detail(*path)
+                        .with_match_detail()
+                })
+                .collect();
+            workspace.picker_open_rows = recents
+                .iter()
+                .map(|(_, path)| OpenRow::RecentLocal(PathBuf::from(path)))
+                .collect();
+            workspace.open_picker(PickerMode::OpenLauncher, String::new(), items, window, cx);
+        });
+        let matched = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let picker = workspace
+                    .overlays
+                    .picker
+                    .clone()
+                    .expect("ランチャーが開いている");
+                picker.read(cx).matched_ids()
+            })
+        };
+        let selected = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let picker = workspace
+                    .overlays
+                    .picker
+                    .clone()
+                    .expect("ランチャーが開いている");
+                picker.read(cx).selected_id()
+            })
+        };
+        let input_focused = workspace.update_in(cx, |workspace, window, cx| {
+            let input = workspace
+                .overlays
+                .picker_input
+                .clone()
+                .expect("入力欄がある");
+            input.read(cx).focus_handle(cx).is_focused(window)
+        });
+        assert!(input_focused, "開いた時から打てる");
+
+        cx.simulate_input("nec");
+        cx.run_until_parked();
+        assert_eq!(
+            matched(cx),
+            vec![0, 1],
+            "名前の一致が上・パスだけの一致が下"
+        );
+        cx.simulate_input("oder-");
+        cx.run_until_parked();
+        assert_eq!(matched(cx), vec![1], "パスの途中でも絞れる");
+        cx.simulate_keystrokes("backspace backspace backspace backspace backspace");
+        cx.run_until_parked();
+        assert_eq!(matched(cx), vec![0, 1], "消せば戻る");
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected(cx),
+            Some(1),
+            "↓ は入力欄のキャレットではなく選択を動かす"
+        );
+        cx.simulate_keystrokes("escape");
+        let open = workspace.read_with(cx, |workspace, _| workspace.overlays.picker.is_some());
+        assert!(!open, "esc で閉じる");
         std::fs::remove_dir_all(&root).ok();
     }
 }

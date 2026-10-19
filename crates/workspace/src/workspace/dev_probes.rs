@@ -1164,16 +1164,10 @@ impl Workspace {
             "open" => self.open_file(target, window, cx),
             // ⌘P（`finder` → 列挙を待って `finder_query:<語>` → `finder_confirm` = ⏎）。
             "finder" => self.open_file_finder(&FileFinder, window, cx),
-            "finder_query" | "finder_confirm" => {
+            "finder_query" => self.set_picker_query(argument, cx),
+            "finder_confirm" => {
                 if let Some(picker) = self.overlays.picker.clone() {
-                    let query = argument.to_string();
-                    picker.update(cx, |picker, cx| {
-                        if name == "finder_query" {
-                            picker.set_query(query, cx);
-                        } else {
-                            picker.confirm_selected(cx);
-                        }
-                    });
+                    picker.update(cx, |picker, cx| picker.confirm_selected(cx));
                 }
             }
             "duplicate" => self.duplicate_entry(target, cx),
@@ -1486,6 +1480,21 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: レールの「＋」ランチャー（最近使った項目を開く…）を開く。`query` があれば入力欄に入れて
+    /// 絞り込む（`NECODER_LAUNCHER_PROBE`・入力欄と絞り込みの offscreen 検証）。
+    #[cfg(debug_assertions)]
+    pub fn debug_open_launcher(
+        &mut self,
+        query: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_launcher(window, cx);
+        if let Some(query) = query {
+            self.set_picker_query(query, cx);
+        }
+    }
+
     /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。`query` があれば開いてから
     /// 絞り込む（選んだ行の行き先がレールで光るのを撮る）。
     #[cfg(debug_assertions)]
@@ -1496,8 +1505,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.open_project_switcher(&ProjectSwitcher, window, cx);
-        if let (Some(query), Some(picker)) = (query, self.overlays.picker.clone()) {
-            picker.update(cx, |picker, cx| picker.set_query(query, cx));
+        if let Some(query) = query {
+            self.set_picker_query(query, cx);
         }
     }
 
@@ -1576,14 +1585,12 @@ impl Workspace {
         let Some(picker) = self.overlays.picker.clone() else {
             return;
         };
-        picker.update(cx, |picker, cx| {
-            if !query.is_empty() {
-                picker.set_query(query, cx);
-            }
-            if confirm {
-                picker.confirm_selected(cx);
-            }
-        });
+        if !query.is_empty() {
+            self.set_picker_query(&query, cx);
+        }
+        if confirm {
+            picker.update(cx, |picker, cx| picker.confirm_selected(cx));
+        }
     }
 
     /// 開発用: Todo ボードを開く（M12-10 のオフスクリーン検証）。

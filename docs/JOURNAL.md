@@ -4232,3 +4232,8 @@
 - 検証: 隔離 offscreen で ①②③と終わりの画面を目視（mac）。`cargo test --workspace`（使い捨ての HOME）。CPU は隔離起動で 18 秒の CPU 時間が約 5.1 秒 → 約 1.2 秒
 - 未: Windows 実機（ne.cmd・初回の案内・アイドル CPU）。`mock/settings-agents.html` は旧い並び
 
+
+## 2026-10-19 — Picker に本物の入力欄・「＋」ランチャーをパスでも絞る
+- やったこと: 本人要望「最近使った項目を開くのウィンドウに文字入力のところが欲しい・打ったらサクサク候補が出てほしい」。`ui::Picker` の入力行は灰色の文字を描くだけで、枠もキャレットも IME も無かった（打てば絞れてはいたが、打てる場所に見えない）。workspace が `EditorView::plain` を作って `Picker::set_input` で差し込み、中身を `set_query` へ写す（全 Picker 共通）。↑↓・⇧⏎・tab・⌘V・⌘⏎ は `render_picker` の外側の div で `capture_action`、esc は入力欄が流す `editor::Cancel` を受け、⏎ は `ComposerEvent::Submit`。リストは `overflow_y_scroll` + `ScrollHandle::scroll_to_item` で選択行へ寄せる（前は 340px で切れて ↓ の先が見えなかった）。ランチャーの最近は 20 → 100 件、`PickerItem::with_match_detail` で名前に外れた時だけパスでも当てる。開発プローブ `NECODER_LAUNCHER_PROBE=<ms>[;語]`
+- 学び/罠: パスをあいまい一致で探すと `api` が `/private/tmp/nl-iso` の飛び飛びの文字に当たって全件残る（隔離 offscreen の実画面で発見・テストでは出なかった）。パスは「語をそのまま含む」だけにした。入力欄があると Picker 自身の `on_key_down` は文字を拾ってはいけない（二重に入る）。テストで ↑↓/esc を打つなら既定 keymap を `bind_keys` する（入力欄の Editor 文脈の束で届くため）
+- 次: パスを打ったらフォルダを候補に出す（`~/Work/` → 中のフォルダ）。今は最近使った項目だけ

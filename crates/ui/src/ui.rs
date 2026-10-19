@@ -14,9 +14,9 @@ pub use density::{row_height, row_padding, RowDensity};
 pub use fonts::{code_font, ui_font, FontFamilies};
 
 use gpui::{
-    div, ease_out_quint, hsla, prelude::*, px, Animation, AnimationExt, AnyView, App, BoxShadow,
-    Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton,
-    Render, SharedString, Window,
+    div, ease_out_quint, hsla, prelude::*, px, svg, Animation, AnimationExt, AnyView, App,
+    BoxShadow, Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
+    MouseButton, Render, ScrollHandle, SharedString, Window,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -124,6 +124,9 @@ pub struct PickerItem {
     /// 並びの加点（あいまい一致のスコアに足す・既定 0）。⌘P の「最近開いたファイルを上へ」
     /// 「無視されたファイルは後ろへ」に使う（D19）。一致しない項目を出す力は無い。
     pub boost: i32,
+    /// 名前に一致しない時、`detail`（パス等）でも探す。名前の一致より下に並べる
+    /// （最近使った項目の「フォルダの途中の名前で探す」用・既定 false）。
+    pub match_detail: bool,
 }
 
 impl PickerItem {
@@ -135,6 +138,7 @@ impl PickerItem {
             accent: None,
             dots: Vec::new(),
             boost: 0,
+            match_detail: false,
         }
     }
 
@@ -155,6 +159,12 @@ impl PickerItem {
 
     pub fn with_boost(mut self, boost: i32) -> Self {
         self.boost = boost;
+        self
+    }
+
+    /// 名前に一致しない時、`detail` でも探す（[`Self::match_detail`]）。
+    pub fn with_match_detail(mut self) -> Self {
+        self.match_detail = true;
         self
     }
 }
@@ -184,6 +194,13 @@ pub struct Picker {
     focus_handle: FocusHandle,
     theme: Theme,
     accent: Hsla,
+    /// 入力行に置く 1 行入力（ホストが作る IME の正しい入力欄）。None なら Picker 自身がキーを受けて
+    /// 文字を描く（テスト・入力欄を渡さないホスト）。入力欄の中身はホストが [`Self::set_query`] で写す。
+    input: Option<AnyView>,
+    /// 入力欄が空か（プレースホルダを出すか）。変換中の未確定の文字だけでも空ではない。
+    input_empty: bool,
+    /// リストのスクロール（↑↓で選んだ行を見える所へ寄せる）。
+    scroll_handle: ScrollHandle,
 }
 
 impl EventEmitter<PickerEvent> for Picker {}
@@ -209,7 +226,45 @@ impl Picker {
             focus_handle: cx.focus_handle(),
             theme,
             accent,
+            input: None,
+            input_empty: true,
+            scroll_handle: ScrollHandle::new(),
         }
+    }
+
+    /// 入力行に 1 行入力を置く（[`Self::input`]）。キー（↑↓・⏎・esc）はホストが入力欄の束より
+    /// 先に受けて [`Self::select_previous`] などへ回す。
+    pub fn set_input(&mut self, input: AnyView, cx: &mut Context<Self>) {
+        self.input = Some(input);
+        cx.notify();
+    }
+
+    /// 入力欄が空か（プレースホルダの表示）をホストから写す。
+    pub fn set_input_empty(&mut self, empty: bool, cx: &mut Context<Self>) {
+        if self.input_empty != empty {
+            self.input_empty = empty;
+            cx.notify();
+        }
+    }
+
+    /// 選択を 1 つ上へ（↑）。
+    pub fn select_previous(&mut self, cx: &mut Context<Self>) {
+        self.move_selection(-1, cx);
+    }
+
+    /// 選択を 1 つ下へ（↓）。
+    pub fn select_next(&mut self, cx: &mut Context<Self>) {
+        self.move_selection(1, cx);
+    }
+
+    /// ⌘⏎ の確定（[`PickerEvent::ConfirmedSecondary`]）。
+    pub fn confirm_selected_secondary(&mut self, cx: &mut Context<Self>) {
+        self.confirm_secondary(cx);
+    }
+
+    /// 閉じる（esc と同じ [`PickerEvent::Dismissed`]）。
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        cx.emit(PickerEvent::Dismissed);
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -301,6 +356,7 @@ impl Picker {
     pub fn set_query(&mut self, query: impl Into<String>, cx: &mut Context<Self>) {
         self.query = query.into();
         self.refilter();
+        self.emit_highlight(cx);
         cx.notify();
     }
 
@@ -331,6 +387,7 @@ impl Picker {
             }
         }
         self.selected = 0;
+        self.scroll_handle.scroll_to_item(0);
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -339,6 +396,7 @@ impl Picker {
         }
         let len = self.filtered.len() as isize;
         self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
+        self.scroll_handle.scroll_to_item(self.selected);
         self.emit_highlight(cx);
         cx.notify();
     }
@@ -360,6 +418,11 @@ impl Picker {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // 入力欄があれば文字・編集キーは入力欄の物（ここで拾うと二重に入る）。↑↓⏎esc はホストが
+        // 入力欄の束より先に受ける。
+        if self.input.is_some() {
+            return;
+        }
         match event.keystroke.key.as_str() {
             "escape" => cx.emit(PickerEvent::Dismissed),
             // ⌘⏎ = 副確定（新しいウィンドウで開く等）。無修飾 ⏎ = 通常確定。
@@ -440,24 +503,74 @@ impl Render for Picker {
                         MouseButton::Left,
                         cx.listener(|_this, _event, _window, cx| cx.stop_propagation()),
                     )
-                    // 入力行
+                    // 入力行: 枠のある入力欄（検索アイコン + 入力欄）。ターミナル検索・設定の検索欄と
+                    // 同じ形（bg1・角 6・フォーカス中の枠はプロジェクト色）。入力欄が無いホストは
+                    // 打った文字を描くだけ。
                     .child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .text_color(query_color)
-                            .child(query_display),
+                        div().p_2().border_b_1().border_color(theme.border).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .h(px(32.))
+                                .px(px(10.))
+                                .rounded(px(6.))
+                                .bg(theme.bg1)
+                                .border_1()
+                                .border_color(accent)
+                                .cursor(gpui::CursorStyle::IBeam)
+                                .child(
+                                    svg()
+                                        .path("icons/search.svg")
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(theme.fg2),
+                                )
+                                .map(|field| match self.input.clone() {
+                                    Some(input) => field.child(
+                                        div()
+                                            .relative()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h(px(20.))
+                                            .overflow_hidden()
+                                            // 入力欄はこの枠（高さ 20）いっぱい。親が高さを決めないと 0 に潰れる。
+                                            .child(input)
+                                            .when(self.input_empty, |text| {
+                                                // 空の欄のキャレット（行頭・幅 2px）に重ならないよう、その右から。
+                                                text.child(
+                                                    div()
+                                                        .absolute()
+                                                        .inset_0()
+                                                        .pl(px(4.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .overflow_hidden()
+                                                        .text_color(theme.fg2)
+                                                        .child(self.placeholder.clone()),
+                                                )
+                                            }),
+                                    ),
+                                    None => field.child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_color(query_color)
+                                            .child(query_display),
+                                    ),
+                                }),
+                        ),
                     )
-                    // リスト（最大 50 件）
+                    // リスト（最大 50 件・↑↓で選んだ行へスクロールを寄せる）
                     .child(
                         div()
+                            .id("picker-list")
                             .flex()
                             .flex_col()
                             .p_1()
                             .max_h(px(340.))
-                            .overflow_hidden()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll_handle)
                             .children(self.filtered.iter().take(50).enumerate().map(
                                 |(row, &item_index)| {
                                     let item = &self.items[item_index];
@@ -562,6 +675,9 @@ impl Render for Picker {
     }
 }
 
+/// `detail` での一致（[`PickerItem::match_detail`]）を名前の一致より下へ落とす減点。
+const DETAIL_MATCH_PENALTY: i32 = 1000;
+
 /// クエリに一致する項目の添字を、良い順に並べて返す（Picker の refilter の本体）。
 /// 順位 = あいまい一致のスコア + [`PickerItem::boost`]。同点は元の並び（安定ソート）。
 /// 一致しない項目は加点があっても出さない。
@@ -570,11 +686,34 @@ pub fn rank_items(query: &str, items: &[PickerItem]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            fuzzy_score(query, &item.label).map(|score| (index, score.saturating_add(item.boost)))
+            fuzzy_score(query, &item.label)
+                .or_else(|| {
+                    // 名前で外れた時だけパス等で探す。名前の一致より必ず下に並べる。
+                    item.match_detail
+                        .then_some(item.detail.as_ref())
+                        .flatten()
+                        .and_then(|detail| detail_score(query, detail))
+                        .map(|score| score.saturating_sub(DETAIL_MATCH_PENALTY))
+                })
+                .map(|score| (index, score.saturating_add(item.boost)))
         })
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     scored.into_iter().map(|(index, _)| index).collect()
+}
+
+/// パス等（[`PickerItem::match_detail`]）での一致。打った語がそのまま含まれる時だけ当てる
+/// （あいまい一致だと長いパスの飛び飛びの文字に当たり、`api` でほぼ全部が残る）。後ろ寄り
+/// （フォルダ名に近い所）の一致ほど上。
+fn detail_score(query: &str, detail: &str) -> Option<i32> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let detail = detail.to_lowercase();
+    let position = detail.rfind(&query)?;
+    let distance_from_end = detail.len() - position - query.len();
+    Some(-(distance_from_end as i32) / 4)
 }
 
 /// ベンチ専用の公開ラッパ（examples/bench_fuzzy が ⌘P の refilter 負荷を実測する用）。
@@ -658,6 +797,36 @@ mod tests {
             rank_items("main", &list),
             vec![1],
             "一致しないものは出さない"
+        );
+    }
+
+    /// 最近使った項目（`match_detail`）: 名前で外れてもパスで当たる。名前の一致が必ず上。
+    /// 印の無い項目（⌘P 等）はパスでは探さない。
+    #[test]
+    fn rank_items_matches_detail_only_when_asked() {
+        let list = vec![
+            PickerItem::new(0, "api")
+                .with_detail("/Users/me/Work/necoder-api")
+                .with_match_detail(),
+            PickerItem::new(1, "necoder")
+                .with_detail("/Users/me/Work/necoder")
+                .with_match_detail(),
+            PickerItem::new(2, "notes").with_detail("/Users/me/necoder-notes"),
+        ];
+        assert_eq!(
+            rank_items("necoder", &list),
+            vec![1, 0],
+            "名前の一致が上・パスだけの一致はその下・印の無い項目は出ない"
+        );
+        assert_eq!(
+            rank_items("work", &list),
+            vec![1, 0],
+            "フォルダの途中の名前でも当たる・フォルダ名に近い一致が上"
+        );
+        assert_eq!(
+            rank_items("mwk", &list),
+            Vec::<usize>::new(),
+            "パスは飛び飛びの文字では当てない"
         );
     }
 
