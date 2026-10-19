@@ -49,9 +49,10 @@ image = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 
-# exe にアイコンと版情報を埋め込む（build.rs・Windows だけ）。MIT。gpui が manifest の埋め込みに
-# 使っている版と同じ物＝新しい crate は増えない。
-[target.'cfg(windows)'.build-dependencies]
+# exe にアイコンと版情報を埋め込む（build.rs・埋め込むのは Windows 向けのビルドだけ）。MIT。gpui が
+# manifest の埋め込みに使っている版と同じ物＝新しい crate は増えない。build.rs は全 OS で
+# `embed_resource` を名指しするので、target 限定にすると mac / Linux でビルドスクリプトが通らない。
+[build-dependencies]
 embed-resource = "3.0.11"
 
 # Dock / AppleScript の「終了」を ⌘Q と同じ確認へ回すフック（quit_hook.rs・O4）。

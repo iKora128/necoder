@@ -804,35 +804,39 @@ mod tests {
     /// 既定の置き場・Scoop を後に。大文字小文字だけ違う重複は外す。
     #[test]
     fn git_bash_is_found_next_to_git_on_path_first() {
+        // 区切りはこの OS の物で組む（mac / Linux の CI でも `Path::parent` が同じように分かれる）。
+        let path = |parts: &[&str]| parts.iter().collect::<PathBuf>();
         let program_dirs = [
-            PathBuf::from(r"C:\Program Files"),
-            PathBuf::from(r"C:\Users\a\AppData\Local\Programs"),
+            path(&["C:", "Program Files"]),
+            path(&["C:", "Users", "a", "AppData", "Local", "Programs"]),
         ];
-        let scoop = Some(PathBuf::from(r"C:\Users\a\scoop\apps\git\current"));
+        let scoop = Some(path(&[
+            "C:", "Users", "a", "scoop", "apps", "git", "current",
+        ]));
+        let expected = path(&["D:", "Tools", "Git", "bin", "bash.exe"]);
         for git in [
-            r"D:\Tools\Git\cmd\git.exe",
-            r"D:\Tools\Git\bin\git.exe",
-            r"D:\Tools\Git\mingw64\bin\git.exe",
+            path(&["D:", "Tools", "Git", "cmd", "git.exe"]),
+            path(&["D:", "Tools", "Git", "bin", "git.exe"]),
+            path(&["D:", "Tools", "Git", "mingw64", "bin", "git.exe"]),
         ] {
-            let candidates =
-                git_bash_candidates(Some(Path::new(git)), &program_dirs, scoop.clone());
-            assert_eq!(
-                candidates.first().map(PathBuf::as_path),
-                Some(Path::new(r"D:\Tools\Git\bin\bash.exe")),
-                "{git}"
-            );
+            let candidates = git_bash_candidates(Some(&git), &program_dirs, scoop.clone());
+            assert_eq!(candidates.first(), Some(&expected), "{}", git.display());
         }
         let candidates = git_bash_candidates(
-            Some(Path::new(r"C:\PROGRAM FILES\Git\cmd\git.exe")),
+            Some(&path(&["C:", "PROGRAM FILES", "Git", "cmd", "git.exe"])),
             &program_dirs,
             scoop,
         );
         assert_eq!(
             candidates,
             vec![
-                PathBuf::from(r"C:\PROGRAM FILES\Git\bin\bash.exe"),
-                PathBuf::from(r"C:\Users\a\AppData\Local\Programs\Git\bin\bash.exe"),
-                PathBuf::from(r"C:\Users\a\scoop\apps\git\current\bin\bash.exe"),
+                path(&["C:", "PROGRAM FILES", "Git", "bin", "bash.exe"]),
+                path(&[
+                    "C:", "Users", "a", "AppData", "Local", "Programs", "Git", "bin", "bash.exe"
+                ]),
+                path(&[
+                    "C:", "Users", "a", "scoop", "apps", "git", "current", "bin", "bash.exe"
+                ]),
             ],
             "Program Files の Git は PATH の物と同じなので重ねない"
         );
