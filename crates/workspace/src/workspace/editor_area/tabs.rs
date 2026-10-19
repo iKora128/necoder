@@ -85,6 +85,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 初回の案内を終えた直後: 使うエージェントがあれば右のパネルを開き、空のスレッドをそのエージェントに
+    /// して（空でなければ新しく作って）入力欄にフォーカスを置く＝そのまま打てる。無ければ何もしない
+    /// （AI を使わずに始めた人に空のパネルを押し付けない）。
+    pub(crate) fn open_first_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = settings::default_agent(cx) else {
+            return;
+        };
+        self.chrome.show_right = true;
+        self.agent_active = true;
+        let label = agent.label().to_string();
+        let panel = self.agent_panel.clone();
+        panel.update(cx, |panel, cx| panel.start_first_thread(&label, cx));
+        window.defer(cx, move |window, cx| {
+            panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+        });
+        cx.notify();
+    }
+
     /// エージェントを決めて新規スレッド（B28）。使わないと決めたエージェント（O16）なら開かずに知らせる
     /// （keymap.json に残したキーから来た時）。
     pub(crate) fn new_agent_thread_with(&mut self, agent: &str, cx: &mut Context<Self>) {

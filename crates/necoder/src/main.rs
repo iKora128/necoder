@@ -174,12 +174,22 @@ fn restored_window_plans(storage: &storage::Storage) -> Vec<WindowPlan> {
 }
 
 /// カレントディレクトリを開く 1 窓（復元できる窓が無い時の最後の砦）。
+///
+/// ただし**プロジェクトになり得ない場所は開かない**（[`opens_as_project`]）。Finder / Dock から起動すると
+/// カレントディレクトリは `/`、Windows のスタートメニューから起動するとインストール先で、初回はそれが
+/// プロジェクトとして開いていた。その時はフォルダの無い窓で始め、初回の案内の ③ で選んでもらう。
 fn current_directory_plan() -> WindowPlan {
     let mut sources = Vec::new();
     let mut open_files = Vec::new();
+    let home = paths::home_dir();
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
     if let Ok(cwd) = std::env::current_dir() {
-        sources.push(ProjectSource::local(cwd));
-        open_files.push(RestoredTabs::default());
+        if opens_as_project(&cwd, home.as_deref(), executable_dir.as_deref()) {
+            sources.push(ProjectSource::local(cwd));
+            open_files.push(RestoredTabs::default());
+        }
     }
     WindowPlan {
         layout_payload: None,
@@ -188,6 +198,20 @@ fn current_directory_plan() -> WindowPlan {
         active: 0,
         window_id: Some(workspace::new_window_session_id()),
     }
+}
+
+/// 引数なしの起動でカレントディレクトリをプロジェクトとして開いてよいか。ファイルシステムの根
+/// （`/`・`C:\`）・ホーム・necoder の実行ファイルの置き場（.app の中・インストール先）は開かない。
+fn opens_as_project(cwd: &Path, home: Option<&Path>, executable_dir: Option<&Path>) -> bool {
+    if cwd.parent().is_none() {
+        return false;
+    }
+    let same = |other: Option<&Path>| {
+        other.is_some_and(|other| {
+            paths::canonicalize_or_keep(other) == paths::canonicalize_or_keep(cwd)
+        })
+    };
+    !same(home) && !same(executable_dir)
 }
 
 /// DB の 1 行（窓セッション）を開ける形へ。SSH は接続し、失敗したプロジェクトは飛ばす。
@@ -1963,6 +1987,32 @@ fn maybe_capture_screenshot(_window: gpui::WindowHandle<Workspace>, _cx: &mut Ap
 mod tests {
     use super::Assets;
     use gpui::AssetSource;
+
+    /// 引数なしの起動: Finder（`/`）・ホーム・実行ファイルの置き場はプロジェクトとして開かない。
+    #[test]
+    fn launch_folders_that_are_not_projects_are_skipped() {
+        let root = std::env::temp_dir().join(format!("necoder-launch-{}", std::process::id()));
+        let home = root.join("home");
+        let install = root.join("install");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).expect("作れる");
+        std::fs::create_dir_all(&install).expect("作れる");
+        let top = std::path::Path::new(std::path::MAIN_SEPARATOR_STR);
+        assert!(!super::opens_as_project(top, Some(&home), Some(&install)));
+        assert!(!super::opens_as_project(&home, Some(&home), Some(&install)));
+        assert!(!super::opens_as_project(
+            &install,
+            Some(&home),
+            Some(&install)
+        ));
+        assert!(super::opens_as_project(
+            &project,
+            Some(&home),
+            Some(&install)
+        ));
+        assert!(super::opens_as_project(&project, None, None));
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn external_file_urls_preserve_folder_names() {

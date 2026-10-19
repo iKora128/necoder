@@ -79,7 +79,12 @@ impl Workspace {
             }
             settings::SettingsViewEvent::OnboardingCompleted => {
                 self.chrome.show_settings = false;
+                self.chrome.pending_first_thread = true;
                 self.celebrate_confetti(cx);
+                cx.notify();
+            }
+            settings::SettingsViewEvent::PickProjectFolder => {
+                self.add_project_via_dialog(cx);
             }
             settings::SettingsViewEvent::SelectTheme(source) => match Theme::load(source) {
                 Ok(theme) => {
@@ -1993,8 +1998,14 @@ impl Workspace {
             // 設定ホーム（レール ⚙ で開閉）。第1セクション=Agents。
             let view = self.chrome.settings_view.clone();
             let accent = self.accent();
+            // 初回の案内の ③ に出す今のフォルダ（ローカルのプロジェクトだけ）。
+            let folder = self
+                .active_slot()
+                .filter(|slot| slot.remote_host.is_none())
+                .map(|slot| slot.worktree.root().to_path_buf());
             view.update(cx, |view, _| {
-                view.set_visuals(self.theme.clone(), self.theme_base.clone(), accent)
+                view.set_visuals(self.theme.clone(), self.theme_base.clone(), accent);
+                view.set_onboarding_folder(folder);
             });
             let body = div().flex_1().min_h_0().child(view);
             if self.tabs.is_empty() {

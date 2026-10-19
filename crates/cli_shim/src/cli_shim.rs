@@ -9,7 +9,8 @@
 //! 設置先は `/usr/local/bin`（stock zsh の PATH に既定で載る場所。`~/.local/bin` は
 //! プロファイル編集が要るため見送り）。書き込めない時の管理者昇格は macOS のみ
 //! [`install_with_admin_prompt`]（osascript のパスワードダイアログ・Zed / VSCode と同型）。
-//! Windows は W フェーズで対応（[`supported`] が false・設定画面はセクションごと隠す）。
+//! Windows は necoder が入れない（[`supported`] が false）。インストーラが `scripts/windows/ne.cmd` を
+//! necoder.exe の隣（PATH に入るインストール先）に置く。設定画面は PATH の `ne` の有無だけを見せる。
 
 use anyhow::{bail, Context as _, Result};
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ pub const COMMAND_NAME: &str = "ne";
 pub const PASSTHROUGH_SUBCOMMANDS: &[&str] =
     &["config", "fleet", "mcp", "remote", "skills", "terminal"];
 
-/// この OS でシム設置に対応しているか（Windows は W フェーズ・WINDOWS-PORT.md）。
+/// この OS で necoder がシムを設置するか（Windows はインストーラが `ne.cmd` を置く・WINDOWS-PORT.md）。
 pub fn supported() -> bool {
     cfg!(unix)
 }
@@ -245,6 +246,22 @@ fn shell_quote(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows の `ne.cmd`（インストーラが置く）も、素通しのサブコマンドを同じ一覧で持つ。
+    #[test]
+    fn the_windows_shim_passes_through_the_same_subcommands() {
+        let script = include_str!("../../../scripts/windows/ne.cmd");
+        let listed = format!("for %%S in ({}) do", PASSTHROUGH_SUBCOMMANDS.join(" "));
+        assert!(
+            script.contains(&listed),
+            "ne.cmd の素通しが一覧とずれている"
+        );
+        assert!(script.contains("\"%NECODER_BIN%\" cli %*"));
+        assert!(
+            script.is_ascii(),
+            "cmd.exe はコンソールのコードページで読む"
+        );
+    }
 
     fn temp_shim(tag: &str) -> PathBuf {
         let dir =

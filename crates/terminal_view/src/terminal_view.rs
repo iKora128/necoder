@@ -537,7 +537,6 @@ fn quote_windows_program(program: String) -> String {
 
 /// PTY の子が `ssh`（接続先の端末＝`ssh -tt …`）か。前面のグループには ssh 自身しか居ないので、
 /// コマンドが動いているかは接続先のシェルの区切り（OSC 133）でしか分からない。
-#[cfg(any(unix, test))]
 fn is_ssh_program(program: &str) -> bool {
     let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
     let name = name
@@ -588,7 +587,12 @@ impl TerminalView {
         )));
 
         let mut env = HashMap::new();
-        if shell.is_none() {
+        // Task の環境（`.necoder/task.env`）はこのマシンのシェルに渡す。シェルを選んだ時（設定・「▾」・
+        // Windows は常に PowerShell を名指し）も同じ。接続先の端末（`ssh -tt …`）にだけは渡さない。
+        let remote = shell
+            .as_ref()
+            .is_some_and(|(program, _)| is_ssh_program(program));
+        if !remote {
             if let Some(root) = &cwd {
                 match host::task_environment(host::LocalHost::shared().as_ref(), root) {
                     Ok(task_env) => env.extend(task_env),

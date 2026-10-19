@@ -314,7 +314,7 @@ pub fn agent_by_label(cx: &App, label: &str) -> Option<acp_client::Agent> {
     agent_catalog(cx).by_label(label)
 }
 
-/// 表示名のエージェントを使うか（`disabled_agents`・O16）。一覧に無い名前は使う扱い（外す根拠が無い）。
+/// 表示名のエージェントを使うか（`enabled_agents`・O16）。一覧に無い名前は使う扱い（外す根拠が無い）。
 pub fn agent_label_enabled(cx: &App, label: &str) -> bool {
     label_enabled_in(&get(cx), &agent_catalog(cx), label)
 }
@@ -386,16 +386,16 @@ pub fn selectable_agent_labels(cx: &App) -> Vec<SharedString> {
         .collect()
 }
 
-/// `agent_id` を使う / 使わないを入れ替えた後の `disabled_agents`（並びは保つ）。
-pub fn toggled_disabled_agents(disabled: &[String], agent_id: &str) -> Vec<String> {
-    if disabled.iter().any(|id| id == agent_id) {
-        disabled
+/// `agent_id` を使う / 使わないを入れ替えた後の `enabled_agents`（並びは保つ）。
+pub fn toggled_enabled_agents(enabled: &[String], agent_id: &str) -> Vec<String> {
+    if enabled.iter().any(|id| id == agent_id) {
+        enabled
             .iter()
             .filter(|id| *id != agent_id)
             .cloned()
             .collect()
     } else {
-        let mut next = disabled.to_vec();
+        let mut next = enabled.to_vec();
         next.push(agent_id.to_string());
         next
     }
@@ -662,6 +662,46 @@ fn mtime(path: Option<&Path>) -> Option<SystemTime> {
     std::fs::metadata(path?).ok()?.modified().ok()
 }
 
+/// 初回の案内の手順（UI-SPEC §12「オンボーディング」）。ビューのメモリ（settings.json に書かない）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OnboardingStep {
+    /// ① 使う AI エージェントを決める（入れる・ログインする）。
+    #[default]
+    Agents,
+    /// ② ターミナルの `ne` コマンド。
+    Command,
+    /// ③ 作業するフォルダ。
+    Folder,
+}
+
+impl OnboardingStep {
+    const ALL: [OnboardingStep; 3] = [Self::Agents, Self::Command, Self::Folder];
+
+    fn label(self) -> String {
+        match self {
+            Self::Agents => i18n::t!("settings.onboarding_step_agents"),
+            Self::Command => i18n::t!("settings.onboarding_step_command"),
+            Self::Folder => i18n::t!("settings.onboarding_step_folder"),
+        }
+    }
+
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::Agents => Some(Self::Command),
+            Self::Command => Some(Self::Folder),
+            Self::Folder => None,
+        }
+    }
+
+    fn previous(self) -> Option<Self> {
+        match self {
+            Self::Agents => None,
+            Self::Command => Some(Self::Agents),
+            Self::Folder => Some(Self::Command),
+        }
+    }
+}
+
 /// SettingsView から workspace shell へ依頼する操作。
 pub enum SettingsViewEvent {
     /// コマンドを新しいターミナルで流す（`title` はタブ名・「Codex をインストール」等）。
@@ -670,6 +710,8 @@ pub enum SettingsViewEvent {
         title: String,
     },
     OnboardingCompleted,
+    /// 初回の案内の ③: OS のフォルダ選択を出し、選んだフォルダをレールに足して切り替える（shell が担う）。
+    PickProjectFolder,
     /// テーマ選択（外観セクション）。適用は全ビューへの波及が要るので shell（apply_theme）が担う。
     SelectTheme(theme_core::ThemeSource),
     /// user settings.json をエディタタブで開く（Window が要るので shell へ上げる）。
@@ -843,7 +885,12 @@ pub struct SettingsView {
     /// 描画で fs を見ないよう、[`Self::refresh_lists`] で見て持っておく。
     ghostty_config_present: bool,
     /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
+    /// Windows は necoder が入れない（インストーラが `ne.cmd` を PATH に置く）ので、PATH の `ne` の場所。
     cli_shim_target: Option<PathBuf>,
+    /// 初回の案内の今の手順。
+    pub(crate) onboarding_step: OnboardingStep,
+    /// 初回の案内の ③ に出す今のフォルダ（shell が描くたびに渡す・ローカルのプロジェクトの根）。
+    onboarding_folder: Option<PathBuf>,
     /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
     cli_shim_busy: bool,
     /// `ne` シムの直近の失敗（管理者ダイアログのキャンセル等）。行の下に赤字で出す。
@@ -981,6 +1028,8 @@ impl SettingsView {
             agent_binary_root: acp_client::deploy::binary_root(),
             ghostty_config_present: false,
             cli_shim_target: None,
+            onboarding_step: OnboardingStep::default(),
+            onboarding_folder: None,
             cli_shim_busy: false,
             cli_shim_error: None,
             remote_pairing: None,
@@ -1040,6 +1089,11 @@ impl SettingsView {
     }
 
     /// 窓のテーマ（上書きを当てたもの・当てる前のもの）とアクセントを受け取る（毎描画）。
+    /// 初回の案内の ③ に出すフォルダ（shell が今のプロジェクトを渡す）。
+    pub fn set_onboarding_folder(&mut self, folder: Option<PathBuf>) {
+        self.onboarding_folder = folder;
+    }
+
     pub fn set_visuals(&mut self, theme: Theme, theme_base: Theme, accent: Hsla) {
         // 別のテーマに切り替わったら、前のテーマの色を編んでいたピッカーは閉じる。
         if theme.name != self.theme.name {
@@ -1155,7 +1209,11 @@ impl SettingsView {
         self.availability_generation = self.availability_generation.wrapping_add(1);
         let generation = self.availability_generation;
         let settings = get(cx);
-        let disabled = settings.disabled_agents.clone();
+        let disabled: Vec<String> = acp_client::AGENTS
+            .iter()
+            .map(|agent| agent.id.to_string())
+            .filter(|id| !settings.agent_enabled(id))
+            .collect();
         let agents = agent_catalog(cx).agents();
         let overrides = agents_page::builtin_overrides(&settings);
         let registry = self.registry.clone();
@@ -1173,7 +1231,13 @@ impl SettingsView {
                         &overrides,
                         registry.as_deref(),
                     );
-                    (auth_states, cli_shim::installed_target(), facts)
+                    // Windows の `ne` はインストーラが置く `ne.cmd`（necoder は入れない）。PATH で探す。
+                    let shim_target = if cfg!(windows) {
+                        host::find_in_path(cli_shim::COMMAND_NAME)
+                    } else {
+                        cli_shim::installed_target()
+                    };
+                    (auth_states, shim_target, facts)
                 })
                 .await;
             let applied = view.update(cx, |view, cx| {
@@ -1262,16 +1326,31 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// `AGENTS[agent_index]` を使うに入れる（既に入っていれば何もしない）。準備のボタンを押した時用。
+    pub(crate) fn enable_agent(&mut self, agent_index: usize, cx: &mut Context<Self>) {
+        let Some(agent) = acp_client::AGENTS.get(agent_index) else {
+            return;
+        };
+        let settings = get(cx);
+        if settings.agent_enabled(agent.id) {
+            return;
+        }
+        let next = toggled_enabled_agents(&settings.enabled_agents, agent.id);
+        let result = set_user_value(cx, "enabled_agents", serde_json::json!(next));
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
     /// エージェントを使う / 使わない（O16）。使うに戻したら、その 1 つもログインを確かめ直す
     /// （使わない間は確かめていない）。**どれでも・全部でも使わないにできる** — 既定のエージェントは
     /// 使うエージェントから選び直され（[`resolve_default_agent`]）、Captain だった物は任命を解く
     /// （[`releases_captain`]）。
     fn toggle_agent_enabled(&mut self, agent_id: &str, cx: &mut Context<Self>) {
         let settings = get(cx);
-        let next = toggled_disabled_agents(&settings.disabled_agents, agent_id);
-        let enabling = !next.iter().any(|id| id == agent_id);
+        let next = toggled_enabled_agents(&settings.enabled_agents, agent_id);
+        let enabling = next.iter().any(|id| id == agent_id);
         let release = !enabling && releases_captain(&settings, &agent_catalog(cx), agent_id);
-        let result = set_user_value(cx, "disabled_agents", serde_json::json!(next));
+        let result = set_user_value(cx, "enabled_agents", serde_json::json!(next));
         let saved = result.is_ok();
         self.report_save(result, cx);
         if saved && release {
@@ -1310,6 +1389,299 @@ impl SettingsView {
     /// 「AI エージェント」ページを開いた状態にする（Fleet の Captain 行「任命する」の行き先）。
     pub fn show_agents_page(&mut self, cx: &mut Context<Self>) {
         self.select_page(SettingsPage::Agents, cx);
+    }
+
+    /// 初回の案内の 1 枚（UI-SPEC §12「オンボーディング」）: 頭（ようこそ + 手順の列）→ 今の手順の中身 →
+    /// 下のボタン（戻る / 次へ・これで始める）。
+    fn onboarding_body(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let step = self.onboarding_step;
+        let note = |text: String| {
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.fg2)
+                .child(SharedString::from(text))
+        };
+        // 手順の列: 済み = ✓（bg3）・今 = 番号（枠 fg1）+ 太字・先 = 番号（枠 border）。押せない。
+        let mut steps = div().flex().flex_wrap().items_center().gap(px(16.));
+        let current = OnboardingStep::ALL
+            .iter()
+            .position(|candidate| *candidate == step)
+            .unwrap_or(0);
+        for (position, candidate) in OnboardingStep::ALL.iter().enumerate() {
+            let done = position < current;
+            let active = position == current;
+            let mark = div()
+                .size(px(18.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .text_size(px(10.5))
+                .when(done, |mark| {
+                    mark.bg(theme.bg3).text_color(theme.fg2).child("✓")
+                })
+                .when(!done, |mark| {
+                    mark.border_1()
+                        .border_color(if active { theme.fg1 } else { theme.border })
+                        .text_color(if active { theme.fg0 } else { theme.fg2 })
+                        .child(SharedString::from((position + 1).to_string()))
+                });
+            steps = steps.child(
+                div().flex().items_center().gap(px(6.)).child(mark).child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(if active { theme.fg0 } else { theme.fg2 })
+                        .when(active, |label| label.font_weight(FontWeight::SEMIBOLD))
+                        .child(SharedString::from(candidate.label())),
+                ),
+            );
+        }
+        let content = match step {
+            OnboardingStep::Agents => div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(note(i18n::t!("settings.onboarding_agents_note")))
+                // 見出しは一覧が持つ（「使える AI エージェント」/「準備すると使える AI エージェント」）。
+                .child(self.agents_list(settings, false, cx))
+                // Ghostty を使っていれば、ターミナルの書体・配色をここで持ってこられる（O45・H14）。
+                .when(self.ghostty_config_present, |body| {
+                    body.child(self.ghostty_import_row(cx))
+                }),
+            // mac / Linux は設定のページと同じ行（見出しと説明はその行が持つ）。Windows は在るかだけ。
+            OnboardingStep::Command if cli_shim::supported() => self.cli_section(cx),
+            OnboardingStep::Command => div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(note(i18n::t!("settings.onboarding_command_note")))
+                .child(self.windows_command_row()),
+            OnboardingStep::Folder => {
+                let folder =
+                    match &self.onboarding_folder {
+                        Some(path) => div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg0)
+                                    .child(SharedString::from(
+                                        path.file_name()
+                                            .map(|name| name.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| path.display().to_string()),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg2)
+                                    .child(SharedString::from(path.display().to_string())),
+                            ),
+                        None => div().text_size(px(12.)).text_color(theme.fg2).child(
+                            SharedString::from(i18n::t!("settings.onboarding_folder_none")),
+                        ),
+                    };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(note(i18n::t!("settings.onboarding_folder_note")))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .px(px(12.))
+                            .py(px(10.))
+                            .rounded(px(9.))
+                            .bg(theme.bg2)
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(div().flex_1().min_w_0().child(folder))
+                            .child(
+                                div()
+                                    .id("onboarding-pick-folder")
+                                    .flex_none()
+                                    .h(px(26.))
+                                    .px(px(10.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(6.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .text_size(px(11.5))
+                                    .text_color(theme.fg0)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.bg3))
+                                    .child(SharedString::from(i18n::t!(
+                                        "settings.onboarding_pick_folder"
+                                    )))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|_view, _, _window, cx| {
+                                            cx.emit(SettingsViewEvent::PickProjectFolder);
+                                        }),
+                                    ),
+                            ),
+                    )
+            }
+        };
+        // 主のボタン: 進めば何かが手に入る時は accent 地、何も無いまま進む時は枠（押せるが勧めない）。
+        let any_enabled = agent_catalog(cx)
+            .agents()
+            .iter()
+            .any(|agent| settings.agent_enabled(agent.id()));
+        let (primary_text, emphasized) = match step {
+            OnboardingStep::Agents if any_enabled => (i18n::t!("settings.onboarding_next"), true),
+            OnboardingStep::Agents => (i18n::t!("settings.onboarding_next_without_ai"), false),
+            OnboardingStep::Command => (i18n::t!("settings.onboarding_next"), true),
+            OnboardingStep::Folder if self.onboarding_folder.is_some() => {
+                (i18n::t!("settings.get_started"), true)
+            }
+            OnboardingStep::Folder => (i18n::t!("settings.onboarding_start_without_folder"), false),
+        };
+        let primary = div()
+            .id("onboarding-start")
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(38.))
+            .rounded(px(8.))
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .when(emphasized, |button| {
+                button
+                    .bg(accent)
+                    .text_color(theme.bg0)
+                    .hover(|style| style.bg(accent.alpha(0.85)))
+            })
+            .when(!emphasized, |button| {
+                button
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(theme.fg1)
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+            })
+            .child(SharedString::from(primary_text))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, _window, cx| view.advance_onboarding(cx)),
+            );
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .when(step.previous().is_some(), |footer| {
+                footer.child(
+                    div()
+                        .id("onboarding-back")
+                        .flex_none()
+                        .text_size(px(12.))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0))
+                        .child(SharedString::from(i18n::t!("settings.onboarding_back")))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, _window, cx| {
+                                if let Some(previous) = view.onboarding_step.previous() {
+                                    view.onboarding_step = previous;
+                                    cx.notify();
+                                }
+                            }),
+                        ),
+                )
+            })
+            .child(primary);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .w_full()
+            .max_w(px(680.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg0)
+                            .child(SharedString::from(i18n::t!("settings.welcome_title"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.welcome_sub"))),
+                    ),
+            )
+            .child(steps)
+            .child(content)
+            .child(footer)
+    }
+
+    /// Windows の ② の行: necoder は `ne` を入れない（インストーラが `ne.cmd` を PATH に置く）ので、
+    /// 在るかだけを見せる。
+    fn windows_command_row(&self) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let status = if self.cli_shim_target.is_some() {
+            div()
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .bg(accent.alpha(0.16))
+                .text_size(px(11.))
+                .text_color(accent)
+                .child(SharedString::from(i18n::t!("settings.cli_installed_chip")))
+        } else {
+            div()
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .child(SharedString::from(i18n::t!(
+                    "settings.onboarding_command_windows_missing"
+                )))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(12.))
+            .py(px(10.))
+            .rounded(px(9.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(i18n::t!("settings.cli_row_label"))),
+            )
+            .child(status)
+    }
+
+    /// 初回の案内を 1 つ進める（最後の手順なら終える）。
+    pub(crate) fn advance_onboarding(&mut self, cx: &mut Context<Self>) {
+        match self.onboarding_step.next() {
+            Some(next) => {
+                self.onboarding_step = next;
+                cx.notify();
+            }
+            None => self.finish_onboarding(cx),
+        }
     }
 
     fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
@@ -3871,62 +4243,11 @@ impl Render for SettingsView {
                 .child(self.remote_section(cx));
         }
         let theme = self.theme.clone();
-        let accent = self.accent;
         let settings = get(cx);
         let onboarding = !settings.onboarded;
         // 初回は器（ナビ）を出さない — 上から順に読ませたいので 1 枚スクロールのまま（UI-SPEC §12）。
         if onboarding {
-            let body = div()
-                .flex()
-                .flex_col()
-                .gap(px(14.))
-                .w_full()
-                .max_w(px(680.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .text_size(px(18.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.fg0)
-                                .child(SharedString::from(i18n::t!("settings.welcome_title"))),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(theme.fg2)
-                                .child(SharedString::from(i18n::t!("settings.welcome_sub"))),
-                        ),
-                )
-                // 見出しは一覧が持つ（「使える AI エージェント」/「準備すると使える AI エージェント」）。
-                .child(self.agents_list(&settings, false, cx))
-                // Ghostty を使っていれば、ターミナルの書体・配色をここで持ってこられる（O45・H14）。
-                .when(self.ghostty_config_present, |body| {
-                    body.child(self.ghostty_import_row(cx))
-                })
-                .child(
-                    div()
-                        .id("onboarding-start")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(38.))
-                        .rounded(px(8.))
-                        .bg(accent)
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.bg0)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(accent.alpha(0.85)))
-                        .child(SharedString::from(i18n::t!("settings.get_started")))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _, _window, cx| view.finish_onboarding(cx)),
-                        ),
-                );
+            let body = self.onboarding_body(&settings, cx);
             return div()
                 .id("settings-scroll")
                 .size_full()
@@ -4031,21 +4352,27 @@ mod tests {
     use super::*;
 
     /// O16: エージェントの出し入れ（並びを保つ・戻すと消える）と、表示名からの引き当て。
+    /// **既定は全部オフ**（2026-10-19）。
     #[test]
     fn agents_are_turned_off_and_on_by_id() {
-        let off = toggled_disabled_agents(&["grok".to_string()], "kimi");
-        assert_eq!(off, vec!["grok".to_string(), "kimi".to_string()]);
+        let catalog = agent_catalog_for(&Settings::default());
+        assert!(
+            !label_enabled_in(&Settings::default(), &catalog, "Claude Code"),
+            "既定はオフ"
+        );
+        let on = toggled_enabled_agents(&["grok".to_string()], "kimi");
+        assert_eq!(on, vec!["grok".to_string(), "kimi".to_string()]);
         assert_eq!(
-            toggled_disabled_agents(&off, "grok"),
+            toggled_enabled_agents(&on, "grok"),
             vec!["kimi".to_string()]
         );
         let mut settings = Settings {
-            disabled_agents: off,
+            enabled_agents: on,
             ..Settings::default()
         };
         let catalog = agent_catalog_for(&settings);
-        assert!(!label_enabled_in(&settings, &catalog, "Kimi CLI"));
-        assert!(label_enabled_in(&settings, &catalog, "Codex"));
+        assert!(label_enabled_in(&settings, &catalog, "Kimi CLI"));
+        assert!(!label_enabled_in(&settings, &catalog, "Codex"));
         assert!(
             label_enabled_in(&settings, &catalog, "Someone Else"),
             "カタログに無い名前は外さない"
@@ -4060,10 +4387,9 @@ mod tests {
                 env: Default::default(),
             },
         );
-        settings.disabled_agents.push("dsh".to_string());
         let catalog = agent_catalog_for(&settings);
         assert!(!label_enabled_in(&settings, &catalog, "DeepSeek Harness"));
-        settings.disabled_agents.retain(|id| id != "dsh");
+        settings.enabled_agents.push("dsh".to_string());
         assert!(label_enabled_in(&settings, &catalog, "DeepSeek Harness"));
     }
 
@@ -4192,7 +4518,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         view.update(cx, |view, cx| {
             view.toggle_agent_enabled("kimi", cx);
-            assert_eq!(get(cx).disabled_agents, vec!["kimi".to_string()]);
+            assert_eq!(get(cx).enabled_agents, vec!["kimi".to_string()]);
             view.forget_remembered_mode("qwen", cx);
             assert!(!get(cx).agent_config_defaults.contains_key("qwen"));
         });
@@ -4207,7 +4533,7 @@ mod tests {
                 "選ぶと覚えているモードを全部消す"
             );
             view.toggle_agent_enabled("kimi", cx);
-            assert!(get(cx).disabled_agents.is_empty(), "戻せる");
+            assert!(get(cx).enabled_agents.is_empty(), "戻せる");
             view.availability_pending = false;
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -4299,7 +4625,7 @@ mod tests {
         ));
         std::fs::write(
             &path,
-            r#"{ "onboarded": true,
+            r#"{ "onboarded": true, "enabled_agents": ["dsh"],
                 "agent_servers": {
                     "dsh": { "name": "DeepSeek Harness", "command": "definitely-not-dsh-acp",
                              "env": { "DEEPSEEK_MODEL": "v4" } },
@@ -4342,10 +4668,12 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             // 使わないにすると選べる一覧から消える（id で覚える）。
             view.toggle_agent_enabled("dsh", cx);
-            assert_eq!(get(cx).disabled_agents, vec!["dsh".to_string()]);
-            assert!(!selectable_agent_labels(cx)
-                .iter()
-                .any(|label| label.as_ref() == "DeepSeek Harness"));
+            assert!(get(cx).enabled_agents.is_empty());
+            assert!(
+                !selectable_agent_labels(cx)
+                    .iter()
+                    .any(|label| label.as_ref() == "DeepSeek Harness")
+            );
             view.toggle_agent_enabled("dsh", cx);
             // 使うに戻すとログインの確かめ（実の CLI）を予約する。テストでは起こさない。
             view.availability_pending = false;
@@ -4389,11 +4717,11 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    /// #38 H2: 使う / 使わないは settings.json の `disabled_agents` に往復する（書いたファイルを読み直しても
+    /// #38 H2: 使う / 使わないは settings.json の `enabled_agents` に往復する（書いたファイルを読み直しても
     /// 同じ）。使わない物は composer に出さない。**最後の 1 つも・既定のエージェントも外せる**
     /// （全部オフ = AI 機能を使わない。断りのトーストは出さない・2026-10-09）。
     #[gpui::test]
-    fn disabled_agents_round_trip_and_every_agent_can_be_turned_off(cx: &mut gpui::TestAppContext) {
+    fn enabled_agents_round_trip_and_every_agent_can_be_turned_off(cx: &mut gpui::TestAppContext) {
         let path = std::env::temp_dir().join(format!(
             "necoder-settings-last-agent-{}.json",
             std::process::id()
@@ -4401,7 +4729,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{ "onboarded": true, "default_agent": "DeepSeek Harness",
-                "disabled_agents": ["claude", "codex", "copilot", "qwen", "opencode", "kimi", "grok"],
+                "enabled_agents": ["dsh"],
                 "agent_servers": {
                     "dsh": { "name": "DeepSeek Harness", "command": "definitely-not-dsh-acp" } } }"#,
         )
@@ -4424,13 +4752,9 @@ mod tests {
         let on_disk = |path: &Path| {
             SettingsStore::load(Some(path), None)
                 .settings()
-                .disabled_agents
+                .enabled_agents
                 .clone()
         };
-        let all_builtins: Vec<String> = acp_client::AGENTS
-            .iter()
-            .map(|agent| agent.id.to_string())
-            .collect();
         view.update(cx, |view, cx| {
             // 使うのは dsh だけで、それが既定。それでも使わないにできる。
             assert_eq!(
@@ -4438,10 +4762,11 @@ mod tests {
                 Some("dsh".to_string())
             );
             view.toggle_agent_enabled("dsh", cx);
-            let mut expected = all_builtins.clone();
-            expected.push("dsh".to_string());
-            assert_eq!(get(cx).disabled_agents, expected);
-            assert_eq!(on_disk(&path), expected, "ファイルに書いて読み直しても同じ");
+            assert!(get(cx).enabled_agents.is_empty());
+            assert!(
+                on_disk(&path).is_empty(),
+                "ファイルに書いて読み直しても同じ"
+            );
             assert_eq!(
                 default_agent(cx),
                 None,
@@ -4461,7 +4786,7 @@ mod tests {
 
             view.toggle_agent_enabled("dsh", cx);
             view.availability_pending = false;
-            assert!(!on_disk(&path).contains(&"dsh".to_string()), "戻せる");
+            assert_eq!(on_disk(&path), vec!["dsh".to_string()], "戻せる");
             assert_eq!(
                 default_agent(cx).map(|agent| agent.id().to_string()),
                 Some("dsh".to_string()),
@@ -4483,6 +4808,15 @@ mod tests {
             "組み込みの既定は自動（どれも必須にしない）"
         );
         let catalog = agent_catalog_for(&settings);
+        assert_eq!(
+            resolve_default_agent(&settings, &catalog, &["Codex"]),
+            None,
+            "既定は全部オフ = 既定のエージェントは無い（入れて使うにしてから）"
+        );
+        settings.enabled_agents = acp_client::AGENTS
+            .iter()
+            .map(|agent| agent.id.to_string())
+            .collect();
         assert!(default_agent_is_automatic(&settings, &catalog));
         assert_eq!(
             id(resolve_default_agent(&settings, &catalog, &[])),
@@ -4503,7 +4837,7 @@ mod tests {
             "人が決めた既定はログインの有無で動かさない"
         );
 
-        settings.disabled_agents = vec!["codex".to_string()];
+        settings.enabled_agents.retain(|id| id != "codex");
         assert!(default_agent_is_automatic(&settings, &catalog));
         assert_eq!(
             id(resolve_default_agent(
@@ -4515,10 +4849,7 @@ mod tests {
             "使わないにした既定は飛ばして、使える物から選ぶ"
         );
 
-        settings.disabled_agents = acp_client::AGENTS
-            .iter()
-            .map(|agent| agent.id.to_string())
-            .collect();
+        settings.enabled_agents.clear();
         assert_eq!(resolve_default_agent(&settings, &catalog, &["Codex"]), None);
 
         settings.captain_agent = Some("Codex".to_string());
@@ -4539,7 +4870,7 @@ mod tests {
         ));
         std::fs::write(
             &path,
-            r#"{ "onboarded": true, "disabled_agents": ["grok"],
+            r#"{ "onboarded": true, "enabled_agents": ["claude", "codex", "dsh", "pi-acp"],
                 "agent_servers": {
                     "pi-acp": { "type": "registry", "name": "pi ACP" },
                     "dsh": { "name": "DeepSeek Harness", "command": "dsh-acp", "args": ["--acp"] } } }"#,
@@ -4758,11 +5089,7 @@ mod tests {
             "necoder-settings-add-agent-{}.json",
             std::process::id()
         ));
-        std::fs::write(
-            &path,
-            r#"{ "onboarded": true, "disabled_agents": ["pi-acp"] }"#,
-        )
-        .expect("seed");
+        std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
         cx.update(|cx| init(Some(path.clone()), None, cx));
         let registry = acp_client::registry::parse(
             r#"{"version":"1.0.0","agents":[
@@ -4808,7 +5135,7 @@ mod tests {
                 })
             );
             assert!(
-                get(cx).disabled_agents.is_empty(),
+                get(cx).enabled_agents == vec!["pi-acp".to_string()],
                 "足した物は使うにする（使わないのまま一覧に並べない）"
             );
             assert!(agent_by_label(cx, "pi ACP").is_some(), "一覧に並ぶ");

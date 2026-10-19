@@ -780,7 +780,7 @@ settings:
   agent_status_unverified: "ログイン未確認"
   agent_status_unverified_remote: "ログイン未確認（SSH では確認しません）"
   agent_status_checking: "確認中…"
-  agent_status_disabled: "無効"
+  agent_status_disabled: "使えます · オフ"
   agent_status_unreachable: "状態を確認できません"
   agent_status_missing: "必要な操作:"
   agent_missing_node: "Node.js のインストール"
@@ -912,8 +912,21 @@ settings:
   make_captain: Captain にする
   is_captain: ⚑ Captain
   welcome_title: ようこそ 🎨
-  welcome_sub: "necoder は、パソコンに入れた AI エージェント（Claude Code や Codex など）を呼び出して使います。どれか 1 つを準備すれば AI と話せます。AI を使わずにエディタだけで使うこともできます（あとから設定でいつでも変えられます）。"
+  welcome_sub: "3 つの手順で、AI と話せるところまで準備します。どれもあとから設定で変えられます。"
   get_started: これで始める →
+  onboarding_step_agents: AI エージェント
+  onboarding_step_command: ne コマンド
+  onboarding_step_folder: フォルダ
+  onboarding_agents_note: "使う AI をオンにします。Claude Code や Codex を、今のサブスクのまま使えます。"
+  onboarding_command_note: "ターミナルで `ne .` と打つと、そのフォルダを necoder で開けます。"
+  onboarding_command_windows_missing: インストーラ版で入れると使えます。
+  onboarding_folder_note: 作業するフォルダを選びます。AI もこのフォルダの中で作業します。
+  onboarding_folder_none: まだフォルダを開いていません
+  onboarding_pick_folder: フォルダを選ぶ…
+  onboarding_next: 次へ →
+  onboarding_next_without_ai: AI を使わずに次へ →
+  onboarding_back: ← 戻る
+  onboarding_start_without_folder: フォルダなしで始める →
   mcp_heading: MCP サーバ
   mcp_empty: "MCP サーバがありません"
   mcp_note: 変更は新しいスレッドから適用されます。

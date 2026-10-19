@@ -1141,8 +1141,10 @@ pub fn cached_agent_auth_states() -> Vec<AgentAuthState> {
 /// CLI/config 判定に加え、必要な Agent はプロンプト無しの ACP session を短時間だけ開く。
 /// probe は並列・タイムアウト付きで、終了時に子プロセスを必ず kill/wait する。
 ///
-/// `disabled`（設定の `disabled_agents`・`AgentKind::id`）のエージェントは子プロセスを起こさず、
-/// ファイルだけの軽い判定のまま返す（使わないと決めたものを確かめに行かない・O16）。
+/// `disabled`（設定の `enabled_agents` に無い物・`AgentKind::id`）のエージェントは ACP の試しの
+/// セッションを起こさない（使わないものを確かめに行かない・O16）。CLI の status（`claude auth status`
+/// 等）だけは流す — エージェントは既定でオフなので、これを止めると、入れてログインも済んだ物まで
+/// 初回の案内で「準備すると使える」に落ちる。
 pub async fn refresh_agent_auth_states(
     cwd: impl Into<PathBuf>,
     disabled: &[String],
@@ -1156,7 +1158,7 @@ pub async fn refresh_agent_auth_states(
             let cwd = cwd.clone();
             let skip = disabled.iter().any(|id| id == agent.id);
             async move {
-                if skip || !agent.cli_installed() {
+                if !agent.cli_installed() {
                     return state;
                 }
                 // status コマンドは最大 2 秒掛かり得るので、この明示 refresh の背景処理にだけ置く。
@@ -1169,6 +1171,9 @@ pub async fn refresh_agent_auth_states(
                 };
                 if status_available || state == AgentAuthState::Available {
                     return AgentAuthState::Available;
+                }
+                if skip {
+                    return state;
                 }
                 if agent.probe_acp_session(cwd).await {
                     AgentAuthState::Available
