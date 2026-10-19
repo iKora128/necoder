@@ -4243,7 +4243,7 @@
 - 発端: 本人「LP の見た目をガラッと変えたい」→ 5 案（ターミナル / 色の帯 / ねこ / ショーケース / Bento）から Bento を選んだ。「測った数字（215ms・122MB・10ms）は要らない。速い・軽い・Rust 製・60fps でぬるぬる」「Nyaco・スマホ・workspace 管理などを散りばめて」「スマホのところは実際に近い画面に」
 - やったこと:
   - `lp/index.html` / `lp/en/index.html` を手書きの 1 枚に置き換えた（暗い地・光るグラデーション・特徴のタイル）。節: 速くて軽い（60fps / Rust / ⌘P）→ いつもの AI（エージェントの一覧・ボタン 1 つで準備・差分・Todo）→ 色とワークスペース（色・⌘O・SSH・⌘⇧P）→ Fleet（Captain）→ スマホ → Nyaco（4 つの状態）→ エディタとしても一人前 → 無料・オープンソース・テレメトリーなし・Mac と Windows
-  - ダウンロードは OS を見分けて 1 つのボタン（#73 と同じ考え）。**Windows はまだ zip**（Latest の v0.1.30 に setup.exe が無い）。setup.exe を付けた正式版を出したら、両ページの `necoder-windows-x64.zip` を `necoder-windows-x64-setup.exe` に替える
+  - ダウンロードは OS を見分けて 1 つのボタン（#73 と同じ考え）。Windows は v0.1.31 から setup.exe（それまでは zip だった）（Latest の v0.1.30 に setup.exe が無い）。setup.exe を付けた正式版を出したら、両ページの `necoder-windows-x64.zip` を `necoder-windows-x64-setup.exe` に替える
   - Nyaco の絵 4 枚（手を振る・スマホを持って歩く・子ねこの AI に旗を振る・色のフォルダを並べる）は Higgsfield の `gpt_image_2_5` で、`lp/assets/mascot/neko-art.png` を参考画像にして生成（背景は透明・`lp/assets/img/lp/`）
   - スマホの画面は本物の PWA を `relay/test/preview.mjs` で撮った（見本のデータ・隔離した cf dev :8791）。Mac の名前は撮る時だけ `Preview Mac` → `MacBook Pro` に替えた
   - **`scripts/lp-build.mjs` / `scripts/lp-copy.mjs` / `lp/i18n/en.json` は消した**。キャンバスの書き出しから作る流れは、作り直すと手書きの LP を上書きするため。今後の LP の直しは `lp/index.html` と `lp/en/index.html` の両方を直接直す
