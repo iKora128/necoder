@@ -329,7 +329,7 @@ impl AgentPanel {
                 .child(step_button(
                     "transcript-search-next",
                     "↓",
-                    i18n::t!("agent.search_next"),
+                    i18n::t!("agent.search_next", "key" => keymap_core::keystroke_label("enter")),
                     1,
                 ))
                 .child(

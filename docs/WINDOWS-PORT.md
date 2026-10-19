@@ -405,7 +405,16 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
   - **残: 実キー入力での確認は人の手番**（`Ctrl+S` を実際に押して保存されるか）
 - [ ] **実キー入力の確認**（`Ctrl+S` 保存・`Ctrl+Shift+P` パレット）は実機で人が押す必要がある
   - → 2026-08-23 に `SendKeys` で自動化して確認済み（W3 の受入欄参照）。人の手番は **IME だけ**
-- [ ] **locale に埋まった mac 記号 60 文字列**（2026-08-23 に発見・**D4 の積み残し**）
+- [x] **locale に埋まった mac 記号 60 文字列**（2026-08-23 に発見・**D4 の積み残し**）
+  - **2026-10-19 解消**。ja/en 各 48 キーの記号を `%{key}`（入力欄ヒントは `%{send}` / `%{newline}`）へ抜き、
+    呼び出し側で `keymap_core::keystroke_label("cmd-w")` 等を差し込む。キーは既定 keymap の実バインドと照合
+    （系譜の帯 `cmd-shift-g` は Windows で `Ctrl+Alt+G`、置換欄 `cmd-alt-f` は `Ctrl+H`）。
+    再発防止に `i18n` の `no_mac_key_symbols_in_locales`（⌘⌃⌥⇧⏎↵⌫ の直書きを弾く）と
+    `keymap_core` の `locale_shortcut_labels` を追加。ついでにコマンドパレットのキー併記
+    （`overlays.rs`）を `pretty_keystroke_for(KeymapPlatform::current(), …)` に、検索バーの全置換を
+    `modifiers.platform`（Windows では Win キー）→ `secondary()` に直した。
+    mac の表示は `⌘↵`→`⌘⏎`・`⌘Enter`/`⇧Enter`→`⌘⏎`/`⇧⏎`・`⌥⌘F`→`⌘⌥F`・`⌘\\`→`⌘\`（YAML の
+    plain scalar で `\\` が 2 文字出ていた）だけ表記が揃った。**実機の目視は未**
   - `locales/ja.yml` / `en.yml` に **各 30 行**、`⌘`×24 / `⇧`×11 / `⌃`×3 / `⌥`×2 が
     文字列の中に直接書かれている（例: `close_thread_tip: スレッドを閉じる  ⌘W` /
     `send_cmd: 送信 ⌘⏎` / `hint_submit_cmd: ⏎ 改行 / ⌘⏎ 送信`）
@@ -414,7 +423,7 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
   - **推奨する直し方**（この codebase の作法に合う）: 記号を locale から抜き、`t!` の
     名前付き引数で埋める。`t!` は既に `"n" => index + 1` の形を持っている:
     ```yaml
-    close_thread_tip: スレッドを閉じる  {key}
+    close_thread_tip: スレッドを閉じる  %{key}
     ```
     ```rust
     i18n::t!("agent.close_thread_tip", "key" => keymap_core::keystroke_label("cmd-w"))

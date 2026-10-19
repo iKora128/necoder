@@ -1482,7 +1482,7 @@ impl Workspace {
             .unwrap_or_else(|| confirm.path.display().to_string());
         let body = match confirm.status {
             StatusKind::Untracked | StatusKind::Added => {
-                i18n::t!("explorer.discard_body_untracked")
+                i18n::t!("explorer.discard_body_untracked", "key" => keymap_core::keystroke_label("cmd-z"))
             }
             _ => i18n::t!("explorer.discard_body"),
         };

@@ -98,6 +98,216 @@ pub(crate) fn builtin_overrides(
         .collect()
 }
 
+/// Windows で Node.js（LTS）を入れるコマンド。winget は Windows 10 1809+ / 11 に標準で入っている。
+const WINDOWS_NODE_INSTALL_COMMAND: &str = "winget install -e --id OpenJS.NodeJS.LTS";
+/// Homebrew がある mac / Linux で Node.js を入れるコマンド（無ければ nodejs.org を案内するだけ）。
+const BREW_NODE_INSTALL_COMMAND: &str = "brew install node";
+/// Windows で uv を入れるコマンド。
+const WINDOWS_UV_INSTALL_COMMAND: &str = "winget install -e --id astral-sh.uv";
+/// mac / Linux（SSH 先も）で uv を入れるコマンド（astral の公式の入れ方）。
+const UNIX_UV_INSTALL_COMMAND: &str = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+
+/// 設定のボタンが開くターミナルのタブ名（「Codex をインストール」「Codex にログイン」）。以前は
+/// PowerShell の exe のパスがそのままタブ名になり、何が動いているのか分からなかった（#69）。
+pub(crate) fn command_tab_title(kind: Option<&acp_client::AgentKind>, command: &str) -> String {
+    let tool = match command {
+        WINDOWS_NODE_INSTALL_COMMAND | BREW_NODE_INSTALL_COMMAND => Some("Node.js"),
+        WINDOWS_UV_INSTALL_COMMAND | UNIX_UV_INSTALL_COMMAND => Some("uv"),
+        _ => None,
+    };
+    if let Some(tool) = tool {
+        return i18n::t!("settings.agent_terminal_install", "name" => tool);
+    }
+    match kind {
+        Some(kind) if command == kind.login_cmd => {
+            i18n::t!("settings.agent_terminal_login", "name" => kind.label)
+        }
+        Some(kind) => i18n::t!("settings.agent_terminal_install", "name" => kind.label),
+        None => i18n::t!("settings.agent_terminal_setup"),
+    }
+}
+
+/// 最初から見せる組み込み（まだ準備していなくても畳まない）。AI の補助機能（コミットメッセージ・
+/// インライン編集・今日の計画）もこの 2 つで動く（README）。
+const FEATURED_AGENTS: [&str; 2] = ["claude", "codex"];
+
+/// 一覧の組（[`SettingsView::agents_list`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentGroup {
+    /// このホストで使える（ログイン未確認も含む）。スイッチと既定の印を出す。
+    Usable,
+    /// 準備すると使える（足りない物がある・起動できない・まだ読めていない）。手順を出す。
+    Setup,
+}
+
+/// 使えるの組に入れるか。ログインを確かめられなかった物（跡はある）は使える側に置く。
+fn is_usable(readiness: &Readiness) -> bool {
+    matches!(readiness, Readiness::Ready | Readiness::Unverified)
+}
+
+/// 準備中でも畳まずに見せるか（Claude Code / Codex と、自分で足した物）。
+fn is_featured(agent: &acp_client::Agent) -> bool {
+    agent.custom().is_some() || FEATURED_AGENTS.contains(&agent.id())
+}
+
+/// 組み込みの 1 行の紹介（何の AI か・何のアカウントで使うか）。
+fn agent_about(kind: &acp_client::AgentKind) -> String {
+    i18n::translate(&format!("settings.agent_about_{}", kind.id))
+}
+
+/// 手順を組み立てる時に見る、このホストの事情。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StepEnvironment {
+    /// SSH 先を見ている（ターミナルはこのマシンで開くので、ボタンは出さずコピーだけ）。
+    pub(crate) remote: bool,
+    /// 手元が Windows（winget で入れる・`curl … | bash` は流せない）。SSH 先を見ている時は `false`。
+    pub(crate) windows: bool,
+    /// 手元に Homebrew がある（mac / Linux で Node.js を `brew install node` で入れられる）。
+    pub(crate) brew: bool,
+}
+
+impl StepEnvironment {
+    pub(crate) fn detect(remote: bool) -> Self {
+        Self {
+            remote,
+            windows: !remote && cfg!(windows),
+            brew: !remote && !cfg!(windows) && host::find_in_path("brew").is_some(),
+        }
+    }
+}
+
+/// 準備の手順の 1 つ。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SetupStep {
+    pub(crate) title: String,
+    /// 何のための手順か（次の手順の時だけ出す）。
+    pub(crate) note: Option<String>,
+    pub(crate) done: bool,
+    /// 流すコマンド（無ければボタンもコピーも出さない＝説明だけ）。
+    pub(crate) command: Option<&'static str>,
+    /// このマシンのターミナルで流せるか（SSH 先を見ている時はコピーだけ）。
+    pub(crate) runnable: bool,
+    /// ボタンの文字（`インストール` / `ログイン`）。
+    pub(crate) button: String,
+}
+
+/// 準備の手順を並べる（済んだ物も ✓ で残す＝今どこまで来たかが分かる）。足りない物は
+/// [`acp_client::readiness::assess`] の結果（`found`）が決め、ここは並べ方と入れ方だけを決める。
+///
+/// 組み込み: ①入れる道具（Node.js / uv）→ ②本体を入れる → ③ログイン。道具が要らない物は ①が無い。
+/// 足した物: 足りない道具と、見つからないコマンド。
+pub(crate) fn setup_steps(
+    agent: &acp_client::Agent,
+    found: &AgentReadiness,
+    environment: &StepEnvironment,
+) -> Vec<SetupStep> {
+    let missing: Vec<Missing> = match &found.readiness {
+        Readiness::Missing(items) => items.clone(),
+        _ => Vec::new(),
+    };
+    let lacks = |item: &Missing| missing.contains(item);
+    let runnable = !environment.remote;
+    let install_button = i18n::t!("settings.agent_step_install_button");
+    let tool_step = |tool: &Missing| -> SetupStep {
+        let done = !lacks(tool);
+        match tool {
+            Missing::Uv => SetupStep {
+                title: i18n::t!("settings.agent_step_uv"),
+                note: Some(i18n::t!("settings.agent_step_uv_note")),
+                done,
+                command: Some(if environment.windows {
+                    WINDOWS_UV_INSTALL_COMMAND
+                } else {
+                    UNIX_UV_INSTALL_COMMAND
+                }),
+                runnable,
+                button: install_button.clone(),
+            },
+            _ => {
+                let command = if environment.windows {
+                    Some(WINDOWS_NODE_INSTALL_COMMAND)
+                } else if environment.brew {
+                    Some(BREW_NODE_INSTALL_COMMAND)
+                } else {
+                    None
+                };
+                let note = if command.is_some() {
+                    i18n::t!("settings.agent_step_node_note")
+                } else {
+                    i18n::t!("settings.agent_step_node_manual")
+                };
+                SetupStep {
+                    title: i18n::t!("settings.agent_step_node"),
+                    note: Some(note),
+                    done,
+                    command,
+                    runnable,
+                    button: install_button.clone(),
+                }
+            }
+        }
+    };
+    // 道具: 足りない物を先に。足りていても、入れるのに使う道具なら ✓ で見せる。
+    let mut tools: Vec<Missing> = missing
+        .iter()
+        .filter(|item| matches!(item, Missing::Node | Missing::Uv))
+        .cloned()
+        .collect();
+    if let Some(kind) = agent.builtin() {
+        if let Some(tool) = acp_client::readiness::install_prerequisite(kind) {
+            if !tools.contains(&tool) {
+                tools.insert(0, tool);
+            }
+        }
+    }
+    let mut steps: Vec<SetupStep> = tools.iter().map(tool_step).collect();
+    for item in &missing {
+        if let Missing::Command(command) = item {
+            steps.push(SetupStep {
+                title: i18n::t!("settings.agent_step_command", "command" => command),
+                note: Some(i18n::t!("settings.agent_step_command_note")),
+                done: false,
+                command: None,
+                runnable: false,
+                button: String::new(),
+            });
+        }
+    }
+    let Some(kind) = agent.builtin() else {
+        return steps;
+    };
+    let cli_missing = missing.iter().any(|item| matches!(item, Missing::Cli(_)));
+    // `curl … | bash` で入れる物（Grok Build）は Windows のターミナル（PowerShell）では流せない。
+    let unix_only = kind.install_cmd.contains("| bash");
+    let windows_cannot_install = environment.windows && unix_only;
+    steps.push(SetupStep {
+        title: i18n::t!("settings.agent_step_cli", "name" => kind.label),
+        note: Some(if windows_cannot_install {
+            i18n::t!("settings.agent_step_cli_windows_unsupported")
+        } else {
+            i18n::t!("settings.agent_step_cli_note")
+        }),
+        done: !cli_missing,
+        command: (!windows_cannot_install).then_some(kind.install_cmd),
+        runnable,
+        button: install_button,
+    });
+    // ログインは CLI がある時にしか確かめられない（readiness も CLI が無ければ Login を足さない）。
+    let blocked = cli_missing
+        || missing
+            .iter()
+            .any(|item| matches!(item, Missing::Command(_)));
+    steps.push(SetupStep {
+        title: i18n::t!("settings.agent_step_login"),
+        note: Some(i18n::t!("settings.agent_step_login_note")),
+        done: !blocked && !lacks(&Missing::Login),
+        command: Some(kind.login_cmd),
+        runnable,
+        button: i18n::t!("settings.agent_step_login_button"),
+    });
+    steps
+}
+
 /// 足りない物の 1 つ。
 fn missing_text(missing: &Missing) -> String {
     match missing {
@@ -347,6 +557,24 @@ impl SettingsView {
     /// ホストの行: `ホスト` + チップ（このマシン + SSH 先）+ 右に「確かめ直す」、下に注記（と読めなかった理由）。
     pub(crate) fn agent_host_row(&self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
+        // SSH のプロジェクトを開いていなければ、選べるのは「このPC」だけ — 切り替えの行も注記も
+        // 意味が無く、初めての人には「実行環境とは？」という謎の行になる。右端の「再確認」だけ残す。
+        if self.agent_hosts.is_empty() {
+            return div().flex().child(div().flex_1()).child(
+                div()
+                    .id("agent-host-recheck")
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0))
+                    .child(SharedString::from(i18n::t!("settings.agent_host_recheck")))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _window, cx| view.recheck_agent_host(cx)),
+                    ),
+            );
+        }
         let chip = |id: (&'static str, usize), selected: bool| {
             div()
                 .id(id)
@@ -508,8 +736,15 @@ impl SettingsView {
         }
     }
 
-    /// エージェント一覧（1 枚のカードに 1 列）。`page` = 設定のページ（行を開ける・役割・ホストの切り替え）/
-    /// `false` = 初回の案内（行の頭だけ・このマシンだけ・UI-SPEC §12）。
+    /// エージェント一覧。**「使える」と「準備すると使える」の 2 組**に分ける（2026-10-19・#69）。
+    ///
+    /// 以前は 7 件を 1 枚に同じ重みで並べ、全部のスイッチがオンで、足りない物を「必要な操作: …」と
+    /// 内部の言葉で書いていた — 初めての人には「どれが使えて、何から押せばよいか」が分からなかった。
+    /// 今は、使える物だけにスイッチ・既定の印を付け、準備中の物は番号付きの手順（済んだ所に ✓・次の
+    /// 1 つにだけボタン）で見せる。Claude Code / Codex 以外の準備中の物は「ほかの AI エージェント」に畳む。
+    ///
+    /// `page` = 設定のページ（役割・起動方法・ホストの切り替え）/ `false` = 初回の案内（このマシンだけ・
+    /// 準備中の行は開いて手順を見られるが、詳細設定は出さない・UI-SPEC §12）。
     pub(crate) fn agents_list(
         &self,
         settings: &Settings,
@@ -529,34 +764,160 @@ impl SettingsView {
             ),
             automatic: crate::default_agent_is_automatic(settings, &catalog),
         };
-        let mut list = div()
+        let environment = StepEnvironment::detect(remote.is_some());
+        let mut usable: Vec<(usize, acp_client::Agent, Option<AgentReadiness>)> = Vec::new();
+        let mut setup: Vec<(usize, acp_client::Agent, Option<AgentReadiness>)> = Vec::new();
+        for (index, agent) in catalog.agents().into_iter().enumerate() {
+            let local = self.local_readiness(&agent, &overrides);
+            // 組は「使うかどうか」と関係なく、このホストで動くかで決める（使わないにした物も、
+            // 動くなら「使える」の組にスイッチ オフで出す）。
+            let known = match self.assessment(&agent, true, local.as_ref(), &overrides, remote.as_ref())
+            {
+                Assessment::Known(found) => Some(found),
+                _ => None,
+            };
+            match &known {
+                Some(found) if is_usable(&found.readiness) => usable.push((index, agent, known)),
+                _ => setup.push((index, agent, known)),
+            }
+        }
+        let checking = usable.is_empty()
+            && setup.iter().any(|(_, _, known)| known.is_none());
+        let hidden = setup
+            .iter()
+            .filter(|(_, agent, _)| !is_featured(agent))
+            .count();
+        let show_all = self.show_more_agents || hidden == 0;
+        let card = |rows: Vec<gpui::AnyElement>| {
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .rounded(px(9.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border);
+            for (position, row) in rows.into_iter().enumerate() {
+                list = list.child(
+                    div()
+                        .when(position > 0, |row| row.border_t_1().border_color(theme.border))
+                        .child(row),
+                );
+            }
+            list
+        };
+        let heading = |text: String| {
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.fg1)
+                .child(SharedString::from(text))
+        };
+        let usable_rows: Vec<gpui::AnyElement> = usable
+            .iter()
+            .map(|(index, agent, known)| {
+                self.agent_row(
+                    *index,
+                    agent,
+                    settings,
+                    &default,
+                    &overrides,
+                    remote.as_ref(),
+                    page,
+                    AgentGroup::Usable,
+                    known.as_ref(),
+                    &environment,
+                    cx,
+                )
+                .into_any_element()
+            })
+            .collect();
+        let setup_rows: Vec<gpui::AnyElement> = setup
+            .iter()
+            .filter(|(_, agent, _)| show_all || is_featured(agent))
+            .map(|(index, agent, known)| {
+                self.agent_row(
+                    *index,
+                    agent,
+                    settings,
+                    &default,
+                    &overrides,
+                    remote.as_ref(),
+                    page,
+                    AgentGroup::Setup,
+                    known.as_ref(),
+                    &environment,
+                    cx,
+                )
+                .into_any_element()
+            })
+            .collect();
+        let empty_text = if checking {
+            i18n::t!("settings.agent_status_checking")
+        } else {
+            i18n::t!("settings.agents_usable_empty")
+        };
+        div()
             .flex()
             .flex_col()
-            .rounded(px(9.))
-            .bg(theme.bg2)
-            .border_1()
-            .border_color(theme.border);
-        for (index, agent) in catalog.agents().iter().enumerate() {
-            let row = self.agent_row(
-                index,
-                agent,
-                settings,
-                &default,
-                &overrides,
-                remote.as_ref(),
-                page,
-                cx,
-            );
-            list = list.child(
+            .gap(px(8.))
+            .child(heading(i18n::t!("settings.agents_usable_heading")))
+            .child(if usable_rows.is_empty() {
                 div()
-                    .when(index > 0, |row| row.border_t_1().border_color(theme.border))
-                    .child(row),
-            );
-        }
-        list
+                    .px(px(12.))
+                    .py(px(12.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.5))
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(empty_text))
+            } else {
+                card(usable_rows)
+            })
+            .when(!setup.is_empty(), |list| {
+                list.child(
+                    div()
+                        .pt(px(10.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(heading(i18n::t!("settings.agents_setup_heading")))
+                        .when(!environment.remote, |section| {
+                            section.child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg2)
+                                    .child(SharedString::from(i18n::t!(
+                                        "settings.agents_setup_sub"
+                                    ))),
+                            )
+                        }),
+                )
+                .child(card(setup_rows))
+            })
+            .when(hidden > 0, |list| {
+                let text = if self.show_more_agents {
+                    i18n::t!("settings.agents_show_less")
+                } else {
+                    i18n::t!("settings.agents_show_more", "n" => hidden)
+                };
+                list.child(
+                    div().flex().child(
+                        self.detail_link(("agents-show-more", 0), text)
+                            .text_size(px(11.))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _window, cx| {
+                                    view.show_more_agents = !view.show_more_agents;
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+                )
+            })
     }
 
-    /// 1 行（頭 + 開いていれば中）。
+    /// 1 行（頭 + 開いていれば中）。`known` はこのホストでの見立て（読めていなければ `None`）。
     #[allow(clippy::too_many_arguments)]
     fn agent_row(
         &self,
@@ -567,12 +928,17 @@ impl SettingsView {
         overrides: &BTreeMap<String, acp_client::AgentOverride>,
         remote: Option<&SharedString>,
         page: bool,
+        group: AgentGroup,
+        known: Option<&AgentReadiness>,
+        environment: &StepEnvironment,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = self.theme.clone();
         let id = SharedString::from(agent.id().to_string());
         let enabled = settings.agent_enabled(agent.id());
-        let is_default = default.agent.as_ref() == Some(agent);
+        let usable_group = group == AgentGroup::Usable;
+        // 準備中の物に既定の印は付けない（自動の既定が準備中の物を指していても、使えないので）。
+        let is_default = usable_group && default.agent.as_ref() == Some(agent);
         let default_text = if default.automatic {
             i18n::t!("settings.is_default_auto")
         } else {
@@ -581,11 +947,14 @@ impl SettingsView {
         let is_captain = settings.captain_agent.as_deref() == Some(agent.label());
         let local = self.local_readiness(agent, overrides);
         let assessment = self.assessment(agent, enabled, local.as_ref(), overrides, remote);
-        let expanded = page && self.expanded_agent.as_ref() == Some(&id);
-        let version = match &assessment {
-            Assessment::Known(found) => version_text(&found.version),
-            _ => None,
+        // 準備中の行は初回の案内でも開ける（手順を見るため）。使える行を開くのは設定のページだけ。
+        let openable = page || !usable_group;
+        let expanded = openable && self.expanded_agent.as_ref() == Some(&id);
+        let steps = match (group, known) {
+            (AgentGroup::Setup, Some(found)) => setup_steps(agent, found, environment),
+            _ => Vec::new(),
         };
+        let next_step = steps.iter().position(|step| !step.done);
         let badge = |text: String, accent: bool| {
             div()
                 .flex_none()
@@ -599,6 +968,22 @@ impl SettingsView {
                 .child(SharedString::from(text))
         };
         let (icon, monogram, brand) = agent.brand();
+        // 2 行目: 使える行は状態、準備中の行は「あと N ステップ · 次: …」。
+        let status = match (group, next_step) {
+            (AgentGroup::Setup, Some(next)) => div()
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .child(SharedString::from(i18n::t!(
+                    "settings.agent_setup_remaining",
+                    "n" => steps.len() - next
+                )))
+                .into_any_element(),
+            _ => self.status_line(&assessment, remote.is_some()),
+        };
+        // 3 行目（準備中の組み込みだけ）: 何の AI か・何のアカウントで使うか。
+        let about = (!usable_group)
+            .then(|| agent.builtin().map(agent_about))
+            .flatten();
         let text = div()
             .flex_1()
             .min_w_0()
@@ -618,41 +1003,55 @@ impl SettingsView {
                             .text_color(theme.fg0)
                             .child(SharedString::from(agent.label().to_string())),
                     )
-                    .child(div().text_size(px(10.5)).text_color(theme.fg2).child(
-                        SharedString::from(kind_text(agent, self.registry.as_deref())),
-                    ))
+                    // 組み込みは種類を出さない（「標準」は使う人には意味が無い）。足した物だけ出す。
+                    .when(agent.custom().is_some(), |line| {
+                        line.child(div().text_size(px(10.5)).text_color(theme.fg2).child(
+                            SharedString::from(kind_text(agent, self.registry.as_deref())),
+                        ))
+                    })
                     .when(is_default, |line| {
                         line.child(badge(default_text.clone(), true))
                     })
-                    .when(is_captain && page, |line| {
+                    .when(is_captain && page && usable_group, |line| {
                         line.child(badge(i18n::t!("settings.is_captain"), false))
                     }),
             )
-            .child(self.status_line(&assessment, remote.is_some()))
-            .when_some(version, |text, version| {
+            .child(status)
+            // 紹介は 1 行で省略（狭い設定のページで何行にも折り返さない）。
+            .when_some(about, |text, about| {
                 text.child(
                     div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_size(px(10.5))
                         .text_color(theme.fg2)
-                        .child(SharedString::from(version)),
+                        .child(SharedString::from(about)),
                 )
             });
-        let action = if remote.is_none() {
-            self.header_action(index, agent, &assessment, cx)
-        } else {
-            None
+        let action = match (group, next_step) {
+            (AgentGroup::Usable, _) if remote.is_none() => {
+                self.header_action(index, agent, &assessment, cx)
+            }
+            (AgentGroup::Setup, Some(next)) if !expanded => {
+                self.step_button(("agent-next-step", index), agent, &steps[next], cx)
+            }
+            _ => None,
         };
         let agent_id = id.clone();
-        let switch = self
-            .switch(("agent-enabled", index), enabled)
-            .flex_none()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, _, _window, cx| {
-                    cx.stop_propagation();
-                    view.toggle_agent_enabled(&agent_id, cx);
-                }),
-            );
+        // スイッチは使える行だけ（準備中の物は使えないので、オン / オフに意味が無い）。
+        let switch = usable_group.then(|| {
+            self.switch(("agent-enabled", index), enabled)
+                .flex_none()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| {
+                        cx.stop_propagation();
+                        view.toggle_agent_enabled(&agent_id, cx);
+                    }),
+                )
+        });
         let toggle_id = id.clone();
         let header = div()
             .id(("agent-row", index))
@@ -661,7 +1060,7 @@ impl SettingsView {
             .gap(px(10.))
             .px(px(12.))
             .py(px(10.))
-            .when(page, |header| {
+            .when(openable, |header| {
                 header.cursor_pointer().on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |view, _, _window, cx| {
@@ -672,12 +1071,12 @@ impl SettingsView {
             .child(
                 div()
                     .flex_none()
-                    .when(!enabled, |logo| logo.opacity(0.4))
+                    .when(!enabled || !usable_group, |logo| logo.opacity(0.55))
                     .child(agent_logo(icon, monogram, brand)),
             )
             .child(text)
             .children(action)
-            .when(page, |header| {
+            .when(openable, |header| {
                 header.child(
                     div()
                         .flex_none()
@@ -689,34 +1088,291 @@ impl SettingsView {
                         .child(if expanded { "⌄" } else { "›" }),
                 )
             })
-            .child(switch);
-        div().flex().flex_col().child(header).when(expanded, |row| {
-            row.child(self.agent_details(
+            .children(switch);
+        let mut row = div().flex().flex_col().child(header);
+        if !expanded {
+            return row;
+        }
+        let default_role = DefaultRole {
+            badge: is_default.then_some(default_text.as_str()),
+            // 自動で選ばれた既定も「既定にする」で固定できる（他を入れても動かなくなる）。
+            can_pin: !is_default || default.automatic,
+        };
+        if usable_group {
+            return row.child(self.agent_details(
                 index,
                 agent,
                 settings,
                 enabled,
-                DefaultRole {
-                    badge: is_default.then_some(default_text.as_str()),
-                    // 自動で選ばれた既定も「既定にする」で固定できる（他を入れても動かなくなる）。
-                    can_pin: !is_default || default.automatic,
-                },
+                default_role,
                 is_captain,
                 local.as_ref(),
+                known,
                 remote.is_some(),
                 cx,
-            ))
-        })
+            ));
+        }
+        // 準備中の行を開いた中: 手順 →（設定のページだけ）詳細設定。
+        row = row.child(self.setup_steps_view(index, agent, &steps, known, environment, cx));
+        if page {
+            let open = self.agent_advanced_open;
+            row = row.child(
+                div().pl(px(DETAILS_INSET)).pb(px(10.)).flex().child(
+                    self.detail_link(
+                        ("agent-advanced", index),
+                        if open {
+                            i18n::t!("settings.agent_advanced_hide")
+                        } else {
+                            i18n::t!("settings.agent_advanced_show")
+                        },
+                    )
+                    .text_size(px(11.))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _window, cx| {
+                            cx.stop_propagation();
+                            view.agent_advanced_open = !view.agent_advanced_open;
+                            cx.notify();
+                        }),
+                    ),
+                ),
+            );
+            if open {
+                row = row.child(self.agent_details(
+                    index,
+                    agent,
+                    settings,
+                    enabled,
+                    default_role,
+                    is_captain,
+                    local.as_ref(),
+                    known,
+                    remote.is_some(),
+                    cx,
+                ));
+            }
+        }
+        row
     }
 
-    /// 行を開く / 閉じる（1 つだけ開く・ビューのメモリ）。
+    /// 行を開く / 閉じる（1 つだけ開く・ビューのメモリ）。別の行を開いたら詳細設定は畳む。
     pub(crate) fn toggle_agent_details(&mut self, agent_id: &SharedString, cx: &mut Context<Self>) {
         self.expanded_agent = if self.expanded_agent.as_ref() == Some(agent_id) {
             None
         } else {
             Some(agent_id.clone())
         };
+        self.agent_advanced_open = false;
         cx.notify();
+    }
+
+    /// 準備の手順（開いた準備中の行の中）。済んだ手順は ✓、次の 1 つは番号の輪 + 説明 + コマンド +
+    /// ボタン、その先は薄い番号だけ（順にしか進められないので、先のボタンは出さない）。
+    fn setup_steps_view(
+        &self,
+        index: usize,
+        agent: &acp_client::Agent,
+        steps: &[SetupStep],
+        known: Option<&AgentReadiness>,
+        environment: &StepEnvironment,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let mut view = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .pl(px(DETAILS_INSET))
+            .pr(px(12.))
+            .pb(px(10.));
+        match known.map(|found| &found.readiness) {
+            Some(Readiness::Unavailable(error)) => {
+                return view.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(add_agent::launch_problem_text(error))),
+                );
+            }
+            None => {
+                return view.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("settings.agent_status_checking"))),
+                );
+            }
+            Some(_) => {}
+        }
+        let next = steps.iter().position(|step| !step.done);
+        for (position, step) in steps.iter().enumerate() {
+            let is_next = Some(position) == next;
+            let number = SharedString::from((position + 1).to_string());
+            let marker = div()
+                .flex_none()
+                .size(px(18.))
+                .mt(px(1.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.))
+                .map(|marker| {
+                    if step.done {
+                        marker.bg(theme.bg3).text_color(theme.fg1).child("✓")
+                    } else if is_next {
+                        marker
+                            .border_1()
+                            .border_color(theme.fg1)
+                            .text_color(theme.fg0)
+                            .child(number)
+                    } else {
+                        marker
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_color(theme.fg2)
+                            .child(number)
+                    }
+                });
+            let mut body = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(if is_next { theme.fg0 } else { theme.fg2 })
+                        .when(is_next, |title| title.font_weight(FontWeight::SEMIBOLD))
+                        .child(SharedString::from(step.title.clone())),
+                );
+            if is_next {
+                if let Some(note) = &step.note {
+                    body = body.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(note.clone())),
+                    );
+                }
+                if let Some(command) = step.command {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .px(px(6.))
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(theme.bg1)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .font_family(ui::code_font(cx))
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg1)
+                                    .child(SharedString::new_static(command)),
+                            )
+                            .child(
+                                self.detail_link(
+                                    ("agent-step-copy", index * 10 + position),
+                                    i18n::t!("settings.agent_detail_copy"),
+                                )
+                                .text_size(px(10.5))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |view, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        view.copy_agent_command(command, cx)
+                                    }),
+                                ),
+                            ),
+                    );
+                }
+            }
+            let button = if is_next {
+                self.step_button(("agent-step", index * 10 + position), agent, step, cx)
+            } else {
+                None
+            };
+            view = view.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .child(marker)
+                    .child(body)
+                    .children(button),
+            );
+        }
+        if environment.remote {
+            view = view.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!(
+                        "settings.agent_detail_remote_note"
+                    ))),
+            );
+        }
+        view
+    }
+
+    /// 手順のボタン（このマシンで流せるコマンドがある時だけ）。押すとターミナルでコマンドを流し、
+    /// 組み込みなら変化を見張って一覧を読み直す（済んだ手順に ✓ が付く）。
+    fn step_button(
+        &self,
+        id: (&'static str, usize),
+        agent: &acp_client::Agent,
+        step: &SetupStep,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let command = step.command.filter(|_| step.runnable)?;
+        let theme = self.theme.clone();
+        let agent_index = agent.builtin().and_then(|kind| {
+            acp_client::AGENTS
+                .iter()
+                .position(|known| known.id == kind.id)
+        });
+        Some(
+            div()
+                .id(id)
+                .flex_none()
+                .h(px(24.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .bg(theme.bg3)
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.5))
+                .text_color(theme.fg0)
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .hover(|style| style.border_color(theme.fg2))
+                .child(SharedString::from(step.button.clone()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| {
+                        cx.stop_propagation();
+                        match agent_index {
+                            Some(agent_index) => view.run_agent_command(agent_index, command, cx),
+                            None => cx.emit(SettingsViewEvent::RunCommand {
+                                command: command.to_string(),
+                                title: command_tab_title(None, command),
+                            }),
+                        }
+                    }),
+                )
+                .into_any_element(),
+        )
     }
 
     /// 状態の文（色相を使わない・文字の濃さで分ける）。
@@ -802,6 +1458,7 @@ impl SettingsView {
                 (i18n::t!("settings.agent_action_login"), kind.login_cmd)
             }
             Readiness::Unverified => (i18n::t!("settings.agent_action_open_cli"), kind.login_cmd),
+            // Node.js / uv が足りない時は、準備中の組の手順（setup_steps）が先にそれを入れさせる。
             _ => return None,
         };
         let theme = self.theme.clone();
@@ -845,7 +1502,10 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.watch_agent_progress(agent_index, cx);
-        cx.emit(SettingsViewEvent::RunCommand(command.to_string()));
+        cx.emit(SettingsViewEvent::RunCommand {
+            command: command.to_string(),
+            title: command_tab_title(acp_client::AGENTS.get(agent_index), command),
+        });
     }
 
     /// コマンドをクリップボードへ（SSH 先で打つ時など）。
@@ -870,12 +1530,15 @@ impl SettingsView {
         default_role: DefaultRole<'_>,
         is_captain: bool,
         local: Option<&AgentReadiness>,
+        known: Option<&AgentReadiness>,
         remote: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = self.theme.clone();
         let id = SharedString::from(agent.id().to_string());
         let label = SharedString::from(agent.label().to_string());
+        // 版は行の頭から外し、開いた中にだけ出す（初めての人には要らない情報なので）。
+        let version = known.and_then(|found| version_text(&found.version));
         let mut details = div()
             .flex()
             .flex_col()
@@ -917,6 +1580,12 @@ impl SettingsView {
                 .into_any_element(),
             ),
         );
+        if let Some(version) = version {
+            details = details.child(self.detail_line(
+                i18n::t!("settings.agent_detail_version"),
+                div().child(SharedString::from(version)).into_any_element(),
+            ));
+        }
         if let Some(text) = custom.and_then(|custom| self.distribution_text(custom, remote)) {
             details = details.child(self.detail_line(
                 i18n::t!("settings.agent_detail_distribution"),
@@ -1314,6 +1983,10 @@ impl SettingsView {
         self.select_page(SettingsPage::Agents, cx);
         self.expanded_agent =
             (!agent_id.is_empty()).then(|| SharedString::from(agent_id.to_string()));
+        // 畳まれた「ほかの AI エージェント」の行も開けるように、畳みも解く。
+        if !agent_id.is_empty() && !FEATURED_AGENTS.contains(&agent_id) {
+            self.show_more_agents = true;
+        }
         cx.notify();
     }
 
@@ -1639,6 +2312,131 @@ mod tests {
                 .map(|text| text.replace("%{name}", "copilot")),
             Some("copilot のインストール".to_string())
         );
+    }
+
+    fn builtin(id: &str) -> acp_client::Agent {
+        acp_client::Agent::Builtin(
+            acp_client::AGENTS
+                .iter()
+                .find(|agent| agent.id == id)
+                .expect("組み込みに在る"),
+        )
+    }
+
+    fn missing(items: Vec<Missing>) -> AgentReadiness {
+        AgentReadiness {
+            readiness: Readiness::Missing(items),
+            version: VersionInfo::None,
+            distribution: None,
+        }
+    }
+
+    /// (済んだか, コマンド, このマシンで流せるか) の並び。
+    fn summary(steps: &[SetupStep]) -> Vec<(bool, Option<&'static str>, bool)> {
+        steps
+            .iter()
+            .map(|step| (step.done, step.command, step.runnable))
+            .collect()
+    }
+
+    /// 準備の手順: 入れる道具 → 本体 → ログイン。済んだ物も ✓ で残し、ログインは本体が入るまで済みにしない。
+    #[test]
+    fn setup_steps_list_the_tool_the_cli_and_the_login_in_order() {
+        let windows = StepEnvironment {
+            remote: false,
+            windows: true,
+            brew: false,
+        };
+        let codex = acp_client::AGENTS
+            .iter()
+            .find(|agent| agent.id == "codex")
+            .expect("codex");
+        // Node.js はある・本体が無い（ログインは本体が入るまで確かめられない＝済みにしない）。
+        let steps = setup_steps(
+            &builtin("codex"),
+            &missing(vec![Missing::Cli("codex".to_string())]),
+            &windows,
+        );
+        assert_eq!(
+            summary(&steps),
+            vec![
+                (true, Some(WINDOWS_NODE_INSTALL_COMMAND), true),
+                (false, Some(codex.install_cmd), true),
+                (false, Some(codex.login_cmd), true),
+            ]
+        );
+        // ネイティブ版 claude はあるが Node.js が無い（ACP のアダプタを取れない・#69）: Node.js だけが残り。
+        let steps = setup_steps(
+            &builtin("claude"),
+            &missing(vec![Missing::Node]),
+            &windows,
+        );
+        assert_eq!(
+            steps.iter().map(|step| step.done).collect::<Vec<_>>(),
+            vec![false, true, true]
+        );
+        // Kimi は uv で入れる。mac の手元なら astral の入れ方。
+        let mac = StepEnvironment {
+            remote: false,
+            windows: false,
+            brew: true,
+        };
+        let steps = setup_steps(
+            &builtin("kimi"),
+            &missing(vec![Missing::Uv, Missing::Cli("kimi".to_string())]),
+            &mac,
+        );
+        assert_eq!(steps[0].command, Some(UNIX_UV_INSTALL_COMMAND));
+        assert_eq!(steps.len(), 3);
+    }
+
+    /// Windows で `curl … | bash` の物（Grok Build）はボタンを出さない・Homebrew の無い mac は Node.js を
+    /// 案内だけ・SSH 先を見ている時はコピーだけ（ターミナルはこのマシンで開くので）。
+    #[test]
+    fn setup_steps_do_not_offer_commands_that_cannot_run_here() {
+        let windows = StepEnvironment {
+            remote: false,
+            windows: true,
+            brew: false,
+        };
+        let steps = setup_steps(
+            &builtin("grok"),
+            &missing(vec![Missing::Cli("grok".to_string())]),
+            &windows,
+        );
+        assert_eq!(steps[0].command, None, "Windows では流せない");
+        let no_brew = StepEnvironment {
+            remote: false,
+            windows: false,
+            brew: false,
+        };
+        let steps = setup_steps(
+            &builtin("codex"),
+            &missing(vec![Missing::Node, Missing::Cli("codex".to_string())]),
+            &no_brew,
+        );
+        assert_eq!(steps[0].command, None, "nodejs.org を案内するだけ");
+        let remote = StepEnvironment {
+            remote: true,
+            windows: false,
+            brew: false,
+        };
+        let steps = setup_steps(
+            &builtin("codex"),
+            &missing(vec![Missing::Cli("codex".to_string())]),
+            &remote,
+        );
+        assert!(steps.iter().all(|step| !step.runnable));
+    }
+
+    /// 使えるの組: 使える・ログイン未確認。準備中: 足りない物がある・起動できない。
+    #[test]
+    fn usable_agents_are_the_ready_and_the_unverified() {
+        assert!(is_usable(&Readiness::Ready));
+        assert!(is_usable(&Readiness::Unverified));
+        assert!(!is_usable(&Readiness::Missing(vec![Missing::Login])));
+        assert!(is_featured(&builtin("claude")));
+        assert!(!is_featured(&builtin("qwen")));
     }
 }
 

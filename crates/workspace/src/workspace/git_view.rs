@@ -173,7 +173,7 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.bg(bg2).text_color(fg0))
                     .child("×")
-                    .tooltip(Tooltip::text(i18n::t!("git.close_tip"), theme.clone()))
+                    .tooltip(Tooltip::text(i18n::t!("git.close_tip", "key" => keymap_core::keystroke_label("ctrl-shift-g")), theme.clone()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
@@ -185,9 +185,9 @@ impl Workspace {
         // ── 入力行（コミットメッセージ / ブランチ名）。IME の正しい平坦 EditorView ──
         // コミットメッセージは内容に合わせて 1〜6 行で伸びる（composer と同じ auto-grow）。
         let placeholder = if naming {
-            i18n::t!("git.branch_placeholder")
+            i18n::t!("git.branch_placeholder", "key" => keymap_core::keystroke_label("enter"))
         } else {
-            i18n::t!("git.message_placeholder")
+            i18n::t!("git.message_placeholder", "key" => keymap_core::keystroke_label("cmd-enter"))
         };
         let input_editor = branch_editor
             .clone()

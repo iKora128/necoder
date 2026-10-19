@@ -186,7 +186,10 @@ impl Workspace {
                 let mut item = PickerItem::new(id, i18n::t!(entry.label_key));
                 if let Some(keystrokes) = keymap_core::key_for_action(&sections, entry.action_name)
                 {
-                    item = item.with_detail(keymap_core::pretty_keystroke(&keystrokes));
+                    item = item.with_detail(keymap_core::pretty_keystroke_for(
+                        keymap_core::KeymapPlatform::current(),
+                        &keystrokes,
+                    ));
                 }
                 item
             })
@@ -801,6 +804,9 @@ impl Workspace {
                     PickerMode::PreviewUrl => self.confirm_localhost_input(&query, window, cx),
                     PickerMode::Fonts => self.commit_font(id, cx),
                     PickerMode::Shells => self.commit_shell(id, cx),
+                    PickerMode::ShellsForNewTerminal => {
+                        self.commit_new_terminal_shell(id, window, cx)
+                    }
                     PickerMode::Files => {
                         // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
                         // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。
@@ -1387,8 +1393,9 @@ impl Workspace {
         let modifiers = event.keystroke.modifiers;
         match event.keystroke.key.as_str() {
             "escape" => self.close_buffer_search(true, window, cx),
-            // ⌘Enter = 全置換（置換行が出ている時のみ）。
-            "enter" if modifiers.platform => {
+            // ⌘Enter（Windows / Linux は Ctrl+Enter）= 全置換（置換行が出ている時のみ）。
+            // `platform` だと Windows では Win キーになり、ラベルの Ctrl+Enter が効かない。
+            "enter" if modifiers.secondary() => {
                 if show_replace {
                     self.replace_all_buffer_matches(cx);
                 }

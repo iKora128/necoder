@@ -9,6 +9,7 @@ publish = false
 gpui.workspace = true
 host.workspace = true
 i18n.workspace = true
+keymap_core.workspace = true
 search.workspace = true
 theme_core.workspace = true
 ui.workspace = true

@@ -104,45 +104,305 @@ pub(crate) fn shells_from_list(
     shells
 }
 
-/// 手元で開けるシェルの一覧（O25・シェルを選ぶ画面）。mac / Linux は `/etc/shells` と `$SHELL`、
-/// Windows は PATH にある pwsh / powershell / cmd / bash（Git Bash）/ wsl。
-pub(crate) fn available_shells() -> Vec<String> {
+/// シェルのピッカーの 1 行（O25）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ShellChoice {
+    pub(crate) kind: ShellKind,
+    /// `terminal_shell` に書く物。
+    pub(crate) program: String,
+    /// `Some` なら選んだ時に `terminal_shell_args` も書く（Windows の Git Bash・WSL はシェルと引数の組で
+    /// 1 つ）。mac / Linux は `None` ＝ 引数には触らない（従来どおり・WINDOWS-PORT.md §D8）。
+    pub(crate) args: Option<Vec<String>>,
+}
+
+/// シェルの種類（表示名を決める）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShellKind {
+    /// mac / Linux の `/etc/shells` の 1 行（名前はファイル名）。
+    Path,
+    /// PowerShell 7（`pwsh`）。
+    Pwsh,
+    /// OS 同梱の Windows PowerShell 5.1。
+    WindowsPowerShell,
+    /// コマンド プロンプト（`cmd`）。
+    Cmd,
+    /// Git for Windows の bash。
+    GitBash,
+    /// WSL のディストリビューション 1 つ。
+    Wsl { distro: String },
+}
+
+impl ShellChoice {
+    fn label(&self) -> String {
+        match &self.kind {
+            ShellKind::Path => Path::new(&self.program)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.program.clone()),
+            ShellKind::Pwsh => i18n::t!("settings.shell_pwsh"),
+            ShellKind::WindowsPowerShell => i18n::t!("settings.shell_windows_powershell"),
+            ShellKind::Cmd => i18n::t!("settings.shell_cmd"),
+            ShellKind::GitBash => i18n::t!("settings.shell_git_bash"),
+            ShellKind::Wsl { distro } => i18n::t!("settings.shell_wsl", "distro" => distro),
+        }
+    }
+
+    /// ピッカーの右に出す、実際に起こすコマンド。
+    fn detail(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().flatten().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// 今の設定がこの行か（引数を持つ行は引数まで同じ時だけ）。
+    fn is_current(&self, program: &str, args: &[String]) -> bool {
+        self.program == program
+            && self
+                .args
+                .as_ref()
+                .is_none_or(|own| own.as_slice() == args)
+    }
+}
+
+/// 「いつものシェル」の行（設定のシェル。設定が空なら OS の既定 = Windows は PowerShell 7 →
+/// Windows PowerShell の先に在る方・mac / Linux は `$SHELL`）。
+pub(crate) fn usual_shell(shells: &[ShellChoice], current: &str, args: &[String]) -> Option<usize> {
+    if !current.is_empty() {
+        return shells.iter().position(|shell| shell.is_current(current, args));
+    }
     if cfg!(windows) {
-        let paths: Vec<PathBuf> = std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect())
-            .unwrap_or_default();
-        ["pwsh", "powershell", "cmd", "bash", "wsl"]
+        return shells.iter().position(|shell| {
+            matches!(shell.kind, ShellKind::Pwsh | ShellKind::WindowsPowerShell)
+        });
+    }
+    let login = std::env::var("SHELL").ok()?;
+    shells.iter().position(|shell| shell.program == login)
+}
+
+/// 手元で開けるシェルの一覧（O25・シェルを選ぶ画面）。mac / Linux は `/etc/shells` と `$SHELL`、
+/// Windows は PowerShell 7 / Windows PowerShell / コマンド プロンプト / Git Bash / WSL の各ディストリ。
+/// **blocking**（Windows は `wsl.exe` を 1 回起こす）なので背景で呼ぶ。
+pub(crate) fn available_shells() -> Vec<ShellChoice> {
+    if cfg!(windows) {
+        let program_dirs: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
             .into_iter()
-            .filter(|name| {
-                paths
-                    .iter()
-                    .any(|directory| directory.join(format!("{name}.exe")).is_file())
-            })
-            .map(str::to_string)
-            .collect()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .chain(std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("Programs")))
+            .collect();
+        let scoop = paths::home_dir().map(|home| home.join(r"scoop\apps\git\current"));
+        let git_bash = git_bash_candidates(host::find_in_path("git").as_deref(), &program_dirs, scoop);
+        let has_wsl = host::find_in_path("wsl").is_some();
+        let distros = if has_wsl { wsl_distros() } else { Vec::new() };
+        windows_shells(host::find_in_path, &git_bash, |path| path.is_file(), &distros)
     } else {
         let listed = std::fs::read_to_string("/etc/shells").unwrap_or_default();
         let current = std::env::var("SHELL").ok();
         shells_from_list(&listed, current.as_deref(), |path| path.is_file())
+            .into_iter()
+            .map(|program| ShellChoice {
+                kind: ShellKind::Path,
+                program,
+                args: None,
+            })
+            .collect()
+    }
+}
+
+/// Windows のシェルを並べる（探し方は引数で受け取る＝どのプラットフォームでもテストできる）。
+///
+/// - PowerShell 7 → Windows PowerShell → コマンド プロンプト（PATH にある物）
+/// - Git Bash: `git_bash` の候補で最初に在る物。**PATH の `bash` は見ない** — Windows の
+///   `System32\bash.exe` は WSL の入口で、Git Bash は既定では PATH に入らない（`Git\cmd` だけが入る）
+/// - WSL: ディストリごとに 1 行（`wsl -d <名前>`）。端末の作業フォルダ（プロジェクトの根）は
+///   `wsl.exe` が `/mnt/c/...` に読み替えて引き継ぐ
+pub(crate) fn windows_shells(
+    find: impl Fn(&str) -> Option<PathBuf>,
+    git_bash: &[PathBuf],
+    exists: impl Fn(&Path) -> bool,
+    wsl_distros: &[String],
+) -> Vec<ShellChoice> {
+    let plain = |kind: ShellKind, program: &str| ShellChoice {
+        kind,
+        program: program.to_string(),
+        args: Some(Vec::new()),
+    };
+    let mut shells = Vec::new();
+    for (kind, program) in [
+        (ShellKind::Pwsh, "pwsh"),
+        (ShellKind::WindowsPowerShell, "powershell"),
+        (ShellKind::Cmd, "cmd"),
+    ] {
+        if find(program).is_some() {
+            shells.push(plain(kind, program));
+        }
+    }
+    if let Some(bash) = git_bash.iter().find(|candidate| exists(candidate)) {
+        shells.push(ShellChoice {
+            kind: ShellKind::GitBash,
+            program: bash.to_string_lossy().into_owned(),
+            // ログインシェルとして起こす（/etc/profile が PATH と見た目を整える・Git Bash の窓と同じ）。
+            args: Some(vec!["--login".to_string(), "-i".to_string()]),
+        });
+    }
+    shells.extend(wsl_distros.iter().map(|distro| ShellChoice {
+        kind: ShellKind::Wsl {
+            distro: distro.clone(),
+        },
+        program: "wsl".to_string(),
+        args: Some(vec!["-d".to_string(), distro.clone()]),
+    }));
+    shells
+}
+
+/// Git Bash（`<Git>\bin\bash.exe`）の候補を、確からしい順に並べる（重複は外す）。
+/// 1. PATH の `git.exe` が居る Git（`<Git>\cmd\git.exe` / `<Git>\bin\git.exe` / `<Git>\mingw64\bin\git.exe`）
+/// 2. 既定の置き場（Program Files・ユーザー単位の `%LOCALAPPDATA%\Programs`）
+/// 3. Scoop
+pub(crate) fn git_bash_candidates(
+    git: Option<&Path>,
+    program_dirs: &[PathBuf],
+    scoop: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(directory) = git.and_then(Path::parent) {
+        let name = |path: &Path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_lowercase())
+        };
+        let root = match name(directory).as_deref() {
+            Some("cmd") => directory.parent(),
+            Some("bin") => directory
+                .parent()
+                .filter(|parent| name(parent).as_deref() != Some("mingw64"))
+                .or_else(|| directory.parent().and_then(Path::parent)),
+            _ => None,
+        };
+        roots.extend(root.map(Path::to_path_buf));
+    }
+    roots.extend(program_dirs.iter().map(|directory| directory.join("Git")));
+    roots.extend(scoop);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let bash = root.join("bin").join("bash.exe");
+        let key = bash.to_string_lossy().to_lowercase();
+        if !candidates
+            .iter()
+            .any(|known| known.to_string_lossy().to_lowercase() == key)
+        {
+            candidates.push(bash);
+        }
+    }
+    candidates
+}
+
+/// `wsl.exe -l -q` の出力をディストリの名前にする。Docker Desktop が置く内部用（`docker-desktop` /
+/// `docker-desktop-data`）は端末に向かないので外す。
+///
+/// 出力は**BOM の無い UTF-16LE**（`WSL_UTF8=1` を解する版なら UTF-8）。どちらでも読めるよう、
+/// NUL を含めば UTF-16LE として読む。
+pub(crate) fn parse_wsl_distros(output: &[u8]) -> Vec<String> {
+    let text = if output.contains(&0) {
+        let units: Vec<u16> = output
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(output).into_owned()
+    };
+    text.lines()
+        .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}'))
+        .filter(|name| !name.is_empty() && !name.to_lowercase().starts_with("docker-desktop"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// 入っている WSL のディストリ（無い・WSL 自体が無い・応答しない時は空）。
+/// WSL の仮想マシンが止まっていると起こすのに数秒かかることがあるので、待つのは 5 秒まで。
+fn wsl_distros() -> Vec<String> {
+    let child = child_process::command("wsl")
+        .args(["-l", "-q"])
+        .env("WSL_UTF8", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("wsl の一覧を読めない: {error}");
+            return Vec::new();
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // ディストリが 1 つも無い時は失敗の終了コードで案内文を出す＝空として扱う。
+                if !status.success() {
+                    return Vec::new();
+                }
+                let mut output = Vec::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    if let Err(error) = std::io::Read::read_to_end(&mut stdout, &mut output) {
+                        eprintln!("wsl の一覧を読めない: {error}");
+                    }
+                }
+                return parse_wsl_distros(&output);
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) => {
+                eprintln!("wsl -l -q が 5 秒で返らないため WSL のシェルを一覧に出さない");
+                if let Err(error) = child.kill() {
+                    eprintln!("wsl を止められない: {error}");
+                }
+                return Vec::new();
+            }
+            Err(error) => {
+                eprintln!("wsl の終わりを待てない: {error}");
+                return Vec::new();
+            }
+        }
     }
 }
 
 impl Workspace {
     /// シェルのピッカーを開く（O25）。先頭 = 既定に戻す、続けて入っているシェル。
+    /// 一覧は背景で集める（Windows は WSL のディストリを `wsl.exe` に聞くため）。
     pub(crate) fn open_shell_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shells = available_shells();
-        let current = settings::get(cx).terminal_shell.trim().to_string();
+        let shells = cx.background_executor().spawn(async { available_shells() });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let shells = shells.await;
+            let shown = workspace.update_in(cx, |workspace, window, cx| {
+                workspace.show_shell_picker(shells, window, cx)
+            });
+            if let Err(error) = shown {
+                eprintln!("シェルのピッカーを開けない（窓が既に無い）: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    fn show_shell_picker(
+        &mut self,
+        shells: Vec<ShellChoice>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = settings::get(cx);
+        let current = settings.terminal_shell.trim().to_string();
+        let current_args = settings.terminal_shell_args.clone();
         let mut items = vec![PickerItem::new(
             0,
             i18n::t!("settings.shell_picker_default"),
         )];
         items.extend(shells.iter().enumerate().map(|(index, shell)| {
-            let name = Path::new(shell)
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| shell.clone());
-            let item = PickerItem::new(index + 1, name).with_detail(shell.clone());
-            if *shell == current {
+            let item = PickerItem::new(index + 1, shell.label()).with_detail(shell.detail());
+            if shell.is_current(&current, &current_args) {
                 item.with_accent(self.accent())
             } else {
                 item
@@ -158,15 +418,101 @@ impl Workspace {
         );
     }
 
-    /// 選んだシェルを `terminal_shell` へ書く（id 0 = 空 = 既定）。引数（`terminal_shell_args`）は触らない。
+    /// ターミナルの「▾」: シェルを選んで新しい端末を開く（設定は変えない）。いつものシェル（設定・
+    /// 空なら OS の既定）の行に「（いつものシェル）」を添える。一覧は背景で集める（WSL に聞くため）。
+    pub(crate) fn open_new_terminal_shell_picker(
+        &mut self,
+        dock: Entity<terminal_view::TerminalDock>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shells = cx.background_executor().spawn(async { available_shells() });
+        let dock = dock.downgrade();
+        cx.spawn_in(window, async move |workspace, cx| {
+            let shells = shells.await;
+            let shown = workspace.update_in(cx, |workspace, window, cx| {
+                let settings = settings::get(cx);
+                let current = settings.terminal_shell.trim().to_string();
+                let current_args = settings.terminal_shell_args.clone();
+                let usual = usual_shell(&shells, &current, &current_args);
+                let items = shells
+                    .iter()
+                    .enumerate()
+                    .map(|(index, shell)| {
+                        let label = if Some(index) == usual {
+                            format!("{} {}", shell.label(), i18n::t!("terminal.shell_menu_default"))
+                        } else {
+                            shell.label()
+                        };
+                        PickerItem::new(index, label).with_detail(shell.detail())
+                    })
+                    .collect();
+                workspace.overlays.picker_shells = shells;
+                workspace.overlays.picker_shell_dock = Some(dock);
+                workspace.open_picker(
+                    PickerMode::ShellsForNewTerminal,
+                    i18n::t!("terminal.shell_menu_placeholder"),
+                    items,
+                    window,
+                    cx,
+                );
+            });
+            if let Err(error) = shown {
+                eprintln!("シェルのメニューを開けない（窓が既に無い）: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    /// 「▾」で選んだシェルで、頼んだドックに新しい端末を開く（タブ名はシェルの名前）。
+    pub(crate) fn commit_new_terminal_shell(
+        &mut self,
+        id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shell) = self.overlays.picker_shells.get(id).cloned() else {
+            return;
+        };
+        let Some(dock) = self
+            .overlays
+            .picker_shell_dock
+            .take()
+            .and_then(|dock| dock.upgrade())
+        else {
+            return;
+        };
+        let title = Some(shell.label());
+        dock.update(cx, |dock, cx| {
+            dock.add_with_shell(
+                shell.program.clone(),
+                shell.args.clone().unwrap_or_default(),
+                title,
+                window,
+                cx,
+            )
+        });
+        if self.terminal_dock == dock {
+            self.chrome.show_bottom = true;
+        }
+        cx.notify();
+    }
+
+    /// 選んだシェルを `terminal_shell` へ書く（id 0 = 空 = 既定）。引数（`terminal_shell_args`）は
+    /// その行が引数を持つ時だけ書く（Windows の Git Bash・WSL。mac / Linux は触らない）。
     pub(crate) fn commit_shell(&mut self, id: usize, cx: &mut Context<Self>) {
-        let value = match id {
-            0 => String::new(),
+        let (value, args) = match id {
+            0 => (String::new(), None),
             index => match self.overlays.picker_shells.get(index - 1) {
-                Some(shell) => shell.clone(),
+                Some(shell) => (shell.program.clone(), shell.args.clone()),
                 None => return,
             },
         };
+        if let Some(args) = args {
+            let args = serde_json::Value::Array(args.into_iter().map(Into::into).collect());
+            let result = settings::set_user_value(cx, "terminal_shell_args", args);
+            self.report_settings_save(result, cx);
+        }
         let result =
             settings::set_user_value(cx, "terminal_shell", serde_json::Value::String(value));
         self.report_settings_save(result, cx);
@@ -300,19 +646,213 @@ mod tests {
             cx.notify();
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        // 一覧は背景で集めてから開く（Windows は wsl.exe に聞くため）。
+        cx.run_until_parked();
         workspace.update_in(cx, |workspace, _window, cx| {
             assert!(workspace.overlays.picker_mode == PickerMode::Shells);
-            workspace.overlays.picker_shells = vec!["/bin/zsh".to_string()];
+            workspace.overlays.picker_shells = vec![
+                ShellChoice {
+                    kind: ShellKind::Path,
+                    program: "/bin/zsh".to_string(),
+                    args: None,
+                },
+                ShellChoice {
+                    kind: ShellKind::Wsl {
+                        distro: "Ubuntu".to_string(),
+                    },
+                    program: "wsl".to_string(),
+                    args: Some(vec!["-d".to_string(), "Ubuntu".to_string()]),
+                },
+            ];
+            settings::set_user_value(
+                cx,
+                "terminal_shell_args",
+                serde_json::json!(["-l"]),
+            )
+            .unwrap();
             workspace.commit_shell(1, cx);
             assert_eq!(settings::get(cx).terminal_shell, "/bin/zsh");
             assert_eq!(
-                terminal_shell_from(&settings::get(cx)).program,
-                "/bin/zsh",
-                "新しく開く端末のシェルになる"
+                terminal_shell_from(&settings::get(cx)),
+                terminal_view::TerminalShell {
+                    program: "/bin/zsh".to_string(),
+                    args: vec!["-l".to_string()],
+                },
+                "新しく開く端末のシェルになる・引数を持たない行は引数に触らない（mac の従来どおり）"
+            );
+            workspace.commit_shell(2, cx);
+            assert_eq!(
+                terminal_shell_from(&settings::get(cx)),
+                terminal_view::TerminalShell {
+                    program: "wsl".to_string(),
+                    args: vec!["-d".to_string(), "Ubuntu".to_string()],
+                },
+                "WSL はシェルと引数の組で書く"
             );
             workspace.commit_shell(0, cx);
             assert_eq!(settings::get(cx).terminal_shell, "");
         });
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ターミナルの「▾」で選ぶと、頼んだドックに新しいタブが開き、タブ名はシェルの名前・設定は変えない。
+    #[gpui::test]
+    fn choosing_a_shell_from_the_terminal_menu_opens_a_new_tab(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_shell_menu_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            let dock = workspace.terminal_dock.clone();
+            dock.update(cx, |dock, _cx| dock.use_test_terminals());
+            let wsl = ShellChoice {
+                kind: ShellKind::Wsl {
+                    distro: "Ubuntu".to_string(),
+                },
+                program: "wsl".to_string(),
+                args: Some(vec!["-d".to_string(), "Ubuntu".to_string()]),
+            };
+            let title = wsl.label();
+            workspace.overlays.picker_shells = vec![wsl];
+            workspace.overlays.picker_shell_dock = Some(dock.downgrade());
+            let before = dock.read(cx).tab_terminals().0.len();
+            workspace.commit_new_terminal_shell(0, window, cx);
+            let (terminals, active) = dock.read(cx).tab_terminals();
+            assert_eq!(terminals.len(), before + 1, "新しいタブが開く");
+            assert_eq!(
+                terminals[active].read(cx).custom_title(),
+                Some(title.as_str()),
+                "タブ名はシェルの名前"
+            );
+            assert!(workspace.chrome.show_bottom, "下のドックを出す");
+            assert_eq!(settings::get(cx).terminal_shell, "", "設定は変えない");
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows のシェル: PATH にある PowerShell 7 / Windows PowerShell / cmd、在る Git Bash 1 つ、
+    /// WSL のディストリごとに 1 行。PATH の `bash`（System32 の WSL の入口）は Git Bash と取り違えない。
+    #[test]
+    fn windows_shells_list_powershell_git_bash_and_each_wsl_distro() {
+        let in_path = ["powershell", "cmd", "bash", "wsl"];
+        let find = |name: &str| {
+            in_path
+                .contains(&name)
+                .then(|| PathBuf::from(format!(r"C:\Windows\System32\{name}.exe")))
+        };
+        let git_bash = [
+            PathBuf::from(r"C:\Missing\Git\bin\bash.exe"),
+            PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+        ];
+        let exists = |path: &Path| path == Path::new(r"C:\Program Files\Git\bin\bash.exe");
+        let distros = ["Ubuntu".to_string(), "Debian".to_string()];
+        let shells = windows_shells(find, &git_bash, exists, &distros);
+        let summary: Vec<(ShellKind, String)> = shells
+            .iter()
+            .map(|shell| (shell.kind.clone(), shell.detail()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (ShellKind::WindowsPowerShell, "powershell".to_string()),
+                (ShellKind::Cmd, "cmd".to_string()),
+                (
+                    ShellKind::GitBash,
+                    r"C:\Program Files\Git\bin\bash.exe --login -i".to_string()
+                ),
+                (
+                    ShellKind::Wsl {
+                        distro: "Ubuntu".to_string()
+                    },
+                    "wsl -d Ubuntu".to_string()
+                ),
+                (
+                    ShellKind::Wsl {
+                        distro: "Debian".to_string()
+                    },
+                    "wsl -d Debian".to_string()
+                ),
+            ],
+            "pwsh が無ければ出さない・Git Bash は在る候補の先頭"
+        );
+        assert!(
+            shells[0].is_current("powershell", &[]),
+            "引数の無い PowerShell"
+        );
+        assert!(
+            !shells[3].is_current("wsl", &["-d".to_string(), "Debian".to_string()]),
+            "WSL は引数（ディストリ）まで見て今の行を決める"
+        );
+        assert!(shells[4].is_current("wsl", &["-d".to_string(), "Debian".to_string()]));
+    }
+
+    /// Git Bash の候補: PATH の git.exe（cmd / bin / mingw64\bin のどれでも）が居る Git を先に、
+    /// 既定の置き場・Scoop を後に。大文字小文字だけ違う重複は外す。
+    #[test]
+    fn git_bash_is_found_next_to_git_on_path_first() {
+        let program_dirs = [
+            PathBuf::from(r"C:\Program Files"),
+            PathBuf::from(r"C:\Users\a\AppData\Local\Programs"),
+        ];
+        let scoop = Some(PathBuf::from(r"C:\Users\a\scoop\apps\git\current"));
+        for git in [
+            r"D:\Tools\Git\cmd\git.exe",
+            r"D:\Tools\Git\bin\git.exe",
+            r"D:\Tools\Git\mingw64\bin\git.exe",
+        ] {
+            let candidates =
+                git_bash_candidates(Some(Path::new(git)), &program_dirs, scoop.clone());
+            assert_eq!(
+                candidates.first().map(PathBuf::as_path),
+                Some(Path::new(r"D:\Tools\Git\bin\bash.exe")),
+                "{git}"
+            );
+        }
+        let candidates = git_bash_candidates(
+            Some(Path::new(r"C:\PROGRAM FILES\Git\cmd\git.exe")),
+            &program_dirs,
+            scoop,
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from(r"C:\PROGRAM FILES\Git\bin\bash.exe"),
+                PathBuf::from(r"C:\Users\a\AppData\Local\Programs\Git\bin\bash.exe"),
+                PathBuf::from(r"C:\Users\a\scoop\apps\git\current\bin\bash.exe"),
+            ],
+            "Program Files の Git は PATH の物と同じなので重ねない"
+        );
+    }
+
+    /// `wsl -l -q` は BOM の無い UTF-16LE（新しい版は WSL_UTF8=1 で UTF-8）。Docker の内部用は外す。
+    #[test]
+    fn wsl_distros_are_read_from_utf16_or_utf8() {
+        let utf16: Vec<u8> = "Ubuntu-24.04\r\ndocker-desktop\r\nDebian\r\n\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            parse_wsl_distros(&utf16),
+            vec!["Ubuntu-24.04".to_string(), "Debian".to_string()]
+        );
+        assert_eq!(
+            parse_wsl_distros(b"Ubuntu\ndocker-desktop-data\n"),
+            vec!["Ubuntu".to_string()]
+        );
+        assert!(parse_wsl_distros(b"").is_empty());
     }
 }

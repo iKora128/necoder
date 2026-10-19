@@ -4,7 +4,7 @@
 app:
   name: necoder
 editor:
-  table_truncated: "Showing the first %{n} rows as a table (the full text is in the source · ⌘⇧V to switch back)"
+  table_truncated: "Showing the first %{n} rows as a table (the full text is in the source · %{key} to switch back)"
   drop_remote: "Files cannot be dropped on a remote project's editor (drop them on a folder in the explorer to upload)"
   toc: Contents
   toc_empty: No headings
@@ -41,7 +41,7 @@ agent:
   search_count: "%{position}/%{entries} · %{total} matches"
   search_none: No matches
   search_prev: Previous match
-  search_next: Next match (⏎)
+  search_next: Next match (%{key})
   search_close: Close search (esc)
   code_copy_tip: Copy this code
   error_prefix: "Error: %{message}"
@@ -126,7 +126,7 @@ agent:
   done_touched: Done %{elapsed} · touched %{n} files
   turn_failed: Failed %{elapsed}
   turn_interrupted: Stopped %{elapsed}
-  close_thread_tip: Close thread  ⌘W
+  close_thread_tip: Close thread  %{key}
   rename_thread_tip: Rename (double-click)
   rename_thread_title: Rename thread
   rename_thread_label: New thread name
@@ -135,8 +135,8 @@ agent:
   rename_thread_confirm: Save
   history_tip: Thread history
   history_placeholder: Open a past thread or search every thread's messages…
-  new_thread_tip: New thread  ⌘⇧A
-  full_screen_tip: AI full screen (hide the editor)  ⌘⇧⏎
+  new_thread_tip: New thread  %{key}
+  full_screen_tip: AI full screen (hide the editor)  %{key}
   view_list: List view
   view_bar: Tab view
   thinking: ✳ Thinking
@@ -151,7 +151,7 @@ agent:
   rollup_working: "%{n} working"
   rollup_blocked: "%{n} waiting"
   rollup_done: "%{n} done"
-  empty: No threads (＋ / ⌘⇧A to start)
+  empty: No threads (＋ / %{key} to start)
   checkpoint_row: checkpoint — %{label} (click to restore this point)
   context_filter: Filter by file name…
   permission_needed: ● Approval needed
@@ -178,19 +178,19 @@ agent:
   code_show_more: "… show %{n} more lines"
   code_collapse: Collapse code
   code_streaming_more: "… streaming (%{n} lines)"
-  hint_submit_enter: ⏎ send / ⇧⏎ newline
-  hint_submit_cmd: ⏎ newline / ⌘⏎ send
+  hint_submit_enter: "%{send} send / %{newline} newline"
+  hint_submit_cmd: "%{newline} newline / %{send} send"
   ime_tip: Toggle Enter behavior (send ⇄ newline). IME confirm never sends
-  send_enter: Send ⏎
-  send_cmd: Send ⌘⏎
+  send_enter: Send %{key}
+  send_cmd: Send %{key}
   stop: Stop esc
   running_hint: esc to interrupt
   running_thinking: Thinking
   slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
   mention_footer: "↑↓ to choose · Enter / Tab to insert (for this message only) · esc to close"
   shell_badge: "! Shell"
-  shell_run_enter: Run ⏎
-  shell_run_cmd: Run ⌘⏎
+  shell_run_enter: Run %{key}
+  shell_run_cmd: Run %{key}
   shell_hint: Runs in the shell (not sent to the agent; the output goes with your next message)
   shell_hint_no_project: Open a project to run shell commands
   shell_hint_no_folder: "Send a first message to use the shell"
@@ -230,7 +230,7 @@ agent:
   history_matches_empty: No matches
   history_matches_failed: "Couldn't search: %{error}"
   history_scope_chat: Chat
-  history_footer: ↑↓ to select · ⏎ to open · esc to close
+  history_footer: ↑↓ to select · %{key} to open · esc to close
   history_project_closed: "This conversation belongs to a project not open in this window (%{project})"
   history_untitled_session: (Untitled conversation)
   history_loading: Loading the past conversation…
@@ -264,14 +264,14 @@ rename:
 color:
   hex_placeholder: rrggbb
 inline:
-  title: ⌘I edit
-  title_terminal: ⌘I command
+  title: "%{key} edit"
+  title_terminal: "%{key} command"
   instruction_placeholder: Instruction (Enter=generate / Esc=close)
   busy: Generating…
-  accept: Apply ⏎
+  accept: Apply %{key}
   reject: Discard esc
   no_change: (no changes)
-  empty_target: Nothing to edit (select code, then ⌘I)
+  empty_target: Nothing to edit (select code, then %{key})
   buffer_changed: Buffer changed — proposal discarded
 todos:
   title: Todo board
@@ -395,7 +395,7 @@ control:
   facts_question: "Awaiting an answer %{elapsed}: %{message}"
   facts_failed: "Failed: %{digest}"
   facts_done_unread: "Done but unread: %{digest}"
-  next_badge: "next ⏎"
+  next_badge: "next %{key}"
   queue: Attention
   waiting: waited
   files: "%{n} files"
@@ -418,7 +418,7 @@ captain:
   title: Captain
   appoint: "Not appointed — click to appoint"
   appoint_tab: "Appoint a Captain"
-  tab_tip: "Go to the Captain (the coordinator living on main) · ⌘0"
+  tab_tip: "Go to the Captain (the coordinator living on main) · %{key}"
   appoint_title: "Appoint a Captain"
   appoint_body: "Give it a goal and it splits the work into Tasks, starts them, and reports back. It writes no code itself."
   appoint_no_agent: "No agent is available. Sign in under Settings → Agents."
@@ -526,9 +526,9 @@ fleet:
   phase_integrated: "Integrated"
   next_fix: "Request changes"
   next_review: "Review"
-  new_task_hint: "What should be done? For multiple tasks, ask Captain (⌘0)."
+  new_task_hint: "What should be done? For multiple tasks, ask Captain (%{key})."
   new_task_cancel: "Cancel"
-  new_task_start: "Start Task ⌘↵"
+  new_task_start: "Start Task %{key}"
   stage_columns: "%{count} columns"
   tab_diff: "Changes"
   tab_terminal: "Terminal"
@@ -538,7 +538,7 @@ fleet:
   side_tip: "Open beside the conversation (press again to close)"
   diff_empty: "No changes from the base"
   diff_files: "%{count} files"
-  tab_close_thread: "Close this conversation (⌘⇧T to restore)"
+  tab_close_thread: "Close this conversation (%{key} to restore)"
   side_close: "Close"
   files_hint: "Click to open in Editor"
   tasks_count: "%{n} Tasks"
@@ -578,7 +578,7 @@ fleet:
   stage_three: Stage 3 columns
   lineage: Lineage
   formation: "Formation"
-  formation_tip: "Open / close the formation on the bridge (⌘⇧G)"
+  formation_tip: "Open / close the formation on the bridge (%{key})"
   graph_fan: Fan
   graph_tree: Tree
   graph_card: Card
@@ -707,7 +707,7 @@ time:
   last_input: "input %{when}"
 rail:
   chat: Chat (conversations outside any project)
-  add_tip: Open — folder / file / remote / recent (⌘O switches)
+  add_tip: Open — folder / file / remote / recent (%{key} switches)
   add_prompt: Open
   menu_new_window: Open in new window
   menu_details: Details…
@@ -721,16 +721,16 @@ rail:
   menu_more_colors: More colors…
   menu_confirm_delete: ⚠ Click again to delete
   cannot_remove_last: Can't remove the last project from the rail
-  open_project: Open project  ⌘O
+  open_project: Open project  %{key}
   explorer: Toggle explorer
-  search: Search  ⌘⇧F
+  search: Search  %{key}
   fleet: Fleet mode
-  git: Source control  ⌃⇧G
+  git: Source control  %{key}
   todos: Todo board
   threads: AI threads (all projects)
   fleet_sidebar: Fleet sidebar (Tasks)
   agent: Toggle AI agent panel
-  terminal: Terminal  ⌘J
+  terminal: Terminal  %{key}
   remote: Remote SSH
   settings: Settings
 titlebar:
@@ -757,7 +757,7 @@ settings:
   mcp_claude_connectors_sub: "Off makes the first reply faster"
   title: Settings
   agents_heading: AI Agents
-  agents_sub: "Choose the agents you want to use and check their installation and login status."
+  agents_sub: "Agents you can use now are listed first, followed by the ones you can set up. Setting one up is just a few clicks."
   permission_default: Default permissions
   permission_default_sub: Changing this resets each agent's permission mode. "Run without asking" applies only to supported agents. Chat is not affected
   permission_default_agent: Agent default
@@ -818,6 +818,40 @@ settings:
   agent_detail_run_install: "Run in terminal"
   agent_detail_copy: "Copy"
   agent_detail_remote_note: "Run these commands in a terminal on the SSH host"
+  agent_detail_version: "Version"
+  agents_usable_heading: "Ready to use"
+  agents_usable_empty: "None yet. Set up one of the agents below and you can start talking to AI."
+  agents_setup_heading: "Set up an AI agent"
+  agents_setup_sub: "Install and Log in open a terminal at the bottom of the window and run the command there. A ✓ appears here by itself when it finishes."
+  agents_show_more: "Show other AI agents (%{n}) ›"
+  agents_show_less: "Hide other AI agents"
+  agent_setup_remaining: "Steps left: %{n}"
+  agent_advanced_show: "Advanced ›"
+  agent_advanced_hide: "Hide advanced ⌄"
+  agent_step_install_button: "Install"
+  agent_step_login_button: "Log in"
+  agent_step_node: "Install Node.js"
+  agent_step_node_note: "The runtime the agents run on. Install it once and every agent can use it"
+  agent_step_node_manual: "Install the LTS version from https://nodejs.org. A ✓ appears here once it is installed"
+  agent_step_uv: "Install uv"
+  agent_step_uv_note: "The tool used to install agents written in Python"
+  agent_step_cli: "Install %{name}"
+  agent_step_cli_note: "Installs the agent itself (takes from a few seconds to a few minutes)"
+  agent_step_cli_windows_unsupported: "Can't be installed automatically on Windows yet. Follow the instructions on the official website"
+  agent_step_login: "Log in"
+  agent_step_login_note: "A browser opens. Sign in with the account you want to use"
+  agent_step_command: "Command %{command} not found"
+  agent_step_command_note: "Check the launch method under Advanced"
+  agent_about_claude: "Anthropic's Claude. Uses a Claude plan (Pro / Max) or an API key"
+  agent_about_codex: "OpenAI's Codex. Uses a ChatGPT plan or an API key"
+  agent_about_copilot: "GitHub Copilot. Uses your GitHub account"
+  agent_about_qwen: "An agent powered by Alibaba's Qwen"
+  agent_about_opencode: "An open-source agent that works with many AI models"
+  agent_about_kimi: "An agent powered by Moonshot AI's Kimi"
+  agent_about_grok: "An agent powered by xAI's Grok"
+  agent_terminal_install: "Install %{name}"
+  agent_terminal_login: "Log in to %{name}"
+  agent_terminal_setup: "Setup"
   agent_copied: "Copied: %{command}"
   agent_role_unusable: "Once available on this PC, it can be the default or Captain"
   agent_distribution_npx: "npx · %{package}"
@@ -877,7 +911,7 @@ settings:
   make_captain: Make Captain
   is_captain: ⚑ Captain
   welcome_title: Welcome 🎨
-  welcome_sub: "Install an agent and log in to use AI. To use only the editor, turn all agents off. You can change this later in Settings."
+  welcome_sub: "necoder talks to the AI agents installed on your computer (such as Claude Code or Codex). Set up any one of them to start using AI. You can also use necoder as a plain editor and change this later in Settings."
   get_started: Get started →
   mcp_heading: MCP servers
   mcp_empty: "No MCP servers"
@@ -947,9 +981,9 @@ settings:
   search_count: "%{count} results"
   search_none: No settings match
   pref_submit_on_enter: Submit on Enter
-  pref_submit_on_enter_sub: "Off: send with ⌘Enter"
+  pref_submit_on_enter_sub: "Off: send with %{key}"
   pref_soft_wrap: Soft wrap
-  pref_soft_wrap_sub: "Toggle with ⌥Z"
+  pref_soft_wrap_sub: "Toggle with %{key}"
   pref_format_on_save: Format on save
   pref_preview_tabs: Preview tabs
   pref_preview_tabs_sub: "A file opened with one click is replaced by the next one"
@@ -995,6 +1029,11 @@ settings:
   terminal_shell_reset: Use default
   shell_picker_placeholder: Search shells…
   shell_picker_default: Use default (the OS shell)
+  shell_pwsh: PowerShell 7
+  shell_windows_powershell: Windows PowerShell
+  shell_cmd: Command Prompt
+  shell_git_bash: Git Bash
+  shell_wsl: "%{distro} (WSL)"
   terminal_cursor_block: Block
   terminal_cursor_bar: Bar
   terminal_cursor_underline: Underline
@@ -1166,7 +1205,7 @@ explorer:
   ctx_discard: Discard changes…
   discard_title: "Discard changes to “%{name}”?"
   discard_body: Restores the last committed version, including staged changes. This can't be undone.
-  discard_body_untracked: "This file is untracked, so it goes to the Trash (⌘Z restores it)"
+  discard_body_untracked: "This file is untracked, so it goes to the Trash (%{key} restores it)"
   discard_confirm: Discard
   discard_cancel: Cancel
   discard_untracked_remote: Can't clean up untracked files on a remote host (the file was removed from git's index)
@@ -1185,7 +1224,7 @@ searchpanel:
   placeholder: Search across project…
   placeholder_scoped: Search in this folder…
   scope: "In: %{path}"
-  scope_clear: Clear the folder scope (search the whole project; ⌫ on an empty query also clears it)
+  scope_clear: Clear the folder scope (search the whole project; %{key} on an empty query also clears it)
   searching: Searching…
   results: "%{n} matches / %{files} files"
   hint_enter: Press Enter to search
@@ -1203,9 +1242,9 @@ git:
   pr_create_tip: Create PR on GitHub (gh pr create --web)
   pr_open_tip: Open PR / repository on GitHub
   new_branch_tip: New branch
-  close_tip: Close  ⌃⇧G
-  branch_placeholder: New branch name (⏎ create / Esc cancel)
-  message_placeholder: Message (⌘⏎ to commit)
+  close_tip: Close  %{key}
+  branch_placeholder: New branch name (%{key} create / Esc cancel)
+  message_placeholder: Message (%{key} to commit)
   ai_message_tip: Generate message with AI (default agent)
   commit: ✓ Commit
   staged: Staged
@@ -1230,7 +1269,7 @@ git:
   running: running
   idle: idle
   branch_menu_tip: Branch / worktree
-  switcher_tip: Switch project / branch  ⌘O
+  switcher_tip: Switch project / branch  %{key}
   commit_failed: Couldn't commit
   stage_failed: Couldn't stage
   unstage_failed: Couldn't unstage
@@ -1250,16 +1289,16 @@ tabs:
   ctx_close_all: Close all (keep unsaved)
   ctx_pin: Pin tab
   ctx_unpin: Unpin tab
-  unpin_tip: Unpin  ⌘K ⇧⏎
-  pinned_kept: "Pinned tabs don't close with ⌘W (click the pin to unpin, or right-click › Close tab)"
+  unpin_tip: Unpin  %{key}
+  pinned_kept: "Pinned tabs don't close with %{key} (click the pin to unpin, or right-click › Close tab)"
   copied_path_line: "Copied %{path}"
   quote_no_file: Only lines of an open file can be quoted (untitled tabs can’t)
   kept_unsaved: "Kept %{count} unsaved tabs open"
   external_remote: Files on an SSH host cannot be opened in local apps
   external_missing: "%{app} was not found (put its CLI on PATH or install the app)"
   untitled: Untitled
-  close_tip: Close  ⌘W
-  close_split_tip: Close split  ⌘\\
+  close_tip: Close  %{key}
+  close_split_tip: Close split  %{key}
   ctx_copy_relative: Copy relative path
   ctx_close: Close tab
   ctx_close_others: Close other tabs
@@ -1272,11 +1311,11 @@ image:
 breadcrumb:
   md_preview: Preview
   md_source: Source
-  md_preview_tip: Toggle rendered preview  ⌘⇧V
+  md_preview_tip: Toggle rendered preview  %{key}
   md_side_preview_tip: "Show the preview beside the source (updates as you type)  %{key}"
   html_preview: Preview
   html_source: Source
-  html_preview_tip: Open in the system WebView  ⌘⇧V
+  html_preview_tip: Open in the system WebView  %{key}
   html_reload_tip: Reload HTML preview
   html_open_web_tab: Open in Web tab
   html_open_web_tab_tip: Open in a Web tab (Design mode)
@@ -1368,6 +1407,9 @@ conflict:
   view_fill_both: From both
   use_result: Use result
 terminal:
+  command_start: "▶ necoder: running %{command}"
+  command_success: "[Done] Go back to necoder Settings for the next step (you can close this tab)"
+  command_failure: "[Failed] That did not work. Check the messages above and press the button again"
   quick_tip: "Quick commands (quick_commands in settings.json)"
   tab_title: Terminal %{n}
   rename_title: Terminal name
@@ -1384,11 +1426,14 @@ terminal:
   tab_split_hint: "Move it to the bottom dock to split (right-click the tab)"
   float_hide_tip: "Hide (keeps running)  %{key}"
   add_tip: New terminal
+  add_shell_tip: "Open with a shell of your choice (PowerShell / Git Bash / WSL …)"
+  shell_menu_placeholder: "Choose a shell to open…"
+  shell_menu_default: "(your default)"
   split_tip: "Split side by side (%{key})"
   pane_title: "Terminal %{n}"
   pane_close_tip: Close this terminal
-  close_dock_tip: Close bottom dock  ⌘J
-  git_tip: Source control  ⌃⇧G
+  close_dock_tip: Close bottom dock  %{key}
+  git_tip: Source control  %{key}
   search_invalid_regex: Invalid regular expression
   menu_copy: Copy
   menu_paste: Paste
@@ -1594,7 +1639,7 @@ menu:
   git_panel: Source Control
   todo_board: Todo Board
   fleet: Fleet Mode
-  agent_full_screen: AI Full Screen  ⌘⇧⏎
+  agent_full_screen: AI Full Screen  %{key}
   diagnostics: Diagnostics
   split_right: Split Right
   soft_wrap: Toggle Soft Wrap
@@ -1706,13 +1751,13 @@ search:
   replace_one: Replace
   replace_one_tip: Replace current match (Enter in the replace field)
   replace_all: Replace all
-  replace_all_tip: Replace all matches (⌘Enter, one undo restores everything)
+  replace_all_tip: Replace all matches (%{key}, one undo restores everything)
   case_sensitive: Match case
   use_regex: Regular expression
-  previous: Previous match (⇧Enter)
+  previous: Previous match (%{key})
   next: Next match (Enter)
   close: Close (Esc returns to where you started)
-  toggle_replace: Toggle replace field (⌥⌘F)
+  toggle_replace: Toggle replace field (%{key})
 key:
   find_in_transcript: Search this conversation
   sheet_title: Keyboard shortcuts

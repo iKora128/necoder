@@ -952,6 +952,34 @@ mod windows_keymap_tests {
             "Alt+F4"
         );
     }
+
+    /// locale の `%{key}` へ差し込むラベル（WINDOWS-PORT.md「locale に埋まった mac 記号」）。
+    /// mac は差し替え前に locale へ直書きしていた記号と同じ、Windows は実際に効くキー。
+    #[test]
+    fn locale_shortcut_labels() {
+        let cases = [
+            ("cmd-w", "⌘W", "Ctrl+W"),
+            ("cmd-shift-enter", "⌘⇧⏎", "Ctrl+Shift+Enter"),
+            ("enter", "⏎", "Enter"),
+            ("shift-enter", "⇧⏎", "Shift+Enter"),
+            ("cmd-enter", "⌘⏎", "Ctrl+Enter"),
+            ("cmd-k shift-enter", "⌘K ⇧⏎", "Ctrl+K Shift+Enter"),
+            ("cmd-\\", "⌘\\", "Ctrl+\\"),
+            ("ctrl-shift-g", "⌃⇧G", "Ctrl+Shift+G"),
+            // 系譜の帯は Windows で Git パネルとの衝突を避けて ctrl-alt-g に逃がしてある
+            ("cmd-shift-g", "⌘⇧G", "Ctrl+Alt+G"),
+            ("alt-z", "⌥Z", "Alt+Z"),
+            ("backspace", "⌫", "Backspace"),
+            ("cmd-0", "⌘0", "Ctrl+0"),
+        ];
+        for (keystroke, mac, windows) in cases {
+            assert_eq!(keystroke_label_for(KeymapPlatform::MacOs, keystroke), mac);
+            assert_eq!(
+                keystroke_label_for(KeymapPlatform::Windows, keystroke),
+                windows
+            );
+        }
+    }
 }
 
 #[cfg(test)]

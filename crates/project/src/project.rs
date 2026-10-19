@@ -214,9 +214,15 @@ impl Worktree {
     }
 
     /// パスが gitignore 対象か（watch イベントのノイズ除去用。ディレクトリ判定不能なら false 扱いで問い合わせる）。
+    /// watch のパスは無視ディレクトリ配下のファイル（`target/debug/x.d`）で来るので親も辿る。
+    /// `matched_path_or_any_parents` はルート外のパスで panic するため、先にルート配下か確かめる。
     pub fn is_ignored(&self, path: &Path) -> bool {
+        if !path.starts_with(&self.root) {
+            return false;
+        }
         let ignore = self.ignore.borrow();
-        ignore.matched(path, false).is_ignore() || ignore.matched(path, true).is_ignore()
+        ignore.matched_path_or_any_parents(path, false).is_ignore()
+            || ignore.matched_path_or_any_parents(path, true).is_ignore()
     }
 
     /// 無視規則のスナップショット。`Worktree` は `Rc` で背景スレッドへ送れないので、
@@ -3047,6 +3053,22 @@ impl imara_diff::Sink for HunkCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// watch イベントは無視ディレクトリ**配下のファイル**のパスで来る（`target/debug/x.d` 等）。
+    /// ディレクトリ規則 `/target/` はそのパス自体には当たらないので、親を辿って判定する。
+    /// 当たらないと cargo build のたびにツリー再構築 + git status が連打される（Windows で顕著）。
+    #[test]
+    fn is_ignored_covers_files_under_ignored_directories() {
+        let root = std::env::temp_dir().join("necoder-is-ignored-test");
+        let worktree = Worktree::trusted(LocalHost::shared(), root.clone());
+        worktree.set_ignore_source("/target/\n*.log\n");
+        assert!(worktree.is_ignored(&root.join("target")));
+        assert!(worktree.is_ignored(&root.join("target").join("debug").join("deps").join("x.d")));
+        assert!(worktree.is_ignored(&root.join("src").join("a.log")));
+        assert!(!worktree.is_ignored(&root.join("src").join("main.rs")));
+        // ルート外のパス（別ドライブ・兄弟ディレクトリ）でも panic しない。
+        assert!(!worktree.is_ignored(&std::env::temp_dir().join("elsewhere").join("x.rs")));
+    }
 
     /// diff タブの本文は 1 行 = 1 行（UnifiedDiffBuilder は行ごとに改行を足すので、改行つきの行を
     /// 渡すと全行の後ろに空行が挟まっていた）。承認カードの diff と `ne --diff` が同じ関数を通る。

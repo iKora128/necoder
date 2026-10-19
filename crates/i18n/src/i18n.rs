@@ -250,6 +250,25 @@ mod tests {
         }
     }
 
+    /// mac のキー記号を locale に直書きしない。Windows / Linux にそのまま出てしまうので、
+    /// `%{key}` で受けて呼び出し側が `keymap_core::keystroke_label("cmd-w")` を差し込む
+    /// （WINDOWS-PORT.md「locale に埋まった mac 記号」・2026-10-19）。
+    #[test]
+    fn no_mac_key_symbols_in_locales() {
+        for (locale, text) in [
+            ("ja.yml", include_str!("../../../locales/ja.yml")),
+            ("en.yml", include_str!("../../../locales/en.yml")),
+        ] {
+            let map = parse_locale(text).expect("解析できる");
+            for (key, value) in &map {
+                assert!(
+                    !value.contains(['⌘', '⌃', '⌥', '⇧', '⏎', '↵', '⌫']),
+                    "{locale} の {key} に mac のキー記号が直書きされている（`%{{key}}` + keystroke_label で差し込む）: {value}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn nested_keys_flatten_to_dotted() {
         let text = "explorer:\n  context:\n    open: ひらく\n";

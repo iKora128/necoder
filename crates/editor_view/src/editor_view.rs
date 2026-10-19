@@ -2515,7 +2515,8 @@ impl Render for EditorView {
             let truncated = self.table.truncated.then(|| {
                 SharedString::from(i18n::t!(
                     "editor.table_truncated",
-                    "n" => table_preview::MAX_ROWS
+                    "n" => table_preview::MAX_ROWS,
+                    "key" => keymap_core::keystroke_label("cmd-shift-v")
                 ))
             });
             return div()

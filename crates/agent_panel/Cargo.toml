@@ -26,6 +26,7 @@ serde.workspace = true
 tempfile = "3"
 futures.workspace = true
 i18n.workspace = true
+keymap_core.workspace = true
 host.workspace = true
 project.workspace = true
 lang.workspace = true

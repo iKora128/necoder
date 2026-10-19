@@ -143,6 +143,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Power",
   # GUI サブシステムの necoder.exe を端末から CLI として使う時に親のコンソールへ繋ぐ（necoder/src/console.rs）
   "Win32_System_Console",
+  # 起動後に入れたツール（winget の Node.js・ネイティブ版 claude）の PATH をレジストリから拾う（host::refresh_search_path）
+  "Win32_System_Registry",
 ] }
 
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）

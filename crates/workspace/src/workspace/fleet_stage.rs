@@ -244,7 +244,7 @@ impl Workspace {
                 .cursor_pointer()
                 .child(div().flex_none().text_color(if captain_agent.is_some() { self.accent() } else { self.theme.fg2 }).child("⚑"))
                 .child(label)
-                .tooltip(Tooltip::text(i18n::t!("captain.tab_tip"), self.theme.clone()))
+                .tooltip(Tooltip::text(i18n::t!("captain.tab_tip", "key" => keymap_core::keystroke_label("cmd-0")), self.theme.clone()))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_captain(&FocusCaptain, window, cx))));
         }
         for panel in &session.fleet_agents {
@@ -259,7 +259,7 @@ impl Workspace {
                     let panel = panel.clone();
                     div().id(("task-tab-close", session_index * 10000 + tab_index)).flex_none().size(px(16.)).flex().items_center().justify_center().rounded(px(4.))
                         .text_size(px(11.)).text_color(self.theme.fg2).hover(|style| style.bg(self.theme.bg2)).cursor_pointer().child("×")
-                        .tooltip(Tooltip::text(i18n::t!("fleet.tab_close_thread"), self.theme.clone()))
+                        .tooltip(Tooltip::text(i18n::t!("fleet.tab_close_thread", "key" => keymap_core::keystroke_label("cmd-shift-t")), self.theme.clone()))
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.close_task_thread(session_index, &panel, thread, cx);

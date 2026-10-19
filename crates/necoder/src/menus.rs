@@ -87,7 +87,10 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action(t!("menu.fleet"), workspace::ToggleFleet),
             MenuItem::action(t!("menu.chat"), workspace::ToggleChat),
             MenuItem::action(
-                t!("menu.agent_full_screen"),
+                t!(
+                    "menu.agent_full_screen",
+                    "key" => keymap_core::keystroke_label("cmd-shift-enter")
+                ),
                 workspace::ToggleAgentFullScreen,
             ),
             MenuItem::action(t!("menu.diagnostics"), workspace::DiagnosticsPanel),

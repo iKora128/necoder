@@ -265,6 +265,26 @@ fn sanitize_title(title: &str) -> String {
         .to_string()
 }
 
+/// Windows のシェルは窓のタイトルに**自分の exe のフルパス**を出す（PowerShell 5.1 は
+/// `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`・cmd は `C:\WINDOWS\system32\cmd.exe`）。
+/// タブの幅ではパスの頭しか見えず、何の端末か分からないので、exe のパスだけのタイトルは名前
+/// （`powershell` / `cmd`）にする。それ以外のタイトルはそのまま。
+fn program_title(title: &str) -> String {
+    // `get` で切る（末尾が多バイト文字のタイトルでも文字の途中で切って落ちない）。
+    let is_exe_path = title.contains(['\\', '/'])
+        && title
+            .get(title.len().saturating_sub(4)..)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(".exe"));
+    if !is_exe_path {
+        return title.to_string();
+    }
+    let name = title.rsplit(['\\', '/']).next().unwrap_or(title);
+    name.get(..name.len().saturating_sub(4))
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(name)
+        .to_string()
+}
+
 /// 端末の設定。scrollback とカーソルの既定は見た目の設定（O25・既定 1 万行・ブロック）から。
 /// kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ許す（読み出しはクリップボードの
 /// 中身をアプリへ渡すことになるので既定で拒否）。
@@ -496,6 +516,25 @@ impl ForegroundProbe {
     }
 }
 
+/// Windows: 空白を含む program（`C:\Program Files\Git\bin\bash.exe`）を `"` で囲む。alacritty は
+/// program をそのままコマンドラインの頭に置くので、囲まないと `CreateProcess` が `C:\Program` から
+/// 順に探してしまう（別の `C:\Program.exe` が在ればそれが起きる）。unix ではそのまま返す。
+fn windows_command_program(program: String) -> String {
+    if cfg!(windows) {
+        quote_windows_program(program)
+    } else {
+        program
+    }
+}
+
+fn quote_windows_program(program: String) -> String {
+    if program.contains([' ', '\t']) && !program.starts_with('"') {
+        format!("\"{program}\"")
+    } else {
+        program
+    }
+}
+
 /// PTY の子が `ssh`（接続先の端末＝`ssh -tt …`）か。前面のグループには ssh 自身しか居ないので、
 /// コマンドが動いているかは接続先のシェルの区切り（OSC 133）でしか分からない。
 #[cfg(any(unix, test))]
@@ -564,13 +603,21 @@ impl TerminalView {
         let over_ssh = shell
             .as_ref()
             .is_some_and(|(program, _)| is_ssh_program(program));
-        let options = tty::Options {
-            shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
+        #[allow(unused_mut)]
+        let mut options = tty::Options {
+            shell: shell.map(|(program, args)| tty::Shell::new(windows_command_program(program), args)),
             working_directory: cwd,
             drain_on_exit: true,
             env,
             ..Default::default()
         };
+        // Windows の alacritty は program と引数を空白で繋いだ 1 本のコマンドラインを作る。
+        // 既定（false）だと空白を含む引数が割れるので、引数は Windows の規則で引用させる
+        // （program は引用されないので [`windows_command_program`] が囲む）。
+        #[cfg(windows)]
+        {
+            options.escape_args = true;
+        }
         let window_size = WindowSize {
             num_lines: size.lines as u16,
             num_cols: size.columns as u16,
@@ -996,7 +1043,7 @@ impl TerminalView {
 
     fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
         let title = title
-            .map(|title| sanitize_title(&title))
+            .map(|title| program_title(&sanitize_title(&title)))
             .filter(|title| !title.is_empty());
         if self.title != title {
             self.title = title;
@@ -2399,6 +2446,34 @@ fn is_default_background(color: AnsiColor) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows のシェルが出す exe のパスのタイトルは名前にする（他のタイトルは触らない）。
+    #[test]
+    fn exe_path_titles_become_the_program_name() {
+        assert_eq!(
+            program_title(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            "powershell"
+        );
+        assert_eq!(program_title(r"C:\WINDOWS\system32\CMD.EXE"), "CMD");
+        assert_eq!(program_title("~/dev/necoder"), "~/dev/necoder");
+        assert_eq!(program_title("npm"), "npm");
+        assert_eq!(program_title("vim notes.exe"), "vim notes.exe", "パスでなければそのまま");
+        assert_eq!(program_title("C:/作業/メモ"), "C:/作業/メモ", "末尾が多バイトでも落ちない");
+    }
+
+    /// Windows の program は空白を含む時だけ囲む（既に囲んであれば二重にしない）。
+    #[test]
+    fn windows_programs_with_spaces_are_quoted_once() {
+        assert_eq!(
+            quote_windows_program(r"C:\Program Files\Git\bin\bash.exe".to_string()),
+            r#""C:\Program Files\Git\bin\bash.exe""#
+        );
+        assert_eq!(quote_windows_program("pwsh".to_string()), "pwsh");
+        assert_eq!(
+            quote_windows_program(r#""C:\Program Files\x.exe""#.to_string()),
+            r#""C:\Program Files\x.exe""#
+        );
+    }
 
     /// O25・C20: シェルの区切りで「コマンドが動いている」なら、前面のプロセスを調べられない端末
     /// （ここではテスト用の端末＝確かめる口が無い）でも閉じる前の確認の対象になる。

@@ -4154,3 +4154,30 @@
 
 - リリース: 本人「お願いします。全部しっかりデプロイできました？」（README・リポジトリの説明・LP は出し済みで、アプリの文言だけがリリース待ちだった）。v0.1.29 と同じく正式版（自動更新で届く）。
 - 中身: About と空のエディタの説明の一文（上の節）。LP は 10-18 に cf deploy 済み・relay は変わらない。
+
+## 2026-10-19 — AI エージェントの画面を「使える / 準備すると使える」の 2 組に（#69）
+
+- 発端: 本人「とくに AI エージェントのところがほんまに意味が分からなくて、もっと直感的でわかりやすい形にしてくれ」。Windows 実機の初回画面で、7 件が 1 枚に同じ重みで並び、**使えるのは Claude Code だけなのに全部のスイッチがオン（プロジェクト色で赤）**、行には `標準`・`コマンド: claude-agent-acp`・`必要な操作: codex のインストール` と内部の言葉、`インストール` を押すと何が起きるか（下でターミナルが動く）の説明も、Node.js → 本体 → ログインの順番も見えなかった。
+- 前提: 同じ #69 を別セッションが先に進めていた（`fix/windows-first-run`・未コミット）— 設定の「導入」「ログイン」が `/bin/sh` 固定で Windows では動かなかった件（`host::command_then_shell`）、起動後に入れた node / ネイティブ版 claude を PATH の読み直しで拾う件（`host::refresh_search_path`）、locale の `⌘` 表記。その上に重ねた。
+- やったこと（UI-SPEC §12 の AI エージェントのページを先に書き直してから実装）:
+  - 一覧を **`使える AI エージェント` と `準備すると使える AI エージェント` の 2 組**に（`agents_page.rs` の `agents_list`）。組は「使う / 使わない」でなく動くかで決める。スイッチと ★ 既定は使える組だけ（準備中の物のオン / オフ・既定の印は意味が無い）
+  - 準備中の行: 2 行目 `あと N ステップで使えます`・3 行目に何の AI か / 何のアカウントで使うかの紹介 1 行・右に**次の手順のボタン**。開くと**番号付きの手順**（済んだ所は ✓ で残す・次の 1 つだけ太字 + 説明 + コマンド + コピー + ボタン・その先は薄く）。`setup_steps` が `readiness::assess` の足りない物から組む（道具は `readiness::install_prerequisite` を新設して、済んだ物にも ✓ を付けられるように）
+  - Node.js は Windows = winget・Homebrew があれば `brew install node`・無ければ nodejs.org の案内だけ。uv も同様。`curl … | bash` の物（Grok）は Windows ではボタンを出さない。ログインは本体が入るまで済みにしない
+  - Claude Code / Codex 以外の準備中の物は `ほかの AI エージェントも表示（N） ›` に畳む
+  - SSH のプロジェクトを開いていなければ「実行環境 このPC」の行と注記を出さない（`再確認` だけ）。版の行は頭から外して開いた中へ。組み込みの `標準` の札は外した。初回の案内の説明文を「necoder は、パソコンに入れた AI エージェントを呼び出して使います…」に
+  - 準備中の行は初回の案内でも開ける（手順を見るため）。設定のページでは手順の下の `詳細設定 ›` から今までの中身（役割・起動方法・版・ログイン・インストール）
+  - 見張り（押した後に変化を待つ）に uv も足した
+- 検証: `cargo test -p settings`（41・新しく 3 本: 手順の並び・流せないコマンドを出さない・組の決め方）・`-p i18n` green。実アプリ（Windows・隔離した `NECODER_HOME`）で初回の案内・Codex の手順・設定のページ・Kimi の手順をスクショで目視。
+  - **この PC で既存の失敗（今回と無関係・変更前の HEAD でも同じく落ちる）**: `acp_client` の偽エージェントを起こすテスト群（codex_limits ほか）と `workspace::conflicts::a_merge_in_progress_is_found_and_aborted`（改行の autocrlf 絡み）。Windows CI（check-windows）との差は未調査
+- 未: `mock/settings-agents.html` は旧い 1 枚の並びのまま（UI-SPEC に明記）。mac での目視。「インストール」を押して実際に Codex が入るところまでは、この PC に余計な物を入れないため試していない
+
+## 2026-10-19 — ターミナル: 設定のボタンから開く端末を分かるように・シェルを選んで開く `▾`（#69）
+
+- 発端: 本人「ターミナル周りは要改善。最初かなり困った。ACP の AI エージェントのところからやると勝手にターミナル指定になって何も開かない」。0.1.30 では設定の「インストール」「ログイン」が `/bin/sh -lc …` 固定で、Windows では端末のタブが開くだけで何も起きなかった（並行セッションが `host::command_then_shell` で直し済み・この節はその先）。直った後も、タブ名は `C:\WINDOWS\System32\WindowsPowerShel…`、何を流して終わったのか失敗したのかが画面に無く、シェル（PowerShell / Git Bash / WSL）は設定の奥でしか選べなかった。
+- やったこと（UI-SPEC のターミナルの節に 3 項目）:
+  - 設定のボタンが開く端末: タブ名を「Codex をインストール」等に（`SettingsViewEvent::RunCommand { command, title }`・`agents_page::command_tab_title`・`TerminalDock::open_command` が title を受ける）。中に「▶ 実行します: …」→ 成否で【完了】/【失敗】の一言（`host::CommandNotes`・PowerShell は `$?`・sh は終了コード）。本物の PowerShell / sh で流して確かめるテストを足した
+  - exe のパスだけのタイトルは名前に（`terminal_view::program_title`）
+  - タブ行の `＋` の右に `▾`: シェルを選んで新しいタブで開く（設定は変えない・いつものシェルに印）。`feat/windows-installer` で作ったシェルの一覧（Git Bash の正しい探し方・WSL のディストリ・表示名・Windows の引数の引用）をこのブランチへ取り込んで使った
+- 罠: Windows PowerShell 5.1 は `Write-Host` の `✓` / `✗` をコンソールのコードページへ落として `√` / `χ` に化けさせる（`▶` は残る）。印は【完了】/【失敗】にした。開発用の `NECODER_CHAT_PROBE` は `;` で区切るので、`settings-run:` に `a; b` を渡すと後ろが別の手順として捨てられる（「npm の出力が消えた」と一度誤診した）
+- 検証: `cargo test -p workspace terminal_settings`（8・「▾」から選ぶと新しいタブ・タブ名・設定は変えない）・`-p terminal_view`（52）・`-p host command_`（本物のシェル）・`-p settings`（41）・`-p i18n`。実アプリで成功 / 失敗の端末と `▾` のメニューをスクショで目視
+- 次: mac での目視。`feat/windows-installer` と同じシェル一覧の変更が両方のブランチに入っている（マージ時は同じ中身）

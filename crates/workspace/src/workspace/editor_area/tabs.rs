@@ -447,7 +447,7 @@ impl Workspace {
         };
         if tab.pinned {
             let color = self.accent();
-            self.push_toast(i18n::t!("tabs.pinned_kept").into(), color, cx);
+            self.push_toast(i18n::t!("tabs.pinned_kept", "key" => keymap_core::keystroke_label("cmd-w")).into(), color, cx);
             return;
         }
         self.close_tab_at(self.active_tab, window, cx);

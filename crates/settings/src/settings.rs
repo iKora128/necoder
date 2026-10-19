@@ -664,7 +664,11 @@ fn mtime(path: Option<&Path>) -> Option<SystemTime> {
 
 /// SettingsView から workspace shell へ依頼する操作。
 pub enum SettingsViewEvent {
-    RunCommand(String),
+    /// コマンドを新しいターミナルで流す（`title` はタブ名・「Codex をインストール」等）。
+    RunCommand {
+        command: String,
+        title: String,
+    },
     OnboardingCompleted,
     /// テーマ選択（外観セクション）。適用は全ビューへの波及が要るので shell（apply_theme）が担う。
     SelectTheme(theme_core::ThemeSource),
@@ -784,6 +788,10 @@ pub struct SettingsView {
     agent_host_generation: u64,
     /// AI エージェントのページで開いている行（エージェントの id・1 つだけ・ビューのメモリ）。
     expanded_agent: Option<SharedString>,
+    /// 準備中の行で「詳細設定」（役割・起動方法・コマンド）まで開いているか（ビューのメモリ）。
+    agent_advanced_open: bool,
+    /// 「ほかの AI エージェント」（Claude Code / Codex 以外で、まだ準備していない物）を出しているか。
+    show_more_agents: bool,
     checking_agents: bool,
     availability_generation: u64,
     /// 導入/ログインボタン押下後の変化見張り中フラグ（agent ごと・多重起動防止）。
@@ -948,6 +956,8 @@ impl SettingsView {
             remote_facts: std::collections::HashMap::new(),
             agent_host_generation: 0,
             expanded_agent: None,
+            agent_advanced_open: false,
+            show_more_agents: false,
             theme_details_open: false,
             color_editor: None,
             theme_save: None,
@@ -1118,9 +1128,10 @@ impl SettingsView {
             return;
         };
         self.watch_agent_progress(agent_index, cx);
-        cx.emit(SettingsViewEvent::RunCommand(account_login_command(
-            var, directory, login,
-        )));
+        cx.emit(SettingsViewEvent::RunCommand {
+            command: account_login_command(var, directory, login),
+            title: i18n::t!("settings.agent_terminal_login", "name" => agent.label),
+        });
     }
 
     /// 設定ホームを開く / 開き直す時に呼ぶ。一覧はここで即座に読み直し（`themes/` に JSON を足した
@@ -1152,6 +1163,8 @@ impl SettingsView {
             let (auth_states, shim_target, facts) = cx
                 .background_executor()
                 .spawn(async move {
+                    // Windows: 起動後に入れた node / claude をここで拾う（再起動しなくても「再確認」で進む）。
+                    host::refresh_search_path();
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                     let auth_states = acp_client::refresh_agent_auth_states(cwd, &disabled).await;
@@ -1190,7 +1203,18 @@ impl SettingsView {
             return; // 既に見張り中（ボタン連打・導入とログインの重複起動を防ぐ）
         }
         self.watching_agents[index] = true;
-        let baseline = (agent.cli_installed(), agent.configured_auth_state());
+        // node も見る: ネイティブ版 claude が在って足りないのが Node.js だけの時、node を入れても
+        // CLI / ログインは変わらないので、これが無いと反映されない（#69）。
+        // uv も同じ（Kimi は uv で入れる・準備の手順の 1 つ目）。
+        let probe = move || {
+            (
+                agent.cli_installed(),
+                agent.configured_auth_state(),
+                host::find_in_path("node").is_some(),
+                host::find_in_path("uv").is_some(),
+            )
+        };
+        let baseline = probe();
         cx.spawn(async move |view, cx| {
             // npm 導入は数分掛かり得るので 10 分まで見張る（stat 数回/秒＝実質タダ）。
             let mut changed = false;
@@ -1198,7 +1222,11 @@ impl SettingsView {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let current = cx
                     .background_executor()
-                    .spawn(async move { (agent.cli_installed(), agent.configured_auth_state()) })
+                    .spawn(async move {
+                        // 導入でシステム / ユーザー PATH が伸びても、このプロセスの PATH は古いまま（Windows）。
+                        host::refresh_search_path();
+                        probe()
+                    })
                     .await;
                 if current != baseline {
                     changed = true;
@@ -3873,10 +3901,7 @@ impl Render for SettingsView {
                                 .child(SharedString::from(i18n::t!("settings.welcome_sub"))),
                         ),
                 )
-                .child(self.section_heading(
-                    i18n::t!("settings.agents_heading"),
-                    None,
-                ))
+                // 見出しは一覧が持つ（「使える AI エージェント」/「準備すると使える AI エージェント」）。
                 .child(self.agents_list(&settings, false, cx))
                 // Ghostty を使っていれば、ターミナルの書体・配色をここで持ってこられる（O45・H14）。
                 .when(self.ghostty_config_present, |body| {
