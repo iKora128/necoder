@@ -49,6 +49,11 @@ image = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 
+# exe にアイコンと版情報を埋め込む（build.rs・Windows だけ）。MIT。gpui が manifest の埋め込みに
+# 使っている版と同じ物＝新しい crate は増えない。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.11"
+
 # Dock / AppleScript の「終了」を ⌘Q と同じ確認へ回すフック（quit_hook.rs・O4）。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true

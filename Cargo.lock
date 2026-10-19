@@ -4344,6 +4344,7 @@ dependencies = [
  "child_process",
  "cli_shim",
  "editor_view",
+ "embed-resource",
  "futures",
  "gpui",
  "gpui_platform",

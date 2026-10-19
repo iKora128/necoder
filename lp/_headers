@@ -10,3 +10,10 @@
 
 /
   Cache-Control: public, max-age=0, must-revalidate
+
+# Windows のインストールスクリプト（`irm https://necoder.com/install.ps1 | iex`）。
+# 中身は ASCII だけだが、テキストとして返さないと irm が文字列にせず iex に渡せない。
+# 直したらすぐ効くよう短く持つ（版は毎回 GitHub の API で引くのでスクリプト自体は滅多に変わらない）。
+/install.ps1
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=300

@@ -4155,6 +4155,25 @@
 - リリース: 本人「お願いします。全部しっかりデプロイできました？」（README・リポジトリの説明・LP は出し済みで、アプリの文言だけがリリース待ちだった）。v0.1.29 と同じく正式版（自動更新で届く）。
 - 中身: About と空のエディタの説明の一文（上の節）。LP は 10-18 に cf deploy 済み・relay は変わらない。
 
+## 2026-10-19 — W7: Windows らしく「入れて・始める」（インストーラ・アイコン・シェル選択）
+
+- 発端: 本人が Windows 実機で 0.1.30 の zip を触って「アイコンが無い・どれを動かすか分からない・ショートカットは？・青い画面は防げない？・PowerShell / ターミナル / WSL を選べない」。エージェント導入の導線（Node.js・PATH の読み直し・ネイティブ版 claude・`⌘` 表記・設定の「導入」ボタンが `/bin/sh` 固定で Windows では動かない）は**別セッションが issue #69 として並行で直していた**ので、分担して重ならない側を受け持った（別 worktree `feat/windows-installer`）。
+- やったこと（WINDOWS-PORT.md §D9〜D11・§W7）:
+  - **exe にアイコンと版情報**: `crates/necoder/build.rs`（embed-resource・gpui が既に引いている版）が `assets/icon/necoder.ico` をリソース ID 1 で埋める。gpui の Windows 実装は窓のアイコンも ID 1 から読むので、エクスプローラ・タスクバー・Alt+Tab が 1 つで揃う。`.ico` は `scripts/make-icon-windows.ps1`（System.Drawing・Python 不要）
+  - **Inno Setup のユーザー単位インストーラ** `scripts/windows/necoder.iss`: `%LOCALAPPDATA%\Programs\necoder`・UAC なし・スタートメニュー・デスクトップ・右クリック「necoder で開く」・PATH（3 つとも既定 ON）・設定と履歴はアンインストールで消さない
+  - `bundle-windows.ps1` を作り直し、**zip とインストーラを同じ stage から**作る。release.yml の windows ジョブもこれを呼ぶ（ISCC はランナー同梱・無ければ choco）。zip には `README-Windows.txt`
+  - **`lp/install.ps1`**（`irm https://necoder.com/install.ps1 | iex`）: GitHub の Release から setup.exe を落とし、GitHub が公開する SHA-256 で照合してから黙って入れる。`Invoke-WebRequest` で落とした物には MotW が付かない＝ SmartScreen が出ない。ASCII だけで書く（irm の文字コード判定で日本語が化けるため）
+  - **ターミナルのシェル選択**: 表示名・Git Bash を正しく探す・WSL のディストリごとの行。端末の起動は program を引用し、引数は alacritty の `escape_args` で Windows の規則に
+- 学び/罠:
+  - **PATH の `bash.exe` は Git Bash ではない**。`C:\Windows\System32\bash.exe` は WSL の入口で、Git for Windows は既定で `Git\cmd` しか PATH に入れない。以前のピッカーは「bash」として WSL を出していた
+  - `wsl -l -q` は BOM 無しの UTF-16LE。`WSL_UTF8=1` で UTF-8 になる版もある → NUL の有無で判定して両方読む。Docker Desktop を入れると `docker-desktop` が混ざる
+  - alacritty（0.26）の Windows は program と引数を空白で繋ぐだけ（既定 `escape_args=false`）。`C:\Program Files\...` の program は `C:\Program` から順に探され、空白入りの引数は割れる
+  - **EV 証明書でも SmartScreen は即時に消えない**（2024 年に変更）。日本の個人は Azure Artifact Signing（旧 Trusted Signing）の対象外。README の Code signing policy にある SignPath Foundation の組み込みが本命
+  - `.ps1` / `.iss` は UTF-8 **BOM 付き**で保つ（PowerShell 5.1 と Inno Setup がそれで UTF-8 と判断する）
+  - シェルのピッカーは一覧を背景で集めてから開くようにした（WSL の VM が止まっていると `wsl.exe` が数秒かかる）。gpui の test では `run_until_parked` が要る
+- 検証（この機械・Windows 11）: `cargo test -p workspace terminal_settings`（7）・`-p terminal_view`・`-p i18n` green。実アプリで Git Bash（`--login -i`・プロジェクトの根）と WSL Ubuntu（`/mnt/c/...`）が開くのと、シェルのピッカーの一覧（`docker-desktop` を外す・今の行に印）をスクショで確認。exe のアイコンと VersionInfo を取り出して確認
+- 次: setup.exe の実機確認（入る・消える）→ LP の deploy（install.ps1）→ 次のリリースで setup.exe を添付。署名（SignPath）。W8（WSL のフォルダを開く・§D11）
+
 ## 2026-10-19 — AI エージェントの画面を「使える / 準備すると使える」の 2 組に（#69）
 
 - 発端: 本人「とくに AI エージェントのところがほんまに意味が分からなくて、もっと直感的でわかりやすい形にしてくれ」。Windows 実機の初回画面で、7 件が 1 枚に同じ重みで並び、**使えるのは Claude Code だけなのに全部のスイッチがオン（プロジェクト色で赤）**、行には `標準`・`コマンド: claude-agent-acp`・`必要な操作: codex のインストール` と内部の言葉、`インストール` を押すと何が起きるか（下でターミナルが動く）の説明も、Node.js → 本体 → ログインの順番も見えなかった。

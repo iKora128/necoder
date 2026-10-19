@@ -297,12 +297,67 @@ Windows にはグローバルメニューバーが無い。
 **Windows 版の初回リリースでは cfg で機能ごと落とし、UI で「Windows では未対応」と明示**する。
 （`OpenSSH for Windows` には ControlMaster が無いため、素直な移植ができない）
 
-### D7. 配布は「zip → Authenticode」の順
+### D7. 配布は「zip → インストーラ → Authenticode」の順
 
 - W6 初手: **署名なし zip**（`necoder.exe` + 必要 DLL）。SmartScreen の警告は README に明記
-- 次: **Authenticode 署名**（EV 証明書は年額が高い。OV でも SmartScreen の評判は時間で育つ）
+- W7: **Inno Setup のユーザー単位インストーラ**と `irm | iex` の導入スクリプト（§D9・§D10）
+- 次: **Authenticode 署名**（README の Code signing policy のとおり SignPath Foundation の無償枠を予定）。
+  **EV 証明書でも SmartScreen は即時には消えない**（2024 年に Microsoft が EV の即時信頼をやめた・
+  learn.microsoft.com の smartscreen-reputation）＝署名は「評判を貯める器」であって即効薬ではない
 - MSIX / winget は**その後の判断**。updater（現状 .dmg + `spctl` 前提）は Windows 分岐が要る
 - **やらない**: Microsoft Store（AGPL との整合と審査コストを公開初期に背負わない）
+
+### D9. インストーラは Inno Setup・ユーザー単位（2026-10-19）
+
+zip を配っていた頃に実機で触った人の声: 「アイコンが無い・どれを動かせばよいか分からない・
+mac の『Applications へドラッグ』に当たる物が無い・デスクトップのショートカットは？」。
+Windows の利用者が期待するのは **setup.exe を実行 → スタートメニューに出る** という流れ。
+
+| 決めたこと | 中身 | 理由 |
+|---|---|---|
+| 道具 | **Inno Setup 6**（`scripts/windows/necoder.iss`） | VS Code・Zed と同じ。GitHub の windows ランナーに最初から入っている。MSI/WiX より書く量が桁違いに少ない |
+| 置き場 | **`%LOCALAPPDATA%\Programs\necoder`**（`PrivilegesRequired=lowest`） | UAC が出ない＝初回の摩擦が 1 つ減る。VS Code の User Installer と同じ。全ユーザー（Program Files）は `/ALLUSERS` の時だけ（起動直後に聞くダイアログは出さない） |
+| タスク | デスクトップのショートカット・右クリック「necoder で開く」・PATH に追加。**3 つとも既定 ON** | VS Code は desktop を既定 OFF にしているが、necoder は「どこから起動するか分からない」が実際の苦情だった |
+| アンインストール | **設定と履歴は消さない** | 入れ直しや上書き更新で会話の履歴が消えたら事故 |
+| 中身 | **zip と同じ stage から作る**（`bundle-windows.ps1`） | インストーラ版と zip 版で入る物が食い違わない |
+| アイコン | `crates/necoder/build.rs` が `necoder.ico` を**リソース ID 1** で埋め込む | gpui の Windows 実装が窓のアイコンも ID 1 から読む＝ exe・タスクバー・Alt+Tab が 1 つで揃う |
+
+右クリックのメニューは**旧形式**（`HKCU\Software\Classes\Directory\shell` 等）に書く。Windows 11 の新しい
+メニューに直接出すには署名済みのパッケージ ID（sparse package）が要るので、署名が始まってから。
+
+**Zed のインストーラ（`zed.iss`）は GPL のアプリ側の資産なので参照も複製もしていない**。
+Inno Setup の一般的な書き方と公式ドキュメントだけで独立に書いた（CLAUDE.md のライセンス境界）。
+
+### D10. SmartScreen（青い画面）への向き合い方（2026-10-19）
+
+「ブラウザで落とした未署名の exe」に **Mark of the Web** が付き、それを初めて開くと SmartScreen が出る。
+消す手段と効き目:
+
+| 手段 | 効き目 | 状態 |
+|---|---|---|
+| **`irm https://necoder.com/install.ps1 \| iex`** | **出ない**。`Invoke-WebRequest` / `curl.exe` が落としたファイルには MotW が付かない（Claude Code・uv・Bun と同じ導入形） | **W7 で用意**（`lp/install.ps1`・ASCII のみ・GitHub が公開する SHA-256 で照合してから実行） |
+| Authenticode 署名（OV / SignPath Foundation） | 署名だけでは**即時には消えない**。ダウンロード数で評判が貯まると出なくなる | 申請・組み込みは別タスク（D7） |
+| EV 署名 | 2024 年以降は OV と同じ扱い（即時には消えない） | 採らない（高いだけ） |
+| winget に載せる | winget 経由の導入は MotW の扱いが公式に書かれていない（未確認） | 署名の後で判断 |
+| Microsoft Store | §「やらないこと」 | — |
+
+**Smart App Control** が有効な Windows 11 では、未署名の exe は MotW に関係なく止められる
+（install.ps1 でも防げない）。これは署名でしか解けない。
+
+### D11. WSL（2026-10-19・設計だけ）
+
+VS Code（Remote - WSL）も Zed（`open folder in wsl`）も、**WSL の中に自分のサーバを置いて、そこで
+ファイル・git・ターミナル・拡張を動かす**形を取る。`\\wsl.localhost\<distro>\…` を Windows 側から
+直接開くのは「遅い・git の所有者チェックに引っかかる・Linux のツールが使えない」ので不採用。
+
+necoder は既に同じ形の部品を持っている — Remote SSH の **`necoder-remote-server`（Linux 用・`host` crate）**。
+WSL 対応はこれの**輸送路を `ssh` から `wsl.exe -d <distro> -- <server>` の標準入出力に替えるだけ**で
+組める見込み（ControlMaster も鍵も要らない分、SSH より単純）。ただし `host` の Remote SSH は
+`#[cfg(unix)]` で Windows から外してある（§D6）ので、輸送路の抽象を cfg の外へ出す作業が先に要る。
+
+W7 では **ターミナルのシェルに WSL のディストリを選べる**ところまで（`wsl -d <distro>`。作業フォルダは
+`wsl.exe` が `/mnt/c/…` に読み替える）。エージェントを WSL の中で動かす・WSL のフォルダをプロジェクトに
+する、は W8 として切る。
 
 ### D8. mac 互換の鉄則（W フェーズ全体に適用）
 
@@ -625,6 +680,40 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
       **実機確認**: チップ表示（旧版起動 or `NECODER_UPDATE_PROBE`）→ クリックでブラウザが開く
 - [ ] README に Windows の導入手順（SmartScreen 警告の説明込み）
 - [ ] 受入: **まっさらな Windows マシンで DL → 起動 → プロジェクトを開いて編集できる**
+
+### W7 — Windows らしく「入れて・始める」（2026-10-19 着手）
+
+0.1.30 の zip を Windows 実機で触った人の指摘から切った段。エージェント導入の導線（Node.js・PATH の
+読み直し・ネイティブ版 claude・`⌘` 表記）は issue #69 で並行して直している — ここはそれ以外。
+
+- [x] **exe にアイコンと版情報**（`crates/necoder/build.rs` + `assets/icon/necoder.ico`・§D9）
+  - `.ico` は `scripts/make-icon-windows.ps1` が mac と同じ原画（`necoder.png`）から 7 サイズで作る
+    （Python が無い Windows でも作れるよう System.Drawing。1024 を割り切るサイズは最近傍＝ドットが溶けない）
+  - 2026-10-19 実機: エクスプローラが取り出したアイコンがねこ・`VersionInfo` の ProductName / FileDescription が `necoder`
+- [x] **Inno Setup のインストーラ**（`scripts/windows/necoder.iss`・§D9）。`bundle-windows.ps1` が zip と同じ stage から作る
+- [x] **release.yml が setup.exe も Release に添付**（ISCC はランナー同梱・無ければ choco）
+- [x] **`irm | iex` の導入スクリプト**（`lp/install.ps1`・§D10）。**LP への deploy はユーザー判断**（`site/` で `npm run deploy`）
+- [x] zip に `README-Windows.txt`（どれを起動するか・インストーラ版の案内・SmartScreen の越え方）
+- [x] **ターミナルのシェル選択を Windows 向けに**（`terminal_settings.rs`）
+  - 表示名（PowerShell 7 / Windows PowerShell / コマンド プロンプト / Git Bash / `<distro>（WSL）`）
+  - **Git Bash を正しく見つける**: 以前は PATH の `bash.exe` を出していたが、Windows のそれは
+    `System32\bash.exe` ＝ **WSL の入口**で Git Bash ではない（Git の既定インストールは `Git\cmd` しか PATH に入れない）。
+    PATH の `git.exe` の隣・Program Files・`%LOCALAPPDATA%\Programs`・Scoop から `<Git>\bin\bash.exe` を探す
+  - **WSL はディストリごとに 1 行**（`wsl -l -q` は BOM 無しの UTF-16LE。`WSL_UTF8=1` の版は UTF-8。両方読む）。
+    一覧は背景で集める（WSL の仮想マシンが止まっていると数秒かかる・5 秒で打ち切り）
+  - Git Bash・WSL はシェルと引数の組で書く（`terminal_shell_args` も書く）。mac / Linux の行は従来どおり引数に触らない
+  - 端末の起動: program に空白があれば `"` で囲み、引数は Windows の規則で引用（alacritty の `escape_args`）。
+    以前は `C:\Program Files\…\bash.exe` が `C:\Program` から順に探され、空白を含む引数は割れていた
+- [ ] **実機確認**: setup.exe を実行 → スタートメニュー・デスクトップ・右クリック・PATH が出来て、アンインストールで消える
+- [ ] **実機確認**: シェルのピッカーで Git Bash / WSL を選んでターミナルが開く
+- [ ] **実機確認**: `irm https://necoder.com/install.ps1 | iex`（deploy 後）で SmartScreen が出ずに入る
+- [ ] 受入: **まっさらな Windows で setup.exe → スタートメニューから起動 → 設定の案内どおりにエージェントを 1 つ使える**（#69 と合わせて）
+
+### W8 — WSL（設計: §D11）
+
+- [ ] `host` の Remote 輸送路を cfg(unix) の外へ（ssh / wsl.exe を差し替えられる形）
+- [ ] 「WSL のフォルダを開く」（ディストリを選ぶ → `necoder-remote-server` を WSL に置いて繋ぐ）
+- [ ] エージェントを WSL の中で起こす（Codex など Linux 前提の道具を使う人向け）
 
 ### やらないこと（当面・意図的に）
 
