@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod preset;
 pub mod readiness;
 pub mod registry;
+pub mod setup;
 pub mod usage;
 
 use acp::schema::v1;

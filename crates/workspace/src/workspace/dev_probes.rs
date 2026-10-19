@@ -1333,6 +1333,22 @@ impl Workspace {
                     cx,
                 );
             }
+            // AI エージェントのページで「インストール」を押す（`settings-install:codex`・裏で入れてログインへ）。
+            "settings-install" => {
+                self.set_chat_mode(false, window, cx);
+                self.chrome.show_settings = true;
+                self.refresh_settings_view(cx);
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_start_agent_setup(argument, cx));
+            }
+            // AI エージェントのページで「ログイン」を押す（`settings-login:claude`・裏でログイン）。
+            "settings-login" => {
+                self.set_chat_mode(false, window, cx);
+                self.chrome.show_settings = true;
+                self.refresh_settings_view(cx);
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_start_agent_login(argument, cx));
+            }
             // 初回の案内の手順へ飛ぶ・終える（`onboarding:command` / `onboarding:folder` / `onboarding:finish`）。
             "onboarding" => {
                 let view = self.chrome.settings_view.clone();

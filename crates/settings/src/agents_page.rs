@@ -176,17 +176,34 @@ impl StepEnvironment {
     }
 }
 
+/// 手順の種類（ボタンを押した時に何をするかが決まる）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepKind {
+    /// 入れる道具（Node.js / uv）。
+    Tool,
+    /// エージェントの本体。
+    Cli,
+    /// 見つからないコマンド（起動方法の設定）。
+    Command,
+    /// ログイン。
+    Login,
+}
+
 /// 準備の手順の 1 つ。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SetupStep {
+    pub(crate) kind: StepKind,
     pub(crate) title: String,
     /// 何のための手順か（次の手順の時だけ出す）。
     pub(crate) note: Option<String>,
     pub(crate) done: bool,
-    /// 流すコマンド（無ければボタンもコピーも出さない＝説明だけ）。
+    /// ターミナルで流すコマンド（無ければコピーも出さない＝説明だけ）。necoder が裏で進める手順
+    /// （[`SetupStep::background`]）は出さない。
     pub(crate) command: Option<&'static str>,
     /// このマシンのターミナルで流せるか（SSH 先を見ている時はコピーだけ）。
     pub(crate) runnable: bool,
+    /// necoder が裏で進める（「インストール」1 つで Node.js から本体まで・ログインはブラウザ）。
+    pub(crate) background: bool,
     /// ボタンの文字（`インストール` / `ログイン`）。
     pub(crate) button: String,
 }
@@ -196,6 +213,10 @@ pub(crate) struct SetupStep {
 ///
 /// 組み込み: ①入れる道具（Node.js / uv）→ ②本体を入れる → ③ログイン。道具が要らない物は ①が無い。
 /// 足した物: 足りない道具と、見つからないコマンド。
+///
+/// **npm で入れる組み込み（Claude Code・Codex・Copilot・Qwen・OpenCode）はこのマシンでは裏で入れる**
+/// （①②は「インストール」1 つ・コマンドは見せない）。Claude Code・Codex はログインも裏で進める。
+/// それ以外（uv の Kimi・`curl | bash` の Grok・SSH 先）は従来どおりコマンドをターミナルで流す。
 pub(crate) fn setup_steps(
     agent: &acp_client::Agent,
     found: &AgentReadiness,
@@ -207,11 +228,19 @@ pub(crate) fn setup_steps(
     };
     let lacks = |item: &Missing| missing.contains(item);
     let runnable = !environment.remote;
+    let builtin = agent.builtin();
+    let installs = builtin.is_some_and(|kind| {
+        agent_setup::installs_in_background(kind, environment.remote)
+    });
+    let logs_in = builtin.is_some_and(|kind| {
+        agent_setup::logs_in_in_background(kind, environment.remote)
+    });
     let install_button = i18n::t!("settings.agent_step_install_button");
     let tool_step = |tool: &Missing| -> SetupStep {
         let done = !lacks(tool);
         match tool {
             Missing::Uv => SetupStep {
+                kind: StepKind::Tool,
                 title: i18n::t!("settings.agent_step_uv"),
                 note: Some(i18n::t!("settings.agent_step_uv_note")),
                 done,
@@ -221,6 +250,17 @@ pub(crate) fn setup_steps(
                     UNIX_UV_INSTALL_COMMAND
                 }),
                 runnable,
+                background: false,
+                button: install_button.clone(),
+            },
+            _ if installs => SetupStep {
+                kind: StepKind::Tool,
+                title: i18n::t!("settings.agent_step_node"),
+                note: Some(i18n::t!("settings.agent_step_node_background")),
+                done,
+                command: None,
+                runnable,
+                background: true,
                 button: install_button.clone(),
             },
             _ => {
@@ -237,11 +277,13 @@ pub(crate) fn setup_steps(
                     i18n::t!("settings.agent_step_node_manual")
                 };
                 SetupStep {
+                    kind: StepKind::Tool,
                     title: i18n::t!("settings.agent_step_node"),
                     note: Some(note),
                     done,
                     command,
                     runnable,
+                    background: false,
                     button: install_button.clone(),
                 }
             }
@@ -253,7 +295,7 @@ pub(crate) fn setup_steps(
         .filter(|item| matches!(item, Missing::Node | Missing::Uv))
         .cloned()
         .collect();
-    if let Some(kind) = agent.builtin() {
+    if let Some(kind) = builtin {
         if let Some(tool) = acp_client::readiness::install_prerequisite(kind) {
             if !tools.contains(&tool) {
                 tools.insert(0, tool);
@@ -264,16 +306,18 @@ pub(crate) fn setup_steps(
     for item in &missing {
         if let Missing::Command(command) = item {
             steps.push(SetupStep {
+                kind: StepKind::Command,
                 title: i18n::t!("settings.agent_step_command", "command" => command),
                 note: Some(i18n::t!("settings.agent_step_command_note")),
                 done: false,
                 command: None,
                 runnable: false,
+                background: false,
                 button: String::new(),
             });
         }
     }
-    let Some(kind) = agent.builtin() else {
+    let Some(kind) = builtin else {
         return steps;
     };
     let cli_missing = missing.iter().any(|item| matches!(item, Missing::Cli(_)));
@@ -281,15 +325,19 @@ pub(crate) fn setup_steps(
     let unix_only = kind.install_cmd.contains("| bash");
     let windows_cannot_install = environment.windows && unix_only;
     steps.push(SetupStep {
+        kind: StepKind::Cli,
         title: i18n::t!("settings.agent_step_cli", "name" => kind.label),
-        note: Some(if windows_cannot_install {
+        note: Some(if installs {
+            i18n::t!("settings.agent_step_cli_background")
+        } else if windows_cannot_install {
             i18n::t!("settings.agent_step_cli_windows_unsupported")
         } else {
             i18n::t!("settings.agent_step_cli_note")
         }),
         done: !cli_missing,
-        command: (!windows_cannot_install).then_some(kind.install_cmd),
+        command: (!installs && !windows_cannot_install).then_some(kind.install_cmd),
         runnable,
+        background: installs,
         button: install_button,
     });
     // ログインは CLI がある時にしか確かめられない（readiness も CLI が無ければ Login を足さない）。
@@ -298,11 +346,17 @@ pub(crate) fn setup_steps(
             .iter()
             .any(|item| matches!(item, Missing::Command(_)));
     steps.push(SetupStep {
+        kind: StepKind::Login,
         title: i18n::t!("settings.agent_step_login"),
-        note: Some(i18n::t!("settings.agent_step_login_note")),
+        note: Some(if logs_in {
+            i18n::t!("settings.agent_step_login_background")
+        } else {
+            i18n::t!("settings.agent_step_login_note")
+        }),
         done: !blocked && !lacks(&Missing::Login),
-        command: Some(kind.login_cmd),
+        command: (!logs_in).then_some(kind.login_cmd),
         runnable,
+        background: logs_in,
         button: i18n::t!("settings.agent_step_login_button"),
     });
     steps
@@ -948,7 +1002,11 @@ impl SettingsView {
         let local = self.local_readiness(agent, overrides);
         let assessment = self.assessment(agent, enabled, local.as_ref(), overrides, remote);
         // 準備中の行は初回の案内でも開ける（手順を見るため）。使える行を開くのは設定のページだけ。
-        let openable = page || !usable_group;
+        // 裏でログインしている途中の使える行も、初回の案内で開けるようにする（コードの入力欄を見せるため）。
+        let has_job = agent
+            .builtin()
+            .is_some_and(|kind| self.agent_job(kind.id).is_some());
+        let openable = page || !usable_group || has_job;
         let expanded = openable && self.expanded_agent.as_ref() == Some(&id);
         let steps = match (group, known) {
             (AgentGroup::Setup, Some(found)) => setup_steps(agent, found, environment),
@@ -968,8 +1026,16 @@ impl SettingsView {
                 .child(SharedString::from(text))
         };
         let (icon, monogram, brand) = agent.brand();
-        // 2 行目: 使える行は状態、準備中の行は「あと N ステップ · 次: …」。
+        // 2 行目: 使える行は状態、準備中の行は裏の作業の様子か「あと N ステップで使えます」。
+        let job_status = agent
+            .builtin()
+            .and_then(|kind| self.agent_job_status(kind));
         let status = match (group, next_step) {
+            (_, _) if job_status.is_some() => div()
+                .text_size(px(11.))
+                .text_color(theme.fg0)
+                .children(job_status.map(SharedString::from))
+                .into_any_element(),
             (AgentGroup::Setup, Some(next)) => div()
                 .text_size(px(11.))
                 .text_color(theme.fg1)
@@ -1099,6 +1165,23 @@ impl SettingsView {
             can_pin: !is_default || default.automatic,
         };
         if usable_group {
+            // 使える行でも、ログインを裏で進めている途中ならその様子を先に出す（ログイン未確認からの「ログイン」）。
+            if let Some(job) = agent
+                .builtin()
+                .and_then(|kind| self.agent_job_view(index, kind, cx))
+            {
+                row = row.child(
+                    div()
+                        .pl(px(DETAILS_INSET))
+                        .pr(px(12.))
+                        .pb(px(10.))
+                        .child(job),
+                );
+            }
+            // 初回の案内では、使える行の詳細（役割・起動方法…）は出さない（UI-SPEC §12）。
+            if !page {
+                return row;
+            }
             return row.child(self.agent_details(
                 index,
                 agent,
@@ -1247,7 +1330,11 @@ impl SettingsView {
                         .when(is_next, |title| title.font_weight(FontWeight::SEMIBOLD))
                         .child(SharedString::from(step.title.clone())),
                 );
-            if is_next {
+            // 裏の作業の途中は、作業の欄が同じことを言うので手順の説明は出さない。
+            let job_running = agent
+                .builtin()
+                .is_some_and(|kind| self.agent_job(kind.id).is_some());
+            if is_next && !job_running {
                 if let Some(note) = &step.note {
                     body = body.child(
                         div()
@@ -1311,6 +1398,13 @@ impl SettingsView {
                     .children(button),
             );
         }
+        // 裏で入れている・ログインしている途中の様子（進み具合・コードの入力欄・失敗の理由）。
+        if let Some(job) = agent
+            .builtin()
+            .and_then(|kind| self.agent_job_view(index, kind, cx))
+        {
+            view = view.child(job);
+        }
         if environment.remote {
             view = view.child(
                 div()
@@ -1333,7 +1427,24 @@ impl SettingsView {
         step: &SetupStep,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let command = step.command.filter(|_| step.runnable)?;
+        // 押した時に何をするか: 裏で入れる / 裏でログイン / ターミナルでコマンドを流す。
+        #[derive(Clone, Copy)]
+        enum Press {
+            Install(&'static acp_client::AgentKind),
+            Login(&'static acp_client::AgentKind),
+            Run(&'static str),
+        }
+        let press = match (step.background, agent.builtin(), step.kind) {
+            (true, Some(kind), StepKind::Login) => Press::Login(kind),
+            (true, Some(kind), _) => Press::Install(kind),
+            _ => Press::Run(step.command.filter(|_| step.runnable)?),
+        };
+        // 裏の作業の途中・失敗の表示中は押させない（作業の欄に「もう一度」がある）。
+        if let Some(kind) = agent.builtin() {
+            if self.agent_job(kind.id).is_some() {
+                return None;
+            }
+        }
         let theme = self.theme.clone();
         let agent_index = agent.builtin().and_then(|kind| {
             acp_client::AGENTS
@@ -1362,12 +1473,18 @@ impl SettingsView {
                     MouseButton::Left,
                     cx.listener(move |view, _, _window, cx| {
                         cx.stop_propagation();
-                        match agent_index {
-                            Some(agent_index) => view.run_agent_command(agent_index, command, cx),
-                            None => cx.emit(SettingsViewEvent::RunCommand {
-                                command: command.to_string(),
-                                title: command_tab_title(None, command),
-                            }),
+                        match press {
+                            Press::Install(kind) => view.start_agent_setup(kind, cx),
+                            Press::Login(kind) => view.start_agent_login(kind, cx),
+                            Press::Run(command) => match agent_index {
+                                Some(agent_index) => {
+                                    view.run_agent_command(agent_index, command, cx)
+                                }
+                                None => cx.emit(SettingsViewEvent::RunCommand {
+                                    command: command.to_string(),
+                                    title: command_tab_title(None, command),
+                                }),
+                            },
                         }
                     }),
                 )
@@ -1461,10 +1578,22 @@ impl SettingsView {
             // Node.js / uv が足りない時は、準備中の組の手順（setup_steps）が先にそれを入れさせる。
             _ => return None,
         };
+        // 裏の作業の途中は出さない（作業の欄に「やめる」「もう一度」がある）。
+        if self.agent_job(kind.id).is_some() {
+            return None;
+        }
+        // ログイン（未確認・未ログイン）は、裏で進められる CLI ならターミナルを開かずに進める。
+        let login = command == kind.login_cmd && agent_setup::logs_in_in_background(kind, false);
+        let text = if login {
+            i18n::t!("settings.agent_action_login")
+        } else {
+            text
+        };
         let theme = self.theme.clone();
         let agent_index = acp_client::AGENTS
             .iter()
             .position(|known| known.id == kind.id)?;
+        let kind: &'static acp_client::AgentKind = &acp_client::AGENTS[agent_index];
         Some(
             div()
                 .id(("agent-action", index))
@@ -1486,7 +1615,11 @@ impl SettingsView {
                     MouseButton::Left,
                     cx.listener(move |view, _, _window, cx| {
                         cx.stop_propagation();
-                        view.run_agent_command(agent_index, command, cx);
+                        if login {
+                            view.start_agent_login(kind, cx);
+                        } else {
+                            view.run_agent_command(agent_index, command, cx);
+                        }
                     }),
                 )
                 .into_any_element(),
@@ -1498,7 +1631,7 @@ impl SettingsView {
     ///
     /// 押したエージェントは**使う**に入れる。エージェントは既定でオフなので、準備を進めた人が最後に
     /// スイッチを探して入れ直す手間を作らない（押した＝使うつもり）。
-    fn run_agent_command(
+    pub(crate) fn run_agent_command(
         &mut self,
         agent_index: usize,
         command: &'static str,
@@ -1692,7 +1825,7 @@ impl SettingsView {
     }
 
     /// 文字のリンク（fg2・hover fg0）。
-    fn detail_link(&self, id: (&'static str, usize), text: String) -> Stateful<Div> {
+    pub(crate) fn detail_link(&self, id: (&'static str, usize), text: String) -> Stateful<Div> {
         let theme = self.theme.clone();
         div()
             .id(id)
@@ -2372,6 +2505,7 @@ mod tests {
             .find(|agent| agent.id == "codex")
             .expect("codex");
         // Node.js はある・本体が無い（ログインは本体が入るまで確かめられない＝済みにしない）。
+        // このマシンの Codex は裏で入れて裏でログインする＝コマンドは見せない。
         let steps = setup_steps(
             &builtin("codex"),
             &missing(vec![Missing::Cli("codex".to_string())]),
@@ -2379,12 +2513,36 @@ mod tests {
         );
         assert_eq!(
             summary(&steps),
+            vec![(true, None, true), (false, None, true), (false, None, true)]
+        );
+        assert_eq!(
+            steps.iter().map(|step| (step.kind, step.background)).collect::<Vec<_>>(),
             vec![
-                (true, Some(WINDOWS_NODE_INSTALL_COMMAND), true),
-                (false, Some(codex.install_cmd), true),
-                (false, Some(codex.login_cmd), true),
+                (StepKind::Tool, true),
+                (StepKind::Cli, true),
+                (StepKind::Login, true)
             ]
         );
+        // SSH 先は裏で入れない（ターミナルはこのマシンで開く）: 従来どおりコマンドを見せてコピーだけ。
+        let remote = StepEnvironment {
+            remote: true,
+            windows: false,
+            brew: false,
+        };
+        let steps = setup_steps(
+            &builtin("codex"),
+            &missing(vec![Missing::Cli("codex".to_string())]),
+            &remote,
+        );
+        assert_eq!(
+            summary(&steps),
+            vec![
+                (true, None, false),
+                (false, Some(codex.install_cmd), false),
+                (false, Some(codex.login_cmd), false),
+            ]
+        );
+        assert!(steps.iter().all(|step| !step.background));
         // ネイティブ版 claude はあるが Node.js が無い（ACP のアダプタを取れない・#69）: Node.js だけが残り。
         let steps = setup_steps(
             &builtin("claude"),

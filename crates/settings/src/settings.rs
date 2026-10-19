@@ -22,6 +22,7 @@ use std::time::{Duration, SystemTime};
 use theme_core::Theme;
 mod add_agent;
 mod agent_launch;
+mod agent_setup;
 mod agents_page;
 mod connections;
 mod remote;
@@ -734,6 +735,8 @@ pub enum SettingsViewEvent {
     PickShell,
     /// 済んだことの知らせ（Ghostty の設定を取り込んだ等）。トーストは shell が出す。
     Notice(SharedString),
+    /// URL を既定のブラウザで開く（エージェントのログインで「ブラウザが開かない時」・shell の open_url）。
+    OpenUrl(String),
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -834,6 +837,10 @@ pub struct SettingsView {
     agent_advanced_open: bool,
     /// 「ほかの AI エージェント」（Claude Code / Codex 以外で、まだ準備していない物）を出しているか。
     show_more_agents: bool,
+    /// 「インストール」「ログイン」を裏で進めている途中の様子（エージェントの id ごと・ビューのメモリ）。
+    agent_jobs: std::collections::BTreeMap<String, agent_setup::AgentJob>,
+    /// 途中の様子を描き直す見張りが回っているか（1 本だけ）。
+    agent_job_ticker: bool,
     checking_agents: bool,
     availability_generation: u64,
     /// 導入/ログインボタン押下後の変化見張り中フラグ（agent ごと・多重起動防止）。
@@ -1005,6 +1012,8 @@ impl SettingsView {
             expanded_agent: None,
             agent_advanced_open: false,
             show_more_agents: false,
+            agent_jobs: std::collections::BTreeMap::new(),
+            agent_job_ticker: false,
             theme_details_open: false,
             color_editor: None,
             theme_save: None,
@@ -1331,11 +1340,16 @@ impl SettingsView {
         let Some(agent) = acp_client::AGENTS.get(agent_index) else {
             return;
         };
+        self.enable_agent_id(agent.id, cx);
+    }
+
+    /// [`Self::enable_agent`] の id 版（裏で入れる・裏でログインする時用）。
+    pub(crate) fn enable_agent_id(&mut self, agent_id: &str, cx: &mut Context<Self>) {
         let settings = get(cx);
-        if settings.agent_enabled(agent.id) {
+        if settings.agent_enabled(agent_id) {
             return;
         }
-        let next = toggled_enabled_agents(&settings.enabled_agents, agent.id);
+        let next = toggled_enabled_agents(&settings.enabled_agents, agent_id);
         let result = set_user_value(cx, "enabled_agents", serde_json::json!(next));
         self.report_save(result, cx);
         cx.notify();
@@ -4519,6 +4533,8 @@ mod tests {
         view.update(cx, |view, cx| {
             view.toggle_agent_enabled("kimi", cx);
             assert_eq!(get(cx).enabled_agents, vec!["kimi".to_string()]);
+            // オンにするとログインの確かめ（実の CLI）を予約する。テストでは起こさない。
+            view.availability_pending = false;
             view.forget_remembered_mode("qwen", cx);
             assert!(!get(cx).agent_config_defaults.contains_key("qwen"));
         });

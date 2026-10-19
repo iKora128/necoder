@@ -539,7 +539,7 @@ fn tar_program() -> PathBuf {
 }
 
 /// 展開する（中身の名前を先に確かめてから）。書庫でない実行ファイルは `cmd` の名前で置く。
-fn extract(
+pub(crate) fn extract(
     archive: &Path,
     url: &str,
     destination: &Path,
@@ -628,7 +628,7 @@ fn make_executable(_path: &Path) -> Result<(), DeployError> {
 }
 
 /// ファイルの sha256（16 進・小文字）。大きな書庫でも読み込みは 64KB ずつ。
-fn sha256_file(path: &Path) -> Result<String, DeployError> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String, DeployError> {
     let mut file = std::fs::File::open(path).map_err(io_error("落とした書庫を開けない"))?;
     let mut hasher = sha2::Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
@@ -649,7 +649,7 @@ fn sha256_file(path: &Path) -> Result<String, DeployError> {
 }
 
 /// `curl` で落とす（https だけ・リダイレクト先も https・止まった転送は 60 秒で諦める）。
-fn download_with_curl(url: &str, destination: &Path) -> Result<(), DeployError> {
+pub(crate) fn download_with_curl(url: &str, destination: &Path) -> Result<(), DeployError> {
     if !url.starts_with("https://") {
         return Err(DeployError::InsecureUrl(url.to_string()));
     }

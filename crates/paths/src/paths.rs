@@ -170,6 +170,14 @@ pub fn external_agents_dir() -> Option<PathBuf> {
     Some(data_dir()?.join("external_agents"))
 }
 
+/// necoder が自分で入れる道具の置き場（設定の「インストール」・2026-10-19）。
+/// `node/`（Node.js の公式の配布物をそのまま）と `npm/`（necoder が `npm install -g --prefix` で入れた
+/// エージェントの CLI）を持つ。起動時に necoder の PATH の**末尾**へ足す（[`host`] の
+/// `append_toolchain_to_path`）＝パソコンに入っている物が先に使われる。
+pub fn toolchain_dir() -> Option<PathBuf> {
+    Some(data_dir()?.join("toolchain"))
+}
+
 /// ACP 公開レジストリのキャッシュファイル。`NECODER_ACP_REGISTRY_CACHE` で差し替え可（テスト用）。
 pub fn acp_registry_cache() -> Option<PathBuf> {
     if let Some(path) = real_var("NECODER_ACP_REGISTRY_CACHE") {
