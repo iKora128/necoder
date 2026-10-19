@@ -2383,12 +2383,12 @@ mod tests {
         );
         assert_eq!(
             ja(&managed(Npx, Some("1.13.1"), "2.1.0", false, false)).as_deref(),
-            Some("1.13.1（公開版 2.1.0）"),
+            Some("1.13.1（最新 2.1.0）"),
             "npx が無ければ「次の起動で」と言わない"
         );
         assert_eq!(
             ja(&managed(Uvx, None, "0.10.1", false, false)).as_deref(),
-            Some("公開版 0.10.1")
+            Some("最新 0.10.1")
         );
         assert_eq!(
             ja(&managed(Binary, Some("0.9.0"), "0.9.0", true, true)).as_deref(),
@@ -2413,7 +2413,7 @@ mod tests {
                 registry: Some("0.84.0".to_string()),
             })
             .as_deref(),
-            Some("0.70.2（claude-agent-acp · 公開版 0.84.0）")
+            Some("0.70.2（claude-agent-acp · 最新 0.84.0）")
         );
         assert_eq!(
             ja(&VersionInfo::Path {
@@ -2422,14 +2422,14 @@ mod tests {
                 registry: Some("1.18.34".to_string()),
             })
             .as_deref(),
-            Some("opencode（公開版 1.18.34）")
+            Some("opencode（最新 1.18.34）")
         );
         assert_eq!(
             ja(&VersionInfo::Registry {
                 version: "1.52.0".to_string()
             })
             .as_deref(),
-            Some("公開版 1.52.0")
+            Some("最新 1.52.0")
         );
         assert_eq!(
             ja(&VersionInfo::OwnCommand {
