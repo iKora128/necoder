@@ -4237,3 +4237,16 @@
 - やったこと: 本人要望「最近使った項目を開くのウィンドウに文字入力のところが欲しい・打ったらサクサク候補が出てほしい」。`ui::Picker` の入力行は灰色の文字を描くだけで、枠もキャレットも IME も無かった（打てば絞れてはいたが、打てる場所に見えない）。workspace が `EditorView::plain` を作って `Picker::set_input` で差し込み、中身を `set_query` へ写す（全 Picker 共通）。↑↓・⇧⏎・tab・⌘V・⌘⏎ は `render_picker` の外側の div で `capture_action`、esc は入力欄が流す `editor::Cancel` を受け、⏎ は `ComposerEvent::Submit`。リストは `overflow_y_scroll` + `ScrollHandle::scroll_to_item` で選択行へ寄せる（前は 340px で切れて ↓ の先が見えなかった）。ランチャーの最近は 20 → 100 件、`PickerItem::with_match_detail` で名前に外れた時だけパスでも当てる。開発プローブ `NECODER_LAUNCHER_PROBE=<ms>[;語]`
 - 学び/罠: パスをあいまい一致で探すと `api` が `/private/tmp/nl-iso` の飛び飛びの文字に当たって全件残る（隔離 offscreen の実画面で発見・テストでは出なかった）。パスは「語をそのまま含む」だけにした。入力欄があると Picker 自身の `on_key_down` は文字を拾ってはいけない（二重に入る）。テストで ↑↓/esc を打つなら既定 keymap を `bind_keys` する（入力欄の Editor 文脈の束で届くため）
 - 次: パスを打ったらフォルダを候補に出す（`~/Work/` → 中のフォルダ）。今は最近使った項目だけ
+
+## 2026-10-19 — LP を Bento の形に作り直した（Claude Design の書き出しをやめた）
+
+- 発端: 本人「LP の見た目をガラッと変えたい」→ 5 案（ターミナル / 色の帯 / ねこ / ショーケース / Bento）から Bento を選んだ。「測った数字（215ms・122MB・10ms）は要らない。速い・軽い・Rust 製・60fps でぬるぬる」「Nyaco・スマホ・workspace 管理などを散りばめて」「スマホのところは実際に近い画面に」
+- やったこと:
+  - `lp/index.html` / `lp/en/index.html` を手書きの 1 枚に置き換えた（暗い地・光るグラデーション・特徴のタイル）。節: 速くて軽い（60fps / Rust / ⌘P）→ いつもの AI（エージェントの一覧・ボタン 1 つで準備・差分・Todo）→ 色とワークスペース（色・⌘O・SSH・⌘⇧P）→ Fleet（Captain）→ スマホ → Nyaco（4 つの状態）→ エディタとしても一人前 → 無料・オープンソース・テレメトリーなし・Mac と Windows
+  - ダウンロードは OS を見分けて 1 つのボタン（#73 と同じ考え）。**Windows はまだ zip**（Latest の v0.1.30 に setup.exe が無い）。setup.exe を付けた正式版を出したら、両ページの `necoder-windows-x64.zip` を `necoder-windows-x64-setup.exe` に替える
+  - Nyaco の絵 4 枚（手を振る・スマホを持って歩く・子ねこの AI に旗を振る・色のフォルダを並べる）は Higgsfield の `gpt_image_2_5` で、`lp/assets/mascot/neko-art.png` を参考画像にして生成（背景は透明・`lp/assets/img/lp/`）
+  - スマホの画面は本物の PWA を `relay/test/preview.mjs` で撮った（見本のデータ・隔離した cf dev :8791）。Mac の名前は撮る時だけ `Preview Mac` → `MacBook Pro` に替えた
+  - **`scripts/lp-build.mjs` / `scripts/lp-copy.mjs` / `lp/i18n/en.json` は消した**。キャンバスの書き出しから作る流れは、作り直すと手書きの LP を上書きするため。今後の LP の直しは `lp/index.html` と `lp/en/index.html` の両方を直接直す
+- 罠: Chrome のヘッドレスは幅を 500px より狭くできない（390 を指定しても 500 で組んで切り取る）。スマホの見た目は Playwright の WebKit（`devices['iPhone 13']`）で撮る
+- 未: 画面写真に旧名 shirushi が写っている（撮り直し）。英語ページのスマホの画面写真は日本語のまま
+
