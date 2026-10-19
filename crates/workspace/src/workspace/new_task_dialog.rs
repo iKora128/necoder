@@ -343,7 +343,12 @@ mod tests {
         std::fs::create_dir_all(project.join(".necoder")).expect("作業フォルダを作れる");
         std::fs::write(project.join(".necoder/settings.json"), r#"{ "task_base": "origin/develop" }"#).expect("書ける");
         let settings_path = root.join("settings.json");
-        std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).expect("設定を書ける");
+        let every = serde_json::json!({
+            "onboarded": true,
+            "agent_prewarm": false,
+            "enabled_agents": acp_client::AGENTS.iter().map(|agent| agent.id).collect::<Vec<_>>(),
+        });
+        std::fs::write(&settings_path, every.to_string()).expect("設定を書ける");
         cx.update(|cx| settings::init(Some(settings_path), None, cx));
         let (workspace, cx) = cx.add_window_view(|_window, cx| Workspace::new(vec![project.clone()], Theme::dark(), None, cx));
         workspace.update_in(cx, |workspace, window, cx| {

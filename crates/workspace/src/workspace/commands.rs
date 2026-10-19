@@ -473,7 +473,7 @@ mod command_registry_tests {
         let settings_path = root.join("settings.json");
         std::fs::write(
             &settings_path,
-            r#"{"onboarded":true,"agent_prewarm":false,"disabled_agents":["kimi"]}"#,
+            r#"{"onboarded":true,"agent_prewarm":false,"enabled_agents":["codex"]}"#,
         )
         .unwrap();
         cx.update(|cx| settings::init(Some(settings_path), None, cx));

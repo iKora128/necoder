@@ -704,10 +704,20 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
   - Git Bash・WSL はシェルと引数の組で書く（`terminal_shell_args` も書く）。mac / Linux の行は従来どおり引数に触らない
   - 端末の起動: program に空白があれば `"` で囲み、引数は Windows の規則で引用（alacritty の `escape_args`）。
     以前は `C:\Program Files\…\bash.exe` が `C:\Program` から順に探され、空白を含む引数は割れていた
+- [x] **`ne` コマンド**（`scripts/windows/ne.cmd`・2026-10-19）: インストーラが necoder.exe の隣（PATH に入るインストール先）に
+  置く。中身は ASCII だけ・行末は CRLF（`.gitattributes`。cmd.exe は LF だけの行末で `goto` のラベルを読み違えることがある）。
+  素通しのサブコマンドは `cli_shim::PASSTHROUGH_SUBCOMMANDS` と同じ一覧（テストで固定）。それ以外は `necoder cli …`＝実行中の
+  necoder へ渡すか切り離して起動してすぐ戻る（バッチは GUI の exe の終わりを待つが、`cli` は待たせない）。necoder 自身は
+  `ne` を入れない（設定と初回の案内は PATH の `ne` の有無だけを見せる）。zip 版には同梱するが PATH には入らない
 - [ ] **実機確認**: setup.exe を実行 → スタートメニュー・デスクトップ・右クリック・PATH が出来て、アンインストールで消える
+- [ ] **実機確認**: インストーラで入れた後、新しい PowerShell で `ne .` が necoder で今のフォルダを開く
 - [ ] **実機確認**: シェルのピッカーで Git Bash / WSL を選んでターミナルが開く
 - [ ] **実機確認**: `irm https://necoder.com/install.ps1 | iex`（deploy 後）で SmartScreen が出ずに入る
-- [ ] 受入: **まっさらな Windows で setup.exe → スタートメニューから起動 → 設定の案内どおりにエージェントを 1 つ使える**（#69 と合わせて）
+- [ ] 受入: **まっさらな Windows で setup.exe → スタートメニューから起動 → 初回の案内（① AI エージェント ② ne ③ フォルダ）どおりに進めて、入力欄に打てる**（#69 と合わせて）
+- [x] **アイドル中に 1 コアの約 9 割を使っていた**（#69 の 5・2026-10-19）: 空のスレッドの一覧（項目 0）で、gpui が返す
+  `logical_scroll_top().item_ix = 0` を「先頭が未確定」と読み、毎フレーム描き直しを予約していた（`agent_panel.rs`
+  `transcript_top_item_pending`）。Windows 固有ではなく、初回の窓（空のスレッド 1 つ）がちょうどこの状態。mac の隔離起動で
+  CPU 時間が 18 秒で約 5.1 秒 → 約 1.2 秒（debug・offscreen）。マスコットの居眠りの 5 fps は設計どおり（窓が前面の時だけ）
 
 ### W8 — WSL（設計: §D11）
 

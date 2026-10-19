@@ -4200,3 +4200,22 @@
 - 罠: Windows PowerShell 5.1 は `Write-Host` の `✓` / `✗` をコンソールのコードページへ落として `√` / `χ` に化けさせる（`▶` は残る）。印は【完了】/【失敗】にした。開発用の `NECODER_CHAT_PROBE` は `;` で区切るので、`settings-run:` に `a; b` を渡すと後ろが別の手順として捨てられる（「npm の出力が消えた」と一度誤診した）
 - 検証: `cargo test -p workspace terminal_settings`（8・「▾」から選ぶと新しいタブ・タブ名・設定は変えない）・`-p terminal_view`（52）・`-p host command_`（本物のシェル）・`-p settings`（41）・`-p i18n`。実アプリで成功 / 失敗の端末と `▾` のメニューをスクショで目視
 - 次: mac での目視。`feat/windows-installer` と同じシェル一覧の変更が両方のブランチに入っている（マージ時は同じ中身）
+
+## 2026-10-19 — 初回の案内を 3 手順に・エージェントは既定でオフ・空のスレッドで CPU が回り続けていた（#70 の上）
+
+- 発端: 本人「最初にインストールした人への誘導をしっかりやらないとまずい。AI エージェント（サブスク）の設定と ne コマンドのインストール、タブを立ち上げて入力できるところまで」「最初から全部ボタンが有効（オン）になってるのも気になる。基本オフでは」「アイドル中の CPU が高いのはやばい」
+- やったこと（UI-SPEC §12 を先に書き直してから実装）:
+  - **初回の案内**（`settings.rs` の `onboarding_body`・`OnboardingStep`）: ① AI エージェント ② `ne` コマンド ③ フォルダ。手順の列・戻る・主のボタン（使う物が無ければ `AI を使わずに次へ`・フォルダが無ければ `フォルダなしで始める` の枠のボタン）。終えると `pending_first_thread` → `open_first_thread`（空のスレッドを既定のエージェントに揃えて入力欄へフォーカス）。③ の `フォルダを選ぶ…` は `SettingsViewEvent::PickProjectFolder` → `add_project_via_dialog`
+  - **エージェントは既定でオフ**: `disabled_agents` → `enabled_agents`（旧形式は読まない）。準備の手順のボタン・＋ エージェントを追加でオンになる。オフでも CLI の status（`claude auth status` 等）は流す — 止めると、入れてログインも済んだ物が初回に「準備すると使える」に落ちる（ACP の試しのセッションだけ止める）。使えるがオフの行の状態は `使えます · オフ`
+  - **引数なしの起動**: カレントディレクトリが根・ホーム・実行ファイルの置き場ならプロジェクトにしない（`main.rs` の `opens_as_project`）。Finder から起動すると `/` が開いていた
+  - **Windows の `ne`**: `scripts/windows/ne.cmd` をインストーラが PATH のインストール先に置く。設定と初回の案内は PATH の `ne` の有無だけを見せる
+  - **アイドル中の CPU**（#69 の 5）: `transcript_top_item_pending` が項目 0 の一覧で常に真 → 毎フレーム `notify`。項目 0 なら待たない
+  - **シェルを選ぶと Task の環境（`.necoder/task.env`）が渡らなかった**: 条件を「シェル未指定」から「ssh でない」に
+  - #70 の CI: build.rs が mac / Linux で `embed_resource` を見つけられない（target 限定の build-dependencies）→ 全 OS 共通に。Git Bash の候補のテストは Windows の区切りで書かれていて mac で落ちる → この OS の区切りで組む
+- 学び/罠:
+  - **gpui の `ListState` は項目 0 で `logical_scroll_top().item_ix = 0`** を返し続ける。「`item_ix >= item_count` = 未確定」の番兵判定は 0 項目で常に真になる。描画の中の `on_next_frame(notify)` は条件が外れないと永久ループ（CPU を焼く）
+  - 初回の案内を撮るには `NECODER_SETTINGS=1`（debug + `NECODER_SCREENSHOT` の時は初回でも設定が開かない）+ `NECODER_CHAT_PROBE="onboarding:command"` / `onboarding:folder` / `onboarding:finish`
+  - 「既定オフ」にすると、エージェントがオンである前提のテスト（既定のエージェント・並べて比べる・Captain・Remote control の新しいスレッド）が落ちる。テストの settings.json に `enabled_agents` を書く
+- 検証: 隔離 offscreen で ①②③と終わりの画面を目視（mac）。`cargo test --workspace`（使い捨ての HOME）。CPU は隔離起動で 18 秒の CPU 時間が約 5.1 秒 → 約 1.2 秒
+- 未: Windows 実機（ne.cmd・初回の案内・アイドル CPU）。`mock/settings-agents.html` は旧い並び
+

@@ -37,7 +37,7 @@ pub(crate) enum RemoteFacts {
 
 /// 行に出す見立て。
 enum Assessment {
-    /// 使わない（`disabled_agents`）。
+    /// 使わない（`enabled_agents` に無い）。
     Disabled,
     /// まだ読めていない（このマシンのログインの確かめ中・SSH 先を読んでいる）。
     Checking,
@@ -1495,12 +1495,16 @@ impl SettingsView {
 
     /// 導入 / ログインのコマンドをターミナルで流す。コマンドの終わりは取れない（ターミナルはシェルに
     /// 落ちる）ので、押した時点から変化を見張って反映の遅れを消す。
+    ///
+    /// 押したエージェントは**使う**に入れる。エージェントは既定でオフなので、準備を進めた人が最後に
+    /// スイッチを探して入れ直す手間を作らない（押した＝使うつもり）。
     fn run_agent_command(
         &mut self,
         agent_index: usize,
         command: &'static str,
         cx: &mut Context<Self>,
     ) {
+        self.enable_agent(agent_index, cx);
         self.watch_agent_progress(agent_index, cx);
         cx.emit(SettingsViewEvent::RunCommand {
             command: command.to_string(),
@@ -1976,6 +1980,22 @@ impl SettingsView {
     }
 
     // ── 開発用（隔離 offscreen の撮影）────────────────────────────────────────────
+
+    /// 開発用: 初回の案内の手順へ飛ぶ（`agents` / `command` / `folder`）・`finish` で終える。
+    #[cfg(debug_assertions)]
+    pub fn debug_onboarding(&mut self, step: &str, cx: &mut Context<Self>) {
+        self.onboarding_step = match step {
+            "command" => crate::OnboardingStep::Command,
+            "folder" => crate::OnboardingStep::Folder,
+            "finish" => {
+                self.onboarding_step = crate::OnboardingStep::Folder;
+                self.advance_onboarding(cx);
+                return;
+            }
+            _ => crate::OnboardingStep::Agents,
+        };
+        cx.notify();
+    }
 
     /// 開発用: AI エージェントのページで行を開く（`agent_id` が空なら閉じる）。
     #[cfg(debug_assertions)]

@@ -1,0 +1,2 @@
+# cmd.exe は LF だけの行末で goto のラベルを読み違えることがある。
+scripts/windows/*.cmd text eol=crlf

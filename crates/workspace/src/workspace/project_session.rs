@@ -969,6 +969,7 @@ impl Workspace {
                 focus_next_frame: None,
                 pending_font_picker: None,
                 pending_shell_picker: false,
+                pending_first_thread: false,
                 pending_terminal_shell_menu: None,
                 statusbar_menu: None,
                 task_details: None,

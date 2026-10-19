@@ -221,7 +221,7 @@ manifest の名前・版・`bin` を確かめてから rename で公開し、以
   （`custom_agent_specs`）。プロセス全体の可変な置き場は作らない（窓・テストごとの App が自分の一覧を持つ）
 - **スレッドは相手を表示名で覚える**（DB の `threads.agent`）ので、表示名は組み込み・他の足した物と
   重ならないようにずらす（`名前 (id)`）。引く時は表示名 → id の順（名前を後から変えても前のスレッドが
-  相手を見失わない）。`disabled_agents` / `agent_config_defaults` は id で引く
+  相手を見失わない）。`enabled_agents` / `agent_config_defaults` は id で引く
 - 組み込みと足した物を 1 つの型で扱う入口は `acp_client::Agent`（`Builtin(&AgentKind)` / `Custom`）。
   oneshot（題名づけ）・再ログインの案内・レジストリの版の解決・ログインの確かめは組み込みだけ
 - 起動は書いたコマンドをそのまま組む（PATH で探し、無ければ書いたまま渡す＝起動の失敗として原因が見える）。

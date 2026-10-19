@@ -5091,8 +5091,13 @@ PYEOF"#;
     }
 
     /// `logical_scroll_top` が番兵値のまま（= まだレイアウトされていない）か。
+    ///
+    /// 項目が 0 の時は決める先頭が無いので待たない。gpui は 0 項目の一覧に `item_ix = 0` を返し続ける
+    /// ので、`0 >= 0` で「未確定」と読むと、空のスレッドを開いている間ずっと毎フレーム描き直す
+    /// （初回起動の Windows でアイドル中に 1 コアの約 9 割を使っていた・#69）。
     fn transcript_top_item_pending(&self) -> bool {
-        self.transcript_list.logical_scroll_top().item_ix >= self.transcript_list.item_count()
+        let item_count = self.transcript_list.item_count();
+        item_count > 0 && self.transcript_list.logical_scroll_top().item_ix >= item_count
     }
 
     /// transcript の仮想リスト項目数。Entry に加え、送信直後など本文がまだ無い間だけ
@@ -5989,6 +5994,26 @@ PYEOF"#;
         self.add_thread(cx);
     }
 
+    /// 初回の案内の終わり（UI-SPEC §12）: 今のスレッドが空ならそれを使い、空でなければ新しく作って、
+    /// `agent` に揃える。初回の窓には起動時の空のスレッドが 1 つあり、そのエージェントは案内の前に
+    /// 決まっている（案内で別の物をオンにしていれば食い違う）ので、選び直しの道筋で揃える。
+    pub fn start_first_thread(&mut self, agent: &str, cx: &mut Context<Self>) {
+        let empty = self
+            .threads
+            .get(self.active)
+            .is_some_and(|thread| thread.entries.is_empty() && !thread.running);
+        if !empty {
+            self.add_thread(cx);
+        }
+        let current = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.agent.clone());
+        if current.as_deref() != Some(agent) {
+            self.select_option(Selector::Agent, SharedString::from(agent.to_string()), cx);
+        }
+    }
+
     /// エージェントを決めて新規スレッドを作る（B28・パレット「AI: 新しいスレッド（Codex）」等）。
     /// 作ってから、エージェント選択と同じ道筋（先張りしたセッションを畳んで張り直す）で差し替える。
     pub fn new_thread_with_agent(&mut self, agent: &str, cx: &mut Context<Self>) {
@@ -6171,7 +6196,7 @@ PYEOF"#;
     /// 捏造した綴りは広告と一致せず「選んだのに次回は戻る」を生む。Zed も同じで、`configOptions` が
     /// 来るまでモデル UI 自体を出さない（necoder は場所を保つためにピルは残し、押せなくする）。
     ///
-    /// Agent は認証済みのうち**使う**もの（設定の `disabled_agents` で外したものは出さない・O16）。
+    /// Agent は認証済みのうち**使う**もの（設定の `enabled_agents` に無いものは出さない・O16）。
     fn selector_choices(&self, selector: Selector, cx: &App) -> Vec<SelectorChoice> {
         match self.threads.get(self.active) {
             Some(thread) => self.selector_choices_for(thread, selector, cx),
@@ -17014,6 +17039,7 @@ PYEOF"#;
         std::fs::write(
             &path,
             r#"{"onboarded":true,"agent_prewarm":false,"default_agent":"Alpha Harness",
+                "enabled_agents":["alpha","beta"],
                 "agent_servers":{"alpha":{"name":"Alpha Harness","command":"definitely-not-alpha"},
                                  "beta":{"name":"Beta Harness","command":"definitely-not-beta"}},
                 "agent_config_defaults":{"alpha":{"model":"a-large","effort":"high","mode":"default"},
@@ -18265,10 +18291,8 @@ PYEOF"#;
     #[gpui::test]
     fn disabled_agents_leave_the_agent_choices(cx: &mut gpui::TestAppContext) {
         let path = init_test_settings(cx, "disabled-agents");
-        let every: Vec<&str> = acp_client::AGENTS.iter().map(|agent| agent.id).collect();
         cx.update(|cx| {
-            settings::set_user_value(cx, "disabled_agents", serde_json::json!(every))
-                .expect("書ける")
+            settings::set_user_value(cx, "enabled_agents", serde_json::json!([])).expect("書ける")
         });
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
@@ -18299,6 +18323,7 @@ PYEOF"#;
         std::fs::write(
             &path,
             r#"{"onboarded":true,"agent_prewarm":false,"default_agent":"DeepSeek Harness",
+                "enabled_agents":["dsh"],
                 "agent_config_defaults":{"dsh":{"model":"deepseek-v4"}},
                 "agent_servers":{"dsh":{"name":"DeepSeek Harness","command":"definitely-not-dsh-acp",
                                         "args":["--stdio"],"env":{"DEEPSEEK_API_KEY":"secret"}}}}"#,
@@ -18413,7 +18438,7 @@ PYEOF"#;
         std::fs::write(
             &settings_path,
             r#"{"onboarded":true,"agent_prewarm":false,"agent_auto_name":false,"sound_done":"off",
-                "default_agent":"Broken Agent",
+                "default_agent":"Broken Agent","enabled_agents":["broken"],
                 "agent_servers":{"broken":{"name":"Broken Agent","command":"/bin/sh",
                   "args":["-c","echo 'booting the fake agent' >&2; echo \"error: BROKEN_API_KEY=$BROKEN_API_KEY is invalid\" >&2; exit 1"],
                   "env":{"BROKEN_API_KEY":"secret-0123456789"}}}}"#,
