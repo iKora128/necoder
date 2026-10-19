@@ -54,6 +54,23 @@
 <script>window.__resources={"https://unpkg.com/react@18.3.1/umd/react.production.min.js":"/assets/js/react.production.min.js","https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js":"/assets/js/react-dom.production.min.js"};</script>
 <script src="/assets/js/dc-runtime.js"></script>
 
+<!-- ダウンロードは OS を見分けて 1 つだけ大きく出す（Mac で開けば Mac 版・Windows なら Windows 版）。
+     見分けられない時・スクリプトが止まっている時は両方出す。?os=windows / ?os=mac で確かめられる。 -->
+<script>
+(function () {
+  var forced = new URLSearchParams(location.search).get('os');
+  var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+  var agent = navigator.userAgent || '';
+  var os = forced === 'windows' || forced === 'mac' ? forced
+    : /Win/i.test(platform) || /Windows/.test(agent) ? 'windows'
+    : /Mac/i.test(platform) || /Macintosh|Mac OS X/.test(agent) ? 'mac' : '';
+  if (os) document.documentElement.dataset.os = os;
+})();
+</script>
+<style>
+html[data-os=mac] .dl-win, html[data-os=windows] .dl-mac { display: none !important; }
+html:not([data-os]) .dl-other { display: none !important; }
+</style>
 </head>
 <body>
 <x-dc>
@@ -420,7 +437,7 @@ a:hover { color: var(--color-accent-600); }
     <a href="#author" style="text-decoration: none">作者</a>
     <a class="lang-switch" href="/?lang=en" hreflang="en" title="Read this page in English">EN</a>
     <button class="theme-toggle" type="button" aria-label="テーマを切り替え"><span class="theme-toggle-to-dark" aria-hidden="true">☾</span><span class="theme-toggle-to-light" aria-hidden="true">☀</span></button>
-    <a class="btn btn-primary" href="#download" style="white-space: nowrap; text-decoration: none">ダウンロード</a>
+    <a class="btn btn-primary dl-mac" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg" style="white-space: nowrap; text-decoration: none">ダウンロード</a><a class="btn btn-primary dl-win" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe" style="white-space: nowrap; text-decoration: none">ダウンロード</a>
   </nav>
   <div style="max-width: 1240px; margin: 0 auto; padding: 0 clamp(20px,4vw,56px)">
     <section style="padding: 96px 0 0">
@@ -432,10 +449,14 @@ a:hover { color: var(--color-accent-600); }
           <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>色分け UI</b> — どの AI が走り、どれに指示しているか、一目でわかる</p></div>
           <div style="display: flex; gap: 12px; align-items: baseline"><span style="width: 10px; height: 10px; background: var(--color-accent); flex-shrink: 0; transform: translateY(-1px)"></span><p style="font-size: 16.5px; line-height: 1.7; margin: 0"><b>マルチプレクサ</b> — AI 時代の新概念、Fleet モード</p></div>
         </div>
-        <div style="display: flex; gap: 12px; flex-wrap: wrap; padding-bottom: 4px">
-          <a class="btn btn-primary" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg" style="white-space: nowrap; text-decoration: none; padding: 12px 22px; font-size: 15px">Mac 版をダウンロード</a>
-          <a class="btn btn-primary" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe" style="white-space: nowrap; text-decoration: none; padding: 12px 22px; font-size: 15px">Windows 版をダウンロード</a>
-          <a class="btn btn-secondary" href="https://github.com/iKora128/necoder" style="white-space: nowrap; text-decoration: none; padding: 12px 22px; font-size: 15px">GitHub</a>
+        <div style="display: grid; gap: 10px; justify-items: start; padding-bottom: 4px">
+          <div style="display: flex; gap: 12px; flex-wrap: wrap">
+            <a class="btn btn-primary dl-mac" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg" style="white-space: nowrap; text-decoration: none; padding: 14px 28px; font-size: 16px">Mac 版をダウンロード</a>
+            <a class="btn btn-primary dl-win" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe" style="white-space: nowrap; text-decoration: none; padding: 14px 28px; font-size: 16px">Windows 版をダウンロード</a>
+            <a class="btn btn-secondary" href="https://github.com/iKora128/necoder" style="white-space: nowrap; text-decoration: none; padding: 14px 28px; font-size: 16px">GitHub</a>
+          </div>
+          <span class="dl-mac" style="font-size: 12.5px; color: color-mix(in srgb, var(--color-text) 65%, transparent)">無料 · macOS 13 以降（Apple Silicon）<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe" style="color: inherit">Windows 版はこちら</a></span></span>
+          <span class="dl-win" style="font-size: 12.5px; color: color-mix(in srgb, var(--color-text) 65%, transparent)">無料 · Windows 10 以降（x64）<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg" style="color: inherit">Mac 版はこちら</a></span></span>
         </div>
       </div>
       <figure style="margin: 44px 0 0">
@@ -637,12 +658,12 @@ a:hover { color: var(--color-accent-600); }
   <section id="download" style="background: var(--color-accent); color: var(--color-bg)">
     <div style="max-width: 1240px; margin: 0 auto; padding: 84px clamp(20px,4vw,56px)">
       <h2 style="font-size: clamp(34px,4.2vw,56px); line-height: 1.1; letter-spacing: -0.015em; margin: 0; color: var(--color-bg)">次のエディタは、<br>エージェントごと動く。</h2>
-      <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 36px; align-items: center">
-        <a class="btn" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg" style="white-space: nowrap; text-decoration: none; color: var(--color-bg); border: 1px solid var(--color-bg); padding: 12px 22px; font-size: 15px">Mac 版をダウンロード</a>
-        <a class="btn" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe" style="white-space: nowrap; text-decoration: none; color: var(--color-bg); border: 1px solid var(--color-bg); padding: 12px 22px; font-size: 15px">Windows 版をダウンロード</a>
-        <span style="font-size: 13px; opacity: 0.85">無料 · macOS 13+（Apple Silicon）/ Windows 10+（x64）</span>
+      <div style="display: grid; gap: 12px; justify-items: start; margin-top: 36px">
+        <a class="btn dl-mac" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg" style="white-space: nowrap; text-decoration: none; color: var(--color-bg); border: 1px solid var(--color-bg); padding: 14px 28px; font-size: 16px">Mac 版をダウンロード</a>
+        <a class="btn dl-win" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe" style="white-space: nowrap; text-decoration: none; color: var(--color-bg); border: 1px solid var(--color-bg); padding: 14px 28px; font-size: 16px">Windows 版をダウンロード</a>
+        <span class="dl-mac" style="font-size: 13px; opacity: 0.85">無料 · macOS 13 以降（Apple Silicon）<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe" style="color: var(--color-bg)">Windows 版はこちら</a></span> · <a href="https://github.com/iKora128/necoder/releases" style="color: var(--color-bg)">ほかの版</a></span>
+        <span class="dl-win" style="font-size: 13px; opacity: 0.85">無料 · Windows 10 以降（x64）<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg" style="color: var(--color-bg)">Mac 版はこちら</a></span> · <a href="https://github.com/iKora128/necoder/releases" style="color: var(--color-bg)">ほかの版</a></span>
       </div>
-      <p style="font-size: 13px; opacity: 0.85; margin: 18px 0 0">Windows は PowerShell で <code style="font-family: var(--font-mono, monospace); background: color-mix(in srgb, var(--color-bg) 18%, transparent); padding: 2px 6px">irm https://necoder.com/install.ps1 | iex</code> でも入れられます · <a href="https://github.com/iKora128/necoder/releases" style="color: var(--color-bg)">ほかの版・zip</a></p>
     </div>
   </section>
   <footer style="max-width: 1240px; margin: 0 auto; padding: 40px clamp(20px,4vw,56px); font-size: 13px; color: color-mix(in srgb, var(--color-text) 70%, transparent); display: flex; gap: 18px; flex-wrap: wrap; align-items: center">
