@@ -738,20 +738,20 @@ mod tests {
     #[test]
     fn a_login_session_passes_the_code_and_reports_the_end() {
         let directory = tempfile::tempdir().expect("一時フォルダ");
+        // Windows は cmd のバッチ（PowerShell は CI のランナーで起動に 20 秒を超えることがあり、何も出さずに
+        // 時間切れになった）。`set /p` が標準入力から 1 行読む（行末が LF だけでも合うよう先頭 2 文字で比べる）。
         let (program, args): (PathBuf, Vec<String>) = if cfg!(windows) {
-            let script = directory.path().join("fake-login.ps1");
+            let script = directory.path().join("fake-login.cmd");
             std::fs::write(
                 &script,
-                "Write-Output 'visit: https://example.invalid/login'\nWrite-Output 'Paste code here if prompted > '\n$code = [Console]::In.ReadLine()\nif ($code -eq 'ok') { exit 0 } else { exit 3 }\n",
+                "@echo off\r\necho visit: https://example.invalid/login\r\necho Paste code here if prompted ^> \r\nset /p code=\r\nif \"%code:~0,2%\"==\"ok\" (exit /b 0) else (exit /b 3)\r\n",
             )
             .expect("書ける");
             (
-                PathBuf::from("powershell"),
+                PathBuf::from("cmd"),
                 vec![
-                    "-NoProfile".to_string(),
-                    "-ExecutionPolicy".to_string(),
-                    "Bypass".to_string(),
-                    "-File".to_string(),
+                    "/D".to_string(),
+                    "/C".to_string(),
                     script.to_string_lossy().into_owned(),
                 ],
             )
@@ -789,7 +789,7 @@ mod tests {
             output,
             finished: None,
         };
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !session.asks_for_code() {
             assert!(std::time::Instant::now() < deadline, "{}", session.output());
             std::thread::sleep(Duration::from_millis(50));
