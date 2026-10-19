@@ -685,6 +685,9 @@ fn main() {
     // 見えない（ACP エージェントは `#!/usr/bin/env node` なので node 不在＝即死する）。
     // ログインシェルの PATH をここで取り込む。窓が開く前＝まだシングルスレッドのうちに済ませる。
     workspace::inherit_login_shell_path();
+    // 設定の「インストール」で necoder が自分で入れた Node.js / エージェントの CLI の置き場を PATH の
+    // 末尾へ（パソコンに入っている物が先）。後で入れても見つかるよう、無くても今のうちに足す。
+    host::append_toolchain_to_path();
     // panic hook（M13 公開準備）: どのスレッドで落ちてもクラッシュログを書き、次回起動で
     // statusbar チップ → バグ報告 Issue に繋ぐ。GPUI 起動前・最初に仕込む。
     workspace::install_panic_hook();

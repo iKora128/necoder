@@ -1,10 +1,102 @@
-//! ローカル npm アダプタの導入と起動を分離する。Node は PATH から借りる。
-//! 完了した版別ディレクトリだけを公開し、起動中の版を書き換えない。
+//! ローカル npm アダプタの導入と起動を分離する。Node は PATH から借りる（無ければ設定の「インストール」が
+//! necoder の道具箱へ入れる・`setup`）。完了した版別ディレクトリだけを公開し、起動中の版を書き換えない。
+//!
+//! Windows でも同じ経路を使う（2026-10-19 まで Windows は npx 任せで、最初のスレッドが毎回 npx の解決を
+//! 待っていた）。npm は Node.js に同梱の `npm-cli.js` を node で直接起こす（[`Npm`]）。
 use super::*;
+use std::ffi::OsString;
 
 fn directory(root: &Path, package: &str) -> PathBuf {
     // '%' は許可するパッケージ名に含まれないため scope 区切りの置換は衝突しない。
     root.join(package.replace('/', "%2F"))
+}
+
+/// npm を起こす形（プログラムと、その頭に付ける引数）。
+///
+/// Windows は **Node.js に同梱の `npm-cli.js` を node で直接起こす**。`npm.cmd` を経由すると、
+/// cmd の引数の解釈（`<` `>` `^` `&`）と PowerShell の実行ポリシー（`npm.ps1`）で事故が多い。
+/// mac / Linux は従来どおり PATH の `npm`（無ければ同じく node + `npm-cli.js`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Npm {
+    program: PathBuf,
+    leading: Vec<OsString>,
+}
+
+impl Npm {
+    /// `node` の横にある npm を探す。
+    pub(crate) fn find(node: &Path) -> Option<Self> {
+        let beside = || {
+            npm_cli_beside(node).map(|script| Self {
+                program: node.to_path_buf(),
+                leading: vec![script.into_os_string()],
+            })
+        };
+        let on_path = || {
+            find_in_path("npm").map(|program| Self {
+                program,
+                leading: Vec::new(),
+            })
+        };
+        if cfg!(windows) {
+            beside().or_else(on_path)
+        } else {
+            on_path().or_else(beside)
+        }
+    }
+
+    /// 頭の引数まで付けた `Command`（コンソール窓は出さない）。
+    pub(crate) fn command(&self) -> std::process::Command {
+        let mut command = child_process::command(&self.program);
+        command.args(&self.leading);
+        command
+    }
+
+    #[cfg(all(test, unix))]
+    fn program(program: &Path) -> Self {
+        Self {
+            program: program.to_path_buf(),
+            leading: Vec::new(),
+        }
+    }
+}
+
+/// Node.js の配布物で `node` の横にある `npm-cli.js`（Windows は `<dir>\node_modules\npm`・
+/// mac / Linux は `<dir>/../lib/node_modules/npm`）。symlink（Homebrew・nvm）は辿ってから探す。
+fn npm_cli_beside(node: &Path) -> Option<PathBuf> {
+    let node = paths::canonicalize(node).unwrap_or_else(|_| node.to_path_buf());
+    let directory = node.parent()?;
+    let mut candidates = vec![directory.join("node_modules/npm/bin/npm-cli.js")];
+    if let Some(parent) = directory.parent() {
+        candidates.push(parent.join("lib/node_modules/npm/bin/npm-cli.js"));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+/// アダプタを（まだ無ければ）necoder の置き場へ入れておく（設定の「インストール」が、最初のスレッドを
+/// 待たせないために先に呼ぶ）。`package` は版まで固定した名前（`@scope/name@1.2.3`）。
+pub(crate) fn preinstall(
+    package: &str,
+    bin: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf> {
+    let root = paths::external_agents_dir()
+        .context("導入先がない")?
+        .join("npm");
+    anyhow::ensure!(
+        exact_package(package).is_some(),
+        "版が固定されていない: {package}"
+    );
+    let directory = directory(&root, package);
+    static INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = INSTALL
+        .lock()
+        .map_err(|_| anyhow::anyhow!("導入ロックが壊れている"))?;
+    if let Some(entry) = installed_entry(&directory, package, bin) {
+        return Ok(entry);
+    }
+    let node = find_in_path("node").context("node がない")?;
+    let npm = Npm::find(&node).context("npm がない")?;
+    install_package(&root, &directory, package, bin, &npm, environment)
 }
 
 pub(super) fn cached_command(
@@ -13,9 +105,6 @@ pub(super) fn cached_command(
     args: Vec<String>,
     cwd: PathBuf,
 ) -> Option<AgentCommand> {
-    if cfg!(windows) {
-        return None;
-    }
     let root = paths::external_agents_dir()?.join("npm");
     let node = find_in_path("node")?;
     let entry = installed_entry(&directory(&root, package), package, bin)?;
@@ -28,29 +117,15 @@ pub(super) fn prepare(mut command: AgentCommand) -> AgentCommand {
     let Some((package, bin)) = command.managed_npm.take() else {
         return command;
     };
-    // Windows の npm.cmd と非固定版は従来の起動経路を使う。
-    if cfg!(windows) || exact_package(&package).is_none() {
+    // 非固定版は従来の起動経路（npx）を使う。
+    if exact_package(&package).is_none() {
         return command;
     }
+    // 同じアプリで複数スレッドが初回起動しても npm install は一度だけ（preinstall のロック）。
     let prepared = (|| -> Result<(PathBuf, PathBuf)> {
-        let root = paths::external_agents_dir()
-            .context("導入先がない")?
-            .join("npm");
+        let entry = preinstall(&package, &bin, &command.env)?;
         let node = find_in_path("node").context("node がない")?;
-        let directory = directory(&root, &package);
-        // 同じアプリで複数スレッドが初回起動しても npm install は一度だけ。
-        static INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = INSTALL
-            .lock()
-            .map_err(|_| anyhow::anyhow!("導入ロックが壊れている"))?;
-        if let Some(entry) = installed_entry(&directory, &package, &bin) {
-            return Ok((node, entry));
-        }
-        let npm = find_in_path("npm").context("npm がない")?;
-        Ok((
-            node,
-            install_package(&root, &directory, &package, &bin, &npm, &command.env)?,
-        ))
+        Ok((node, entry))
     })();
     match prepared {
         Ok((node, entry)) => {
@@ -70,7 +145,7 @@ fn install_package(
     directory: &Path,
     package: &str,
     bin: &str,
-    npm: &Path,
+    npm: &Npm,
     environment: &BTreeMap<String, String>,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(&root)?;
@@ -78,7 +153,8 @@ fn install_package(
         .prefix("install-")
         .tempdir_in(&root)?;
     std::fs::write(staging.path().join("package.json"), r#"{"private":true}"#)?;
-    let mut child = child_process::command(npm)
+    let mut child = npm
+        .command()
         .args([
             "install",
             "--global=false",
@@ -224,8 +300,9 @@ fn installed_entry(directory: &Path, package: &str, bin: &str) -> Option<PathBuf
     }
     let bins = manifest.get("bin")?;
     let relative = bins.as_str().or_else(|| bins.get(bin)?.as_str())?;
-    let entry = package_dir.join(relative).canonicalize().ok()?;
-    if !entry.starts_with(package_dir.canonicalize().ok()?) {
+    // paths::canonicalize は Windows の verbatim 形（`\\?\C:\…`）を剥がす＝node に渡す道が普通の形になる。
+    let entry = paths::canonicalize(&package_dir.join(relative)).ok()?;
+    if !entry.starts_with(paths::canonicalize(&package_dir).ok()?) {
         return None;
     }
     // node に渡せる JS エントリだけを対象にする（ネイティブ CLI を誤実行しない）。
@@ -258,7 +335,7 @@ printf '%s' 'console.log("adapter")' > node_modules/adapter/index.js
             &destination,
             "adapter@1.2.3",
             "adapter",
-            &npm,
+            &Npm::program(&npm),
             &BTreeMap::new(),
         )
         .unwrap();
@@ -272,7 +349,7 @@ printf '%s' 'console.log("adapter")' > node_modules/adapter/index.js
             &failed,
             "adapter@1.2.4",
             "adapter",
-            &npm,
+            &Npm::program(&npm),
             &BTreeMap::new()
         )
         .is_err());

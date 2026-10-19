@@ -4200,3 +4200,16 @@
 - 罠: Windows PowerShell 5.1 は `Write-Host` の `✓` / `✗` をコンソールのコードページへ落として `√` / `χ` に化けさせる（`▶` は残る）。印は【完了】/【失敗】にした。開発用の `NECODER_CHAT_PROBE` は `;` で区切るので、`settings-run:` に `a; b` を渡すと後ろが別の手順として捨てられる（「npm の出力が消えた」と一度誤診した）
 - 検証: `cargo test -p workspace terminal_settings`（8・「▾」から選ぶと新しいタブ・タブ名・設定は変えない）・`-p terminal_view`（52）・`-p host command_`（本物のシェル）・`-p settings`（41）・`-p i18n`。実アプリで成功 / 失敗の端末と `▾` のメニューをスクショで目視
 - 次: mac での目視。`feat/windows-installer` と同じシェル一覧の変更が両方のブランチに入っている（マージ時は同じ中身）
+
+## 2026-10-19 — エージェントを「インストール」1 つで裏で入れてログインまで（#69 の続き）
+
+- 発端: 本人「ターミナルで実行とかも気になる。もっと簡単に起動インストールできるようにしてほしい。ボタン一つで裏で入れてほしい」。普通はどうしているか: VS Code の Claude Code / Codex 拡張は本体を同梱し、ログインはボタン → ブラウザ。Zed も Node.js を自分で落としてアダプタを裏で入れる。necoder だけが「npm でパソコン全体に入れるコマンドをターミナルで流す」形で、Windows では winget・UAC・実行ポリシー・ターミナルを越えさせていた。
+- 実機で先に確かめたこと（一時フォルダ・本人の設定には触らず）: `npm install -g --prefix <一時>` で `@openai/codex` と `@anthropic-ai/claude-code` は 8 秒で入り、どちらも起きる（合わせて 998 MB）。npm 11 は Claude Code の postinstall を `allow-scripts` が無いと走らせないが、走らなくても動く。**ログインはどちらも端末無しで動く**: `codex login` は localhost:1455 で待って自動で終わる、`claude auth login` はブラウザに出たコードを標準入力で待つ（`Paste code here if prompted >`）。
+- やったこと:
+  - `paths::toolchain_dir`（`<data>/toolchain`）と `host::append_toolchain_to_path`（起動時・窓が開く前に PATH の**末尾**へ `node` と npm の prefix を足す＝後で入れても見つかる・パソコンの物が先・mac で走っている途中に `set_var` しない）
+  - `acp_client::setup`: Node.js（パソコンの v20 以上 → 無ければ公式 v24.22.0 を落として**ソースに書いた SHA-256 で照合**して展開）→ `npm install -g --prefix` で CLI → アダプタを起動時の版で先に（`install::preinstall`）。ログを `logs/agent-setup.log` に。`LoginSession`（CLI のログインを裏で起こし、出力から URL と「コードを待っているか」を読み、標準入力へコードを渡す・止める時は子孫ごと）
+  - `install`: Windows でも necoder の置き場のアダプタを使う（今までは npx 任せ）。npm は Node.js 同梱の `npm-cli.js` を node で直接起こす（`install::Npm`）＝ `npm.cmd` の引用と `npm.ps1` の実行ポリシーを通らない
+  - 設定（`agent_setup.rs`）: 手順に種類（道具 / 本体 / コマンド / ログイン）と「裏で進めるか」を持たせ、npm で入れる組み込みはボタン 1 つ `インストール` で最後まで（入ったら未ログインなら自動でログインへ）。作業の欄（回る印 + 今の段 + 経過秒 / ブラウザでログイン + コードの欄 + 開かない時のリンク / 失敗の理由とログの最後 + もう一度・ターミナルで実行・閉じる）。使える行の「ログイン未確認」の `ログイン` も Claude Code / Codex は裏で
+- 検証（Windows 11 実機・隔離した necoder の置き場）: 開発用の口 `settings-install:codex` で Codex を実際に入れ、数枚撮って目で確かめた（インストール中の表示 → ✓ Node.js ✓ Codex → 自動でログインへ・ブラウザが開く）。node / npm 5 秒・アダプタ込みで 833 MB。`settings-login:claude`（一時の `CLAUDE_CONFIG_DIR`）でコードの欄を確かめた。公式の Node.js を落として照合・展開して node と npm が起きる所は `cargo test -p acp_client -- --ignored node_is_downloaded`（6 秒）。偽の CLI で「コードを待つ → 渡す → 0 で終わる」を本物の子プロセスで（`setup::tests`）。試した時の一時ファイル（1.8 GB）は消した
+- 罠: `.cmd` を起こしてから親だけ止めると、中の node が出力を握ったまま残る（試験の PowerShell が止まらなかった）→ 止める時は `taskkill /T`。PowerShell 5.1 は UTF-8 のログを CP932 で読むので化けて見える（中身は正しい）。`npm.cmd` を素の `Command` で起こすのは避ける
+- 未: 本物のログインを最後まで（本人の操作が要る）。mac での目視。Copilot・Qwen・OpenCode のログインは対話の画面なのでターミナルのまま。Node.js の版を上げる時は `setup::NODE_ARCHIVES` の SHA-256 も書き直すこと

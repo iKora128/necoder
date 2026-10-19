@@ -22,6 +22,7 @@ use std::time::{Duration, SystemTime};
 use theme_core::Theme;
 mod add_agent;
 mod agent_launch;
+mod agent_setup;
 mod agents_page;
 mod connections;
 mod remote;
@@ -692,6 +693,8 @@ pub enum SettingsViewEvent {
     PickShell,
     /// 済んだことの知らせ（Ghostty の設定を取り込んだ等）。トーストは shell が出す。
     Notice(SharedString),
+    /// URL を既定のブラウザで開く（エージェントのログインで「ブラウザが開かない時」・shell の open_url）。
+    OpenUrl(String),
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -792,6 +795,10 @@ pub struct SettingsView {
     agent_advanced_open: bool,
     /// 「ほかの AI エージェント」（Claude Code / Codex 以外で、まだ準備していない物）を出しているか。
     show_more_agents: bool,
+    /// 「インストール」「ログイン」を裏で進めている途中の様子（エージェントの id ごと・ビューのメモリ）。
+    agent_jobs: std::collections::BTreeMap<String, agent_setup::AgentJob>,
+    /// 途中の様子を描き直す見張りが回っているか（1 本だけ）。
+    agent_job_ticker: bool,
     checking_agents: bool,
     availability_generation: u64,
     /// 導入/ログインボタン押下後の変化見張り中フラグ（agent ごと・多重起動防止）。
@@ -958,6 +965,8 @@ impl SettingsView {
             expanded_agent: None,
             agent_advanced_open: false,
             show_more_agents: false,
+            agent_jobs: std::collections::BTreeMap::new(),
+            agent_job_ticker: false,
             theme_details_open: false,
             color_editor: None,
             theme_save: None,

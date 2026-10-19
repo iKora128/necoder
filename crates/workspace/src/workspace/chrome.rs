@@ -69,6 +69,7 @@ impl Workspace {
                 self.chrome.pending_settings_command = Some((command.clone(), title.clone()));
                 cx.notify();
             }
+            settings::SettingsViewEvent::OpenUrl(url) => self.open_url(url, cx),
             settings::SettingsViewEvent::PickShell => {
                 self.chrome.pending_shell_picker = true;
                 cx.notify();

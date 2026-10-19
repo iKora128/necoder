@@ -152,7 +152,10 @@ fn host_platform(remote: bool) -> Option<&'static str> {
 
 /// 組み込みがレジストリから起こす npm の配布（パッケージ名, 版）。レジストリの項目が npx でなければ `None`
 /// （起動の解決と同じく、組み込みはレジストリの npm の版だけを使う）。
-fn builtin_registry_npm(kind: &AgentKind, registry: Option<&Registry>) -> Option<(String, String)> {
+pub(crate) fn builtin_registry_npm(
+    kind: &AgentKind,
+    registry: Option<&Registry>,
+) -> Option<(String, String)> {
     let entry = registry?.agent(kind.registry_id?)?;
     let Some(Launch::Npx(npx)) = entry.launch() else {
         return None;

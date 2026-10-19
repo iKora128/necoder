@@ -1073,6 +1073,47 @@ pub fn refresh_search_path() -> Option<String> {
     }
 }
 
+/// necoder が自分で入れた道具（Node.js・エージェントの CLI）を探す場所（在っても無くても返す・使う順）。
+/// 置き場は [`paths::toolchain_dir`]。Node.js の公式の配布物は Windows では直下に `node.exe`、
+/// mac / Linux では `bin/node`。npm の `--prefix` も Windows は直下・それ以外は `bin/` に実行ファイルを置く。
+pub fn toolchain_search_dirs() -> Vec<PathBuf> {
+    paths::toolchain_dir()
+        .map(|root| toolchain_search_dirs_in(&root, cfg!(windows)))
+        .unwrap_or_default()
+}
+
+/// [`toolchain_search_dirs`] の本体（置き場と OS を渡せる＝どのプラットフォームでもテストできる）。
+pub fn toolchain_search_dirs_in(root: &Path, windows: bool) -> Vec<PathBuf> {
+    if windows {
+        vec![root.join("node"), root.join("npm")]
+    } else {
+        vec![root.join("node").join("bin"), root.join("npm").join("bin")]
+    }
+}
+
+/// 起動時に 1 回だけ（**窓が開く前＝実質シングルスレッド**の main の冒頭）: necoder の道具箱を PATH の
+/// **末尾**へ足す。まだ何も入れていなくても足しておく — 後で「インストール」で入れた物が、
+/// 環境を書き換え直さずにそのまま見つかる（mac / Linux で動いている途中に `set_var` しないため）。
+/// 末尾なので、パソコンに入っている node や CLI が先に使われる。ターミナル・エージェント・LSP など
+/// necoder が起こす子プロセスもこの PATH を継ぐ。
+pub fn append_toolchain_to_path() {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut directories: Vec<PathBuf> = std::env::split_paths(&current).collect();
+    let before = directories.len();
+    for directory in toolchain_search_dirs() {
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    }
+    if directories.len() == before {
+        return;
+    }
+    match std::env::join_paths(directories) {
+        Ok(joined) => std::env::set_var("PATH", joined),
+        Err(error) => eprintln!("necoder の道具箱を PATH に足せない: {error}"),
+    }
+}
+
 /// `current`（`;` 区切り）に無いディレクトリを `system` から順に末尾へ足す。足す物が無ければ `None`。
 /// 比較は Windows の流儀（大文字小文字・末尾の `\` を区別しない）。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -5946,6 +5987,21 @@ mod windows_terminal_tests {
         } else {
             assert_eq!(command_then_shell("echo", None).0, "/bin/sh", "mac は変えない");
         }
+    }
+
+    /// necoder の道具箱の PATH: Windows は Node.js の配布物の直下と npm の prefix の直下、mac / Linux は
+    /// それぞれの `bin/`（Node.js の公式の配布物と `npm install -g --prefix` の置き方）。
+    #[test]
+    fn toolchain_dirs_follow_how_node_and_npm_lay_out_files() {
+        let root = Path::new("toolchain");
+        assert_eq!(
+            toolchain_search_dirs_in(root, true),
+            vec![root.join("node"), root.join("npm")]
+        );
+        assert_eq!(
+            toolchain_search_dirs_in(root, false),
+            vec![root.join("node").join("bin"), root.join("npm").join("bin")]
+        );
     }
 
     /// 前後の一言: 成否で出し分け、引用符を含む文でも壊れない。**本物のシェルで流して確かめる**
