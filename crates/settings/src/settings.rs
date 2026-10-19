@@ -3525,6 +3525,14 @@ impl SettingsView {
                 cx,
             ))
             .child(self.toggle_row(
+                "update_check",
+                7,
+                i18n::t!("settings.pref_update_check"),
+                Some(i18n::t!("settings.pref_update_check_sub")),
+                settings.update_check,
+                cx,
+            ))
+            .child(self.toggle_row(
                 "reduce_motion",
                 5,
                 i18n::t!("settings.pref_reduce_motion"),

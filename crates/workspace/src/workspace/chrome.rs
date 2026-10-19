@@ -2826,11 +2826,14 @@ impl Workspace {
                 if workspace.update(cx, |_workspace, _cx| ()).is_err() {
                     break;
                 }
-                let due = update_check_due(
-                    checked_at,
-                    std::time::SystemTime::now(),
-                    UPDATE_RECHECK_INTERVAL,
-                );
+                // 設定でオフにしていれば確認しない（毎回読むので、切り替えは再起動なしで効く）。
+                let enabled = cx.update(|cx| settings::get(cx).update_check);
+                let due = enabled
+                    && update_check_due(
+                        checked_at,
+                        std::time::SystemTime::now(),
+                        UPDATE_RECHECK_INTERVAL,
+                    );
                 if due {
                     checked_at = Some(std::time::SystemTime::now());
                     let found = cx
@@ -2878,6 +2881,9 @@ impl Workspace {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(12))
                 .await;
+            if !cx.update(|cx| settings::get(cx).update_check) {
+                return;
+            }
             cx.background_executor()
                 .spawn(async move {
                     // 1 時間以内に取っていれば何もしない（`refresh_if_stale` が判断する）。
