@@ -95,7 +95,7 @@ agent:
   deploying: "%{agent} %{version} をダウンロード中…"
   deploy_verified: ダウンロードしたファイルを検証しました
   deploy_unverified: 検証情報がないため、ファイルを検証せずに使用します
-  deploy_fallback: "更新版（%{new}）をダウンロードできなかったため、インストール済みの版（%{version}）で起動します"
+  deploy_fallback: "新しいバージョン（%{new}）をダウンロードできなかったため、インストール済みのバージョン（%{version}）で起動します"
   err_session_lost: セッションが切れました。もう一度送信してください
   err_session_ended: エージェントのセッションが終了しました（中断扱い）
   err_cancel_session_lost: セッションが応答しないため中断しました
@@ -780,7 +780,7 @@ settings:
   agent_status_unverified: "ログイン未確認"
   agent_status_unverified_remote: "ログイン未確認（SSH では確認しません）"
   agent_status_checking: "確認中…"
-  agent_status_disabled: "使えます · オフ"
+  agent_status_disabled: "利用可能 · オフ"
   agent_status_unreachable: "状態を確認できません"
   agent_status_missing: "必要な操作:"
   agent_missing_node: "Node.js のインストール"
@@ -792,8 +792,8 @@ settings:
   agent_version_same: "%{version}"
   agent_version_update: "%{current} → %{target}（次回起動時に更新）"
   agent_version_fetch: "%{version}（初回起動時にダウンロード）"
-  agent_version_behind: "%{current}（公開版 %{target}）"
-  agent_version_registry: "公開版 %{version}"
+  agent_version_behind: "%{current}（最新 %{target}）"
+  agent_version_registry: "最新 %{version}"
   agent_version_binary_same: "%{version}（検証済み）"
   agent_version_binary_same_unverified: "%{version}（検証情報なし）"
   agent_version_binary_update: "%{current} → %{target}（次回起動時に更新・検証）"
@@ -801,9 +801,9 @@ settings:
   agent_version_binary_fetch: "%{version}（初回起動時にダウンロード・検証）"
   agent_version_binary_fetch_unverified: "%{version}（初回起動時にダウンロード・検証情報なし）"
   agent_version_path_same: "%{version}（%{command}）"
-  agent_version_path_behind: "%{current}（%{command} · 公開版 %{registry}）"
+  agent_version_path_behind: "%{current}（%{command} · 最新 %{registry}）"
   agent_version_path_current: "%{version}（%{command}）"
-  agent_version_path_registry: "%{command}（公開版 %{registry}）"
+  agent_version_path_registry: "%{command}（最新 %{registry}）"
   agent_version_path: "コマンド: %{command}"
   agent_version_own: "コマンド指定（%{command}）"
   agent_action_install: "インストール"
@@ -819,7 +819,7 @@ settings:
   agent_detail_run_install: "ターミナルで実行"
   agent_detail_copy: "コピー"
   agent_detail_remote_note: "SSH 接続先のターミナルで実行してください"
-  agent_detail_version: "版"
+  agent_detail_version: "バージョン"
   agents_usable_heading: "使える AI エージェント"
   agents_usable_empty: "まだありません。下のどれか 1 つを準備すると、AI と話せるようになります。"
   agents_setup_heading: "準備すると使える AI エージェント"
@@ -833,7 +833,7 @@ settings:
   agent_step_login_button: "ログイン"
   agent_step_node: "Node.js を入れる"
   agent_step_node_note: "AI エージェントを動かすための土台です。一度入れれば、ほかのエージェントでも使えます"
-  agent_step_node_manual: "https://nodejs.org から LTS 版を入れてください。入れたら自動でここに ✓ が付きます"
+  agent_step_node_manual: "https://nodejs.org から LTS をインストールしてください。インストールすると自動でここに ✓ が付きます"
   agent_step_uv: "uv を入れる"
   agent_step_uv_note: "Python で作られたエージェントを入れるための道具です"
   agent_step_cli: "%{name} を入れる"
@@ -942,7 +942,7 @@ settings:
   onboarding_step_folder: フォルダ
   onboarding_agents_note: "使う AI をオンにします。Claude Code や Codex を、今のサブスクのまま使えます。"
   onboarding_command_note: "ターミナルで `ne .` と打つと、そのフォルダを necoder で開けます。"
-  onboarding_command_windows_missing: インストーラ版で入れると使えます。
+  onboarding_command_windows_missing: インストーラでインストールすると使えます。
   onboarding_folder_note: 作業するフォルダを選びます。AI もこのフォルダの中で作業します。
   onboarding_folder_none: まだフォルダを開いていません
   onboarding_pick_folder: フォルダを選ぶ…
@@ -1433,7 +1433,7 @@ conflict:
   side_by_side: 並べて見る
   view_title: "衝突 %{index} / %{count}（%{line} 行目）"
   view_base: 元（共通の祖先）
-  view_no_base: "元の版は衝突マーカーに含まれていません（git config merge.conflictStyle diff3 で含まれるようになります）"
+  view_no_base: "元のバージョンは衝突マーカーに含まれていません（git config merge.conflictStyle diff3 で含まれるようになります）"
   view_empty: （空）
   view_more: "… 他 %{count} 行"
   view_close: 閉じる
