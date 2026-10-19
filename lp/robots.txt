@@ -1,4 +1,4 @@
-# necoder.com — 全公開。sitemap は毎ビルド再生成される（scripts/lp-build.mjs）
+# necoder.com — 全公開。sitemap は手で保つ（LP を直したら lastmod を書き換える）
 User-agent: *
 Allow: /
 
