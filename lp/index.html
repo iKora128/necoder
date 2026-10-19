@@ -54,8 +54,6 @@
 <script>window.__resources={"https://unpkg.com/react@18.3.1/umd/react.production.min.js":"/assets/js/react.production.min.js","https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js":"/assets/js/react-dom.production.min.js"};</script>
 <script src="/assets/js/dc-runtime.js"></script>
 
-<!-- ダウンロードは OS を見分けて 1 つだけ大きく出す（Mac で開けば Mac 版・Windows なら Windows 版）。
-     見分けられない時・スクリプトが止まっている時は両方出す。?os=windows / ?os=mac で確かめられる。 -->
 <script>
 (function () {
   var forced = new URLSearchParams(location.search).get('os');
@@ -655,7 +653,7 @@ a:hover { color: var(--color-accent-600); }
       </div>
     </section>
   </div>
-  <section id="download" style="background: var(--color-accent); color: var(--color-bg)">
+  <section style="background: var(--color-accent); color: var(--color-bg)">
     <div style="max-width: 1240px; margin: 0 auto; padding: 84px clamp(20px,4vw,56px)">
       <h2 style="font-size: clamp(34px,4.2vw,56px); line-height: 1.1; letter-spacing: -0.015em; margin: 0; color: var(--color-bg)">次のエディタは、<br>エージェントごと動く。</h2>
       <div style="display: grid; gap: 12px; justify-items: start; margin-top: 36px">
