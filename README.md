@@ -133,7 +133,7 @@ Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 
 **Team and roles.** necoder is developed and released by its maintainer, Daichi Nagashima ([@iKora128](https://github.com/iKora128)), who acts as committer, reviewer and approver for signed releases. All release binaries are built from this public repository by GitHub Actions ([`release.yml`](.github/workflows/release.yml)) on version tags, and each signing request is approved manually.
 
-**Privacy.** necoder does not collect or transmit any user data. No telemetry, ever. The only network requests are the ones you initiate yourself (your AI agents, your SSH hosts) and a version check against GitHub Releases.
+**Privacy.** necoder does not collect or transmit any user data. No telemetry, ever. On its own it only checks GitHub Releases for a new version and refreshes the AI agent list from the ACP registry; turn both off with **Settings → Behavior & editor → Check for new versions automatically**. Everything else happens only when you ask for it (your AI agents, your SSH hosts, an agent install). Details: [necoder.com/code-signing-policy](https://necoder.com/code-signing-policy/).
 
 ---
 
@@ -260,4 +260,4 @@ SSH 経路全体をローカルで試すには `./scripts/test-remote-ssh-docker
 
 **体制**: necoder はメンテナの長嶋大地([@iKora128](https://github.com/iKora128))が開発・リリースし、署名リリースの committer / reviewer / approver を兼ねます。リリースバイナリは全てこの公開リポジトリのバージョンタグから GitHub Actions([`release.yml`](.github/workflows/release.yml))でビルドされ、署名リクエストは毎回手動で承認します。
 
-**プライバシー**: necoder はユーザーデータを一切収集・送信しません(テレメトリなし)。通信は自分で開始するもの(エージェント・SSH ホスト)と GitHub Releases への更新チェックのみです。
+**プライバシー**: necoder はユーザーデータを一切収集・送信しません(テレメトリなし)。自動でつなぐのは GitHub Releases への新しいバージョンの確認と、ACP レジストリからの AI エージェント一覧の更新だけで、どちらも **設定 → 動作とエディタ →「新しいバージョンを自動で確認」** で止められます。そのほかは自分で開始するもの(エージェント・SSH ホスト・エージェントのインストール)だけです。詳細: [necoder.com/code-signing-policy](https://necoder.com/code-signing-policy/)

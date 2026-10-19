@@ -418,6 +418,10 @@ pub struct Settings {
     /// **その窓を見ていない時だけ**通知センターへ出す（見ている時は右下のトーストで足りる）。
     /// ミュートしたスレッドは出さない。押すとそのスレッドへ飛ぶ。
     pub system_notifications: bool,
+    /// 自動でネットへ出る確認（新しいバージョンの確認・AI エージェント一覧の取り直し）をするか（既定 on）。
+    /// オフでも、メニューの「アップデートを確認」や設定の「一覧を更新」など人が押した時は出る。
+    /// SignPath Foundation の署名の条件（自動で外へつなぐ物は止められること）でもある（2026-10-19）。
+    pub update_check: bool,
     /// 装飾的な動きを静止するアクセシビリティ設定。GPUI の `reduce_motion` へ接続し、
     /// スピナー・fade・マスコットなどの継続アニメーションを静止画として描く。
     pub reduce_motion: bool,
@@ -577,6 +581,7 @@ impl Default for Settings {
             sound_waiting: "nyaan".to_string(),
             sound_volume: 100,
             system_notifications: true,
+            update_check: true,
             reduce_motion: false,
             tier2_summaries: true,
             captain_agent: None,
@@ -729,6 +734,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "sound_waiting": "nyaan",
   "sound_volume": 100,
   "system_notifications": true,
+  "update_check": true,
   "reduce_motion": false,
   "tier2_summaries": true,
   "agent_tabs_view": "bar",

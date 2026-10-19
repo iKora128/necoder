@@ -1039,6 +1039,8 @@ settings:
   sound_mew: みゃっ
   sound_system: システム音
   sound_off: オフ
+  pref_update_check: 新しいバージョンを自動で確認
+  pref_update_check_sub: オフにすると、AI エージェントの一覧も自動では更新しません
   pref_reduce_motion: 動きを減らす
   pref_font_size: フォントサイズ
   pref_tab_size: タブ幅

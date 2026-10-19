@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code signing policy — necoder</title>
+<meta name="description" content="How necoder's Windows builds are signed, who can approve a signing, and what necoder sends over the network.">
+<link rel="canonical" href="https://necoder.com/code-signing-policy/">
+<style>
+  :root { color-scheme: light dark; --bg: #f4f2ee; --text: #1a1a1a; --muted: #5d5d5d; --rule: #d8d4cc; --accent: #f04523; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161616; --text: #f1eee8; --muted: #a8a49c; --rule: #3a3833; } }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.75 system-ui, "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 72px 24px 96px; }
+  a { color: inherit; text-underline-offset: 3px; }
+  h1 { font-size: 40px; line-height: 1.15; margin: 0 0 8px; }
+  h2 { font-size: 22px; margin: 48px 0 8px; padding-top: 24px; border-top: 2px solid var(--rule); }
+  .note { color: var(--muted); font-size: 14px; }
+  .attribution { border-left: 4px solid var(--accent); padding: 8px 16px; margin: 24px 0; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--rule); }
+  .ja { margin-top: 64px; }
+</style>
+</head>
+<body>
+<main>
+  <p class="note"><a href="/">necoder</a></p>
+  <h1>Code signing policy</h1>
+  <p class="note">necoder is a free, open-source code editor (AGPL-3.0). This page covers the Windows builds.</p>
+
+  <p class="attribution">Free code signing provided by <a href="https://signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.</p>
+
+  <h2>What is signed</h2>
+  <p>The Windows installer (<code>necoder-windows-x64-setup.exe</code>) and <code>necoder.exe</code> attached to <a href="https://github.com/iKora128/necoder/releases">GitHub Releases</a>. They are built by GitHub Actions from the public source of <a href="https://github.com/iKora128/necoder">github.com/iKora128/necoder</a> only. Every signing request is approved by hand. The macOS build is signed and notarized with Apple's Developer ID separately.</p>
+
+  <h2>Team roles</h2>
+  <table>
+    <tr><th>Role</th><th>Members</th></tr>
+    <tr><td>Committers and reviewers</td><td><a href="https://github.com/iKora128">Daichi Nagashima (@iKora128)</a></td></tr>
+    <tr><td>Approvers</td><td><a href="https://github.com/iKora128">Daichi Nagashima (@iKora128)</a></td></tr>
+  </table>
+  <p class="note">Contributions from anyone else are merged only after review. All members use multi-factor authentication for GitHub and SignPath.</p>
+
+  <h2>Privacy policy</h2>
+  <p>necoder has no telemetry, analytics or crash reporting. Crash logs stay on your computer. necoder connects to other systems only in these cases:</p>
+  <table>
+    <tr><th>When</th><th>Where</th><th>Can you turn it off?</th></tr>
+    <tr><td>Checking for a new version, every few hours</td><td>GitHub (api.github.com)</td><td>Yes: Settings → Behavior &amp; editor → “Check for new versions automatically”</td></tr>
+    <tr><td>Refreshing the list of AI agents, at most hourly</td><td>ACP registry (cdn.agentclientprotocol.com)</td><td>Yes: the same switch</td></tr>
+    <tr><td>You press “Install” for an AI agent</td><td>nodejs.org and the npm registry</td><td>Only runs when you press it</td></tr>
+    <tr><td>You use an AI agent (Claude Code, Codex and others)</td><td>That agent's own service, under its own privacy policy</td><td>Agents are off until you turn them on</td></tr>
+    <tr><td>You turn on phone remote control</td><td>necoder's relay (control.necoder.com)</td><td>Off until you turn it on</td></tr>
+    <tr><td>You open a Git remote, an SSH host or a web page in necoder</td><td>The address you chose</td><td>Only runs when you ask</td></tr>
+  </table>
+  <p>Besides its own folder, the installer adds a Start menu entry and, if you leave them checked in setup, a desktop shortcut, an “Open with necoder” entry in Explorer and an entry in your user PATH. It needs no administrator rights. Uninstall it from Windows Settings → Apps; your settings in <code>%APPDATA%\necoder</code> are kept until you delete them.</p>
+
+  <section class="ja" lang="ja">
+    <h2>日本語</h2>
+    <p>necoder の Windows 用のインストーラと <code>necoder.exe</code> は、SignPath Foundation の証明書で無料で署名しています。署名するのは、公開しているソースから GitHub Actions が作った物だけで、署名のたびに人が承認します。</p>
+    <p>necoder はテレメトリーや利用状況の送信をしません。自動でネットにつなぐのは、新しいバージョンの確認と AI エージェント一覧の更新だけで、どちらも 設定 → 動作とエディタ の「新しいバージョンを自動で確認」で止められます。そのほかは、インストールを押した時・AI エージェントを使う時・スマホ連携を入れた時など、操作した時だけつなぎます。</p>
+  </section>
+</main>
+</body>
+</html>

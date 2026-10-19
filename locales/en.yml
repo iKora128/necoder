@@ -1038,6 +1038,8 @@ settings:
   sound_mew: Chirp
   sound_system: System
   sound_off: Off
+  pref_update_check: Check for new versions automatically
+  pref_update_check_sub: When off, the AI agent list isn't refreshed automatically either
   pref_reduce_motion: Reduce motion
   pref_font_size: Font size
   pref_tab_size: Tab width
