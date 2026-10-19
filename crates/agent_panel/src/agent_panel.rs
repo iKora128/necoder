@@ -5091,8 +5091,13 @@ PYEOF"#;
     }
 
     /// `logical_scroll_top` が番兵値のまま（= まだレイアウトされていない）か。
+    ///
+    /// 項目が 0 の時は決める先頭が無いので待たない。gpui は 0 項目の一覧に `item_ix = 0` を返し続ける
+    /// ので、`0 >= 0` で「未確定」と読むと、空のスレッドを開いている間ずっと毎フレーム描き直す
+    /// （初回起動の Windows でアイドル中に 1 コアの約 9 割を使っていた・#69）。
     fn transcript_top_item_pending(&self) -> bool {
-        self.transcript_list.logical_scroll_top().item_ix >= self.transcript_list.item_count()
+        let item_count = self.transcript_list.item_count();
+        item_count > 0 && self.transcript_list.logical_scroll_top().item_ix >= item_count
     }
 
     /// transcript の仮想リスト項目数。Entry に加え、送信直後など本文がまだ無い間だけ
