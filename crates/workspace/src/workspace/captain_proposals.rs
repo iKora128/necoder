@@ -2260,7 +2260,7 @@ mod tests {
         std::fs::write(
             &settings,
             r#"{"onboarded":true,"agent_prewarm":false,"captain_agent":"Claude Code",
-                "tier2_summaries":false,"agent_auto_name":false,
+                "enabled_agents":["claude"],"tier2_summaries":false,"agent_auto_name":false,
                 "agent_servers":{"claude":{"type":"custom","command":"/nonexistent/necoder-test-agent"}}}"#,
         )
         .expect("設定を書ける");

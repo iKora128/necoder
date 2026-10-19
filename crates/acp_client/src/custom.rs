@@ -198,7 +198,7 @@ fn missing_tool(tool: &str) -> anyhow::Error {
 /// 設定側から受け取る 1 件（settings 層が `agent_servers` から写す）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomAgentSpec {
-    /// `agent_servers` のキー。`disabled_agents` / `agent_config_defaults` も同じ id で引く。
+    /// `agent_servers` のキー。`enabled_agents` / `agent_config_defaults` も同じ id で引く。
     pub id: String,
     /// 一覧に出す名前（無い・空なら id）。
     pub name: Option<String>,
@@ -480,7 +480,7 @@ impl PartialEq for Agent {
 impl Eq for Agent {}
 
 impl Agent {
-    /// 設定のキー（`disabled_agents` / `agent_config_defaults` / `agent_servers` の id）。
+    /// 設定のキー（`enabled_agents` / `agent_config_defaults` / `agent_servers` の id）。
     pub fn id(&self) -> &str {
         match self {
             Agent::Builtin(kind) => kind.id,

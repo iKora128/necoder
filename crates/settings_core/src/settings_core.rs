@@ -467,11 +467,13 @@ pub struct Settings {
     /// ピルで選んだモード（`agent_config_defaults.<id>.mode`）があればそちらが勝つ。設定画面で選ぶと
     /// その記憶を全部消す（全エージェントを一括で揃える）。Chat のスレッドには効かない。
     pub agent_permission_default: String,
-    /// 使わないエージェント（`AgentKind::id`・例 `["grok", "kimi"]`・O16）。選択肢（composer の
-    /// エージェント・＋ Task の並べて比べる・パレットのエージェント別の新規スレッド）から外し、
-    /// ログインの確かめ（CLI の status・ACP の試しのセッション）でも起こさない。設定 › エージェントの
-    /// スイッチで出し入れする。既定のエージェントと Captain は外せない（画面が止める）。
-    pub disabled_agents: Vec<String>,
+    /// 使うエージェント（`AgentKind::id`・例 `["claude", "codex"]`・O16）。**既定は空＝全部オフ**
+    /// （2026-10-19・入れてもいない物が最初からオンに見えて「使える」と読まれた）。設定 › エージェントの
+    /// スイッチ・初回の案内・「インストール」「ログイン」を押した時・＋ エージェントを追加で入る。
+    /// 入っていない物は選択肢（composer のエージェント・＋ Task の並べて比べる・パレットの
+    /// エージェント別の新規スレッド）から外し、ACP の試しのセッションでも起こさない。
+    /// 旧 `disabled_agents` は読まない（後方互換の経路は作らない）。
+    pub enabled_agents: Vec<String>,
     /// スレッドのセッションでエージェントへ渡す MCP サーバ（サーバ名がキー）。詳細は [`McpServerSetting`]。
     /// 空＝他ツールから発見した分だけが一覧に並び、どれも渡さない（有効化は明示だけ）。
     pub mcp_servers: BTreeMap<String, McpServerSetting>,
@@ -586,7 +588,7 @@ impl Default for Settings {
             connections: BTreeMap::new(),
             agent_connections: BTreeMap::new(),
             agent_permission_default: "default".to_string(),
-            disabled_agents: Vec::new(),
+            enabled_agents: Vec::new(),
             mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
             confirm_quit: "running".to_string(),
@@ -668,9 +670,9 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    /// エージェント（`AgentKind::id`）を使うか（`disabled_agents` に無ければ使う・O16）。
+    /// エージェント（`AgentKind::id`）を使うか（`enabled_agents` に在れば使う・O16）。
     pub fn agent_enabled(&self, agent_id: &str) -> bool {
-        !self.disabled_agents.iter().any(|id| id == agent_id)
+        self.enabled_agents.iter().any(|id| id == agent_id)
     }
 
     /// エージェントが使う接続（`agent_connections.<agent_id>` → `connections.<id>`）。決めていない・
@@ -749,7 +751,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "connections": {},
   "agent_connections": {},
   "agent_permission_default": "default",
-  "disabled_agents": [],
+  "enabled_agents": [],
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
   "agent_idle_stop_minutes": 15,

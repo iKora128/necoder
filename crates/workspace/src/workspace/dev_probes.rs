@@ -1349,6 +1349,11 @@ impl Workspace {
                 let view = self.chrome.settings_view.clone();
                 view.update(cx, |view, cx| view.debug_start_agent_login(argument, cx));
             }
+            // 初回の案内の手順へ飛ぶ・終える（`onboarding:command` / `onboarding:folder` / `onboarding:finish`）。
+            "onboarding" => {
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_onboarding(argument, cx));
+            }
             // AI エージェントのページで行を開く（`settings-open:codex`・空なら閉じる）。
             "settings-open" => {
                 let view = self.chrome.settings_view.clone();

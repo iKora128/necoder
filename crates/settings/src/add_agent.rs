@@ -188,8 +188,9 @@ impl SettingsView {
         .detach();
     }
 
-    /// 「追加」: `agent_servers.<id>` に `{"type": "registry", "name": …}` を書く。使わないに入って
-    /// いたら出す（足したのに一覧で「使わない」のままにしない）。ダイアログは開いたまま（続けて足せる）。
+    /// 「追加」: `agent_servers.<id>` に `{"type": "registry", "name": …}` を書き、使う一覧
+    /// （`enabled_agents`）にも入れる（足したのに一覧で「使わない」のままにしない）。ダイアログは開いたまま
+    /// （続けて足せる）。
     pub(crate) fn add_registry_agent(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
         let setting = settings_core::AgentServerSetting::Registry {
             name: Some(name.to_string()),
@@ -199,8 +200,8 @@ impl SettingsView {
         let failed = result.is_err();
         self.report_save(result, cx);
         if !failed && !get(cx).agent_enabled(id) {
-            let next = toggled_disabled_agents(&get(cx).disabled_agents, id);
-            let result = set_user_value(cx, "disabled_agents", serde_json::json!(next));
+            let next = toggled_enabled_agents(&get(cx).enabled_agents, id);
+            let result = set_user_value(cx, "enabled_agents", serde_json::json!(next));
             self.report_save(result, cx);
         }
         cx.notify();

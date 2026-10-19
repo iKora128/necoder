@@ -111,6 +111,8 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item $exe (Join-Path $stage 'necoder.exe')
 Copy-Item 'scripts/windows/README-Windows.txt' $stage
+# ターミナルの `ne`（インストール先は PATH に入る＝`ne .` で開ける・cli_shim の Windows 版）。
+Copy-Item 'scripts/windows/ne.cmd' $stage
 Copy-Item 'LICENSE', 'THIRD_PARTY_NOTICES.md' $stage
 Copy-Item 'third_party/licenses' (Join-Path $stage 'licenses') -Recurse
 New-Item -ItemType Directory -Path (Join-Path $stage 'control') -Force | Out-Null

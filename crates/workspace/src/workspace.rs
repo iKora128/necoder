@@ -1509,6 +1509,9 @@ struct ChromeState {
     pending_font_picker: Option<&'static str>,
     /// 設定の「選ぶ…」で頼まれたシェルのピッカー（窓が要るので後処理で開く・O25）。
     pending_shell_picker: bool,
+    /// 初回の案内を終えた: 使うエージェントがあれば、入力欄にフォーカスを置いたスレッドを用意する
+    /// （窓が要るので効果の末尾で・UI-SPEC §12「オンボーディング」）。
+    pending_first_thread: bool,
     /// ターミナルの「▾」で頼まれた「シェルを選んで新しく開く」のピッカー（頼んだドック・窓が要るので後処理）。
     pending_terminal_shell_menu: Option<Entity<terminal_view::TerminalDock>>,
     /// statusbar の項目の出し入れのメニュー（右クリックした所・O27）。
@@ -2082,6 +2085,7 @@ impl Workspace {
             || self.conflict_view_is_stale()
             || self.chrome.pending_font_picker.is_some()
             || self.chrome.pending_shell_picker
+            || self.chrome.pending_first_thread
             || self.chrome.pending_terminal_shell_menu.is_some()
     }
 
@@ -2152,6 +2156,10 @@ impl Workspace {
         }
         if let Some(index) = self.overlays.pending_project_switch.take() {
             self.switch_project(index, window, cx);
+        }
+        // 切り替えの後に置く（③で選んだフォルダのパネルにスレッドを用意する）。
+        if std::mem::take(&mut self.chrome.pending_first_thread) {
+            self.open_first_thread(window, cx);
         }
         if let Some((path, line, column)) = self.pending_navigation.take() {
             self.record_nav_position(cx);

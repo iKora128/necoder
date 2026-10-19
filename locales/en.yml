@@ -779,7 +779,7 @@ settings:
   agent_status_unverified: "Login unverified"
   agent_status_unverified_remote: "Login unverified (not checked over SSH)"
   agent_status_checking: "Checking…"
-  agent_status_disabled: "Disabled"
+  agent_status_disabled: "Ready · off"
   agent_status_unreachable: "Couldn't check status"
   agent_status_missing: "Required steps:"
   agent_missing_node: "Install Node.js"
@@ -934,8 +934,21 @@ settings:
   make_captain: Make Captain
   is_captain: ⚑ Captain
   welcome_title: Welcome 🎨
-  welcome_sub: "necoder talks to the AI agents installed on your computer (such as Claude Code or Codex). Set up any one of them to start using AI. You can also use necoder as a plain editor and change this later in Settings."
+  welcome_sub: "Three quick steps get you to your first AI conversation. You can change any of this later in Settings."
   get_started: Get started →
+  onboarding_step_agents: AI agents
+  onboarding_step_command: ne command
+  onboarding_step_folder: Folder
+  onboarding_agents_note: "Turn on the AI you want to use. Claude Code and Codex work with the subscription you already have."
+  onboarding_command_note: "Type `ne .` in a terminal to open that folder in necoder."
+  onboarding_command_windows_missing: Available when you install necoder with the installer.
+  onboarding_folder_note: Choose the folder you'll work in. The AI works inside it too.
+  onboarding_folder_none: No folder open yet
+  onboarding_pick_folder: Choose folder…
+  onboarding_next: Next →
+  onboarding_next_without_ai: Continue without AI →
+  onboarding_back: ← Back
+  onboarding_start_without_folder: Start without a folder →
   mcp_heading: MCP servers
   mcp_empty: "No MCP servers"
   mcp_note: "Applies to threads opened from now on"

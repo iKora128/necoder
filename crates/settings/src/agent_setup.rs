@@ -69,6 +69,8 @@ impl SettingsView {
         {
             return;
         }
+        // 押した＝使うつもり（エージェントは既定でオフ・UI-SPEC §12「使う / 使わない」）。
+        self.enable_agent_id(kind.id, cx);
         let stage = Arc::new(Mutex::new(SetupStage::Node));
         self.agent_jobs.insert(
             kind.id.to_string(),
@@ -134,6 +136,8 @@ impl SettingsView {
         {
             return;
         }
+        // 押した＝使うつもり（エージェントは既定でオフ・UI-SPEC §12「使う / 使わない」）。
+        self.enable_agent_id(kind.id, cx);
         let session = match acp_client::setup::start_login(kind) {
             Ok(session) => session,
             Err(error) => {
