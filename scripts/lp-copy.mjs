@@ -82,3 +82,72 @@ export function arrangeSections(html) {
   });
   return html;
 }
+
+// ── ダウンロード: OS を見分けてボタンを 1 つだけ大きく出す（2026-10-19・本人が 5 案から選んだ案 2）──
+// 以前は「Mac / Windows 版をダウンロード」が GitHub の Releases の一覧を開くだけで、普通の人は GitHub の
+// ページで迷った。最新の正式版のファイルを直接落とす（releases/latest/download/<名前>）。Mac で開けば
+// Mac 用・Windows なら Windows 用だけを大きく出し、もう片方は下の小さなリンク。見分けられない時・
+// スクリプトが止まっている時は両方出す。?os=windows / ?os=mac で確かめられる。
+// 「版」は使わない（本人「版という日本語は使いません、バージョンです」）。
+// 書き出しの markup（ナビ・ヒーロー・下の帯のボタン）を置き換える。当てた後の HTML に当て直しても変わらない。
+const RELEASES = 'https://github.com/iKora128/necoder/releases';
+const MAC_DOWNLOAD = `${RELEASES}/latest/download/necoder.dmg`;
+const WINDOWS_DOWNLOAD = `${RELEASES}/latest/download/necoder-windows-x64-setup.exe`;
+const OS_SCRIPT = `<script>
+(function () {
+  var forced = new URLSearchParams(location.search).get('os');
+  var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+  var agent = navigator.userAgent || '';
+  var os = forced === 'windows' || forced === 'mac' ? forced
+    : /Win/i.test(platform) || /Windows/.test(agent) ? 'windows'
+    : /Mac/i.test(platform) || /Macintosh|Mac OS X/.test(agent) ? 'mac' : '';
+  if (os) document.documentElement.dataset.os = os;
+})();
+</script>
+<style>
+html[data-os=mac] .dl-win, html[data-os=windows] .dl-mac { display: none !important; }
+html:not([data-os]) .dl-other { display: none !important; }
+</style>
+`;
+const SMALL_NOTE = 'font-size: 12.5px; color: color-mix(in srgb, var(--color-text) 65%, transparent)';
+const BIG_BUTTON = 'white-space: nowrap; text-decoration: none; padding: 14px 28px; font-size: 16px';
+const BAND_BUTTON =
+  'white-space: nowrap; text-decoration: none; color: var(--color-bg); border: 1px solid var(--color-bg); padding: 14px 28px; font-size: 16px';
+const MAC_NOTE = '無料 · macOS 13 以降（Apple Silicon）';
+const WINDOWS_NOTE = '無料 · Windows 10 以降（x64）';
+
+export function applyDownloads(html) {
+  if (!html.includes('html[data-os=mac]')) html = html.replace('</head>', `${OS_SCRIPT}</head>`);
+
+  html = html.replace(
+    /<a class="btn btn-primary" href="https:\/\/github\.com\/iKora128\/necoder\/releases" style="white-space: nowrap; text-decoration: none">([^<]+)<\/a>/,
+    (_, label) =>
+      `<a class="btn btn-primary dl-mac" href="${MAC_DOWNLOAD}" style="white-space: nowrap; text-decoration: none">${label}</a>` +
+      `<a class="btn btn-primary dl-win" href="${WINDOWS_DOWNLOAD}" style="white-space: nowrap; text-decoration: none">${label}</a>`,
+  );
+
+  html = html.replace(
+    /        <div style="display: flex; gap: 12px; flex-wrap: wrap; padding-bottom: 4px">\n[\s\S]*?GitHub<\/a>\n        <\/div>/,
+    `        <div style="display: grid; gap: 10px; justify-items: start; padding-bottom: 4px">
+          <div style="display: flex; gap: 12px; flex-wrap: wrap">
+            <a class="btn btn-primary dl-mac" href="${MAC_DOWNLOAD}" style="${BIG_BUTTON}">Mac 用ダウンロード</a>
+            <a class="btn btn-primary dl-win" href="${WINDOWS_DOWNLOAD}" style="${BIG_BUTTON}">Windows 用ダウンロード</a>
+            <a class="btn btn-secondary" href="https://github.com/iKora128/necoder" style="${BIG_BUTTON}">GitHub</a>
+          </div>
+          <span class="dl-mac" style="${SMALL_NOTE}">${MAC_NOTE}<span class="dl-other"> · <a href="${WINDOWS_DOWNLOAD}" style="color: inherit">Windows 用はこちら</a></span></span>
+          <span class="dl-win" style="${SMALL_NOTE}">${WINDOWS_NOTE}<span class="dl-other"> · <a href="${MAC_DOWNLOAD}" style="color: inherit">Mac 用はこちら</a></span></span>
+        </div>`,
+  );
+
+  html = html.replace(
+    /      <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 36px; align-items: center">\n[\s\S]*?<\/div>\n/,
+    `      <div style="display: grid; gap: 12px; justify-items: start; margin-top: 36px">
+        <a class="btn dl-mac" href="${MAC_DOWNLOAD}" style="${BAND_BUTTON}">Mac 用ダウンロード</a>
+        <a class="btn dl-win" href="${WINDOWS_DOWNLOAD}" style="${BAND_BUTTON}">Windows 用ダウンロード</a>
+        <span class="dl-mac" style="font-size: 13px; opacity: 0.85">${MAC_NOTE}<span class="dl-other"> · <a href="${WINDOWS_DOWNLOAD}" style="color: var(--color-bg)">Windows 用はこちら</a></span> · <a href="${RELEASES}" style="color: var(--color-bg)">ほかのバージョン</a></span>
+        <span class="dl-win" style="font-size: 13px; opacity: 0.85">${WINDOWS_NOTE}<span class="dl-other"> · <a href="${MAC_DOWNLOAD}" style="color: var(--color-bg)">Mac 用はこちら</a></span> · <a href="${RELEASES}" style="color: var(--color-bg)">ほかのバージョン</a></span>
+      </div>
+`,
+  );
+  return html;
+}

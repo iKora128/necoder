@@ -15,7 +15,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { COPY_PATCHES, arrangeSections } from './lp-copy.mjs';
+import { COPY_PATCHES, applyDownloads, arrangeSections } from './lp-copy.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const lpRoot = path.join(repoRoot, 'lp');
@@ -273,6 +273,8 @@ for (const page of PAGES) {
     `${headMeta(page.meta)}\n${resourceShim}\n<script src="/assets/js/dc-runtime.js"></script>`,
   );
   html = html.replace('<html>', `<html lang="${page.lang}">`);
+  // トグル類を挿した後で、ダウンロードを OS 別の直リンクにする（訳す前＝日本語の文言で当てる）。
+  html = applyDownloads(html);
 
   if (page.translate) {
     const dictionary = JSON.parse(fs.readFileSync(path.join(repoRoot, page.translate), 'utf8'));
