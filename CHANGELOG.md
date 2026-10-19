@@ -5,6 +5,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-10-20
+
+This release makes the first start much easier, especially on Windows. A three-step guide takes you from launch to a ready AI thread, AI agents install and sign in with one button, and Windows gets an installer. It is delivered through auto-update.
+
+**Please note:** AI agents now start turned off. After updating, turn on the agents you use in Settings › AI agents (one switch each).
+
+### Added
+
+- **First-run guide**: three steps on first launch: turn on an AI agent, install the `ne` command, choose a folder. It ends with the agent's input box focused, so you can type right away.
+- **One-button agent setup**: "Install" sets up Node.js (if needed), the agent and its ACP adapter in the background, then moves on to sign-in. No terminal opens. Claude Code shows a box to paste the code from the browser; Codex finishes by itself. Progress and errors show under the agent.
+- **Windows installer**: `necoder-windows-x64-setup.exe` installs for your user only (no admin rights), with a Start menu entry, an optional desktop shortcut, "Open with necoder" in Explorer and `necoder` / `ne` on PATH. `necoder.exe` now has the necoder icon.
+- **Choose a shell for a new terminal**: the ▾ next to ＋ in the terminal opens PowerShell, Command Prompt, Git Bash or a WSL distribution in a new tab (on macOS, the shells in `/etc/shells`).
+- **Turn off automatic update checks**: Settings › Behavior & editor › "Check for new versions automatically". When off, necoder also stops refreshing the AI agent list on its own.
+
+### Changed
+
+- **AI agents are off until you turn them on**: the agent list is split into "Available" and "Set up to use", with numbered steps for the ones that still need setup. Pressing Install or Sign in turns that agent on.
+- **Starting without a folder**: launching from Finder, the Dock or the Start menu no longer opens `/`, your home folder or the install folder as a project.
+- **Pickers have a real input field**: the ＋ and "Open recent" windows show a proper input box, and recent projects also match on their path.
+- **Wording**: "版" is now "バージョン" in Japanese; agents that are ready but off say "Available · off".
+
+### Fixed
+
+- **High CPU while idle**: an empty AI thread made the panel redraw every frame. On Windows this kept one core at about 90% right after first launch.
+- **Install and Sign in on Windows**: the buttons ran a macOS shell and did nothing on Windows. They now work, and Node.js / native `claude` installed after launch are found without restarting.
+- **Git Bash on Windows**: the shell list used to pick WSL's `bash.exe`; it now finds Git for Windows' own Bash.
+- **Task environment with a chosen shell**: `.necoder/task.env` now reaches the terminal even when you pick a shell.
+- **Shortcut labels on Windows** show Ctrl instead of ⌘.
+
+### 日本語
+
+初めて使う時の流れを、特に Windows で大きく楽にした版です。起動したら 3 つの手順で AI と話せるところまで進めます。AI エージェントはボタン 1 つでインストールからログインまで済み、Windows にはインストーラができました。自動更新で配信します。
+
+**ご注意:** AI エージェントは最初はオフになりました。更新したら、設定 › AI エージェントで使うエージェントのスイッチをオンにしてください。
+
+#### 追加
+
+- **初回の案内**：初めて起動すると、① AI エージェントをオンにする ② `ne` コマンドをインストールする ③ フォルダを選ぶ、の 3 つの手順で進みます。最後はエージェントの入力欄にカーソルがあるので、そのまま打てます。
+- **ボタン 1 つでエージェントを準備**：「インストール」を押すと、必要なら Node.js、エージェント本体、ACP のアダプタを裏で入れて、ログインへ進みます。ターミナルは開きません。Claude Code はブラウザに出たコードを貼る欄が出て、Codex は自動で終わります。進み具合と失敗はエージェントの行の下に出ます。
+- **Windows のインストーラ**：`necoder-windows-x64-setup.exe` は自分のユーザーだけにインストールします（管理者権限は不要）。スタートメニュー、デスクトップのショートカット（選べます）、エクスプローラの「necoder で開く」、PATH の `necoder` / `ne` まで用意します。`necoder.exe` に necoder のアイコンが付きました。
+- **シェルを選んでターミナルを開く**：ターミナルの ＋ の隣の ▾ から、PowerShell・コマンド プロンプト・Git Bash・WSL のディストリを選んで新しいタブで開けます（macOS は `/etc/shells` のシェル）。
+- **アップデートの自動確認を止められる**：設定 › 動作とエディタ の「新しいバージョンを自動で確認」。オフにすると、AI エージェント一覧の自動更新もしません。
+
+#### 変更
+
+- **AI エージェントはオンにするまで使いません**：一覧を「使える」と「準備すると使える」に分け、準備がまだの物は番号付きの手順で見せます。「インストール」「ログイン」を押したエージェントはオンになります。
+- **フォルダなしで始める**：Finder・Dock・スタートメニューから起動した時に、`/`・ホームフォルダ・インストール先をプロジェクトとして開かなくなりました。
+- **選ぶ画面にちゃんとした入力欄**：＋ と「最近使った項目を開く」の画面に入力欄を置き、最近のプロジェクトはパスでも絞り込めます。
+- **言葉づかい**：「版」を「バージョン」に、使えるがオフのエージェントの状態を「利用可能 · オフ」にしました。
+
+#### 修正
+
+- **アイドル中の CPU 使用率が高い**：空の AI スレッドがあると、パネルが毎フレーム描き直していました。Windows では初回起動の直後から 1 コアの約 9 割を使っていました。
+- **Windows の「インストール」「ログイン」**：macOS のシェルでコマンドを流していたため、Windows では何も起きませんでした。今は動きます。起動後に入れた Node.js やネイティブ版の `claude` も、再起動せずに見つけます。
+- **Windows の Git Bash**：シェルの一覧が WSL の `bash.exe` を拾っていました。Git for Windows の Bash を正しく見つけます。
+- **シェルを選んだ時の Task の環境**：シェルを選んでも、`.necoder/task.env` がターミナルに渡るようになりました。
+- **Windows のショートカットの表記**：⌘ ではなく Ctrl と出ます。
+
 ## [0.1.30] - 2026-10-18
 
 A small release that updates how necoder describes itself in the About window and the empty editor. It is delivered through auto-update.
