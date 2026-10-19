@@ -107,11 +107,15 @@ impl Workspace {
     /// SSH 先の localhost ではない）。最後の端末を閉じたら隠す。
     fn on_floating_terminal_event(
         &mut self,
-        _dock: Entity<TerminalDock>,
+        dock: Entity<TerminalDock>,
         event: &TerminalDockEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
+            // 浮かべた端末の「▾」も、選んだシェルはその浮かべた端末に開く。
+            TerminalDockEvent::ChooseShell => {
+                self.chrome.pending_terminal_shell_menu = Some(dock.clone());
+            }
             TerminalDockEvent::OpenPath { path, line } => {
                 let resolved = if Path::new(path).is_absolute() {
                     PathBuf::from(path)

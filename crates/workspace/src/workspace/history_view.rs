@@ -926,7 +926,7 @@ impl Workspace {
             .border_color(theme.border)
             .text_size(px(10.5))
             .text_color(theme.fg2)
-            .child(SharedString::from(i18n::t!("agent.history_footer")));
+            .child(SharedString::from(i18n::t!("agent.history_footer", "key" => keymap_core::keystroke_label("enter"))));
 
         Some(
             div()

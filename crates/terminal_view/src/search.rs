@@ -496,7 +496,7 @@ impl TerminalView {
                     "tsearch-prev",
                     "‹",
                     false,
-                    SharedString::from(i18n::t!("search.previous")),
+                    SharedString::from(i18n::t!("search.previous", "key" => keymap_core::keystroke_label("shift-enter"))),
                 )
                 .on_mouse_down(
                     MouseButton::Left,

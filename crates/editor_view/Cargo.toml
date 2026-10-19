@@ -19,6 +19,7 @@ ui.workspace = true
 lang.workspace = true
 markdown.workspace = true
 i18n.workspace = true
+keymap_core.workspace = true
 project.workspace = true
 webview_view.workspace = true
 

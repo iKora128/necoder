@@ -69,6 +69,9 @@ pub enum TerminalDockEvent {
     Dismissed,
     /// タブのダブルクリック（改名・O24）。入力欄は親が出す（このクレートはエディタを知らない）。
     RenameRequested(Entity<TerminalView>),
+    /// 「＋」の隣の「▾」: シェルを選んで新しい端末を開く。入っているシェルの一覧とピッカーは親が持つ
+    /// （このクレートは設定もピッカーも知らない）。選ばれたら親が [`TerminalDock::add_with_shell`] を呼ぶ。
+    ChooseShell,
 }
 
 /// ドックのタブ 1 つ（O24・分割）: 横に並べた端末。1 つなら分割していない。
@@ -389,6 +392,32 @@ impl TerminalDock {
         cx.notify();
     }
 
+    /// 手元の端末か（作業フォルダを持つ launch＝SSH 先の `ssh -tt …` ではない・[`TerminalLaunch::with_shell`]
+    /// と同じ線引き。Windows の手元は既定シェルの指定も持つので、shell の有無では決めない）。
+    pub fn is_local(&self) -> bool {
+        self.launch.cwd.is_some()
+    }
+
+    /// 選んだシェルで新しい端末を開く（「▾」から・設定のシェルは変えない）。`title` はタブ名
+    /// （「Git Bash」「Ubuntu（WSL）」）。SSH 先の端末なら何もしない（シェルは接続先の物）。
+    pub fn add_with_shell(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        title: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_local() {
+            return;
+        }
+        let launch = TerminalLaunch {
+            cwd: self.launch.cwd.clone(),
+            shell: Some((program, args)),
+        };
+        self.open_command(launch, title, window, cx);
+    }
+
     /// 前にあるタブを横に分割する（O24・C02）: 前にいる端末の右に新しい端末を開き、そこへ打鍵を移す。
     /// 1 つのタブは [`MAX_PANES`] まで（それ以上は新しいタブにする）。
     pub fn split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -436,13 +465,19 @@ impl TerminalDock {
         cx.notify();
     }
 
+    /// コマンドを流す端末を新しいタブで開く（設定の「インストール」等）。`title` はタブ名
+    /// （人が付けた名前と同じ扱い＝アプリが付けるタイトルより前に出る）。
     pub fn open_command(
         &mut self,
         launch: TerminalLaunch,
+        title: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let terminal = self.create_terminal(launch, cx);
+        if title.is_some() {
+            terminal.update(cx, |terminal, cx| terminal.set_custom_title(title, cx));
+        }
         self.tabs.push(TerminalTab::single(terminal));
         self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
@@ -727,6 +762,34 @@ impl Render for TerminalDock {
                         cx.listener(|this, _, window, cx| this.add(window, cx)),
                     ),
             )
+            // 「▾」: シェルを選んで新しく開く（PowerShell / コマンド プロンプト / Git Bash / WSL …）。
+            // 手元の端末だけ（SSH 先のシェルは接続先の物）。
+            .when(self.is_local(), |header| {
+                header.child(
+                    div()
+                        .id("term-add-shell")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(18.))
+                        .h_full()
+                        .text_size(px(10.))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
+                        .child("▾")
+                        .tooltip(Tooltip::text(
+                            i18n::t!("terminal.add_shell_tip"),
+                            theme.clone(),
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _window, cx| {
+                                cx.emit(TerminalDockEvent::ChooseShell)
+                            }),
+                        ),
+                )
+            })
             // 横に分割（O24・⌘\）。前にあるタブの前にいる端末の右に新しい端末を開く。
             .when(!self.tabs.is_empty(), |header| {
                 header.child(
@@ -801,7 +864,7 @@ impl Render for TerminalDock {
                     .tooltip(Tooltip::text(
                         self.close_tip
                             .clone()
-                            .unwrap_or_else(|| i18n::t!("terminal.close_dock_tip").into()),
+                            .unwrap_or_else(|| i18n::t!("terminal.close_dock_tip", "key" => keymap_core::keystroke_label("cmd-j")).into()),
                         theme.clone(),
                     ))
                     .on_mouse_down(

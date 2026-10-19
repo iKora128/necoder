@@ -1973,6 +1973,7 @@ dependencies = [
  "gpui",
  "host",
  "i18n",
+ "keymap_core",
  "lang",
  "markdown",
  "project",
@@ -3162,6 +3163,7 @@ dependencies = [
  "serde",
  "serde_json",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4342,6 +4344,7 @@ dependencies = [
  "child_process",
  "cli_shim",
  "editor_view",
+ "embed-resource",
  "futures",
  "gpui",
  "gpui_platform",
@@ -6172,6 +6175,7 @@ dependencies = [
  "gpui",
  "host",
  "i18n",
+ "keymap_core",
  "search",
  "theme_core",
  "ui",
@@ -6431,6 +6435,7 @@ dependencies = [
  "gpui_platform",
  "host",
  "i18n",
+ "keymap_core",
  "paths",
  "serde_json",
  "settings_core",

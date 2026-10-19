@@ -42,7 +42,7 @@ impl Workspace {
             };
             if old_text.trim().is_empty() {
                 self.push_toast(
-                    SharedString::from(i18n::t!("inline.empty_target")),
+                    SharedString::from(i18n::t!("inline.empty_target", "key" => keymap_core::keystroke_label("cmd-i"))),
                     self.accent(),
                     cx,
                 );
@@ -281,8 +281,8 @@ impl Workspace {
                     .text_size(px(11.))
                     .text_color(accent)
                     .child(SharedString::from(match &state.target {
-                        InlineEditTarget::Editor { .. } => i18n::t!("inline.title"),
-                        InlineEditTarget::Terminal => i18n::t!("inline.title_terminal"),
+                        InlineEditTarget::Editor { .. } => i18n::t!("inline.title", "key" => keymap_core::keystroke_label("cmd-i")),
+                        InlineEditTarget::Terminal => i18n::t!("inline.title_terminal", "key" => keymap_core::keystroke_label("cmd-i")),
                     })),
             )
             .child(
@@ -390,7 +390,7 @@ impl Workspace {
                         .text_size(px(11.5))
                         .text_color(gpui::white())
                         .cursor_pointer()
-                        .child(SharedString::from(i18n::t!("inline.accept")))
+                        .child(SharedString::from(i18n::t!("inline.accept", "key" => keymap_core::keystroke_label("enter"))))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| this.accept_inline_edit(window, cx)),

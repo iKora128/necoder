@@ -150,10 +150,15 @@ fn write_cache_to(cache: &std::path::Path, path: &str) {
     }
 }
 
-/// Windows は環境の渡り方が別物（launchd 相当が無い）。移植のときに専用実装を入れるまで no-op。
+/// Windows は login shell が無く、PATH は親（エクスプローラ）から継ぐ。親が古い PATH を
+/// 持っていると、起動前に入れたツールも見えない（issue #69）ので、レジストリのシステム /
+/// ユーザー PATH で足りない分を補う（並びは変えない・`host::refresh_search_path`）。
 #[cfg(not(unix))]
 pub fn inherit_login_shell_path() -> Option<String> {
-    None
+    if std::env::var_os("NECODER_NO_SHELL_ENV").is_some() {
+        return None;
+    }
+    host::refresh_search_path()
 }
 
 #[cfg(all(test, unix))]

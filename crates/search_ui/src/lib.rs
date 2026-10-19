@@ -545,7 +545,7 @@ impl Render for SearchPanel {
                                                     .hover(|style| style.text_color(theme.fg0))
                                                     .child("×")
                                                     .tooltip(Tooltip::text(
-                                                        i18n::t!("searchpanel.scope_clear"),
+                                                        i18n::t!("searchpanel.scope_clear", "key" => keymap_core::keystroke_label("backspace")),
                                                         theme.clone(),
                                                     ))
                                                     .on_mouse_down(

@@ -9228,7 +9228,7 @@ PYEOF"#;
                                             })
                                             .child("×")
                                             .tooltip(Tooltip::text(
-                                                i18n::t!("agent.close_thread_tip"),
+                                                i18n::t!("agent.close_thread_tip", "key" => keymap_core::keystroke_label("cmd-w")),
                                                 theme.clone(),
                                             ))
                                             .on_mouse_down(
@@ -9330,7 +9330,7 @@ PYEOF"#;
                     .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
                     .child("＋")
                     .tooltip(Tooltip::text(
-                        i18n::t!("agent.new_thread_tip"),
+                        i18n::t!("agent.new_thread_tip", "key" => keymap_core::keystroke_label("cmd-shift-a")),
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -9365,7 +9365,7 @@ PYEOF"#;
                     .group_hover("agent-fullscreen", |style| style.text_color(theme.fg0)),
             )
             .tooltip(Tooltip::text(
-                i18n::t!("agent.full_screen_tip"),
+                i18n::t!("agent.full_screen_tip", "key" => keymap_core::keystroke_label("cmd-shift-enter")),
                 theme.clone(),
             ))
             .on_mouse_down(
@@ -9484,7 +9484,7 @@ PYEOF"#;
                     .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
                     .child("＋")
                     .tooltip(Tooltip::text(
-                        i18n::t!("agent.new_thread_tip"),
+                        i18n::t!("agent.new_thread_tip", "key" => keymap_core::keystroke_label("cmd-shift-a")),
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -10284,7 +10284,7 @@ PYEOF"#;
                 .justify_center()
                 .text_size(px(12.5))
                 .text_color(theme.fg2)
-                .child(SharedString::from(i18n::t!("agent.empty")))
+                .child(SharedString::from(i18n::t!("agent.empty", "key" => keymap_core::keystroke_label("cmd-shift-a"))))
                 .into_any_element();
         };
         let entry_count = thread.entries.len();
@@ -13161,9 +13161,17 @@ PYEOF"#;
                                     .cursor_pointer()
                                     .hover(|style| style.text_color(theme.fg0).bg(theme.bg3))
                                     .child(if self.submit_on_enter {
-                                        SharedString::from(i18n::t!("agent.hint_submit_enter"))
+                                        SharedString::from(i18n::t!(
+                                            "agent.hint_submit_enter",
+                                            "send" => keymap_core::keystroke_label("enter"),
+                                            "newline" => keymap_core::keystroke_label("shift-enter"),
+                                        ))
                                     } else {
-                                        SharedString::from(i18n::t!("agent.hint_submit_cmd"))
+                                        SharedString::from(i18n::t!(
+                                            "agent.hint_submit_cmd",
+                                            "newline" => keymap_core::keystroke_label("enter"),
+                                            "send" => keymap_core::keystroke_label("cmd-enter"),
+                                        ))
                                     })
                                     .tooltip(Tooltip::text(
                                         i18n::t!("agent.ime_tip"),
@@ -13191,9 +13199,9 @@ PYEOF"#;
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.bg0)
                                     .child(SharedString::from(if self.submit_on_enter {
-                                        i18n::t!("agent.shell_run_enter")
+                                        i18n::t!("agent.shell_run_enter", "key" => keymap_core::keystroke_label("enter"))
                                     } else {
-                                        i18n::t!("agent.shell_run_cmd")
+                                        i18n::t!("agent.shell_run_cmd", "key" => keymap_core::keystroke_label("cmd-enter"))
                                     }))
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -13236,9 +13244,9 @@ PYEOF"#;
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.bg0)
                                     .child(SharedString::from(if self.submit_on_enter {
-                                        i18n::t!("agent.send_enter")
+                                        i18n::t!("agent.send_enter", "key" => keymap_core::keystroke_label("enter"))
                                     } else {
-                                        i18n::t!("agent.send_cmd")
+                                        i18n::t!("agent.send_cmd", "key" => keymap_core::keystroke_label("cmd-enter"))
                                     }))
                                     .on_mouse_down(
                                         MouseButton::Left,

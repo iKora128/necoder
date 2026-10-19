@@ -628,7 +628,7 @@ impl Workspace {
                                 .border_color(theme.border)
                                 .text_size(px(9.))
                                 .text_color(theme.fg2)
-                                .child(SharedString::from(i18n::t!("control.next_badge"))),
+                                .child(SharedString::from(i18n::t!("control.next_badge", "key" => keymap_core::keystroke_label("enter")))),
                         )
                     }),
             );

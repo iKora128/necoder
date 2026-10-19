@@ -1446,7 +1446,7 @@ impl Workspace {
                     .child("⚑")
                     .child(SharedString::from(i18n::t!("fleet.formation")))
                     .tooltip(Tooltip::text(
-                        i18n::t!("fleet.formation_tip"),
+                        i18n::t!("fleet.formation_tip", "key" => keymap_core::keystroke_label("cmd-shift-g")),
                         theme.clone(),
                     ))
                     .on_mouse_down(

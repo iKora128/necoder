@@ -5,7 +5,7 @@
 app:
   name: necoder
 editor:
-  table_truncated: "先頭の %{n} 行だけを表にしています（全体は本文で表示・⌘⇧V で戻る）"
+  table_truncated: "先頭の %{n} 行だけを表にしています（全体は本文で表示・%{key} で戻る）"
   drop_remote: "リモートのプロジェクトのエディタにはドロップできません（エクスプローラのフォルダへドロップするとアップロードします）"
   toc: 目次
   toc_empty: 見出しがありません
@@ -42,7 +42,7 @@ agent:
   search_count: "%{position}/%{entries} · %{total} 件"
   search_none: 見つかりません
   search_prev: 前の一致へ
-  search_next: 次の一致へ（⏎）
+  search_next: 次の一致へ（%{key}）
   search_close: 検索を閉じる（esc）
   code_copy_tip: このコードをコピー
   error_prefix: "エラー: %{message}"
@@ -127,7 +127,7 @@ agent:
   done_touched: 完了 %{elapsed}・触ったファイル %{n}
   turn_failed: 失敗 %{elapsed}
   turn_interrupted: 中断 %{elapsed}
-  close_thread_tip: スレッドを閉じる  ⌘W
+  close_thread_tip: スレッドを閉じる  %{key}
   rename_thread_tip: 名前を変更（ダブルクリック）
   rename_thread_title: スレッド名を変更
   rename_thread_label: 新しいスレッド名
@@ -136,8 +136,8 @@ agent:
   rename_thread_confirm: 保存
   history_tip: スレッド履歴
   history_placeholder: 過去のスレッドを開く・全スレッドの本文を検索…
-  new_thread_tip: 新規スレッド  ⌘⇧A
-  full_screen_tip: "AI を全画面（エディタを折りたたむ）  ⌘⇧⏎"
+  new_thread_tip: 新規スレッド  %{key}
+  full_screen_tip: "AI を全画面（エディタを折りたたむ）  %{key}"
   view_list: 縦リストで表示
   view_bar: タブで表示
   thinking: ✳ 考え中
@@ -152,7 +152,7 @@ agent:
   rollup_working: "%{n} 実行中"
   rollup_blocked: "%{n} 承認待ち"
   rollup_done: "%{n} 完了"
-  empty: スレッドはありません（＋ / ⌘⇧A で開始）
+  empty: スレッドはありません（＋ / %{key} で開始）
   checkpoint_row: checkpoint — %{label}（クリックでこの時点へ戻す）
   context_filter: ファイル名で絞り込み…
   permission_needed: ● 承認が必要
@@ -179,19 +179,19 @@ agent:
   code_show_more: "… 残り %{n} 行を表示"
   code_collapse: コードを折りたたむ
   code_streaming_more: "… 実行中（%{n} 行）"
-  hint_submit_enter: ⏎ 送信 / ⇧⏎ 改行
-  hint_submit_cmd: ⏎ 改行 / ⌘⏎ 送信
+  hint_submit_enter: "%{send} 送信 / %{newline} 改行"
+  hint_submit_cmd: "%{newline} 改行 / %{send} 送信"
   ime_tip: Enter の挙動を切替（送信 ⇄ 改行）。日本語 IME の変換確定では送信しません
-  send_enter: 送信 ⏎
-  send_cmd: 送信 ⌘⏎
+  send_enter: 送信 %{key}
+  send_cmd: 送信 %{key}
   stop: 停止 esc
   running_hint: esc で中断
   running_thinking: 考えています
   slash_footer: "%{count} 件 · ↑↓ で選択 · Enter / Tab で挿入 · esc で閉じる"
   mention_footer: "↑↓ で選択 · Enter / Tab で挿入（この 1 通だけに付く） · esc で閉じる"
   shell_badge: "! シェル"
-  shell_run_enter: 実行 ⏎
-  shell_run_cmd: 実行 ⌘⏎
+  shell_run_enter: 実行 %{key}
+  shell_run_cmd: 実行 %{key}
   shell_hint: "シェルで実行（エージェントには送らない・結果は次の送信に添付）"
   shell_hint_no_project: シェルで実行するには、プロジェクトを開いてください
   shell_hint_no_folder: "最初のメッセージを送るとシェルを使えます"
@@ -231,7 +231,7 @@ agent:
   history_matches_empty: 一致はありません
   history_matches_failed: "検索できませんでした: %{error}"
   history_scope_chat: Chat
-  history_footer: "↑↓ で選択 · ⏎ で開く · esc で閉じる"
+  history_footer: "↑↓ で選択 · %{key} で開く · esc で閉じる"
   history_project_closed: "このウィンドウで開いていないプロジェクトの会話です（%{project}）"
   history_untitled_session: "（無題の会話）"
   history_loading: 過去の会話を読み込んでいます…
@@ -265,14 +265,14 @@ rename:
 color:
   hex_placeholder: rrggbb
 inline:
-  title: ⌘I 編集
-  title_terminal: ⌘I コマンド生成
+  title: "%{key} 編集"
+  title_terminal: "%{key} コマンド生成"
   instruction_placeholder: 編集指示（Enter=生成 / Esc=閉じる）
   busy: 生成中…
-  accept: 適用 ⏎
+  accept: 適用 %{key}
   reject: 破棄 esc
   no_change: （変更なし）
-  empty_target: 編集対象が空です（コードを選択して ⌘I）
+  empty_target: 編集対象が空です（コードを選択して %{key}）
   buffer_changed: バッファが変わったため提案を破棄しました
 todos:
   title: Todo ボード
@@ -396,7 +396,7 @@ control:
   facts_question: "質問待ち %{elapsed}: %{message}"
   facts_failed: "失敗: %{digest}"
   facts_done_unread: "完了未確認: %{digest}"
-  next_badge: "次 ⏎"
+  next_badge: "次 %{key}"
   queue: 要対応
   waiting: 待ち
   files: "%{n} ファイル"
@@ -419,7 +419,7 @@ captain:
   title: Captain
   appoint: "未任命 — クリックで任命"
   appoint_tab: "Captain を任命"
-  tab_tip: "Captain（main に常駐する采配役）へ · ⌘0"
+  tab_tip: "Captain（main に常駐する采配役）へ · %{key}"
   appoint_title: "Captain を任命する"
   appoint_body: "目標を渡すと Task に分けて起動し、結果を監視して報告します。自分ではコードを書きません。"
   appoint_no_agent: "利用可能なエージェントがありません。設定 → AI エージェント でログインしてください。"
@@ -527,9 +527,9 @@ fleet:
   phase_integrated: "統合済み"
   next_fix: "修正を指示"
   next_review: "レビューへ"
-  new_task_hint: "何をしますか？ 複数の Task に分けるなら Captain へ（⌘0）"
+  new_task_hint: "何をしますか？ 複数の Task に分けるなら Captain へ（%{key}）"
   new_task_cancel: "キャンセル"
-  new_task_start: "Task を起動 ⌘↵"
+  new_task_start: "Task を起動 %{key}"
   stage_columns: "%{count} 列"
   tab_diff: "変更"
   tab_terminal: "ターミナル"
@@ -539,7 +539,7 @@ fleet:
   side_tip: "会話の横に開く（もう一度クリックで閉じる）"
   diff_empty: "base からの変更はありません"
   diff_files: "%{count} ファイル"
-  tab_close_thread: "この会話を閉じる（⌘⇧T で戻せる）"
+  tab_close_thread: "この会話を閉じる（%{key} で戻せる）"
   side_close: "閉じる"
   files_hint: "クリックで Editor に開く"
   tasks_count: "Task %{n} 件"
@@ -579,7 +579,7 @@ fleet:
   stage_three: 舞台 3 列
   lineage: 系譜グラフ
   formation: "編隊図"
-  formation_tip: "ブリッジで編隊図を開く / 閉じる（⌘⇧G）"
+  formation_tip: "ブリッジで編隊図を開く / 閉じる（%{key}）"
   graph_fan: 扇形
   graph_tree: ツリー
   graph_card: カード
@@ -708,7 +708,7 @@ time:
   last_input: "入力 %{when}"
 rail:
   chat: Chat（プロジェクトに紐づかない会話）
-  add_tip: 開く — フォルダ / ファイル / リモート / 最近（⌘O は切替）
+  add_tip: 開く — フォルダ / ファイル / リモート / 最近（%{key} は切替）
   add_prompt: 開く
   menu_new_window: 新しいウィンドウで開く
   menu_details: 詳細…
@@ -722,16 +722,16 @@ rail:
   menu_more_colors: その他の色…
   menu_confirm_delete: "⚠ もう一度クリックで削除"
   cannot_remove_last: 最後のプロジェクトはレールから外せません
-  open_project: プロジェクトを開く  ⌘O
+  open_project: プロジェクトを開く  %{key}
   explorer: エクスプローラの表示切替
-  search: 検索  ⌘⇧F
+  search: 検索  %{key}
   fleet: "Fleet"
-  git: ソース管理  ⌃⇧G
+  git: ソース管理  %{key}
   todos: Todo ボード
   threads: AI スレッド一覧（全プロジェクト）
   fleet_sidebar: Fleet サイドバー（Task 一覧）
   agent: AI エージェントの表示切替
-  terminal: ターミナル  ⌘J
+  terminal: ターミナル  %{key}
   remote: リモート SSH
   settings: 設定
 titlebar:
@@ -758,7 +758,7 @@ settings:
   mcp_claude_connectors_sub: Figma や Google Calendar など、アカウントに接続したサービスを利用します。オフにすると初回応答が速くなります。Chat モードには適用されません
   title: 設定
   agents_heading: AI エージェント
-  agents_sub: "使用するエージェントを選び、インストールやログインの状態を確認できます。"
+  agents_sub: "使える AI と、準備すると使える AI が分かれて並びます。準備はボタンを順に押すだけです。"
   permission_default: 新しいスレッドの権限
   permission_default_sub: 変更すると、エージェントごとの権限設定をリセットします。「確認なしで実行」は対応するエージェントのみ。Chat には適用されません
   permission_default_agent: エージェントの標準設定
@@ -776,7 +776,7 @@ settings:
   agent_kind_command: "コマンド指定"
   agent_kind_registry: "追加"
   agent_kind_registry_with: "追加（%{kind}）"
-  agent_status_ready: "利用可能"
+  agent_status_ready: "使えます"
   agent_status_unverified: "ログイン未確認"
   agent_status_unverified_remote: "ログイン未確認（SSH では確認しません）"
   agent_status_checking: "確認中…"
@@ -819,6 +819,40 @@ settings:
   agent_detail_run_install: "ターミナルで実行"
   agent_detail_copy: "コピー"
   agent_detail_remote_note: "SSH 接続先のターミナルで実行してください"
+  agent_detail_version: "版"
+  agents_usable_heading: "使える AI エージェント"
+  agents_usable_empty: "まだありません。下のどれか 1 つを準備すると、AI と話せるようになります。"
+  agents_setup_heading: "準備すると使える AI エージェント"
+  agents_setup_sub: "「インストール」「ログイン」を押すと、画面の下にターミナルが開いてコマンドが動きます。終わると自動でここに ✓ が付きます。"
+  agents_show_more: "ほかの AI エージェントも表示（%{n}） ›"
+  agents_show_less: "ほかの AI エージェントを隠す"
+  agent_setup_remaining: "あと %{n} ステップで使えます"
+  agent_advanced_show: "詳細設定 ›"
+  agent_advanced_hide: "詳細設定を閉じる ⌄"
+  agent_step_install_button: "インストール"
+  agent_step_login_button: "ログイン"
+  agent_step_node: "Node.js を入れる"
+  agent_step_node_note: "AI エージェントを動かすための土台です。一度入れれば、ほかのエージェントでも使えます"
+  agent_step_node_manual: "https://nodejs.org から LTS 版を入れてください。入れたら自動でここに ✓ が付きます"
+  agent_step_uv: "uv を入れる"
+  agent_step_uv_note: "Python で作られたエージェントを入れるための道具です"
+  agent_step_cli: "%{name} を入れる"
+  agent_step_cli_note: "エージェントの本体を入れます（数十秒〜数分かかります）"
+  agent_step_cli_windows_unsupported: "Windows ではまだ自動で入れられません。公式サイトの案内に従って入れてください"
+  agent_step_login: "ログインする"
+  agent_step_login_note: "ブラウザが開くので、使うアカウントでログインしてください"
+  agent_step_command: "コマンド %{command} が見つかりません"
+  agent_step_command_note: "「詳細設定」の起動方法を確認してください"
+  agent_about_claude: "Anthropic の Claude。Claude のプラン（Pro / Max）か API キーで使います"
+  agent_about_codex: "OpenAI の Codex。ChatGPT のプランか API キーで使います"
+  agent_about_copilot: "GitHub Copilot。GitHub のアカウントで使います"
+  agent_about_qwen: "Alibaba の Qwen で動くエージェントです"
+  agent_about_opencode: "いろいろな AI モデルを選べる、オープンソースのエージェントです"
+  agent_about_kimi: "Moonshot AI の Kimi で動くエージェントです"
+  agent_about_grok: "xAI の Grok で動くエージェントです"
+  agent_terminal_install: "%{name} をインストール"
+  agent_terminal_login: "%{name} にログイン"
+  agent_terminal_setup: "セットアップ"
   agent_copied: "コピーしました: %{command}"
   agent_role_unusable: "このPCで利用可能になると、既定や Captain に設定できます"
   agent_distribution_npx: "npx · %{package}"
@@ -878,7 +912,7 @@ settings:
   make_captain: Captain にする
   is_captain: ⚑ Captain
   welcome_title: ようこそ 🎨
-  welcome_sub: "エージェントをインストールしてログインすると、AI を使えます。エディタだけを使う場合は、すべて無効にできます。あとから設定で変更できます。"
+  welcome_sub: "necoder は、パソコンに入れた AI エージェント（Claude Code や Codex など）を呼び出して使います。どれか 1 つを準備すれば AI と話せます。AI を使わずにエディタだけで使うこともできます（あとから設定でいつでも変えられます）。"
   get_started: これで始める →
   mcp_heading: MCP サーバ
   mcp_empty: "MCP サーバがありません"
@@ -948,9 +982,9 @@ settings:
   search_count: "%{count} 件"
   search_none: 一致する設定はありません
   pref_submit_on_enter: Enter で送信
-  pref_submit_on_enter_sub: オフの場合は ⌘Enter で送信します
+  pref_submit_on_enter_sub: オフの場合は %{key} で送信します
   pref_soft_wrap: 行の折り返し
-  pref_soft_wrap_sub: ⌥Z でも切り替えられます
+  pref_soft_wrap_sub: "%{key} でも切り替えられます"
   pref_format_on_save: 保存時にフォーマット
   pref_preview_tabs: プレビュータブ
   pref_preview_tabs_sub: 1 回クリックで開いたタブは、次のファイルに置き換わります。編集するかダブルクリックすると、タブを保持します
@@ -996,6 +1030,11 @@ settings:
   terminal_shell_reset: 既定に戻す
   shell_picker_placeholder: "シェルを検索…"
   shell_picker_default: 既定に戻す（OS のシェル）
+  shell_pwsh: PowerShell 7
+  shell_windows_powershell: Windows PowerShell
+  shell_cmd: コマンド プロンプト
+  shell_git_bash: Git Bash
+  shell_wsl: "%{distro}（WSL）"
   terminal_cursor_block: ブロック
   terminal_cursor_bar: 縦線
   terminal_cursor_underline: 下線
@@ -1167,7 +1206,7 @@ explorer:
   ctx_discard: 変更を破棄…
   discard_title: "「%{name}」の変更を破棄しますか？"
   discard_body: "最後のコミットの内容に戻します。ステージ済みの変更も失われます。この操作は取り消せません。"
-  discard_body_untracked: "未追跡のファイルのため、ゴミ箱に移動します（⌘Z で元に戻せます）"
+  discard_body_untracked: "未追跡のファイルのため、ゴミ箱に移動します（%{key} で元に戻せます）"
   discard_confirm: 破棄する
   discard_cancel: キャンセル
   discard_untracked_remote: "リモートでは未追跡のファイルを削除できません（git の管理対象からは外しました）"
@@ -1186,7 +1225,7 @@ searchpanel:
   placeholder: プロジェクトを横断検索…
   placeholder_scoped: このフォルダの中を検索…
   scope: "範囲: %{path}"
-  scope_clear: "範囲を解除（プロジェクト全体を検索・空欄で ⌫ でも解除できます）"
+  scope_clear: "範囲を解除（プロジェクト全体を検索・空欄で %{key} でも解除できます）"
   searching: 検索中…
   results: "%{n} 件 / %{files} ファイル"
   hint_enter: Enter で検索
@@ -1204,9 +1243,9 @@ git:
   pr_create_tip: GitHub で PR を作成（gh pr create --web）
   pr_open_tip: GitHub で PR / リポジトリを開く
   new_branch_tip: 新しいブランチ
-  close_tip: 閉じる  ⌃⇧G
-  branch_placeholder: "新しいブランチ名（⏎ で作成・Esc でキャンセル）"
-  message_placeholder: メッセージ（⌘⏎ でコミット）
+  close_tip: 閉じる  %{key}
+  branch_placeholder: "新しいブランチ名（%{key} で作成・Esc でキャンセル）"
+  message_placeholder: メッセージ（%{key} でコミット）
   ai_message_tip: AI でメッセージ生成（既定のエージェント）
   commit: ✓ コミット
   staged: ステージ済み
@@ -1231,7 +1270,7 @@ git:
   running: 実行中
   idle: 待機中
   branch_menu_tip: ブランチ / worktree
-  switcher_tip: プロジェクト / ブランチを切替  ⌘O
+  switcher_tip: プロジェクト / ブランチを切替  %{key}
   commit_failed: コミットできませんでした
   stage_failed: ステージできませんでした
   unstage_failed: ステージを解除できませんでした
@@ -1251,16 +1290,16 @@ tabs:
   ctx_close_all: "すべて閉じる（未保存のタブは残す）"
   ctx_pin: ピン留め
   ctx_unpin: ピン留めを外す
-  unpin_tip: ピン留めを外す  ⌘K ⇧⏎
-  pinned_kept: "ピン留めしたタブは ⌘W では閉じません（ピンをクリックして解除するか、右クリック › タブを閉じる）"
+  unpin_tip: ピン留めを外す  %{key}
+  pinned_kept: "ピン留めしたタブは %{key} では閉じません（ピンをクリックして解除するか、右クリック › タブを閉じる）"
   copied_path_line: "コピーしました: %{path}"
   quote_no_file: 引用できるのは開いているファイルの行です（無題のタブは引用できません）
   kept_unsaved: "未保存のタブ %{count} 枚は残しました"
   external_remote: "SSH 先のファイルはローカルのアプリで開けません"
   external_missing: "%{app} が見つかりません（CLI を PATH に追加するか、アプリをインストールしてください）"
   untitled: 無題
-  close_tip: 閉じる  ⌘W
-  close_split_tip: 分割を閉じる  ⌘\\
+  close_tip: 閉じる  %{key}
+  close_split_tip: 分割を閉じる  %{key}
   ctx_copy_relative: 相対パスをコピー
   ctx_close: タブを閉じる
   ctx_close_others: 他のタブを閉じる
@@ -1273,11 +1312,11 @@ image:
 breadcrumb:
   md_preview: プレビュー
   md_source: ソース
-  md_preview_tip: 整形プレビューを切替  ⌘⇧V
+  md_preview_tip: 整形プレビューを切替  %{key}
   md_side_preview_tip: "本文の右にプレビューを並べる（入力のたびに更新）  %{key}"
   html_preview: プレビュー
   html_source: ソース
-  html_preview_tip: OS 標準 WebView で表示  ⌘⇧V
+  html_preview_tip: OS 標準 WebView で表示  %{key}
   html_reload_tip: HTML プレビューを再読み込み
   html_open_web_tab: Web タブで開く
   html_open_web_tab_tip: Web タブで開く（Design モード）
@@ -1369,6 +1408,9 @@ conflict:
   view_fill_both: 両方から
   use_result: 結果で解決
 terminal:
+  command_start: "▶ necoder: 次のコマンドを実行します: %{command}"
+  command_success: "【完了】necoder の設定画面に戻ると、次の手順に進めます（このタブは閉じてかまいません）"
+  command_failure: "【失敗】うまくいきませんでした。上のメッセージを確認して、もう一度ボタンを押してください"
   quick_tip: "よく使うコマンド（settings.json の quick_commands）"
   tab_title: ターミナル %{n}
   rename_title: 端末の名前
@@ -1385,11 +1427,14 @@ terminal:
   tab_split_hint: "下ドックへ移動すると分割できます（タブを右クリック）"
   float_hide_tip: "隠す（終了しない）  %{key}"
   add_tip: ターミナルを追加
+  add_shell_tip: "シェルを選んで開く（PowerShell / Git Bash / WSL など）"
+  shell_menu_placeholder: "開くシェルを選ぶ…"
+  shell_menu_default: "（いつものシェル）"
   split_tip: "横に分割（%{key}）"
   pane_title: "端末 %{n}"
   pane_close_tip: この端末を閉じる
-  close_dock_tip: 下ドックを閉じる  ⌘J
-  git_tip: ソース管理  ⌃⇧G
+  close_dock_tip: 下ドックを閉じる  %{key}
+  git_tip: ソース管理  %{key}
   search_invalid_regex: 正規表現が不正です
   menu_copy: コピー
   menu_paste: 貼り付け
@@ -1595,7 +1640,7 @@ menu:
   git_panel: ソース管理
   todo_board: Todo ボード
   fleet: "Fleet"
-  agent_full_screen: AI を全画面  ⌘⇧⏎
+  agent_full_screen: AI を全画面  %{key}
   diagnostics: 診断一覧
   split_right: 右に分割
   soft_wrap: 行の折り返しを切り替え
@@ -1707,13 +1752,13 @@ search:
   replace_one: 置換
   replace_one_tip: 現在のマッチを置換（置換欄で Enter）
   replace_all: 全置換
-  replace_all_tip: "すべてのマッチを置換（⌘Enter・取り消し 1 回ですべて元に戻る）"
+  replace_all_tip: "すべてのマッチを置換（%{key}・取り消し 1 回ですべて元に戻る）"
   case_sensitive: 大文字小文字を区別
   use_regex: 正規表現
-  previous: 前のマッチ（⇧Enter）
+  previous: 前のマッチ（%{key}）
   next: 次のマッチ（Enter）
   close: 閉じる（Esc は開いた位置へ戻って閉じる）
-  toggle_replace: 置換欄の表示切替（⌥⌘F）
+  toggle_replace: 置換欄の表示切替（%{key}）
 key:
   find_in_transcript: この会話を検索
   sheet_title: キーボードショートカット

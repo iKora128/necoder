@@ -497,6 +497,12 @@ pub fn assess(
     }
 }
 
+/// 組み込みの CLI を入れる道具（`Node` = npm で入れる・`Uv` = uv で入れる・それ以外は `None`）。
+/// 設定の「準備の手順」が、済んだ手順にも ✓ を付けて並べるのに使う（足りない物は [`assess`] が決める）。
+pub fn install_prerequisite(kind: &AgentKind) -> Option<Missing> {
+    install_tool(kind)
+}
+
 /// 組み込みの CLI を入れる道具（`install_cmd` の頭の語から）。
 fn install_tool(kind: &AgentKind) -> Option<Missing> {
     let command = kind.install_cmd.trim_start();

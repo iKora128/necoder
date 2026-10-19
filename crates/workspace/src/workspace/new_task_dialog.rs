@@ -208,7 +208,7 @@ impl Workspace {
         };
         let mut body = div().id("new-task-dialog").debug_selector(|| "new-task-dialog".to_string()).w(px(600.)).max_w_full().p(px(20.)).flex().flex_col().gap(px(12.)).rounded(px(10.)).bg(self.theme.bg0).border_1().border_color(self.theme.border)
             .child(div().text_size(px(16.)).text_color(self.theme.fg0).child(i18n::t!("fleet.new_task")))
-            .child(div().text_size(px(11.)).text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_hint")))
+            .child(div().text_size(px(11.)).text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_hint", "key" => keymap_core::keystroke_label("cmd-0"))))
             .child(div().h(px(150.)).border_1().border_color(self.theme.border).child(dialog.editor.clone()));
         if dialog.root.is_none() {
             body = body.child(div().text_size(px(11.)).text_color(self.theme.err).child(i18n::t!("fleet.new_task_no_repository")));
@@ -316,7 +316,7 @@ impl Workspace {
         body = body.child(div().flex().justify_end().gap(px(10.))
             .child(div().id("new-task-cancel").cursor_pointer().text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_cancel"))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.cancel_new_task(window, cx); })))
-            .child(div().id("new-task-submit").cursor_pointer().text_color(self.theme.fg0).child(i18n::t!("fleet.new_task_start"))
+            .child(div().id("new-task-submit").cursor_pointer().text_color(self.theme.fg0).child(i18n::t!("fleet.new_task_start", "key" => keymap_core::keystroke_label("cmd-enter")))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.submit_new_task(cx) }))));
         // 入力欄の外（余白・ラベル）を押しても入力欄へ戻す（ボタンは各自 stop_propagation で除外）。背面は `occlude` でクリックを通さない
         // ＝ダイアログ越しに裏のサイドバーや composer がフォーカスを取らない。

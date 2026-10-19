@@ -65,8 +65,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
-            settings::SettingsViewEvent::RunCommand(command) => {
-                self.chrome.pending_settings_command = Some(command.clone());
+            settings::SettingsViewEvent::RunCommand { command, title } => {
+                self.chrome.pending_settings_command = Some((command.clone(), title.clone()));
                 cx.notify();
             }
             settings::SettingsViewEvent::PickShell => {
@@ -561,7 +561,7 @@ impl Workspace {
             .overflow_hidden()
             .text_size(px(12.))
             .child(inner)
-            .tooltip(Tooltip::text(i18n::t!("git.switcher_tip"), theme.clone()))
+            .tooltip(Tooltip::text(i18n::t!("git.switcher_tip", "key" => keymap_core::keystroke_label("cmd-o")), theme.clone()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -732,7 +732,7 @@ impl Workspace {
                                         .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
                                         .child("×")
                                         .tooltip(Tooltip::text(
-                                            i18n::t!("tabs.close_tip"),
+                                            i18n::t!("tabs.close_tip", "key" => keymap_core::keystroke_label("cmd-w")),
                                             theme.clone(),
                                         ))
                                         // × クリックはタブ切替へ伝播させない。
@@ -762,7 +762,7 @@ impl Workspace {
                                                 .text_color(theme.fg2),
                                         )
                                         .tooltip(Tooltip::text(
-                                            i18n::t!("tabs.unpin_tip"),
+                                            i18n::t!("tabs.unpin_tip", "key" => keymap_core::keystroke_label("cmd-k shift-enter")),
                                             theme.clone(),
                                         ))
                                         .on_mouse_down(
@@ -1187,7 +1187,7 @@ impl Workspace {
                                     .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
                                     .child("×")
                                     .tooltip(Tooltip::text(
-                                        i18n::t!("tabs.close_split_tip"),
+                                        i18n::t!("tabs.close_split_tip", "key" => keymap_core::keystroke_label("cmd-\\")),
                                         theme.clone(),
                                     ))
                                     .on_mouse_down(
@@ -1245,7 +1245,7 @@ impl Workspace {
                 )
                 .child(div().text_size(px(10.5)).child(label))
                 .tooltip(Tooltip::text(
-                    i18n::t!("breadcrumb.md_preview_tip"),
+                    i18n::t!("breadcrumb.md_preview_tip", "key" => keymap_core::keystroke_label("cmd-shift-v")),
                     theme.clone(),
                 ))
                 .on_mouse_down(
@@ -1410,7 +1410,7 @@ impl Workspace {
                             )
                             .child(div().text_size(px(10.5)).child(label))
                             .tooltip(Tooltip::text(
-                                i18n::t!("breadcrumb.html_preview_tip"),
+                                i18n::t!("breadcrumb.html_preview_tip", "key" => keymap_core::keystroke_label("cmd-shift-v")),
                                 theme.clone(),
                             ))
                             .on_mouse_down(
@@ -1577,7 +1577,7 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
                     .child(if show_replace { "▾" } else { "▸" })
                     .tooltip(Tooltip::text(
-                        i18n::t!("search.toggle_replace"),
+                        i18n::t!("search.toggle_replace", "key" => keymap_core::keystroke_label("cmd-alt-f")),
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -1649,7 +1649,7 @@ impl Workspace {
                     "bsearch-prev",
                     "‹",
                     false,
-                    SharedString::from(i18n::t!("search.previous")),
+                    SharedString::from(i18n::t!("search.previous", "key" => keymap_core::keystroke_label("shift-enter"))),
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1719,7 +1719,7 @@ impl Workspace {
                     action_button(
                         "bsearch-replace-all",
                         i18n::t!("search.replace_all"),
-                        SharedString::from(i18n::t!("search.replace_all_tip")),
+                        SharedString::from(i18n::t!("search.replace_all_tip", "key" => keymap_core::keystroke_label("cmd-enter"))),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1959,9 +1959,12 @@ impl Workspace {
 
     /// 指定コマンドを新しいターミナルタブで実行し、終わったらログインシェルに落ちる（ログイン/導入用）。
     /// 各 CLI の認証はローカルで行う想定なので **ローカルシェル**で走らせる（remote 時も cwd は外す）。
+    /// タブ名は `title`（「Codex をインストール」）。中にも「▶ 実行します」→ 成否の一言を出す
+    /// （以前は exe のパスがタブ名で、何が動いて・終わったのかが分からなかった・#69）。
     pub(crate) fn open_command_terminal(
         &mut self,
         command: &str,
+        title: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1969,16 +1972,17 @@ impl Workspace {
             .active_slot()
             .filter(|slot| slot.remote_host.is_none())
             .map(|slot| slot.worktree.root().to_path_buf());
-        let shell = Some((
-            "/bin/sh".to_string(),
-            vec![
-                "-lc".to_string(),
-                format!("{command}; exec \"${{SHELL:-/bin/zsh}}\" -l"),
-            ],
-        ));
+        let notes = host::CommandNotes {
+            start: i18n::t!("terminal.command_start", "command" => command),
+            success: i18n::t!("terminal.command_success"),
+            failure: i18n::t!("terminal.command_failure"),
+        };
+        // Windows は `/bin/sh` が無い（#69: 導入・ログインのボタンが全部動かなかった）。
+        let shell = Some(host::command_then_shell(command, Some(&notes)));
+        let title = (!title.is_empty()).then(|| title.to_string());
         self.chrome.show_bottom = true;
         self.terminal_dock.update(cx, |dock, cx| {
-            dock.open_command(TerminalLaunch { cwd, shell }, window, cx)
+            dock.open_command(TerminalLaunch { cwd, shell }, title, window, cx)
         });
         cx.notify();
     }
@@ -2514,7 +2518,7 @@ impl Workspace {
                         .px(px(4.))
                         .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
                         .child(SharedString::from(label))
-                        .tooltip(Tooltip::text(i18n::t!("terminal.git_tip"), theme.clone()))
+                        .tooltip(Tooltip::text(i18n::t!("terminal.git_tip", "key" => keymap_core::keystroke_label("ctrl-shift-g")), theme.clone()))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| {
@@ -2621,7 +2625,7 @@ impl Workspace {
                                 .flex_none()
                                 .text_color(if terminal_open { theme.fg0 } else { theme.fg2 }),
                         )
-                        .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
+                        .tooltip(Tooltip::text(i18n::t!("rail.terminal", "key" => keymap_core::keystroke_label("cmd-j")), theme.clone()))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| {

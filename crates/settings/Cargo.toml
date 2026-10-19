@@ -38,6 +38,7 @@ gpui.workspace = true
 # AI エージェントのページで SSH 先の状態を読む（workspace が開いている SSH のプロジェクトの接続を渡す）
 host.workspace = true
 i18n.workspace = true
+keymap_core.workspace = true
 # Dev.app（検証用）では常用と共有する置き場（`ne` のシム・skill）を書き換えない
 paths.workspace = true
 settings_core.workspace = true

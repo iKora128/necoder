@@ -164,6 +164,10 @@ impl Workspace {
             TerminalDockEvent::RenameRequested(terminal) => {
                 self.start_terminal_rename(terminal.clone(), cx)
             }
+            // ピッカーは窓が要るので後処理で開く（`process_pending_shell_effects`）。
+            TerminalDockEvent::ChooseShell => {
+                self.chrome.pending_terminal_shell_menu = Some(dock.clone())
+            }
         }
         cx.notify();
     }

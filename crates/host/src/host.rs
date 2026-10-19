@@ -925,6 +925,87 @@ fn pick_windows_shell(is_available: impl Fn(&str) -> bool) -> TerminalLaunch {
     }
 }
 
+/// 流すコマンドの前後に端末へ出す一言（設定の「インストール」「ログイン」・2026-10-19）。
+///
+/// 以前は端末がいきなり開いてコマンドの出力だけが流れ、何を実行したのか・終わったのか・失敗したのかが
+/// 画面に無かった（初めての人が「開いたけど何も起きない？」と迷った・#69）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandNotes {
+    /// 流す前（例「▶ 次のコマンドを実行します: …」）。
+    pub start: String,
+    /// 終了コード 0 の後。
+    pub success: String,
+    /// 失敗の後。
+    pub failure: String,
+}
+
+/// `command` を流したあと、そのまま対話シェルに残る端末の起動（プログラム, 引数）。
+/// 設定の「インストール」「ログイン」「ターミナルで実行」が使う。`notes` があれば前後に一言を出す。
+///
+/// Windows は `/bin/sh` が無いので PowerShell の `-NoExit`。`-ExecutionPolicy Bypass` は
+/// 既定の Restricted だと `npm i -g` が `npm.ps1` を弾かれて失敗するため（このプロセスだけに効く）。
+pub fn command_then_shell(command: &str, notes: Option<&CommandNotes>) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let shell = pick_windows_shell(is_in_path);
+        let script = match notes {
+            Some(notes) => powershell_script_with_notes(command, notes),
+            None => command.to_string(),
+        };
+        return (shell.program, windows_command_then_shell_args(&script));
+    }
+    let script = match notes {
+        Some(notes) => sh_script_with_notes(command, notes),
+        None => command.to_string(),
+    };
+    (
+        "/bin/sh".to_string(),
+        vec![
+            "-lc".to_string(),
+            format!("{script}; exec \"${{SHELL:-/bin/zsh}}\" -l"),
+        ],
+    )
+}
+
+fn windows_command_then_shell_args(command: &str) -> Vec<String> {
+    ["-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", command]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// PowerShell の単引用符の文字列（中の `'` は `''` に重ねる）。
+fn powershell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// sh の単引用符の文字列（中の `'` は閉じて逃がしてから開き直す）。
+fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// 前に一言 → コマンド → 成否で一言（PowerShell）。`$?` はコマンドの直後に読む。
+fn powershell_script_with_notes(command: &str, notes: &CommandNotes) -> String {
+    format!(
+        "Write-Host {start}; Write-Host ''; {command}; $necoderOk = $?; Write-Host ''; \
+         if ($necoderOk) {{ Write-Host {success} }} else {{ Write-Host {failure} }}",
+        start = powershell_quote(&notes.start),
+        success = powershell_quote(&notes.success),
+        failure = powershell_quote(&notes.failure),
+    )
+}
+
+/// 前に一言 → コマンド → 成否で一言（sh）。
+fn sh_script_with_notes(command: &str, notes: &CommandNotes) -> String {
+    format!(
+        "printf '%s\\n\\n' {start}; {command}; necoder_status=$?; printf '\\n'; \
+         if [ \"$necoder_status\" -eq 0 ]; then printf '%s\\n' {success}; \
+         else printf '%s\\n' {failure}; fi",
+        start = sh_quote(&notes.start),
+        success = sh_quote(&notes.success),
+        failure = sh_quote(&notes.failure),
+    )
+}
+
 /// 探すべきファイル名の候補。
 ///
 /// **Windows は拡張子込みでないと見つからない**（PATH 解決が `PATHEXT` に依る）。
@@ -964,6 +1045,127 @@ fn find_in_search_path(binary: &str, path: &std::ffi::OsStr) -> Option<PathBuf> 
 /// PATH に実行ファイルがあるか。
 fn is_in_path(binary: &str) -> bool {
     find_in_path(binary).is_some()
+}
+
+/// **Windows**: レジストリのシステム / ユーザー PATH のうち、このプロセスの PATH に無いディレクトリを
+/// 末尾へ足す。足したら新しい PATH を返す（変化なし・Windows 以外は `None`）。
+///
+/// Windows のプロセスは環境を親（たいていエクスプローラ）から継ぐので、necoder を起動した後や
+/// エクスプローラが変更を拾い損ねた後に入れたツール（`winget install OpenJS.NodeJS.LTS` の node・
+/// ネイティブ版 claude の `%USERPROFILE%\.local\bin`）が**再起動するまで見えない**（issue #69）。
+/// 既存の並びには触らず足すだけなので、ターミナルから起動した開発時の PATH 優先順位も変えない。
+///
+/// 起動時と、エージェントの準備状況を読み直すたびに呼ぶ。
+pub fn refresh_search_path() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let current = std::env::var("PATH").unwrap_or_default();
+        let system = windows_registry_search_path();
+        let merged = append_missing_search_dirs(&current, &system)?;
+        // SAFETY: Windows の std は環境の読み書きを内部ロックで直列化する。C 側の getenv と
+        // 競合するのは unix の事情で、ここ（cfg(windows)）には当たらない。
+        unsafe { std::env::set_var("PATH", &merged) };
+        Some(merged)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// `current`（`;` 区切り）に無いディレクトリを `system` から順に末尾へ足す。足す物が無ければ `None`。
+/// 比較は Windows の流儀（大文字小文字・末尾の `\` を区別しない）。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn append_missing_search_dirs(current: &str, system: &str) -> Option<String> {
+    fn normalized(directory: &str) -> String {
+        directory
+            .trim()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+    }
+    let mut known: std::collections::HashSet<String> = current
+        .split(';')
+        .map(normalized)
+        .filter(|directory| !directory.is_empty())
+        .collect();
+    let missing: Vec<&str> = system
+        .split(';')
+        .map(str::trim)
+        .filter(|directory| !directory.is_empty() && known.insert(normalized(directory)))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let mut merged = current.trim_end_matches(';').to_string();
+    for directory in missing {
+        if !merged.is_empty() {
+            merged.push(';');
+        }
+        merged.push_str(directory);
+    }
+    Some(merged)
+}
+
+/// システム → ユーザーの順に連結した PATH（`%SystemRoot%` 等は展開済み）。
+#[cfg(windows)]
+fn windows_registry_search_path() -> String {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    [
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+        (HKEY_CURRENT_USER, "Environment"),
+    ]
+    .into_iter()
+    .filter_map(|(root, key)| windows_registry_string(root, key, "Path"))
+    .collect::<Vec<_>>()
+    .join(";")
+}
+
+/// REG_SZ / REG_EXPAND_SZ の値を読む（REG_EXPAND_SZ は `RegGetValueW` が展開して返す）。
+#[cfg(windows)]
+fn windows_registry_string(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    key: &str,
+    value: &str,
+) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
+    const ERROR_SUCCESS: u32 = 0;
+    const ERROR_MORE_DATA: u32 = 234;
+    let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() };
+    let (key, value) = (wide(key), wide(value));
+    let mut size: u32 = 0;
+    // 展開後の長さは 1 回目の問い合わせで見積もりしか返らないことがあるので、足りなければ測り直す。
+    for _ in 0..4 {
+        let mut buffer = vec![0u16; (size as usize).div_ceil(2)];
+        let data = if buffer.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            buffer.as_mut_ptr().cast()
+        };
+        // SAFETY: key / value は NUL 終端の UTF-16。data は size バイト以上の領域か null（長さだけ問う）。
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                data,
+                &mut size,
+            )
+        };
+        match status {
+            ERROR_SUCCESS if !buffer.is_empty() => {
+                let length = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+                return Some(String::from_utf16_lossy(&buffer[..length]));
+            }
+            ERROR_SUCCESS | ERROR_MORE_DATA => continue,
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn metadata_for(path: &Path) -> Result<HostMetadata> {
@@ -5728,6 +5930,90 @@ mod windows_terminal_tests {
         std::fs::remove_file(directory.join("npx.cmd")).unwrap();
         assert_eq!(find_in_search_path("npx", &search_path), None);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// 設定の「インストール」等は Windows では PowerShell で流して残す（`/bin/sh` は無い・#69）。
+    #[test]
+    fn windows_command_terminal_runs_in_powershell_and_stays() {
+        let args = windows_command_then_shell_args("npm i -g x");
+        assert_eq!(
+            args,
+            ["-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "npm i -g x"]
+        );
+        if cfg!(windows) {
+            let (program, _) = command_then_shell("echo", None);
+            assert!(program == "pwsh" || program == "powershell", "{program}");
+        } else {
+            assert_eq!(command_then_shell("echo", None).0, "/bin/sh", "mac は変えない");
+        }
+    }
+
+    /// 前後の一言: 成否で出し分け、引用符を含む文でも壊れない。**本物のシェルで流して確かめる**
+    /// （Windows は PowerShell・それ以外は sh。`-NoExit` と `exec $SHELL` は付けない形で流す）。
+    #[test]
+    fn command_notes_tell_success_and_failure_in_a_real_shell() {
+        let notes = CommandNotes {
+            start: "▶ it's starting".to_string(),
+            success: "✓ done".to_string(),
+            failure: "✗ didn't work".to_string(),
+        };
+        let run = |command: &str| -> String {
+            let output = if cfg!(windows) {
+                child_process::command("powershell")
+                    .args([
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        &powershell_script_with_notes(command, &notes),
+                    ])
+                    .output()
+            } else {
+                child_process::command("/bin/sh")
+                    .args(["-c", &sh_script_with_notes(command, &notes)])
+                    .output()
+            }
+            .expect("シェルを起こせる");
+            String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
+        };
+        let ok = run("echo hello");
+        assert!(ok.contains("it's starting"), "{ok}");
+        assert!(ok.contains("hello"), "{ok}");
+        assert!(ok.contains("✓ done") || ok.contains("done"), "{ok}");
+        assert!(!ok.contains("didn't work"), "{ok}");
+        let failed = run(if cfg!(windows) { "cmd /c exit 3" } else { "false" });
+        assert!(failed.contains("didn't work"), "{failed}");
+        assert!(!failed.contains("✓ done"), "{failed}");
+    }
+
+    /// 起動後に入れたツールの PATH（レジストリ側）を、既存の並びを変えずに末尾へ足す（#69）。
+    #[test]
+    fn registry_search_dirs_are_appended_without_reordering() {
+        let current = r"C:\dev\bin;C:\Windows\system32";
+        let system = r"C:\WINDOWS\System32\;C:\Program Files\nodejs\;;C:\Users\a\.local\bin";
+        assert_eq!(
+            append_missing_search_dirs(current, system).as_deref(),
+            Some(r"C:\dev\bin;C:\Windows\system32;C:\Program Files\nodejs\;C:\Users\a\.local\bin")
+        );
+        // 全部既に在る（大文字小文字・末尾 `\` 違い）なら書き換えない。
+        assert_eq!(
+            append_missing_search_dirs(r"C:\Program Files\nodejs;", r"c:\program files\NODEJS\"),
+            None
+        );
+        assert_eq!(append_missing_search_dirs("", r"C:\a").as_deref(), Some(r"C:\a"));
+    }
+
+    /// 実機のレジストリから PATH が読めて、`%SystemRoot%` が展開されていること。
+    #[cfg(windows)]
+    #[test]
+    fn registry_search_path_is_expanded() {
+        let path = windows_registry_search_path();
+        assert!(
+            path.to_lowercase().contains(r"\system32"),
+            "システム PATH が読めている: {path}"
+        );
+        assert!(!path.contains('%'), "REG_EXPAND_SZ は展開済み: {path}");
     }
 
     /// **`.cmd` を直接 spawn できるか**（WINDOWS-PORT.md §W4 / §4）。

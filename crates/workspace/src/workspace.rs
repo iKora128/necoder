@@ -357,6 +357,8 @@ pub(crate) enum PickerMode {
     Fonts,
     /// 手元のターミナルのシェルを選ぶ（O25）。id 0 = 既定に戻す、1.. = `picker_shells` の添字 + 1。
     Shells,
+    /// ターミナルの「▾」: シェルを選んで新しい端末を開く（設定は変えない）。id = `picker_shells` の添字。
+    ShellsForNewTerminal,
 }
 
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
@@ -1507,6 +1509,8 @@ struct ChromeState {
     pending_font_picker: Option<&'static str>,
     /// 設定の「選ぶ…」で頼まれたシェルのピッカー（窓が要るので後処理で開く・O25）。
     pending_shell_picker: bool,
+    /// ターミナルの「▾」で頼まれた「シェルを選んで新しく開く」のピッカー（頼んだドック・窓が要るので後処理）。
+    pending_terminal_shell_menu: Option<Entity<terminal_view::TerminalDock>>,
     /// statusbar の項目の出し入れのメニュー（右クリックした所・O27）。
     statusbar_menu: Option<Point<gpui::Pixels>>,
     /// 詳細を出している project（O21・右クリックの「詳細…」）。
@@ -1545,7 +1549,7 @@ struct ChromeState {
     /// ニュース欄の回転タイマーが稼働中か（多重起動防止。2件未満で次 tick 自停止＝idle 予算を守る）。
     rollup_ticker: bool,
     settings_view: Entity<settings::SettingsView>,
-    pending_settings_command: Option<String>,
+    pending_settings_command: Option<(String, String)>,
     /// 設定画面の「settings.json を開く」。subscription は Window を持たないため effect cycle 末尾で処理。
     pending_open_settings_json: bool,
     /// `ne` CLI から IPC（control_ipc の `open`）で届いたパス。ハンドラは Window を持たないため
@@ -1605,7 +1609,9 @@ struct WorkspaceOverlays {
     picker_fonts: Vec<String>,
     picker_font_key: &'static str,
     /// シェルのピッカーの行（入っているシェル・O25）。
-    picker_shells: Vec<String>,
+    picker_shells: Vec<terminal_settings::ShellChoice>,
+    /// 「シェルを選んで新しく開く」で開く先のドック（設定のシェルを選ぶ時は `None`）。
+    picker_shell_dock: Option<gpui::WeakEntity<terminal_view::TerminalDock>>,
     /// パレットの「新しいスレッド（…）」のうち設定で足したエージェントの行（表示名・H1）。行の id は
     /// [`overlays::PALETTE_CUSTOM_AGENT_ROW`] からの通し番号（コマンドの登録簿の番号と重ならない）。
     picker_agent_threads: Vec<SharedString>,
@@ -2076,6 +2082,7 @@ impl Workspace {
             || self.conflict_view_is_stale()
             || self.chrome.pending_font_picker.is_some()
             || self.chrome.pending_shell_picker
+            || self.chrome.pending_terminal_shell_menu.is_some()
     }
 
     fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2094,12 +2101,15 @@ impl Workspace {
             self.chrome.pending_shell_picker = false;
             self.open_shell_picker(window, cx);
         }
+        if let Some(dock) = self.chrome.pending_terminal_shell_menu.take() {
+            self.open_new_terminal_shell_picker(dock, window, cx);
+        }
         if self.chrome.pending_agent_full_screen_toggle {
             self.chrome.pending_agent_full_screen_toggle = false;
             self.toggle_agent_full_screen_state(window, cx);
         }
-        if let Some(command) = self.chrome.pending_settings_command.take() {
-            self.open_command_terminal(&command, window, cx);
+        if let Some((command, title)) = self.chrome.pending_settings_command.take() {
+            self.open_command_terminal(&command, &title, window, cx);
         }
         if self.chrome.pending_open_settings_json {
             self.chrome.pending_open_settings_json = false;

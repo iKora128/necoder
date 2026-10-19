@@ -1324,6 +1324,15 @@ impl Workspace {
                 let view = self.chrome.settings_view.clone();
                 view.update(cx, |view, cx| view.debug_submit_theme_save(cx));
             }
+            // 設定の「インストール」「ログイン」と同じ経路でコマンドを端末で流す（`settings-run:<コマンド>`）。
+            "settings-run" => {
+                self.open_command_terminal(
+                    argument,
+                    &i18n::t!("settings.agent_terminal_setup"),
+                    window,
+                    cx,
+                );
+            }
             // AI エージェントのページで行を開く（`settings-open:codex`・空なら閉じる）。
             "settings-open" => {
                 let view = self.chrome.settings_view.clone();
@@ -1438,6 +1447,13 @@ impl Workspace {
         if name == "open" {
             self.chrome.show_bottom = true;
             self.focus_active_terminal(window, cx);
+        } else if name == "shells" {
+            // シェルのピッカー（設定 › ターミナル の「選択…」と同じ・Windows の一覧を撮る）。
+            self.open_shell_picker(window, cx);
+        } else if name == "shell-menu" {
+            // ターミナルの「▾」（シェルを選んで新しく開く）。
+            let dock = self.terminal_dock.clone();
+            self.open_new_terminal_shell_picker(dock, window, cx);
         } else {
             let terminal = self
                 .terminal_dock

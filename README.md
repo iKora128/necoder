@@ -55,7 +55,15 @@ So necoder makes what agent-heavy development needs first-class in the editor co
 
 To open necoder from Terminal, install the `ne` command from **Settings → Command line** (approve the standard macOS authentication prompt), then run `ne .`. It opens paths in the running necoder window; without one it launches the app.
 
-**Windows 10+ (x64)**: download `necoder-windows-x64.zip` from [Releases](https://github.com/iKora128/necoder/releases), unzip, run `necoder.exe`. The app notifies you of new versions and opens the release page.
+**Windows 10+ (x64)**: run this in PowerShell. It installs for your user only (no admin rights) into `%LOCALAPPDATA%\Programs\necoder`, with a Start menu entry, a desktop shortcut, **Open with necoder** in the Explorer context menu and `necoder` on PATH:
+
+```powershell
+irm https://necoder.com/install.ps1 | iex
+```
+
+Or download `necoder-windows-x64-setup.exe` from [Releases](https://github.com/iKora128/necoder/releases) and run it (same result, with checkboxes for each option). `necoder-windows-x64.zip` is the portable build: unzip and double-click `necoder.exe`. Uninstall from **Settings → Apps**; your settings and history stay in `%APPDATA%\necoder` and `%LOCALAPPDATA%\necoder`.
+
+If a browser-downloaded file shows **"Windows protected your PC"**, click **More info → Run anyway** (shown once, until the signed builds have built up reputation). The PowerShell one-liner does not trigger it. The app notifies you of new versions and opens the release page.
 
 For AI features, install and log in to the CLI of **any one** agent you like: Claude Code, Codex, GitHub Copilot, Qwen Code, OpenCode, Kimi CLI or Grok Build. Other ACP agents can be added in Settings. No agent is required: **Settings → AI Agents** shows which ones were found, and each one can be turned on or off. The first one that is ready becomes the default, and you can pick another. With every agent off, necoder works as a plain editor. The small helpers (AI commit message, `⌘I` inline edit, today's plan) use the default agent and work with Claude Code or Codex.
 
@@ -174,7 +182,15 @@ necoder は、エージェント中心の開発に要るものをエディタの
 
 ターミナルから開くには、設定 → コマンドライン で `ne` コマンドをインストール(macOS の認証を許可)して `ne .`。実行中の necoder があればそのウィンドウで開き、無ければアプリを起動します。
 
-**Windows 10+(x64)**: [Releases](https://github.com/iKora128/necoder/releases) から `necoder-windows-x64.zip` を展開して `necoder.exe` を実行。新版はアプリ内通知からリリースページを開きます。
+**Windows 10+(x64)**: PowerShell で次の 1 行を実行。自分のユーザーだけに入り(管理者権限は不要)、置き場は `%LOCALAPPDATA%\Programs\necoder`。スタートメニュー・デスクトップのショートカット・エクスプローラの右クリック「necoder で開く」・PATH の `necoder` まで揃います:
+
+```powershell
+irm https://necoder.com/install.ps1 | iex
+```
+
+[Releases](https://github.com/iKora128/necoder/releases) の `necoder-windows-x64-setup.exe` を実行しても同じです(項目ごとにチェックで選べます)。`necoder-windows-x64.zip` はポータブル版で、展開して `necoder.exe` をダブルクリックするだけで動きます。アンインストールは **設定 → アプリ** から。設定と履歴は `%APPDATA%\necoder` と `%LOCALAPPDATA%\necoder` に残ります。
+
+ブラウザで落としたファイルで **「Windows によって PC が保護されました」** と出たら、**詳細情報 → 実行** で起動できます(初回だけ・署名済みの版の評判が育つまで)。上の PowerShell の 1 行では出ません。新版はアプリ内通知からリリースページを開きます。
 
 AI 機能を使うには、好きなエージェントの CLI を**どれか 1 つ**入れてログインしてください。Claude Code・Codex・GitHub Copilot・Qwen Code・OpenCode・Kimi CLI・Grok Build に対応し、ほかの ACP エージェントも設定から足せます。どれも必須ではありません。**設定 → AI エージェント** で見つかったものが分かり、1 つずつオン/オフできます。既定のエージェントは使えるものから自動で選ばれ、自分で選び直すこともできます。全部オフにすれば普通のエディタとして使えます。コミットメッセージ生成・`⌘I` のインライン編集・今日の計画などの補助機能は既定のエージェントを使い、Claude Code か Codex で動きます。
 

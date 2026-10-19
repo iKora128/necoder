@@ -25,3 +25,7 @@ url.workspace = true
 # 人が打ったコマンド（`run_user_command`）をプロセスグループごと止める `killpg`。
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# 起動後に変わったシステム / ユーザーの PATH をレジストリから読む（`refresh_search_path`）。
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

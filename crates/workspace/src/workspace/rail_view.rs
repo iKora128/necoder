@@ -318,7 +318,7 @@ impl Workspace {
                             .border_color(theme.fg2)
                             .bg(theme.bg2)
                     })
-                    .tooltip(Tooltip::text(i18n::t!("rail.add_tip"), theme.clone()))
+                    .tooltip(Tooltip::text(i18n::t!("rail.add_tip", "key" => keymap_core::keystroke_label("cmd-o")), theme.clone()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.open_launcher(window, cx)),
@@ -376,7 +376,7 @@ impl Workspace {
                     self.rail_icon(
                         "rail-search",
                         "icons/search.svg",
-                        i18n::t!("rail.search"),
+                        i18n::t!("rail.search", "key" => keymap_core::keystroke_label("cmd-shift-f")),
                         if self.search_panel.is_some() {
                             accent
                         } else {
@@ -400,7 +400,7 @@ impl Workspace {
                     self.rail_icon(
                         "rail-git",
                         "icons/git-branch.svg",
-                        i18n::t!("rail.git"),
+                        i18n::t!("rail.git", "key" => keymap_core::keystroke_label("ctrl-shift-g")),
                         if self.git_panel_open(cx) {
                             accent
                         } else {
@@ -547,7 +547,7 @@ impl Workspace {
                     self.rail_icon(
                         "rail-terminal",
                         "icons/square-terminal.svg",
-                        i18n::t!("rail.terminal"),
+                        i18n::t!("rail.terminal", "key" => keymap_core::keystroke_label("cmd-j")),
                         // 編隊では下段のタブが「ターミナル」なら点灯（solo は下ドックの開閉）。
                         if if self.chrome.fleet_mode {
                             self.chrome.fleet_bottom_view == FleetBottomView::Terminal
