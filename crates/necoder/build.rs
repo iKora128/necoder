@@ -9,8 +9,9 @@
 //!
 //! mac / Linux では何もしない（.app の .icns は bundle-mac.sh が置く）。
 //! gpui も `windows-manifest` で RT_MANIFEST（ID 1）を埋めるが、種類が違うので衝突しない。
-
-use std::path::PathBuf;
+//!
+//! `embed-resource` は Windows でだけ入る build-dependency なので、使う所も `cfg(windows)` に閉じる
+//! （閉じないと mac / Linux で build script がコンパイルできない）。
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -18,41 +19,59 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("cargo が CARGO_MANIFEST_DIR を渡す"),
-    );
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo が OUT_DIR を渡す"));
-    let version = std::env::var("CARGO_PKG_VERSION").expect("cargo が版を渡す");
-    let icon = manifest_dir.join("assets").join("icon").join("necoder.ico");
-    let rc = out_dir.join("necoder.rc");
-    std::fs::write(&rc, resource_script(&icon, &version)).expect("OUT_DIR に .rc を書ける");
-    embed_resource::compile(&rc, embed_resource::NONE)
-        .manifest_optional()
-        .expect("アイコンと版情報を埋め込める（Windows SDK の rc.exe が要る）");
+    windows_resources::embed();
 }
 
-/// `1.2.3` → `1,2,3,0`（VERSIONINFO の数の版）。数でない部分（`-beta` 等）は 0。
-fn numeric_version(version: &str) -> String {
-    let mut parts: Vec<u16> = version
-        .split(['.', '-', '+'])
-        .take(3)
-        .map(|part| part.parse().unwrap_or(0))
-        .collect();
-    parts.resize(4, 0);
-    parts
-        .iter()
-        .map(u16::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
+/// Windows 以外の手元から Windows 向けに作る時（クロスビルド）は埋め込めない。
+#[cfg(not(windows))]
+mod windows_resources {
+    pub fn embed() {
+        println!(
+            "cargo:warning=Windows の手元でビルドしないとアイコンと版情報は埋め込まれない（rc.exe が要る）"
+        );
+    }
 }
 
-fn resource_script(icon: &std::path::Path, version: &str) -> String {
-    // rc の文字列リテラルは `\` をエスケープとして読む。
-    let icon = icon.display().to_string().replace('\\', "\\\\");
-    let numeric = numeric_version(version);
-    // 0x0411 = 日本語・0x04B0 = Unicode。表示名は製品名なので言語に依らず necoder。
-    format!(
-        r#"1 ICON "{icon}"
+#[cfg(windows)]
+mod windows_resources {
+    use std::path::PathBuf;
+
+    pub fn embed() {
+        let manifest_dir = PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo が CARGO_MANIFEST_DIR を渡す"),
+        );
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo が OUT_DIR を渡す"));
+        let version = std::env::var("CARGO_PKG_VERSION").expect("cargo が版を渡す");
+        let icon = manifest_dir.join("assets").join("icon").join("necoder.ico");
+        let rc = out_dir.join("necoder.rc");
+        std::fs::write(&rc, resource_script(&icon, &version)).expect("OUT_DIR に .rc を書ける");
+        embed_resource::compile(&rc, embed_resource::NONE)
+            .manifest_optional()
+            .expect("アイコンと版情報を埋め込める（Windows SDK の rc.exe が要る）");
+    }
+
+    /// `1.2.3` → `1,2,3,0`（VERSIONINFO の数の版）。数でない部分（`-beta` 等）は 0。
+    fn numeric_version(version: &str) -> String {
+        let mut parts: Vec<u16> = version
+            .split(['.', '-', '+'])
+            .take(3)
+            .map(|part| part.parse().unwrap_or(0))
+            .collect();
+        parts.resize(4, 0);
+        parts
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn resource_script(icon: &std::path::Path, version: &str) -> String {
+        // rc の文字列リテラルは `\` をエスケープとして読む。
+        let icon = icon.display().to_string().replace('\\', "\\\\");
+        let numeric = numeric_version(version);
+        // 0x0411 = 日本語・0x04B0 = Unicode。表示名は製品名なので言語に依らず necoder。
+        format!(
+            r#"1 ICON "{icon}"
 
 1 VERSIONINFO
 FILEVERSION {numeric}
@@ -80,5 +99,6 @@ BEGIN
   END
 END
 "#
-    )
+        )
+    }
 }
