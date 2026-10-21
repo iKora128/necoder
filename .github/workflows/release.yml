@@ -240,6 +240,7 @@ jobs:
             target/zed-${{ env.ZED_SOURCE_REV }}-source.tar.gz
 
   windows:
+    needs: remote-servers
     runs-on: windows-latest
     # **continue-on-error は付けない**（2026-08-25 に外した）。
     #
@@ -346,10 +347,22 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           if (-not (Test-Path $iscc)) { Write-Host "::error::ISCC.exe が無い"; exit 1 }
+      # Remote SSH の接続先（Linux）に置く remote-server。mac と同じく同じタグから作った物を同梱する
+      # （Windows の client は ControlMaster を使わず、1 本の接続の中でこれを送り込む・docs/REMOTE-CHANNEL.md §3）。
+      - uses: actions/download-artifact@v4
+        with:
+          name: remote-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: remote-aarch64-unknown-linux-musl
+          path: target/aarch64-unknown-linux-musl/release
       # zip とインストーラは手元と同じスクリプトで、同じ中身（stage）から作る（WINDOWS-PORT.md §W7）。
       # `shell: powershell`（5.1）で回す = 利用者の手元と同じ版で動くことも確かめる。
       - name: zip とインストーラを作る
         shell: powershell
+        env:
+          NECODER_REQUIRE_REMOTE_SERVERS: '1'
         run: |
           ./scripts/bundle-windows.ps1 -SkipBuild -SkipRelay -RequireInstaller -TargetDir target
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

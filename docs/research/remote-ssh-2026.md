@@ -2,6 +2,12 @@
 
 調査日: 2026-07-13
 
+> **2026-10-21 追記**: 下の「ControlMaster を protocol・terminal・task の接続で再利用する」は撤回した。Windows の
+> OpenSSH に ControlMaster が無く（#79）、使い回しの代わりに 1 本を何度も繋ぐと認証が何度も要るため、
+> **ssh は接続 1 回に 1 本にし、端末・LSP・ACP・TCP を自前の RPC のストリームで多重化する**形に変えた。
+> 通り道の正は [`../REMOTE-CHANNEL.md`](../REMOTE-CHANNEL.md)。それ以外（ローカル UI + リモート常駐サーバー・
+> system OpenSSH に認証を任せる・versioned な配備・askpass）はこの文書のとおり。
+
 ## 結論
 
 necoder の Remote SSH は、リモートファイルを SFTP でローカルへ見せる機能ではない。

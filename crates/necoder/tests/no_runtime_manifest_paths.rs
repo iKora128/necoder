@@ -40,10 +40,10 @@ use std::path::{Path, PathBuf};
 /// 新しい用例が紛れ込んだときに気づけるようにするため。
 const ALLOWED: &[(&str, usize, &str)] = &[
     (
-        "crates/host/src/host.rs",
+        "crates/host/src/ssh_link.rs",
         1,
-        "find_local_remote_server の開発用フォールバック。exe の隣を先に見て、\
-         無ければ `.is_file().then_some()` で None を返すだけ＝配布物では黙って無視される",
+        "find_local_remote_server の開発用フォールバック。debug_assertions の時だけ有効で、\
+         ファイルが無ければ None を返す。release ビルドには含まれない",
     ),
     (
         "crates/lang/src/lsp.rs",

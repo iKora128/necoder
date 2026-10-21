@@ -3,15 +3,16 @@
 //! 実行には稼働中の SSH リモートが要るため、既定では **skip**（`NECODER_REMOTE_TEST_URI`
 //! 未設定なら全 test が早期 return）。CI や通常の `cargo test` は素通りする。
 //!
-//! ローカル検証（Docker の Linux ホストに対して）:
+//! ローカル検証（Docker の Linux ホストに対して・`scripts/test-remote-ssh-docker.sh` が面倒を見る）:
 //! ```sh
 //! NECODER_SSH_CONFIG=<scratch>/ssh_config \
 //! NECODER_REMOTE_TEST_URI=ssh://necoder-docker/home/dev/work/sample \
 //!   cargo test -p host --test remote_ssh_live -- --nocapture --test-threads=1
 //! ```
-//! remote-server バイナリはホスト側の配備ロジック（`ensure_remote_server`）が
-//! `~/.local/share/necoder/remote/artifacts/<triple>/` から自動アップロードする。
-#![cfg(unix)]
+//! Windows の client からは `scripts/test-remote-ssh-wsl.ps1`（WSL のユーザー権限の sshd へ繋ぐ）。
+//! remote-server バイナリは接続の bootstrap（`docs/REMOTE-CHANNEL.md` §3）が
+//! `~/.local/share/necoder/remote/artifacts/<triple>/`（または `NECODER_REMOTE_SERVER_BINARY`）から
+//! 同じ接続の中で送り込む。
 
 use host::{CommandSpec, Host, RemoteHost, SshProject, TextSearchSpec, WriteCondition};
 use std::process::Command;
@@ -77,31 +78,27 @@ fn read_with_retry(remote: &RemoteHost, path: &std::path::Path) -> host::FileCon
     panic!("再接続後も read に失敗: {:?}", last_error);
 }
 
-/// Remote terminal の `ne .` が、接続先の GUI ではなく接続元へ reverse socket 経由で戻る。
-/// gateway が method を `open_remote` へ変換し、SSH authority をローカル側で刻むところまで実証する。
+/// 接続先の端末の `ne .` が、接続先の GUI ではなく接続元へ戻る。daemon の `ne` の受け口 → Event →
+/// 手元の client → GUI の制御口（`open_remote`）と渡り、SSH authority は手元で刻まれる。
+#[cfg(unix)]
 #[test]
 fn remote_terminal_ne_opens_on_the_client() {
-    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::os::unix::net::UnixListener;
-    use std::process::Stdio;
 
     let Some(uri) = test_uri() else { return };
     let gui_socket =
         std::path::PathBuf::from(format!("/tmp/necoder-live-gui-{}.sock", std::process::id()));
     let _stale = std::fs::remove_file(&gui_socket);
     let listener = UnixListener::bind(&gui_socket).expect("偽 GUI socket を bind できる");
-    let previous_socket = std::env::var_os("NECODER_GUI_SOCK");
-    std::env::set_var("NECODER_GUI_SOCK", &gui_socket);
+    // SAFETY: このテストだけが GUI の口を差し替える（--test-threads=1 で走らせる前提）。
+    unsafe { std::env::set_var("NECODER_GUI_SOCK", &gui_socket) };
     let remote = connect(&uri);
-    match previous_socket {
-        Some(path) => std::env::set_var("NECODER_GUI_SOCK", path),
-        None => std::env::remove_var("NECODER_GUI_SOCK"),
-    }
 
     let expected_authority = SshProject::parse(&uri).unwrap().identity();
     let expected_path = remote.root().to_string_lossy().to_string();
     let gui = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("gateway が GUI へ接続する");
+        let (mut stream, _) = listener.accept().expect("client が GUI へ接続する");
         let mut line = String::new();
         BufReader::new(&mut stream)
             .read_line(&mut line)
@@ -118,40 +115,82 @@ fn remote_terminal_ne_opens_on_the_client() {
         .unwrap();
     });
 
-    let launch = remote
-        .terminal_launch(remote.root())
-        .expect("terminal launch を組める")
-        .expect("remote は ssh launch を返す");
-    let mut child = Command::new(&launch.program)
-        .args(&launch.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("remote terminal を起動できる");
-    child
-        .stdin
-        .take()
-        .expect("terminal stdin")
+    let pty = open_terminal(&remote);
+    pty.writer()
         .write_all(b"ne .\nexit\n")
         .expect("ne を入力できる");
-    let output = child
-        .wait_with_output()
-        .expect("remote terminal が終了する");
+    let mut screen = Vec::new();
+    pty.reader()
+        .read_to_end(&mut screen)
+        .expect("端末が終わるまで読める");
+    let screen = String::from_utf8_lossy(&screen);
     assert!(
-        output.status.success(),
-        "remote terminal が失敗: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("接続元の necoder で開きました")
-            || stdout.contains("実行中の necoder で開きました"),
-        "ne の成功表示が無い: {stdout:?}"
+        screen.contains("接続元の necoder で開きました"),
+        "ne の成功表示が無い: {screen:?}"
     );
     gui.join().unwrap();
+    unsafe { std::env::remove_var("NECODER_GUI_SOCK") };
+    drop(pty);
     drop(remote);
     let _cleanup = std::fs::remove_file(gui_socket);
+}
+
+fn open_terminal(remote: &RemoteHost) -> host::HostPty {
+    let Some(host::TerminalLaunch::Remote(terminal)) = remote
+        .terminal_launch(remote.root())
+        .expect("terminal launch を組める")
+    else {
+        panic!("remote の端末は接続先の PTY");
+    };
+    terminal
+        .open(host::PtySize::default())
+        .expect("端末を開ける")
+}
+
+/// 端末の画面を `needle` が出るまで読む。
+fn read_screen_until(screen: &mut dyn std::io::Read, needle: &str) -> String {
+    let mut seen = String::new();
+    let mut chunk = [0u8; 4096];
+    let started = Instant::now();
+    while !seen.contains(needle) {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{needle} が出ない: {seen}"
+        );
+        let read = screen.read(&mut chunk).expect("画面を読める");
+        assert!(read > 0, "{needle} より前に端末が終わった: {seen}");
+        seen.push_str(&String::from_utf8_lossy(&chunk[..read]));
+    }
+    seen
+}
+
+/// **端末は接続が切れても死なない**（スリープ・VPN 断の代わりに ssh を落とす）。シェルは daemon で
+/// 生きていて、切れている間に打った分も、繋ぎ直した後に実行されて画面に出る。
+#[test]
+fn remote_ssh_terminal_survives_a_dropped_connection() {
+    use std::io::Write as _;
+
+    let Some(uri) = test_uri() else { return };
+    let remote = connect(&uri);
+    let pty = open_terminal(&remote);
+    let mut keyboard = pty.writer();
+    let mut screen = pty.reader();
+    keyboard
+        .write_all(b"export NECODER_LIVE=kept; echo before-$((1+1))\n")
+        .expect("打てる");
+    read_screen_until(&mut screen, "before-2");
+
+    remote.debug_drop_connection();
+    println!("ssh を落とした");
+    keyboard
+        .write_all(b"echo during-$NECODER_LIVE-$((2+2))\n")
+        .expect("切れていても打てる");
+    // 次の操作（または heartbeat）が繋ぎ直す。
+    let _reconnected = read_with_retry(&remote, &remote.root().join("src/lib.rs"));
+    read_screen_until(&mut screen, "during-kept-4");
+    assert!(remote.debug_reconnect_generation() > 0, "繋ぎ直している");
+    keyboard.write_all(b"exit\n").expect("打てる");
+    assert!(pty.wait_exit(Duration::from_secs(10)).is_some());
 }
 
 #[test]
@@ -234,9 +273,8 @@ fn remote_ssh_crud_search_command() {
 /// 疎通を**黙って**止める / 戻すコマンド（`docker pause` / `unpause` 等）。
 /// 両方揃っているときだけ該当 test を走らせる。
 ///
-/// ControlMaster kill との違いが肝: kill は接続が閉じる（EOF が届く）が、凍結は
-/// **TCP を張ったまま相手が黙る**。laptop の sleep 復帰直後がこの形で、`ssh -O check` は
-/// master プロセスの生死しか見ないため「生きている」と答えてしまう。
+/// ssh を落とすのとの違いが肝: 落とすと接続が閉じる（EOF が届く）が、凍結は
+/// **TCP を張ったまま相手が黙る**。laptop の sleep 復帰直後がこの形で、Ping の時間切れでしか気付けない。
 fn freeze_commands() -> Option<(String, String)> {
     let read = |key: &str| {
         std::env::var(key)
@@ -258,7 +296,16 @@ fn freeze_commands() -> Option<(String, String)> {
 }
 
 fn run_shell(command: &str) -> bool {
-    match Command::new("sh").arg("-c").arg(command).status() {
+    let mut shell = if cfg!(windows) {
+        let mut shell = Command::new("cmd");
+        shell.arg("/C");
+        shell
+    } else {
+        let mut shell = Command::new("sh");
+        shell.arg("-c");
+        shell
+    };
+    match shell.arg(command).status() {
         Ok(status) => {
             println!("shell [{command}] -> {status}");
             status.success()
@@ -294,7 +341,7 @@ impl Drop for FrozenLink {
 ///
 /// 相手を凍結すると、TCP は張られたまま応答だけが消える。heartbeat が
 /// [`host`] 側の Ping timeout（5s）で気付き、古い接続に乗った request を落として
-/// master ごと張り直す。疎通が戻ったら**ユーザーが何もしなくても**読めるようになること、
+/// ssh を張り直す。疎通が戻ったら**ユーザーが何もしなくても**読めるようになること、
 /// そしてそれが**有界な時間**で起きることを見る（直す前は ServerAlive が気付く 45s 級を待っていた）。
 #[test]
 fn remote_ssh_recovers_from_a_silently_dead_link() {
@@ -350,17 +397,17 @@ fn remote_ssh_recovers_from_a_silently_dead_link() {
 }
 
 #[test]
-fn remote_ssh_reconnects_after_control_master_kill() {
+fn remote_ssh_reconnects_after_the_connection_drops() {
     let Some(uri) = test_uri() else { return };
     let remote = connect(&uri);
     let lib = remote.root().join("src/lib.rs");
     let before = remote.read_file(&lib).expect("最初の read");
 
-    // ControlMaster を落とす → 多重化された RPC チャネルが切れる
-    remote.debug_stop_master();
-    println!("ControlMaster を kill した");
+    // ssh を落とす → RPC の接続が切れる（スリープ・VPN 断と同じ）
+    remote.debug_drop_connection();
+    println!("ssh を落とした");
 
-    // 次の read は ReconnectingClient が master 再生成 + 再接続で透過回復するはず
+    // 次の read は ReconnectingClient が繋ぎ直して透過回復するはず
     let after = read_with_retry(&remote, &lib);
     assert_eq!(after.bytes, before.bytes, "再接続後も同じ内容を読める");
 }
@@ -510,7 +557,10 @@ fn remote_ssh_watch_pushes_external_edits() {
     // out-of-band（別 ssh）で project 内のファイルを編集
     out_of_band_ssh(
         &uri,
-        "echo 'watched change' >> /home/dev/work/sample/README.md",
+        &format!(
+            "echo 'watched change' >> '{}/README.md'",
+            remote.root().display()
+        ),
     );
 
     // poll 間隔（700ms）内に変更イベントが push される
@@ -543,8 +593,8 @@ fn remote_ssh_watch_resubscribes_after_reconnect() {
         .expect("remote host は watch を返す");
     std::thread::sleep(Duration::from_millis(400));
 
-    // ControlMaster を落として再接続を誘発 → request 一発で確定（generation++）
-    remote.debug_stop_master();
+    // ssh を落として再接続を誘発 → request 一発で確定（generation++）
+    remote.debug_drop_connection();
     let _reconnected = read_with_retry(&remote, &lib);
     // keeper が generation 変化を見て監視を張り直すまで待つ（1.5s tick + 余裕）
     std::thread::sleep(Duration::from_secs(3));
@@ -552,7 +602,10 @@ fn remote_ssh_watch_resubscribes_after_reconnect() {
     // 再接続後に out-of-band 編集 → 再購読済みなら通知が来る
     out_of_band_ssh(
         &uri,
-        "echo 'after reconnect' >> /home/dev/work/sample/docs/notes.md",
+        &format!(
+            "echo 'after reconnect' >> '{}/docs/notes.md'",
+            remote.root().display()
+        ),
     );
     let event = watch
         .recv_timeout(Duration::from_secs(8))
@@ -570,39 +623,34 @@ fn remote_ssh_watch_resubscribes_after_reconnect() {
 }
 
 #[test]
-fn remote_ssh_process_respawns_after_master_kill() {
-    // 再接続後の LSP/PTY handle 再同期の土台: ControlMaster が落ちても、新しいプロセスを
-    // spawn し直せば ensure_master が master を張り直して stdio が通る（M13）。
+fn remote_ssh_process_survives_a_dropped_connection() {
+    // LSP / ACP と同じ経路（RPC のストリーム）。接続が切れてもプロセスは daemon で生きていて、
+    // 切れている間に書いた stdin も、繋ぎ直した後に届いて続きが読める（以前は ssh の子として死んでいた）。
     let Some(uri) = test_uri() else { return };
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Write as _};
     let remote = connect(&uri);
+    let spec = CommandSpec::new("sh", remote.root()).args([
+        "-c",
+        "echo ready; while IFS= read -r line; do echo \"got:$line\"; done",
+    ]);
+    let mut process = remote.spawn_process(&spec).expect("プロセスを spawn");
+    let mut stdin = process.take_stdin().expect("stdin");
+    let mut reader = BufReader::new(process.take_stdout().expect("stdout"));
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("stdout を読む");
+    assert_eq!(line.trim(), "ready");
 
-    let spawn_echo = |marker: &str| -> String {
-        // LSP/PTY と同じ経路（transport.command で別 ssh チャネル）。echo で一発出して sleep で常駐。
-        let spec = CommandSpec::new("sh", remote.root())
-            .args(["-c".to_string(), format!("echo {marker}; sleep 30")]);
-        let mut process = remote.spawn_process(&spec).expect("プロセスを spawn");
-        assert!(process.is_alive(), "spawn 直後は生きている");
-        let mut reader = BufReader::new(process.take_stdout().expect("stdout"));
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("stdout を読む");
-        line.trim().to_string()
-        // process は drop → child kill（remote の sleep も SIGHUP で終わる）
-    };
+    // ssh を落とす（laptop sleep / VPN 断で接続が死ぬのと同じ）
+    remote.debug_drop_connection();
+    stdin
+        .write_all(b"while-away\n")
+        .expect("切れていても書ける");
+    let _reconnected = read_with_retry(&remote, &remote.root().join("src/lib.rs"));
 
-    // ① 通常の spawn（LSP/PTY と同じ ssh チャネル経路で stdio が通る）
-    assert_eq!(spawn_echo("ready-before"), "ready-before");
-
-    // ② ControlMaster を落とす（laptop sleep / VPN 断で LSP/PTY チャネルが死ぬのと同じ）
-    remote.debug_stop_master();
-    std::thread::sleep(Duration::from_millis(400));
-
-    // ③ 再接続後に新プロセスを spawn → ensure_master が master を張り直して成功（= handle 再同期）
-    assert_eq!(
-        spawn_echo("ready-after"),
-        "ready-after",
-        "master kill 後も新しいプロセスを spawn して stdio が通る"
-    );
+    line.clear();
+    reader.read_line(&mut line).expect("繋ぎ直した後も読める");
+    assert_eq!(line.trim(), "got:while-away", "切れている間の入力が届いた");
+    assert!(process.is_alive(), "プロセスは daemon で生きていた");
 }
 
 /// remote-server 全プロセスの utime+stime（jiffies）合計を出す sh スクリプト。

@@ -4258,3 +4258,35 @@
 - 検証: `cargo test --workspace`（使い捨ての HOME・64 本の test result がすべて ok）
 - 次: Release に setup.exe が付いたら、LP（`lp/index.html`・`lp/en/index.html`）の Windows のリンクを zip から setup.exe へ替えて deploy
 
+
+## 2026-10-21 — Remote SSH を ssh 1 本の上に作り直す（#79・Windows でも使える・切れても端末が死なない）
+- やったこと: issue #79（Windows で `ssh://…` が「SSH control directory を作れない: /tmp/…」で落ちる）の調べから、
+  Windows の OpenSSH に ControlMaster が無いことを実機で確かめ、本人の判断で「1 本の RPC にまとめる」方へ作り直した
+  （設計の正 `docs/REMOTE-CHANNEL.md`・DECISIONS 同日）。
+  - host: `stream.rs`（wire の型と手元の受け口・offset と窓・繋ぎ直しの Attach）・`server_stream.rs`（daemon 側の
+    プロセス / PTY（`openpty`）/ TCP・流量制御・切れている間の控え）・`ssh_link.rs`（ssh 1 本・POSIX sh の bootstrap が
+    同じ接続の中で配備・askpass を Windows でも・`getrandom`）。`HostProcess` は手元の子か接続先のストリーム、
+    `TerminalLaunch` は手元のプログラムか接続先の端末（`RemoteTerminal`）。daemon は接続ごとのスレッドで、新しい接続が
+    来たら古い接続を切る。`ne` は daemon の Unix socket → Event → 手元 → GUI の制御口。ポート転送は手元の待ち受け + OpenTcp
+  - terminal_view: `remote_pty.rs`（RPC の端末を alacritty の EventLoop に PTY として見せる・unix は Unix socket の対、
+    Windows は loopback TCP の対）。`TerminalView::new_remote`
+  - workspace: askpass を Windows でも・Ports パネルの接続先の分を Windows でも・`hydrate_restored_projects` の git を背景へ
+    （`WorktreeGitFacts`）・パスフレーズの一言を Windows 向けに
+  - 配布: `bundle-windows.ps1` / `release.yml` が Linux 用 remote-server を同梱。`scripts/test-remote-ssh-wsl.ps1`
+    （WSL にユーザー権限の sshd を立てて Windows の client から実 SSH の試験）
+  - ついで: `crates/necoder/build.rs` が Windows 専用の `embed-resource` を mac / Linux でも参照していた
+    （このブランチの前のコミットで入った・Linux でワークスペースを check して発見）→ `cfg(windows)` に閉じた
+- 検証: host Windows 47 / Linux 58・terminal_view Windows / Linux 54 / 58・workspace Windows 298/300
+  （落ちた 2 本はビルド中にロケールを書き換えた取り違えと、既存の CRLF 依存の `a_merge_in_progress_is_found_and_aborted`）・
+  **実 SSH（Windows の ssh.exe → WSL の sshd）10 本すべて緑**（sshd の SIGSTOP で「無言で死んだ回線」も・凍結を解いて 0.16 秒で復帰）・GUI で WSL の端末を目視（プロンプト・色・題名・`uname`）。
+  acp_client の試験はこの機械の `python3` が Store の空の入口で起動できず多数落ちる（環境・今回と無関係）
+- 学び/罠:
+  - **フレームを分けて書くと 1 往復 ~40ms**（Nagle × 遅延 ACK・`-T` の ssh は TCP_NODELAY を立てない）。`write_frame` を
+    1 回の書き込みにして 45ms → 2ms。ControlMaster 時代も同じ形だったので mac も速くなるはず
+  - **alacritty の EventLoop のキーは OS で違う**（unix 0 / 1・Windows 2 / 1）。違うと EventLoop は黙って捨て、試験も
+    「終わる時の読み切り」で偶然通る。生きている間に往復する試験で固定した（誤ったキーで落ちることも確かめた）
+  - `cargo fmt --all` は整形されていない既存のファイルまで書き換える。触ったファイルだけを整形すること
+  - 試験の接続（TCP の対）は手元が drop しても reader が socket を握るので、server を待つ前に Shutdown を送る
+  - ユーザー権限の sshd はパスワード認証ができない（shadow を読めない）→ askpass の実機確認は別に要る
+- 次: mac の実機で Remote SSH 一通り（REMOTE-CHANNEL R9）・askpass の実機確認（R10）・WSL のフォルダを開く（W8）・
+  issue #79 への返信（文面は本人の確認の後）

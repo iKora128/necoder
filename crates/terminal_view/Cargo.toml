@@ -29,3 +29,5 @@ libc.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# 接続先の端末の試験で、開けなかった時のエラーを作る（host の `Result` は anyhow）。
+anyhow.workspace = true

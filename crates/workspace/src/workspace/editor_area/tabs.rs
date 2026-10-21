@@ -382,30 +382,29 @@ impl Workspace {
 
     /// project の Host 設定を TerminalDock が扱える launch spec に解決する。
     pub(crate) fn terminal_launch_for(slot: Option<&ProjectSlot>) -> TerminalLaunch {
-        let (cwd, shell) = slot
+        let (cwd, shell, remote) = slot
             .map(|slot| {
                 let root = slot.worktree.root().to_path_buf();
                 match slot.worktree.host().terminal_launch(&root) {
-                    Ok(Some(launch)) => {
-                        // remote の launch は `ssh -tt …` 自体が接続先で cwd を決めるので、
-                        // ローカルのパスを渡すと意味が無い（むしろ壊す）。
-                        // 一方 **ローカルで launch が返るのは Windows の既定シェル指定**（§W4）で、
-                        // こちらは cwd を渡さないと project root で開かない。
-                        let cwd = (!slot.worktree.host().is_remote()).then_some(root);
-                        (cwd, Some((launch.program, launch.args)))
+                    // remote は接続先の daemon が PTY を持つ（開く場所も接続先で決まる）。
+                    Ok(Some(host::TerminalLaunch::Remote(remote))) => (None, None, Some(remote)),
+                    // **ローカルで launch が返るのは Windows の既定シェル指定**（§W4）で、
+                    // cwd を渡さないと project root で開かない。
+                    Ok(Some(host::TerminalLaunch::Program(launch))) => {
+                        (Some(root), Some((launch.program, launch.args)), None)
                     }
-                    Ok(None) => (Some(root), None),
+                    Ok(None) => (Some(root), None, None),
                     Err(error) => {
                         eprintln!("remote terminal を起動できない: {error:#}");
-                        (None, None)
+                        (None, None, None)
                     }
                 }
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
         // 開発用: NECODER_TERM_ECHO="text" で起動時に text を表示してから shell へ
         // （file:line リンクの下線描画をオフスクリーン検証するためのフック・M13）。
         let shell = match std::env::var("NECODER_TERM_ECHO") {
-            Ok(text) if !text.is_empty() && shell.is_none() => Some((
+            Ok(text) if !text.is_empty() && shell.is_none() && remote.is_none() => Some((
                 "/bin/sh".to_string(),
                 vec!["-c".to_string(), format!("echo '{text}'; exec zsh -f")],
             )),
@@ -415,13 +414,13 @@ impl Workspace {
         // rc を読まない zsh へ（下線・色・リンクなど端末の描画を offscreen で撮るためのフック）。
         #[cfg(debug_assertions)]
         let shell = match std::env::var("NECODER_TERM_SCRIPT") {
-            Ok(script) if !script.is_empty() && shell.is_none() => Some((
+            Ok(script) if !script.is_empty() && shell.is_none() && remote.is_none() => Some((
                 "/bin/sh".to_string(),
                 vec!["-c".to_string(), format!("{script}; exec zsh -f")],
             )),
             _ => shell,
         };
-        TerminalLaunch { cwd, shell }
+        TerminalLaunch { cwd, shell, remote }
     }
 
     /// アクティブなターミナルにフォーカス（キー入力を受ける）。

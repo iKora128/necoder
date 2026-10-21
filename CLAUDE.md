@@ -14,6 +14,7 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 | **Fleet（多エージェント）の UI・Captain** | `docs/FLEET-V2.md` — Task を主語にした 1 画面と Captain の設計・実装計画（F0〜F7）。ドメイン不変条件は `docs/FLEET-ARCHITECTURE.md` |
 | **Chat モード（会話と artifact）** | `docs/CHAT.md` — 保存場所（書類フォルダ）・ファイルの扱いと権限・機能一覧（P0〜P2）・プリセットの中身。受入条件は ROADMAP M16 |
 | **Windows 対応（W フェーズ）** | `docs/WINDOWS-PORT.md` — 環境・設計決定・受入条件・罠・該当箇所インベントリ。`/goal-win` はこれを消化する |
+| **Remote SSH の通り道** | `docs/REMOTE-CHANNEL.md` — ssh 1 本の上にファイル操作・端末・LSP・ACP・TCP を載せる設計（protocol v4・daemon が PTY とプロセスを持つ）・罠・受入条件。実 SSH の試験は Docker（`scripts/test-remote-ssh-docker.sh`）か WSL（`scripts/test-remote-ssh-wsl.ps1`） |
 | 直近の文脈・罠 | `docs/JOURNAL.md` — セッションごとの実装日誌 |
 | 経緯・ビジョン | `docs/BACKGROUND.md` |
 | 設計判断と根拠 | `docs/DECISIONS.md`（AGPL-3.0・ウィンドウモデル・i18n などの決定ログ含む） |

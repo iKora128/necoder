@@ -492,3 +492,13 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   CSP を見る試験が本番と食い違う）。LP の中身の `lp/` は README の画像やアイコンの元も兼ねるので動かさず、
   `site/` の vite が publicDir として読む。cf と plugin はまだ beta なので版を固定する（`relay/package.json`・
   `site/package.json`）。
+- **Remote SSH は ssh 1 本の上に全部を載せる・ControlMaster をやめる — 2026-10-21（#79・本人判断「最高の状態を最高に。もっともあるべき素晴らしい方向に」）**:
+  #79（Windows で `ssh://` が `/tmp` を作れずに落ちる）の調べで、Windows の OpenSSH には ControlMaster が無い
+  （`ControlPath` を付けただけで `getsockname failed: Not a socket`）ことを実機で確かめた。選択肢は「1 本ずつ繋ぐ」
+  （小さい・ただしパスワード / 2 段階認証 / ハードウェア鍵 / 踏み台の人は端末や LSP を開くたびに認証と待ちが要る・
+  復元で一斉に繋いで sshd の `MaxStartups` に当たる）と「1 本の RPC にまとめる」（大きい）。後者を選んだ。
+  決めたこと: ① ssh は接続 1 回に 1 プロセス（`-o ControlMaster=no -o ControlPath=none`）。② 端末・LSP・ACP・
+  ポート転送は protocol v4 のストリーム（channel ごとの offset・窓 1 MiB）で運ぶ。③ PTY とプロセスは接続先の daemon が
+  持ち、切れても生かし、繋ぎ直した client が続きを受け取る（O35 の実装）。④ 配備も bootstrap が同じ接続の中で行う。
+  ⑤ 手元の OS で分岐しない（Windows / mac / Linux が同じ道）。mac の挙動も変わる（W フェーズの「mac を変えない」の
+  例外として本人が求めた）ので、mac の実機確認を残件にした。設計と受入条件の正は `docs/REMOTE-CHANNEL.md`。

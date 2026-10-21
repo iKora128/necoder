@@ -21,6 +21,10 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
+# 配備した remote-server の照合（sha256）・送る前の gzip・session id の乱数（docs/REMOTE-CHANNEL.md §3）。
+sha2.workspace = true
+flate2.workspace = true
+getrandom.workspace = true
 
 # 人が打ったコマンド（`run_user_command`）をプロセスグループごと止める `killpg`。
 [target.'cfg(unix)'.dependencies]

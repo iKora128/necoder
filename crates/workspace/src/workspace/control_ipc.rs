@@ -300,7 +300,6 @@ impl Workspace {
     }
 
     /// 同じ effect cycle に認証要求が重なっても、先に待っている要求を上書きしない。
-    #[cfg(unix)]
     fn queue_askpass(
         &mut self,
         prompt: String,
@@ -339,31 +338,24 @@ impl Workspace {
             // SSH の askpass（`host::install_askpass` が起こした necoder 自身からの要求）。
             // **token を持つ子だけ**が秘密を要求できる（token は ssh の環境変数にしか無い）。
             // 入力欄は Window が要るので、pending effect に積んで effect cycle の末尾で開く。
+            // Windows も同じ（ssh.exe は SSH_ASKPASS / SSH_ASKPASS_REQUIRE を見る・制御口は名前付きパイプ）。
             "askpass" => {
-                #[cfg(unix)]
-                {
-                    let token = params
-                        .get("token")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    let prompt = params
-                        .get("prompt")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    // token の検証と「何回目の問いか」を同時に取る。2 回目以降 = 直前の入力が
-                    // 拒否されて OpenSSH が訊き直している。
-                    let Some(attempt) = host::askpass_attempt(token, &prompt) else {
-                        let _ = respond.send(err(i18n::t!("askpass.err_token")));
-                        return;
-                    };
-                    self.queue_askpass(prompt, attempt, respond, cx);
-                }
-                #[cfg(not(unix))]
-                {
-                    // Windows の GUI ssh は現状 askpass を使わない（WINDOWS-PORT.md §D2 の続き）。
+                let token = params
+                    .get("token")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let prompt = params
+                    .get("prompt")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                // token の検証と「何回目の問いか」を同時に取る。2 回目以降 = 直前の入力が
+                // 拒否されて OpenSSH が訊き直している。
+                let Some(attempt) = host::askpass_attempt(token, &prompt) else {
                     let _ = respond.send(err(i18n::t!("askpass.err_token")));
-                }
+                    return;
+                };
+                self.queue_askpass(prompt, attempt, respond, cx);
             }
             "open" => {
                 // `ne` CLI（cli.rs）からの「このウィンドウで開いて」。絶対パス前提（絶対化は
@@ -1414,7 +1406,6 @@ fn serve_connection(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     #[gpui::test]
     fn simultaneous_askpass_requests_preserve_the_first(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;

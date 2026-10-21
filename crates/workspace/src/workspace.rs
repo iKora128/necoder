@@ -1160,6 +1160,40 @@ pub struct TaskSpace {
     pub captain_origin: bool,
 }
 
+/// worktree について git に聞く事実（[`TaskSpace`] の素）。読むのは I/O なので背景で行う。
+pub(crate) struct WorktreeGitFacts {
+    repository_id: String,
+    head: Option<String>,
+    linked: bool,
+    /// Task のブランチ（`task/*`・指定されていればそれ）。
+    branch: Option<String>,
+}
+
+impl WorktreeGitFacts {
+    /// **I/O あり**（SSH 先なら往復）。UI スレッドで呼ばない。
+    pub(crate) fn read(host: &dyn host::Host, root: &Path, branch: Option<&str>) -> Self {
+        let repository_id = project::repository_id_on(host, root);
+        let head = project::git_head_oid_on(host, root);
+        // `task/*` の自動判定は linked worktree に限る。本体チェックアウトでエージェントが一時的に
+        // `task/*` を checkout しただけで Task 扱い＝レールから消え、＋ で開き直しても隠れた枠へ
+        // 切り替わるだけになっていた（2026-09-26 ユーザー報告）。
+        // linked か は統合先の選び方（`linked`）にも使うので 1 回だけ聞く。
+        let linked = project::is_linked_worktree_on(host, root);
+        let branch = branch.map(str::to_string).or_else(|| {
+            linked
+                .then(|| project::git_current_branch_on(host, root))
+                .flatten()
+                .filter(|branch| branch.starts_with("task/"))
+        });
+        Self {
+            repository_id,
+            head,
+            linked,
+            branch,
+        }
+    }
+}
+
 impl TaskSpace {
     fn is_integration(&self) -> bool {
         self.kind == SpaceKind::Integration
@@ -1200,21 +1234,21 @@ impl TaskSpace {
         }
     }
 
+    /// **I/O あり**（git に 4 回聞く・SSH 先なら往復）。remote の worktree では UI スレッドで呼ばず、
+    /// 背景で [`WorktreeGitFacts::read`] してから [`Self::from_git_facts`] する。
     fn for_worktree(worktree: &Worktree, branch: Option<&str>) -> Self {
-        let repository_id = project::repository_id_on(worktree.host().as_ref(), worktree.root());
-        let head = project::git_head_oid_on(worktree.host().as_ref(), worktree.root());
-        // `task/*` の自動判定は linked worktree に限る。本体チェックアウトでエージェントが一時的に
-        // `task/*` を checkout しただけで Task 扱い＝レールから消え、＋ で開き直しても隠れた枠へ
-        // 切り替わるだけになっていた（2026-09-26 ユーザー報告）。
-        // linked か は統合先の選び方（`linked`）にも使うので 1 回だけ聞く。
-        let host = worktree.host();
-        let linked = project::is_linked_worktree_on(host.as_ref(), worktree.root());
-        let detected_branch = branch.map(str::to_string).or_else(|| {
-            linked
-                .then(|| project::git_current_branch_on(host.as_ref(), worktree.root()))
-                .flatten()
-                .filter(|branch| branch.starts_with("task/"))
-        });
+        let facts = WorktreeGitFacts::read(worktree.host().as_ref(), worktree.root(), branch);
+        Self::from_git_facts(worktree, facts)
+    }
+
+    /// [`WorktreeGitFacts::read`]（背景で読んだ git の事実）から組み立てる。I/O は無い＝UI スレッドでよい。
+    fn from_git_facts(worktree: &Worktree, facts: WorktreeGitFacts) -> Self {
+        let WorktreeGitFacts {
+            repository_id,
+            head,
+            linked,
+            branch: detected_branch,
+        } = facts;
         let is_task = detected_branch.is_some();
         let title = detected_branch
             .as_deref()

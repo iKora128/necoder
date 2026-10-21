@@ -8,11 +8,11 @@
 //!
 //! **SSH の接続先**（O5 の続き）: 開いている接続先ごとに、そこで LISTEN しているポートを 1 回読み
 //! （`ss`・無ければ `lsof`・自分のユーザーのプロセスだけ見える）、作業フォルダでプロジェクトに割り当てる。
-//! 「転送」で ControlMaster の `-O forward -L` を張り（手元は 127.0.0.1・同じ番号が塞がっていれば別の番号）、
-//! 転送した行は「開く」で手元の localhost を Web タブで開く。再接続したら張り直す（host）。接続先の
+//! 「転送」で手元に待ち受けを立て、来た接続を RPC の TCP ストリームで中継し（手元は 127.0.0.1・同じ番号が塞がっていれば別の番号）、
+//! 転送した行は「開く」で手元の localhost を Web タブで開く。再接続しても待ち受けは残る（host）。接続先の
 //! プロセスは止めない（ほかの人の物かもしれない・端末から止める）。
 //!
-//! Windows は未対応（lsof / ps が無い・OpenSSH の ControlMaster も無い）。
+//! Windows は手元の一覧だけ未対応（lsof / ps が無い）。SSH の接続先の一覧と転送は使える。
 
 use crate::workspace::*;
 use std::collections::HashMap;
@@ -375,13 +375,17 @@ impl Workspace {
         let Some(state) = self.overlays.ports.as_mut() else {
             return;
         };
+        state.rows = None;
+        // SSH の接続先の一覧と転送は手元の OS に依らない（RPC の上で読み、手元で待ち受ける）。
+        self.refresh_remote_ports(cx);
         if cfg!(target_os = "windows") {
-            state.rows = Some(Err(i18n::t!("ports.unsupported").into()));
+            // 手元の一覧は lsof / ps が要る（Windows は未対応）。
+            if let Some(state) = self.overlays.ports.as_mut() {
+                state.rows = Some(Err(i18n::t!("ports.unsupported").into()));
+            }
             cx.notify();
             return;
         }
-        state.rows = None;
-        self.refresh_remote_ports(cx);
         let roots: Vec<PathBuf> = self
             .project_sessions
             .projects

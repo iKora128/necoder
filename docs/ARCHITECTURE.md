@@ -531,34 +531,44 @@ Remote SSH を UI の条件分岐として足さない。local/SSH 共通の `Ho
 `project` / `search` / `lang` / `terminal` / `acp_client` は host の capability を使う。
 
 ```
-workspace/view -> project model -> Host trait <- LocalHost / SshHost
+workspace/view -> project model -> Host trait <- LocalHost / RemoteHost
                                       |
-                         versioned RPC over system OpenSSH
+            versioned RPC over 1 本の system OpenSSH（ControlMaster は使わない）
                                       |
-                           necoder-remote-server
+              necoder-remote-server（bootstrap → proxy → session の daemon）
 ```
 
+- 通り道の設計と受入条件の正は [`REMOTE-CHANNEL.md`](./REMOTE-CHANNEL.md)（2026-10-21・#79）。要点: **ssh は接続 1 回に
+  1 プロセス**（`-o ControlMaster=no -o ControlPath=none`）。ファイル操作の request と並んで、プロセス（LSP / ACP / 人の
+  コマンド）の stdio・端末の PTY・ポート転送の TCP を、同じ RPC の上の**ストリーム**（frame kind 5・id ごとに
+  channel と offset を数える・窓 1 MiB）として運ぶ。PTY とプロセスは接続先の **daemon が持つ**ので、接続が切れても
+  生き残り、繋ぎ直した client が受け取った位置から続きを受け取り直す（入力も同じ）。配備（remote-server を置く）も
+  bootstrap が同じ接続の中で済ませる＝認証は接続のたびに 1 回。手元の OS に依らず同じコード（Windows も mac も Linux も）
 - path identity は `(HostId, RemotePath)`。remote path を local `PathBuf` として OS API に渡さない。
 - UI/tree-sitter/dirty backup/credential は local。FS/watcher/search/Git/LSP/PTY/task/ACP は remote。
 - **Host は同期 trait ＝ UI スレッド（render・アクションハンドラ）から直接呼ばない**（2026-07-16 監査で規律化）。
   remote は 1 呼び出しが最大 `REQUEST_TIMEOUT`（30s）ブロックしうる。確立パターン
   （push/pull・gutter diff・横断検索と同じ `host.clone()` → `background_executor().spawn` → 前景で反映）に寄せる。
   render 内での FS/RPC 列挙は禁止 — ツリーが `slot.rows` にキャッシュするのと同型で、表示時に読んでキャッシュする。
-- 再接続（`host::ReconnectingClient`・2026-09-07 現在）: heartbeat は 5s ごとに Ping（timeout 5s）。
+  例外は「待たずに返す」と決めた入口だけ: `spawn_process`（開く request を背景で送り、それまでの stdin は溜める）と
+  `terminal_launch`（開き方を組むだけ・開くのは `TerminalView` が背景で行う）。
+- 再接続（`host::ReconnectingClient`・2026-09-07 / 2026-10-21 現在）: heartbeat は 5s ごとに Ping（timeout 5s）。
   時間切れでも受信バイトが進んでいれば「混んでいるだけ」と見て切らない（低速回線の大きな転送を巻き添えにしない）。
-  張り直しが決まったら古い接続に乗っていた request を即失敗させ session プロセスを落とす（待たせると各自の timeout まで帰らない）。
-  ControlMaster の作り直しは Hello が**時間切れ**のときだけ（即 EOF は remote-server 側の問題）。
-  端末/LSP/ACP の session は `ControlMaster=auto` で起こし master 不在なら自分が master になる＝ launch spec を組む関数はネットワークに触らない。
+  張り直しが決まったら古い接続に乗っていた request を即失敗させ ssh を落とす（待たせると各自の timeout まで帰らない）。
+  張り直した直後に、続けられるストリーム（端末・プロセス）を新しい接続へ付け直す（`StreamHub::reattach`）。
+  daemon は新しい接続が来たら古い接続を切る（1 session = 1 client・古い TCP の死を sshd が気付くのを待たない）。
   到達不能なホストでは 1 回の試行に十数秒かかるので、**待っている間に起きた失敗は待ち人が試し直さない**
   （到着より前の失敗＝ユーザーの新しい操作だけが繋ぎに行く）。切断中に操作するほど遅くなるのを防ぐ。
   実 SSH の回帰は `crates/host/tests/remote_ssh_live.rs`（`scripts/test-remote-ssh-docker.sh` が
-  Linux artifact の用意から container の凍結注入まで面倒を見る）。
+  Linux artifact の用意から container の凍結注入まで面倒を見る・Windows の client からは
+  `scripts/test-remote-ssh-wsl.ps1` が WSL のユーザー権限の sshd で同じ試験を流す）。
 - 接続状態の公開（2026-09-08）: `Host::connection_state()`（atomic 読み・I/O 無し＝ UI スレッド可）/
   `Host::watch_connection()`（変化の購読・std mpsc）/ `Host::reconnect()`（背景で heartbeat を 1 回前倒し。
   生きていれば何もしない）。遷移は `ReconnectingClient` が一手に握る（Unconnected → Connecting → Connected / Disconnected）。
   workspace は host ごとに 1 本の pump（`remote_connection.rs`）で notify を受け、statusbar の SSH チップが色と
-  「再接続」チップを出す。**SSH セッションに乗るプロセス（ACP/LSP/PTY）は自動再接続の外**: ssh の子が
-  落ちると stdout が EOF になり、そのプロセスは消える。ACP は `acp_client` が EOF（`is_incoming_transport_closed` /
+  「再接続」チップを出す。**ACP/LSP/PTY は daemon で生きていれば再接続をまたいで続く**（2026-10-21）。daemon ごと
+  消えた時（client が 10 分来ない・殺された）だけ、そのストリームは「見失った」になって stdout が EOF になる。
+  ACP は `acp_client` が EOF（`is_incoming_transport_closed` /
   待機中は `incoming_closed`）を見てセッションを畳み（`AgentEvent::SessionLost`）、次の送信で立ち上げ直す。
   待機中（ターンとターンの間）も `session/update` を読み、ターン中と同じ `handle_session_message` で捌く
   （コマンド一覧は `session/new` 直後、会話名はターン終了の数秒後に届く。読まずにいると次の prompt まで
@@ -570,15 +580,15 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   **一覧のためだけにエージェントを 1 本**起こして読む（`session/new` も prompt もしない）。どちらも `Host` 越しなので、
   SSH のプロジェクトではリモートのエージェント（＝リモートのアカウントの会話）に訊く。「新しいセッションで続ける」で
   忘れた会話 id・引き継げずに替わった id は `storage.thread_past_sessions` に残し、履歴の重複除けに使う。
-  LSP/PTY の同種の再 spawn は未着手（ROADMAP M9 残件）。
-- SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
-  GUI 起動の ssh には TTY が無いので、パスワード / passphrase / host key 確認だけは
-  `SSH_ASKPASS` に necoder 自身を指して入力欄へ中継する（`host::install_askpass` →
-  `control_ipc` の `askpass` → `remote_ssh::AskpassPrompt`）。秘密を要求できるのは
+- SSH は system binary（mac / Linux の OpenSSH・Windows の OpenSSH for Windows）。認証・known_hosts・ProxyJump を
+  再実装しない。GUI 起動の ssh には TTY が無いので、パスワード / passphrase / host key 確認だけは
+  `SSH_ASKPASS` に necoder 自身を指して入力欄へ中継する（`host::ssh_link::install_askpass` →
+  `control_ipc` の `askpass` → `remote_ssh::AskpassPrompt`・Windows も同じ）。秘密を要求できるのは
   その ssh のために発行した token を持つ子プロセスだけで、秘密は保存しない。
 - server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
-- wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、
-  stream/event/cancel は watch・PTY の protocol 化と同時に追加する。
+- wire は length-prefixed typed header + JSON meta + raw body（v4）。request id / frame limit を持ち、stream（frame kind 5）と
+  event（watch・`ne` の open）を同じ接続に載せる。**1 frame は 1 回の書き込みで出す**（分けると Nagle と遅延 ACK で
+  1 往復 ~40ms・REMOTE-CHANNEL §4）。
 - 途中で用が無くなる読み取り専用の command（変更レビューの `git diff` 等・`--no-optional-locks`）は
   `Host::run_command_cancellable(spec, cancel)`（2026-09-27・R02）: local は子の出力を待つ間に印を見て、
   立ったら子を止める。remote は 1 往復の途中で止める口が無いので、既定の実装が最後まで走らせてから結果を
@@ -588,8 +598,8 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   stream ごとに頭と尻を上限まで持ち、間は読み捨てる（子は止めない）。local は子を自分のプロセスグループで起こし、
   止める時はグループごと SIGTERM → 2 秒で SIGKILL。`pre_exec` で**シグナルのマスクと無視を既定へ戻す** —
   背景の executor のスレッド（macOS は GCD）は非同期のシグナルをブロックしていて、std の `Command` はマスクを
-  子へ継ぐ（戻さないと子に SIGTERM が届かず、止めるたびに SIGKILL の猶予を待つ）。remote は既定の実装
-  （1 往復で最後まで走らせて丸める・`can_stop_user_command` = false＝呼ぶ側は待たずに「中断」として畳む）。
+  子へ継ぐ（戻さないと子に SIGTERM が届かず、止めるたびに SIGKILL の猶予を待つ）。remote は `spawn_process` の
+  ストリームの子として起こし（`run_user_command_over_process`）、先頭の PID の目印から木ごと TERM → KILL する。
 - local implementation を先に `Host` へ移し、既存機能の回帰 test 後に SSH implementation を挿す。
 - security/performance/reliability の受入条件は
   [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) を正とする。

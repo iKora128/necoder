@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["zed"]
 
 [workspace.package]
-version = "0.1.31"
+version = "0.1.32"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -105,6 +105,11 @@ base64 = "0.22"
 # `acp_client::deploy`）。RustCrypto の実装（MIT OR Apache-2.0）で、依存ツリーに lock 済みの版を共有する。
 # 外から落とした実行ファイルを走らせる前の検証なので、手書きの実装ではなくこれを使う。
 sha2 = "0.10"
+# Remote SSH の session id と askpass の token に OS の乱数を使う（手元で `/dev/urandom` を直接読まない＝
+# Windows でも同じコードが通る・docs/REMOTE-CHANNEL.md）。依存ツリーに lock 済みの版を共有する。
+getrandom = "0.3"
+# Remote SSH の配備で remote-server を gzip して送る（同 §3）。依存ツリーに lock 済みの版を共有する。
+flate2 = "1"
 # M8 統合ターミナル。crates.io の公開 API を使用する。
 alacritty_terminal = "0.26"
 # 端末の PTY を包むのに要る（alacritty_terminal の EventedReadWrite が polling の型を取る）。

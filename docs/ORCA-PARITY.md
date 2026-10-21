@@ -90,7 +90,7 @@
 
 | # | 中身 | 作り方の要点 | 受入 | 規模 |
 |---|---|---|---|---|
-| **O5** Ports とポート転送 | X1・G08・F10 | 端末の pid を控え（alacritty の `Pty::child()`）、**パネルを開いた時と端末に URL が出た時だけ** `lsof -nP -iTCP -sTCP:LISTEN` を走らせ、pid の cwd で Task に割り当てる。止める = 所有を確かめて SIGTERM。SSH は remote server に一覧の request を足し、ControlMaster の `-O forward` で転送（再接続で張り直す）。O3・O8 の後 | Task の端末で dev server を立てると Ports に出て、開く（O8）/ 止めるができる。SSH の Task でも同じ | M〜L |
+| **O5** Ports とポート転送 | X1・G08・F10 | 端末の pid を控え（alacritty の `Pty::child()`）、**パネルを開いた時と端末に URL が出た時だけ** `lsof -nP -iTCP -sTCP:LISTEN` を走らせ、pid の cwd で Task に割り当てる。止める = 所有を確かめて SIGTERM。SSH は remote server に一覧の request を足し、手元で待ち受けて RPC の TCP ストリームで転送する（2026-10-21・以前は ControlMaster の `-O forward`）。O3・O8 の後 | Task の端末で dev server を立てると Ports に出て、開く（O8）/ 止めるができる。SSH の Task でも同じ | M〜L |
 | **O6** 変更レビュー画面 | E01〜E04・D12・D13 | EditorView を拡張せず新しいビューにする（可変高の仮想リスト）。`project` に base 指定のファイル単位パッチ・`git show <rev>:<path>`・merge-base を足す。+/- の行背景・旧 / 新の行番号・シンタックスハイライト・変更の無い領域の畳み・空白の無視・左のファイルツリー。基準は Task の base / HEAD / ブランチ / コミット。入口は Fleet の「変更」・ソース管理・パレット | 3 ファイル変えた Task で、全 diff が 1 画面に色付きで並び、基準を切り替えられる | L |
 | **O7** 行コメントと注記トレイ | E06〜E08（S1） | 行の ＋ か `c` で行・範囲に Markdown のコメント（入力は EditorView の平坦モード）。注記は storage に残す（再起動を越える）。トレイから宛先のスレッドを選び、`path:行` と抜粋つきの **1 通**にまとめて、表示を奪わずに送る（実行中ならキュー）。解決 / 未解決だけ再送 | 3 か所にコメントして「送る」で Task のスレッドに 1 通で届く | L |
 | **O8** localhost プレビュー | F01（localhost に限る）・F02・F04・F08・F14・F16・D10・E33 | 新しいタブの種類。読めるのは `localhost` / `127.0.0.1` / `[::1]` だけで、ほかは既定のブラウザへ回す（汎用ブラウザにしない）。戻る / 進む / 再読込 / ズーム / ビューポート / DevTools。URL を開く関数を 1 つにまとめ、トランスクリプト・Markdown プレビュー・（統合時に）端末のリンクをそこへ通す | dev server の URL を押すと necoder のタブで開き、外部サイトは既定のブラウザで開く | M |
@@ -130,7 +130,7 @@
 | **O32** GitHub II: PR / Issue / URL から Task | E24・E28・A04・E26・E27 | PR は `git fetch origin +refs/pull/N/head:…` で worktree に。Issue は名前をタイトルから作り、プロンプトには URL だけ。**Linear / Jira は作り込まない**: ＋Task に URL を貼れば、エージェントが自分の MCP で読む。**§6 の判断待ち** | M |
 | **O33** GitHub III: レビューコメントを直させる | X2・E20 | レビューの thread を読み、選んだものをスレッドへ。返信と resolve は **エージェントが終わった後に、文面を見せて本人が押す**（Orca はプロンプトが届いた時点で自動投稿する）。auto-merge は `gh pr merge --auto`。**§6 の判断待ち** | M |
 | **O34** 閉じても走る II: 端末の daemon | C05・C06 | `necoder-remote-server` の daemon を土台に、PTY の request（spawn / attach / detach / write / resize / snapshot）と出力の Event を足し、ローカルでも Unix ソケットで起動する。TerminalView に PTY ハンドルの抽象。daemon 側にも alacritty の `Term` を持たせ、reattach でスナップショット。scrollback をディスクへ（上限つき）。端末 id を台帳に残す | XL |
-| **O35** 閉じても走る III: SSH の切断を越える | G06・G07 | リモート端末を `ssh -tt` の中ではなく remote server の daemon に持たせ、切断後に reattach する | L |
+| **O35** 閉じても走る III: SSH の切断を越える | G06・G07 | **済（2026-10-21・#79・REMOTE-CHANNEL.md）**: リモート端末とプロセス（LSP・ACP）を remote server の daemon に持たせ、ssh が切れても生かしておき、繋ぎ直した client が受け取った位置から reattach する（入力も欠けずに届く）。ssh は接続 1 回に 1 本（ControlMaster をやめた） | L |
 | **O36** 閉じても走る IV: ACP のターンを続ける | S5 のエージェント部分 | ACP を daemon 側で持つか、stdio をバッファして中継する。アプリ不在中の承認は、方針で裁くかスマホへ回す。**O34 の後に判断** | XL |
 | **O37** SSH の UI | G01〜G04・G09 | 接続先の登録と接続テスト・ホスト鍵の案内・パスフレーズ（ssh-agent / Keychain の案内）・ダウンロード / アップロード | M |
 | **O38** スマホ | G15〜G18 | ファイル・端末（読み取り）・stage / commit・Task の作成・画像の添付 | L |
@@ -165,7 +165,7 @@
 ### 3.3 閉じても走る（O4 → O34〜O36）
 
 - 今は PTY も ACP の子プロセスもアプリ本体が持ち、⌘Q や最後の窓閉じで全部終わる（`terminal_view.rs` の Drop、`host.rs` の `HostProcess` の Drop）。
-- remote server は PTY を持っておらず、リモート端末は、ローカルの PTY の中で動く `ssh -tt` にすぎない。daemon は 1 接続ずつの逐次ループで、600 秒接続が無いと終わる。session id は接続ごとの乱数。
+- （〜2026-10-20）remote server は PTY を持っておらず、リモート端末は、ローカルの PTY の中で動く `ssh -tt` にすぎなかった。daemon は 1 接続ずつの逐次ループで、600 秒接続が無いと終わる。**2026-10-21（O35）**: daemon が PTY とプロセスを持ち、新しい接続が来たら古い接続を切って乗り換える。session id は RemoteHost ごとの乱数（再接続では同じ）。
 - Orca の daemon は、テストを除いて約 3 万行（SSH の relay も約 3 万行）ある。
 - そこで 2 段にする。
   - まず O4（安い）で「⌘Q の確認 → 隠して動かし続ける」。クラッシュや更新の再起動は守れないが、うっかり閉じる事故は防げる。
@@ -577,9 +577,9 @@ Task タブ行（変更・ターミナルが会話と同じ行に横並び）に
 | G03 | ProxyJump・多重化・GSSAPI・FIDO2 | 一部（#30・接続は OpenSSH と ~/.ssh/config に任せるので ProxyJump・多重化はそのまま効く。登録の画面に経由するホスト（ProxyJump）の欄。GSSAPI・FIDO2 は実機未確認） | O37 |
 | G04 | パスフレーズの保持 | 一部（#30・askpass に `ssh-add --apple-use-keychain` の案内。necoder 自身は保存しない） | O37 |
 | G05 | SSH 上の worktree とエージェント | 有 | 済 |
-| G06 | 切断を越えて PTY が生きる | 一部 | O35 |
-| G07 | 接続状態の表示と自動再接続 | 一部 | O35 |
-| G08 | ポート転送 | 有（#30・Ports の接続先の行の「転送」・ControlMaster の `-O forward`・再接続で張り直す・SSH のプロジェクトの localhost のリンクは転送してから開く） | O5 |
+| G06 | 切断を越えて PTY が生きる | 有（2026-10-21・ssh が切れても daemon の PTY は生き、繋ぎ直すと続きが出る。daemon は client が 10 分来ないと畳む） | O35 |
+| G07 | 接続状態の表示と自動再接続 | 有（2026-10-21・statusbar の SSH チップ + heartbeat の自動再接続で端末・LSP・ACP も続く） | O35 |
+| G08 | ポート転送 | 有（#30・Ports の接続先の行の「転送」・手元の待ち受け + RPC の TCP ストリーム（2026-10-21・再接続しても張り直し不要・Windows でも使える）・SSH のプロジェクトの localhost のリンクは転送してから開く） | O5 |
 | G09 | リモートのダウンロード・アップロード | 有（#30・Finder から落とす / 右クリック・上書きしない） | O37 |
 | G10 | VS Code Remote-SSH で開く | 方式差 | 方式差 |
 | G11 | ツールチェインの無い Linux でも動く | 有（優位） | 済 |

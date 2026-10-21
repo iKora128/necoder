@@ -1988,7 +1988,16 @@ impl Workspace {
         let title = (!title.is_empty()).then(|| title.to_string());
         self.chrome.show_bottom = true;
         self.terminal_dock.update(cx, |dock, cx| {
-            dock.open_command(TerminalLaunch { cwd, shell }, title, window, cx)
+            dock.open_command(
+                TerminalLaunch {
+                    cwd,
+                    shell,
+                    remote: None,
+                },
+                title,
+                window,
+                cx,
+            )
         });
         cx.notify();
     }
