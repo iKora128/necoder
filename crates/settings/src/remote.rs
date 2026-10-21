@@ -1,8 +1,50 @@
 //! スマホ連携。QR 秘密をファイルやログに残さず、期限付きで設定画面に表示する。
+//! 登録済みの端末を一覧し、その場で削除（失効）できる — 離席中に誰かが QR を発行して
+//! 自分の端末を繋いでも、ここを開けば気付けて切れるように。
 use super::*;
 use gpui::{canvas, fill, point, rgb, size, Bounds, ClipboardItem};
 use std::io::Read;
 use std::process::Stdio;
+use std::time::Instant;
+
+/// 「登録済みの端末」を読み直す間隔（ページが表示されている間だけ）。
+const DEVICE_REFRESH: Duration = Duration::from_secs(5);
+/// ホストが受け付ける端末の種類（`relay/host/bridge.mjs` の `DEVICE_MODELS` と同じ）。
+const DEVICE_MODELS: &[&str] = &["iPhone", "iPad", "Android", "Mac", "Windows", "Linux"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceStatus {
+    /// 認証済みの経路が開いている。
+    Online,
+    /// 登録済みだが、いまは繋がっていない（ホストが止まっている時も含む）。
+    Offline,
+    /// QR を発行したが、まだ読み取られていない。
+    Waiting,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RemoteDevice {
+    id: String,
+    model: Option<String>,
+    status: DeviceStatus,
+    paired_at: Option<u64>,
+    last_seen: Option<u64>,
+    projects: usize,
+}
+
+/// 設定画面の「登録済みの端末」の状態。
+#[derive(Default)]
+pub(super) struct DeviceList {
+    /// `None` = まだ一度も読めていない。
+    devices: Option<Vec<RemoteDevice>>,
+    error: Option<SharedString>,
+    loading: bool,
+    loaded_at: Option<Instant>,
+    /// 「削除」を押して確認を待っている端末。
+    confirming: Option<String>,
+    /// 削除を実行中の端末。
+    removing: Option<String>,
+}
 
 #[derive(Clone)]
 pub(super) struct Pairing {
@@ -11,6 +53,98 @@ pub(super) struct Pairing {
     modules: Vec<u8>,
     expires: u64,
     projects: usize,
+}
+
+impl DeviceList {
+    /// 次の描画で読み直させる。
+    pub(super) fn mark_stale(&mut self) {
+        self.loaded_at = None;
+    }
+}
+
+/// ホストの端末 ID（部屋 ID・base64url 43 文字）。CLI の引数に渡すので形を確かめてから使う。
+fn valid_device_id(id: &str) -> bool {
+    id.len() == 43
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn parse_devices(bytes: &[u8]) -> anyhow::Result<Vec<RemoteDevice>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let devices = value["devices"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("invalid_devices"))?;
+    devices
+        .iter()
+        .map(|device| {
+            let id = device["id"]
+                .as_str()
+                .filter(|id| valid_device_id(id))
+                .ok_or_else(|| anyhow::anyhow!("invalid_devices"))?;
+            let status = match device["status"].as_str() {
+                Some("online") => DeviceStatus::Online,
+                Some("offline") => DeviceStatus::Offline,
+                Some("waiting") => DeviceStatus::Waiting,
+                _ => anyhow::bail!("invalid_devices"),
+            };
+            Ok(RemoteDevice {
+                id: id.to_owned(),
+                model: device["model"]
+                    .as_str()
+                    .filter(|model| DEVICE_MODELS.contains(model))
+                    .map(str::to_owned),
+                status,
+                paired_at: device["paired_at"].as_u64(),
+                last_seen: device["last_seen"].as_u64(),
+                projects: device["projects"].as_array().map_or(0, Vec::len),
+            })
+        })
+        .collect()
+}
+
+/// unix ms を「たった今 / N分前 / N時間前 / N日前」へ（タイムゾーンの依存を増やさない）。
+fn relative_time(unix_ms: u64) -> String {
+    let minutes = now_ms().saturating_sub(unix_ms) / 60_000;
+    if minutes < 1 {
+        i18n::t!("time.just_now")
+    } else if minutes < 60 {
+        i18n::t!("time.minutes_ago", "count" => minutes)
+    } else if minutes < 60 * 24 {
+        i18n::t!("time.hours_ago", "count" => minutes / 60)
+    } else {
+        i18n::t!("time.days_ago", "count" => minutes / (60 * 24))
+    }
+}
+
+/// 端末の 2 行目（登録・最終接続・共有しているプロジェクト数）。
+fn device_details(device: &RemoteDevice) -> String {
+    let mut parts = Vec::new();
+    if device.status != DeviceStatus::Waiting {
+        if let Some(paired_at) = device.paired_at {
+            parts.push(
+                i18n::t!("settings.remote_device_paired", "when" => relative_time(paired_at)),
+            );
+        }
+        // 接続中なら「最終接続」は言うまでもない。
+        if device.status == DeviceStatus::Offline {
+            if let Some(last_seen) = device.last_seen {
+                parts.push(
+                    i18n::t!("settings.remote_device_seen", "when" => relative_time(last_seen)),
+                );
+            }
+        }
+    }
+    parts.push(i18n::t!("settings.remote_device_projects", "count" => device.projects));
+    parts.join(" · ")
+}
+
+/// ペアリング URL のフラグメントにある部屋 ID（= 端末 ID）。
+fn pairing_room(url: &str) -> Option<&str> {
+    url.split_once('#')?
+        .1
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("room="))
 }
 
 fn now_ms() -> u64 {
@@ -87,7 +221,7 @@ fn failure_message(code: &str) -> String {
         "node_missing" => "settings.remote_err_node",
         "host_not_bundled" | "host_not_built" => "settings.remote_err_host_missing",
         "host_startup_failed" | "local_auth_required" => "settings.remote_err_host_start",
-        "pairing_timeout" | "ipc_timeout_outcome_unknown" => "settings.remote_err_timeout",
+        "remote_timeout" | "ipc_timeout_outcome_unknown" => "settings.remote_err_timeout",
         "invalid_pairing" | "invalid_qr" | "expired_pairing" => "settings.remote_err_bad_payload",
         "room_create_429" => "settings.remote_err_relay_busy",
         "proof_of_work_too_hard" => "settings.remote_err_relay_busy",
@@ -107,9 +241,31 @@ fn issue_pairing() -> Result<Pairing, String> {
 }
 
 fn run_pairing() -> anyhow::Result<Pairing> {
+    parse_pairing(&run_remote(
+        &["remote", "pair-json", "Phone"],
+        Duration::from_secs(35),
+    )?)
+}
+
+fn load_devices() -> anyhow::Result<Vec<RemoteDevice>> {
+    parse_devices(&run_remote(
+        &["remote", "devices-json"],
+        Duration::from_secs(20),
+    )?)
+}
+
+fn revoke_device(id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(valid_device_id(id), "device_not_found");
+    // ホストが止まっていても CLI がローカルで失効する（リレーへの削除は届かなくてもよい）。
+    run_remote(&["remote", "revoke", id], Duration::from_secs(20))?;
+    Ok(())
+}
+
+/// `necoder remote …` を実行して stdout を返す。失敗は既知のコードだけを持ち出す。
+fn run_remote(args: &[&str], timeout: Duration) -> anyhow::Result<Vec<u8>> {
     let mut command = child_process::command(std::env::current_exe()?);
     command
-        .args(["remote", "pair-json", "Phone"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -132,15 +288,15 @@ fn run_pairing() -> anyhow::Result<Pairing> {
         let mut bytes = Vec::new();
         stderr.take(8_192).read_to_end(&mut bytes).map(|_| bytes)
     });
-    let deadline = std::time::Instant::now() + Duration::from_secs(35);
+    let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait()?.is_some() {
             break;
         }
-        if std::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             child.kill()?;
             child.wait()?;
-            anyhow::bail!("pairing_timeout");
+            anyhow::bail!("remote_timeout");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -158,7 +314,7 @@ fn run_pairing() -> anyhow::Result<Pairing> {
             known_failure(&String::from_utf8_lossy(&diagnostics)).unwrap_or("pairing_failed");
         anyhow::bail!("{code}");
     }
-    parse_pairing(&output)
+    Ok(output)
 }
 
 impl SettingsView {
@@ -166,7 +322,100 @@ impl SettingsView {
     #[cfg(feature = "remote-preview")]
     pub fn remote_preview(&mut self, payload: &[u8]) {
         self.remote_pairing = parse_pairing(payload).ok();
+        self.remote_devices.devices = parse_devices(payload).ok();
         self.remote_preview_only = true;
+    }
+
+    /// 「登録済みの端末」を読み直す（スマホ連携のページが描かれている間だけ、5 秒おき）。
+    /// 隔離撮影（`remote_preview`）は描画がここへ来る前に返るので、本物のホストを呼ばない。
+    pub(super) fn refresh_remote_devices_if_stale(&mut self, cx: &mut Context<Self>) {
+        let list = &mut self.remote_devices;
+        if list.loading
+            || list
+                .loaded_at
+                .is_some_and(|at| at.elapsed() < DEVICE_REFRESH)
+        {
+            return;
+        }
+        list.loading = true;
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { load_devices() })
+                .await;
+            let updated = view.update(cx, |view, cx| {
+                let list = &mut view.remote_devices;
+                list.loading = false;
+                list.loaded_at = Some(Instant::now());
+                match result {
+                    Ok(devices) => {
+                        list.devices = Some(devices);
+                        list.error = None;
+                    }
+                    Err(error) => {
+                        eprintln!("端末の一覧を読み込めない: {error}");
+                        list.error = Some(i18n::t!("settings.remote_devices_error").into());
+                    }
+                }
+                cx.notify();
+            });
+            if updated.is_err() {
+                return; // 設定画面が閉じた。
+            }
+            // 次の描画で読み直す。ページが表示されていなければ描画されないので、そこで止まる。
+            cx.background_executor().timer(DEVICE_REFRESH).await;
+            if let Err(error) = view.update(cx, |_, cx| cx.notify()) {
+                eprintln!("Remote device list closed: {error}");
+            }
+        })
+        .detach();
+    }
+
+    fn remove_remote_device(&mut self, id: String, cx: &mut Context<Self>) {
+        let list = &mut self.remote_devices;
+        if list.removing.is_some() {
+            return;
+        }
+        list.confirming = None;
+        list.removing = Some(id.clone());
+        list.error = None;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let target = id.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { revoke_device(&target) })
+                .await;
+            if let Err(error) = view.update(cx, |view, cx| {
+                let list = &mut view.remote_devices;
+                list.removing = None;
+                list.loaded_at = None; // すぐ読み直す。
+                match result {
+                    Ok(()) => {
+                        if let Some(devices) = list.devices.as_mut() {
+                            devices.retain(|device| device.id != id);
+                        }
+                        // 表示中の QR の端末なら、その QR も閉じる（もう読み取っても繋がらない）。
+                        if view
+                            .remote_pairing
+                            .as_ref()
+                            .is_some_and(|pairing| pairing_room(&pairing.url) == Some(id.as_str()))
+                        {
+                            view.remote_pairing = None;
+                            view.remote_generation += 1;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("端末を削除できない: {error}");
+                        list.error = Some(i18n::t!("settings.remote_device_remove_failed").into());
+                    }
+                }
+                cx.notify();
+            }) {
+                eprintln!("Remote device list closed: {error}");
+            }
+        })
+        .detach();
     }
     fn issue_remote_qr(&mut self, cx: &mut Context<Self>) {
         if self.remote_busy {
@@ -187,6 +436,8 @@ impl SettingsView {
             if view
                 .update(cx, |view, cx| {
                     view.remote_busy = false;
+                    // 発行した QR の「読み取り待ち」をすぐ一覧に出す。
+                    view.remote_devices.loaded_at = None;
                     match result {
                         Ok(pairing) => view.remote_pairing = Some(pairing),
                         Err(code) => view.remote_error = Some(failure_message(&code).into()),
@@ -276,6 +527,168 @@ impl SettingsView {
                             view.remote_pairing = None; view.remote_generation += 1; cx.notify();
                         }))))
             })
+            .child(self.remote_devices_section(cx))
+    }
+
+    /// 「登録済みの端末」: 1 台 = 1 枚のカード（種類と状態 / 登録・最終接続・共有数 / 削除）。
+    fn remote_devices_section(&self, cx: &mut Context<Self>) -> Div {
+        let theme = &self.theme;
+        let list = &self.remote_devices;
+        let note = |text: String| {
+            div()
+                .text_size(px(12.))
+                .text_color(theme.fg2)
+                .child(SharedString::from(text))
+        };
+        let mut section = div().flex().flex_col().gap(px(6.)).pt(px(10.)).child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.fg1)
+                .child(SharedString::from(i18n::t!(
+                    "settings.remote_devices_heading"
+                ))),
+        );
+        if let Some(error) = list.error.clone() {
+            section = section.child(note(error.to_string()));
+        }
+        let Some(devices) = list.devices.as_ref() else {
+            return section;
+        };
+        if devices.is_empty() {
+            return section.child(note(i18n::t!("settings.remote_devices_empty")));
+        }
+        for (index, device) in devices.iter().enumerate() {
+            let (dot, status) = match device.status {
+                DeviceStatus::Online => (theme.ok, i18n::t!("settings.remote_device_online")),
+                DeviceStatus::Offline => (
+                    theme.fg2.opacity(0.5),
+                    i18n::t!("settings.remote_device_offline"),
+                ),
+                DeviceStatus::Waiting => (theme.warn, i18n::t!("settings.remote_device_waiting")),
+            };
+            let name = device
+                .model
+                .clone()
+                .unwrap_or_else(|| i18n::t!("settings.remote_device_phone"));
+            let text_button = |id: (&'static str, usize), label: String, strong: bool| {
+                div()
+                    .id(id)
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(5.))
+                    .text_size(px(12.))
+                    .text_color(if strong { theme.fg0 } else { theme.fg2 })
+                    .when(strong, |element| {
+                        element.border_1().border_color(theme.border)
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .child(SharedString::from(label))
+            };
+            let actions = if list.removing.as_deref() == Some(device.id.as_str()) {
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.cli_busy")))
+            } else if list.confirming.as_deref() == Some(device.id.as_str()) {
+                let id = device.id.clone();
+                div()
+                    .flex()
+                    .gap(px(4.))
+                    .child(
+                        text_button(
+                            ("remote-device-cancel", index),
+                            i18n::t!("settings.remote_device_cancel"),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, _, cx| {
+                                view.remote_devices.confirming = None;
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        text_button(
+                            ("remote-device-remove-confirm", index),
+                            i18n::t!("settings.remote_device_remove_confirm"),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _, cx| {
+                                view.remove_remote_device(id.clone(), cx);
+                            }),
+                        ),
+                    )
+            } else {
+                let id = device.id.clone();
+                div().child(
+                    text_button(
+                        ("remote-device-remove", index),
+                        i18n::t!("settings.remote_device_remove"),
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _, cx| {
+                            view.remote_devices.confirming = Some(id.clone());
+                            cx.notify();
+                        }),
+                    ),
+                )
+            };
+            section = section.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .py(px(9.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .text_color(theme.fg0)
+                                            .child(SharedString::from(name)),
+                                    )
+                                    .child(div().size(px(7.)).rounded_full().bg(dot))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(theme.fg1)
+                                            .child(SharedString::from(status)),
+                                    ),
+                            )
+                            // 狭い幅でも 1 行に収める（「プロジェク / ト」と折り返さない）。
+                            .child(
+                                note(device_details(device))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis(),
+                            ),
+                    )
+                    .child(div().flex_none().child(actions)),
+            );
+        }
+        section
     }
 }
 
@@ -297,6 +710,62 @@ mod tests {
         value["modules"] = "0".repeat(441).into();
         value["expires"] = 0.into();
         assert!(parse_pairing(value.to_string().as_bytes()).is_err());
+    }
+
+    /// 端末の一覧は形の正しいものだけ受け取る（ID は CLI の引数に渡すので特に厳しく）。
+    #[test]
+    fn device_list_validation() {
+        let room = "a".repeat(43);
+        let payload = serde_json::json!({"running": false, "devices": [
+            {"id": room, "model": "iPhone", "status": "offline", "paired_at": 1, "last_seen": 2, "projects": ["a", "b"]},
+            {"id": "b".repeat(43), "model": "<script>", "status": "waiting", "projects": []},
+        ]});
+        let devices = parse_devices(payload.to_string().as_bytes()).unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].status, DeviceStatus::Offline);
+        assert_eq!(devices[0].model.as_deref(), Some("iPhone"));
+        assert_eq!(devices[0].projects, 2);
+        // 知らない種類は名前に出さない（「スマホ」に倒す）。
+        assert_eq!(devices[1].model, None);
+        for bad in [
+            serde_json::json!({"devices": [{"id": "--help", "status": "online"}]}),
+            serde_json::json!({"devices": [{"id": room, "status": "hacked"}]}),
+            serde_json::json!({"running": true}),
+        ] {
+            assert!(parse_devices(bad.to_string().as_bytes()).is_err());
+        }
+        assert!(parse_devices(br#"{"running":true,"devices":[]}"#)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn pairing_url_names_its_device() {
+        let url = format!(
+            "https://control.necoder.com/#room={}&token=t&secret=s",
+            "a".repeat(43)
+        );
+        assert_eq!(pairing_room(&url), Some("a".repeat(43).as_str()));
+        assert_eq!(pairing_room("https://control.necoder.com/"), None);
+    }
+
+    /// 読み取り待ちの QR に「登録」「最終接続」は出さない。接続中は「最終接続」を出さない。
+    #[test]
+    fn device_details_show_only_what_applies() {
+        let mut device = RemoteDevice {
+            id: "a".repeat(43),
+            model: None,
+            status: DeviceStatus::Waiting,
+            paired_at: Some(now_ms()),
+            last_seen: Some(now_ms()),
+            projects: 1,
+        };
+        let projects = i18n::t!("settings.remote_device_projects", "count" => 1);
+        assert_eq!(device_details(&device), projects);
+        device.status = DeviceStatus::Online;
+        assert_eq!(device_details(&device).matches(" · ").count(), 1);
+        device.status = DeviceStatus::Offline;
+        assert_eq!(device_details(&device).matches(" · ").count(), 2);
     }
 
     /// stderr から拾うのは**既知のコードだけ**。URL やパスの混ざった行からは何も取らない。

@@ -1185,6 +1185,7 @@ impl Workspace {
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
     /// チャットの行 / `edit:<文字>` = 成果物を書き換える（本番と同じ合図を出す）/ `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
+    /// `remote-device-added:<種類>` = スマホ連携の新しい端末の知らせ / `remote-devices` = そのトーストを押した先 /
     /// `settings:<page>` / `settings-add:<語>` = 設定の「エージェントを追加」/
     /// `settings-connection:<ひな形の id>` = 設定の「接続を追加」/ `settings-open:<id>` = AI
     /// エージェントのページで行を開く / `settings-host:<名前>` = 偽の SSH 先を足して選ぶ /
@@ -1360,6 +1361,21 @@ impl Workspace {
                 view.update(cx, |view, cx| view.debug_use_fake_host(argument, cx));
             }
             // 設定画面をページ指定で開く（Chat の設定・MCP のコネクタの見た目を撮る）。
+            // Remote ホストの「新しい端末が登録された」と同じ IPC の受け口を通す（`<種類>`）。
+            "remote-device-added" => {
+                let (respond, _receiver) = std::sync::mpsc::channel();
+                self.handle_remote_control(
+                    "remote_device_added",
+                    serde_json::json!({ "model": argument }),
+                    respond,
+                    cx,
+                );
+            }
+            // そのトーストを押した時と同じ（設定 › スマホ連携 を開く）。
+            "remote-devices" => {
+                self.set_chat_mode(false, window, cx);
+                self.open_remote_devices(cx);
+            }
             "settings" => {
                 self.set_chat_mode(false, window, cx);
                 self.chrome.show_settings = true;

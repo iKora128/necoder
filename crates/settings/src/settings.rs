@@ -906,6 +906,7 @@ pub struct SettingsView {
     remote_busy: bool,
     remote_error: Option<SharedString>,
     remote_generation: u64,
+    remote_devices: remote::DeviceList,
     /// Skills 節の中身（skill 置き場の走査結果と necoder の skill の状態）。`None` = まだ読んでいない。
     /// 他人の置き場を数十個読むので背景で読み、描画はこのキャッシュだけを見る。
     skills: Option<SkillsSnapshot>,
@@ -1045,6 +1046,7 @@ impl SettingsView {
             remote_busy: false,
             remote_error: None,
             remote_generation: 0,
+            remote_devices: remote::DeviceList::default(),
             skills: None,
             skills_project: None,
             skills_busy: false,
@@ -2937,6 +2939,16 @@ impl SettingsView {
         self.select_page(page, cx);
     }
 
+    /// スマホ連携のページを開き、登録済みの端末をすぐ読み直す（新しい端末の知らせから来る）。
+    pub fn open_remote_devices(&mut self, cx: &mut Context<Self>) {
+        if self.searching() {
+            self.clear_search(cx);
+        }
+        self.remote_devices.mark_stale();
+        self.select_page(SettingsPage::Remote, cx);
+        cx.notify();
+    }
+
     fn select_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         if self.page != page {
             self.page = page;
@@ -4263,6 +4275,10 @@ impl Render for SettingsView {
                 .bg(self.theme.bg1)
                 .p(px(28.))
                 .child(self.remote_section(cx));
+        }
+        // スマホ連携のページが見えている間は、登録済みの端末を読み直し続ける。
+        if self.page == SettingsPage::Remote {
+            self.refresh_remote_devices_if_stale(cx);
         }
         let theme = self.theme.clone();
         let settings = get(cx);

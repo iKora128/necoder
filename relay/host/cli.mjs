@@ -49,6 +49,7 @@ async function serve() {
           if (method === 'status') result = { pid: process.pid, online: !!bridge.snapshot, origin: config.origin,
             keeps_awake: bridge.keepsAwake(), on_ac_power: bridge.onAcPower, sleeps_on_lid_close: hasLid(),
             devices: bridge.devices.filter(d => !d.revoked).map(d => ({ id: d.room, name: d.name, paired: d.confirmed, projects: d.tasks })) };
+          else if (method === 'devices') result = { running: true, devices: bridge.describe() };
           else if (method === 'pair') { await bridge.poll(); result = await bridge.pair(params.name, params.tasks); }
           else if (method === 'revoke') result = await bridge.revoke(params.id);
           else if (method === 'stop') { result = { stopped: true }; setTimeout(shutdown, 100); }
@@ -69,6 +70,29 @@ async function serve() {
   process.once('SIGTERM', shutdown); process.once('SIGINT', shutdown);
   await bridge.start();
   console.log('necoder Remote host started:', config.origin);
+}
+/// ホストが止まっているか（admin socket が無い・応答しない）。
+const hostStopped = error => ['ENOENT', 'ECONNREFUSED'].includes(error.code);
+/// 止まっているホストの代わりに、保存済みの端末表を直接扱う Bridge（接続も wake lock も張らない）。
+async function offlineBridge(config) {
+  const bridge = new Bridge(config, await readState('devices', []));
+  bridge.stopped = true;
+  return bridge;
+}
+/// 設定画面の端末一覧。ホストが止まっていても登録は残っているので、保存済みの表から出す。
+async function listDevices() {
+  try { return await admin('devices'); } catch (error) { if (!hostStopped(error)) throw error; }
+  const config = await readState('config');
+  if (!config) return { running: false, devices: [] };
+  return { running: false, devices: (await offlineBridge(config)).describe() };
+}
+/// 失効はホストが止まっていても行う（次に起動したホストはこの端末を認証しない）。
+async function revokeDevice(id) {
+  if (!validSecret(id)) throw new Error('device_not_found');
+  try { return await admin('revoke', { id }); } catch (error) { if (!hostStopped(error)) throw error; }
+  const config = await readState('config');
+  if (!config) throw new Error('device_not_found');
+  return (await offlineBridge(config)).revoke(id);
 }
 async function ensureStarted() {
   try { return await admin('status'); } catch (error) {
@@ -113,10 +137,12 @@ try {
       if (hasLid()) console.log('注意: この Mac は蓋を閉じるとスリープします（power assertion では止まりません）。'
         + '\n  外部ディスプレイ + 電源で clamshell にするか、蓋を開けたままにしてください。');
     }
-  } else if (['status', 'stop', 'revoke'].includes(command)) {
+  } else if (command === 'devices-json') console.log(JSON.stringify(await listDevices()));
+  else if (command === 'revoke') console.log(JSON.stringify(await revokeDevice(args[0]), null, 2));
+  else if (['status', 'stop'].includes(command)) {
     console.log(JSON.stringify(await admin(command, { id: args[0] }), null, 2));
   } else {
-    console.log('necoder Remote: init [https://origin] | start | serve | pair [device-name] [task-id...] | status | revoke <device-id> | stop');
+    console.log('necoder Remote: init [https://origin] | start | serve | pair [device-name] [task-id...] | status | devices-json | revoke <device-id> | stop');
     console.log('Mac / Windows の Node.js 22+ が必要です。pair は現在開いているプロジェクトだけを共有します。');
   }
 } catch (error) { console.error(error.message); process.exitCode = 1; }
