@@ -24,7 +24,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         point(px(0.), px(0.)),
-                        size(px(700.), px(760.)),
+                        size(px(700.), px(1000.)),
                     ))),
                     ..Default::default()
                 },

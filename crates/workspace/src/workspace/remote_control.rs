@@ -22,6 +22,25 @@ impl Workspace {
         respond: std::sync::mpsc::Sender<Value>,
         cx: &mut Context<Self>,
     ) {
+        // Remote ホストからの知らせ: スマホ連携に新しい端末が登録された（確認まで済んだ）。
+        // 種類はホストが既知の値に絞ってあるが、ここでも形を確かめてから文に入れる。
+        if method == "remote_device_added" {
+            let model = params["model"]
+                .as_str()
+                .filter(|model| {
+                    ["iPhone", "iPad", "Android", "Mac", "Windows", "Linux"].contains(model)
+                })
+                .map(str::to_owned)
+                .unwrap_or_else(|| i18n::t!("settings.remote_device_phone"));
+            self.push_remote_device_toast(
+                SharedString::from(i18n::t!("toast.remote_device_added", "model" => model)),
+                cx,
+            );
+            if let Err(error) = respond.send(reply(Ok(json!({"shown": true})))) {
+                eprintln!("remote device notice receiver: {error}");
+            }
+            return;
+        }
         if method == "remote_snapshot" {
             let projects: Vec<Value> = self.project_sessions.projects.iter().enumerate().map(|(index, slot)| {
                 let session = &self.project_sessions.sessions[index];

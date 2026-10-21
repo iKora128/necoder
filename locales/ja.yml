@@ -1167,7 +1167,7 @@ settings:
   remote_err_no_project: 共有できるプロジェクトがありません。先にプロジェクトを開いてください。
   remote_err_not_initialized: スマホ連携がまだ初期化されていません。ターミナルで `ne remote init` を実行してください。
   remote_err_relay_busy: 中継サーバが混み合っています。1分ほど置いてからもう一度発行してください。
-  remote_err_device_limit: 登録済みの端末が上限（8台）です。使っていない端末を失効させてから発行してください。
+  remote_err_device_limit: 登録済みの端末が上限（8台）です。使っていない端末を削除してから発行してください。
   remote_err_node: Node.js 22以降が見つかりません。インストールしてから発行してください。
   remote_err_host_missing: スマホ連携に必要なファイルがありません。necoder を再インストールしてください。
   remote_err_host_start: Remoteホストを起動できませんでした。`~/.necoder/remote/host.log` に理由が残ります。
@@ -1175,6 +1175,20 @@ settings:
   remote_err_timeout: 発行が時間内に終わりませんでした。もう一度お試しください。
   remote_err_bad_payload: "受け取ったQRが壊れていました。necoder とRemoteホストのバージョンが一致しているか確認してください。"
   remote_expired: QRの有効期限が切れました。接続用QRを再発行してください。
+  remote_devices_heading: 登録済みの端末
+  remote_devices_empty: 登録済みの端末はありません
+  remote_devices_error: 端末の一覧を読み込めませんでした
+  remote_device_phone: スマホ
+  remote_device_online: 接続中
+  remote_device_offline: 未接続
+  remote_device_waiting: QRの読み取り待ち
+  remote_device_paired: "登録 %{when}"
+  remote_device_seen: "最終接続 %{when}"
+  remote_device_projects: "%{count} プロジェクト"
+  remote_device_remove: 削除
+  remote_device_remove_confirm: 削除する
+  remote_device_cancel: キャンセル
+  remote_device_remove_failed: 端末を削除できませんでした。もう一度お試しください。
   cli_sub: ターミナルから `ne <パス>` で necoder を開けるようにします。
   cli_row_label: ne コマンド
   cli_row_sub_missing: "%{path} にインストールします（`ne .` で今いるフォルダを開く）"
@@ -1492,6 +1506,8 @@ link:
 toast:
   open_details: 全文 ›
   reveal: Finder で表示 ›
+  remote_devices: 端末を確認 ›
+  remote_device_added: "スマホ連携に新しい端末（%{model}）が登録されました"
 review:
   tab_title: 変更レビュー
   compare: 比較

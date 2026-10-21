@@ -24,6 +24,19 @@ const GLYPH = { blocked: '◐', done: '○', lost: '○', idle: '●' };
 const STATE_LABEL = { blocked: 'blocked', running: 'running', done: 'done', lost: 'lost', idle: 'idle' };
 // 端末ごとの表示状態（秘密ではない）。最後に開いたスレッドと、スレッドごとに見た最後のターン。
 const LAST = 'necoder-remote-last', SEEN = 'necoder-remote-seen';
+
+/// Mac の設定画面の端末一覧に出す種類（名前や識別子は送らない・ホストは既知の値しか受けない）。
+function deviceModel() {
+  const agent = navigator.userAgent;
+  if (/iPhone/.test(agent)) return 'iPhone';
+  // iPadOS は Mac の UA を名乗るので、タッチの有無で見分ける。
+  if (/iPad/.test(agent) || (/Macintosh/.test(agent) && navigator.maxTouchPoints > 1)) return 'iPad';
+  if (/Android/.test(agent)) return 'Android';
+  if (/Macintosh/.test(agent)) return 'Mac';
+  if (/Windows/.test(agent)) return 'Windows';
+  if (/Linux/.test(agent)) return 'Linux';
+  return null;
+}
 function stored(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
 function store(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* 保存できなくても表示は続ける */ } }
 let seen = stored(SEEN, {});
@@ -155,11 +168,11 @@ async function connect() {
         selectedDevice.secret = value.secret; selectedDevice.name = String(value.name || 'Mac').slice(0, 80); selectedDevice.paired = true;
         try { await saveDevice(selectedDevice); } catch { throw new Error('storage_failed'); }
         known = await devices(); device = selectedDevice; refreshHosts();
-        await send({ type: 'confirm' });
+        await send({ type: 'confirm', model: deviceModel() });
       } else if (value.type === 'ready') {
         if (!selectedDevice.paired) throw new Error('pairing_not_saved');
         // 保存後 confirm 前に切断しても、新しい接続で確認を完了できる。
-        await send({ type: 'confirm' });
+        await send({ type: 'confirm', model: deviceModel() });
       } else if (value.type === 'snapshot') {
         snapshot = value.snapshot; vapid = value.vapid; pushEnabled = value.push_subscribed;
         changeStatus(value.online && snapshot ? 'online' : 'guiOffline');

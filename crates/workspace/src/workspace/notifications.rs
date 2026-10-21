@@ -24,6 +24,8 @@ pub(crate) enum ToastAction {
     Reveal { path: PathBuf },
     /// 押すとページを開く（更新の変更点・O45 / H17）。`label` はトーストの右の文字。
     OpenUrl { url: String, label: SharedString },
+    /// 設定 › スマホ連携 の「登録済みの端末」を開く（新しい端末の登録の知らせ）。
+    OpenRemoteDevices,
 }
 
 /// トーストが消えるまで。失敗の知らせは理由を読む時間が要るので長めにする。
@@ -634,6 +636,24 @@ impl Workspace {
         self.push_toast_entry(text, color, action, FAILURE_TOAST_LIFETIME, cx);
     }
 
+    /// スマホ連携に新しい端末が登録された知らせ。押すと登録済みの端末を開く（読む時間が要るので長め）。
+    pub(crate) fn push_remote_device_toast(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        let color = self.accent();
+        let action = Some(ToastAction::OpenRemoteDevices);
+        self.push_toast_entry(text, color, action, FAILURE_TOAST_LIFETIME, cx);
+    }
+
+    /// 設定 › スマホ連携 を開く。
+    pub(crate) fn open_remote_devices(&mut self, cx: &mut Context<Self>) {
+        self.chrome.show_settings = true;
+        self.exit_agent_full_screen(cx); // 全画面のままだと中央が Agent で設定が出ない
+        self.refresh_settings_view(cx);
+        self.chrome
+            .settings_view
+            .update(cx, |view, cx| view.open_remote_devices(cx));
+        cx.notify();
+    }
+
     fn push_toast_entry(
         &mut self,
         text: SharedString,
@@ -866,6 +886,28 @@ impl Workspace {
                                         move |_this, _event: &MouseDownEvent, _window, cx| {
                                             cx.stop_propagation();
                                             cx.open_url(&url);
+                                        },
+                                    ),
+                                );
+                        }
+                        Some(ToastAction::OpenRemoteDevices) => {
+                            toast = toast
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(i18n::t!(
+                                            "toast.remote_devices"
+                                        ))),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        move |this, _event: &MouseDownEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.open_remote_devices(cx);
                                         },
                                     ),
                                 );

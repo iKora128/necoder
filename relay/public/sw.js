@@ -19,6 +19,8 @@ self.addEventListener('fetch', event => {
 const NOTICES = {
   attention: { body: 'エージェントが回答を待っています / Your agent needs attention', tag: 'necoder-attention' },
   done: { body: 'エージェントが作業を終えました / Your agent finished', tag: 'necoder-done' },
+  // 離席中に Mac の前で誰かが端末を登録した時、すでに登録してある自分のスマホに届く。
+  device_added: { body: '新しい端末が登録されました。心当たりがなければ Mac で削除してください / A new device was paired. If it wasn\'t you, remove it on your Mac', tag: 'necoder-device' },
 };
 self.addEventListener('push', event => {
   // 本文を信用してリンクやコマンドを作らない。通知は常に固定文・固定オリジン。

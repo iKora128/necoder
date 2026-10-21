@@ -4258,3 +4258,14 @@
 - 検証: `cargo test --workspace`（使い捨ての HOME・64 本の test result がすべて ok）
 - 次: Release に setup.exe が付いたら、LP（`lp/index.html`・`lp/en/index.html`）の Windows のリンクを zip から setup.exe へ替えて deploy
 
+## 2026-10-20 — スマホ連携: 登録済みの端末の一覧と削除
+
+- 発端: 本人「QRでスマホから操作できるのって危なくない？」。調べると暗号と認証は堅いが、QR を先に読んだ人がそのまま登録でき、Mac 側に登録済みの端末を見る画面も消す画面も無かった（`ne remote status` / `revoke` だけ）。本人の判断で「確認ダイアログ」より先に**一覧と削除**を入れた（離席中に Mac の前で QR を発行されると、確認ダイアログも本人ではなく相手が押せるため）
+- ホスト（`relay/host`）: `devices-json` を追加。ホストが止まっていても保存済みの表から返す。`revoke` もホスト停止中はローカルで失効する（以前は host.sock に繋がらず失敗していた）。端末に `pairedAt` / `lastSeen`（保存は 60 秒に 1 回へ間引く）/ `model` を持たせた
+- PWA（`relay/public/app.mjs`）: confirm に端末の種類（UA から iPhone / iPad / Android / Mac / Windows / Linux）を添える。名前や識別子は送らない。ホストは既知の値以外を捨てる
+- 設定（`crates/settings/src/remote.rs`）: 「登録済みの端末」のカード。削除は 2 段。表示中の QR の端末を消したら QR も閉じる
+- 検証: `relay` の `npm test`（26 本）・`cargo test -p settings`（使い捨ての HOME）・隔離した本体（`NECODER_REMOTE_HOME` / `NECODER_HOME` / `NECODER_GUI_SOCK` を一時ディレクトリ・`NECODER_CHAT_PROBE=settings:remote`）を offscreen で撮って目視。実物の `necoder remote revoke` → 一覧から消えることも確認
+- 続き（本人「全部やってください」）: 新しい端末の登録を知らせる。ホストは初回の確認で GUI へ `remote_device_added`（トースト + `端末を確認 ›`）を送り、ほかの登録済みのスマホへ Push `device_added` を送る。Mac の前にいる相手はトーストを消せるので、効くのは手元のスマホへの Push の方
+- 罠: スクショ用の起動（`--features screenshot`）では管制 IPC が張られない。トーストは開発用の命令 `NECODER_CHAT_PROBE=remote-device-added:<種類>` で同じ受け口を通して撮る（`remote-devices` = トーストを押した先）
+- 未: 実機 iPhone での接続中表示と Push の文面は未確認
+

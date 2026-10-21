@@ -36,6 +36,22 @@ export function validSubscription(subscription) {
   } catch { return false; }
 }
 
+/// 端末の種類として受け取ってよい値（スマホの PWA が confirm に添える）。ほかは捨てる。
+export const DEVICE_MODELS = new Set(['iPhone', 'iPad', 'Android', 'Mac', 'Windows', 'Linux']);
+/// lastSeen を保存し直す最短の間隔。接続中の毎メッセージでディスクに書かない。
+const SEEN_PERSIST_INTERVAL = 60_000;
+
+/// 設定画面に出す端末の一覧（失効済みと期限切れの未使用 QR は出さない）。
+/// `online(device)` は「いま認証済みの経路が開いているか」— ホストが止まっていれば常に false。
+export function describeDevices(devices, online, now = Date.now()) {
+  return devices.filter(device => !device.revoked && (device.paired || device.expires > now)).map(device => ({
+    id: device.room, name: device.name, model: device.model || null,
+    status: !device.paired ? 'waiting' : online(device) ? 'online' : 'offline',
+    paired_at: device.pairedAt || null, last_seen: device.lastSeen || null,
+    expires: device.paired ? null : device.expires, projects: device.tasks,
+  }));
+}
+
 export class Bridge {
   constructor(config, devices, options = {}) {
     this.config = config; this.devices = devices;
@@ -46,6 +62,8 @@ export class Bridge {
     this.receipts = {}; this.polling = false; this.caffeinate = null;
     // 端末ごと（room）の「前の poll で走っていたスレッド」。完了の push を決めるだけなので保存しない。
     this.runningThreads = new Map();
+    // 端末ごとに lastSeen を最後に保存した時刻（保存の間引き用・保存しない）。
+    this.seenPersisted = new Map();
     // 電源が読めない機種・OS では「挿さっている」に倒す（据え置き機で黙って効かなくなるのを避ける）。
     this.onAcPower = true; this.powerCheckedAt = 0;
     this.readPower = options.readPower || (() => new Promise(resolve =>
@@ -114,19 +132,26 @@ export class Bridge {
       if (!device.paired) {
         // QR 秘密はこの成功で消費。復帰用の新しい鍵を暗号チャネル内だけで送る。
         device.secret = random(); device.paired = true; device.confirmed = false;
+        device.pairedAt = device.lastSeen = Date.now();
         await this.persist();
         this.updateWakeLock();
         await this.send(state, { type: 'paired', secret: device.secret, name: this.config.name, room: device.room });
         await this.renew();
       } else {
+        await this.seen(device);
         await this.send(state, { type: 'ready', name: this.config.name });
       }
       return;
     }
     if (!state.channel) throw new Error('authentication_required');
     const value = await state.channel.open(message);
+    await this.seen(device);
     if (value.type === 'confirm') {
-      device.confirmed = true; state.pairedChannel = true; await this.persist();
+      const added = !device.confirmed;
+      device.confirmed = true; state.pairedChannel = true;
+      if (DEVICE_MODELS.has(value.model)) device.model = value.model;
+      await this.persist();
+      if (added) await this.announceNewDevice(device);
       await this.sendSnapshot(device, state); return;
     }
     if (value.type === 'subscribe') {
@@ -145,6 +170,32 @@ export class Bridge {
     try { response = { type: 'response', id: value.id, ok: true, result: await this.execute(device, state, value) }; }
     catch (error) { response = { type: 'response', id: value?.id, ok: false, error: error.message }; }
     await this.send(state, response);
+  }
+  /// 新しい端末の登録を知らせる。Mac には GUI のトースト、ほかの登録済みのスマホには Push。
+  /// 離席中に Mac の前で誰かが QR を発行して繋いでも、手元のスマホで気付けるように。
+  /// どちらも届かなくても登録そのものは止めない（知らせは補助）。
+  async announceNewDevice(device) {
+    await this.ipc('remote_device_added', { model: device.model || null })
+      .catch(error => console.error('New device notice (GUI):', error.message));
+    for (const other of this.devices) {
+      if (other === device || other.revoked || !other.confirmed || !other.subscription) continue;
+      await this.push(other, 'device_added');
+    }
+  }
+  /// 認証済みのやり取りがあった時刻を記録する（設定画面の「最終接続」）。
+  async seen(device) {
+    const now = Date.now();
+    device.lastSeen = now;
+    if (now - (this.seenPersisted.get(device.room) || 0) < SEEN_PERSIST_INTERVAL) return;
+    this.seenPersisted.set(device.room, now);
+    await this.persist();
+  }
+  /// 設定画面に出す一覧。接続中 = 認証済みの経路が開いていて、ペアリングの確認まで済んでいる。
+  describe() {
+    return describeDevices(this.devices, device => {
+      const state = this.connections.get(device.room);
+      return !!(device.confirmed && state?.channel && state.socket?.readyState === WebSocket.OPEN);
+    });
   }
   async execute(device, state, message) {
     if (device.revoked) throw new Error('device_revoked');
@@ -242,7 +293,7 @@ export class Bridge {
     if (!pending.length) return;
     await this.push(device, 'attention');
   }
-  /// Push を 1 通。本文は種類（'attention' / 'done'）だけ — コード・プロジェクト名・入力は含めない。
+  /// Push を 1 通。本文は種類（'attention' / 'done' / 'device_added'）だけ — コード・プロジェクト名・入力は含めない。
   /// 送信先も既知の Push サービスへ限定（購読の検証済み）。
   async push(device, type) {
     if (!device.subscription) return;

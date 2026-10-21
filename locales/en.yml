@@ -1166,7 +1166,7 @@ settings:
   remote_err_no_project: No project to share. Open a project first.
   remote_err_not_initialized: Phone connection is not initialized yet. Run `ne remote init` in a terminal.
   remote_err_relay_busy: The relay is busy. Wait about a minute, then generate the QR again.
-  remote_err_device_limit: The device limit (8) is reached. Revoke a device you no longer use, then try again.
+  remote_err_device_limit: The device limit (8) is reached. Remove a device you no longer use, then try again.
   remote_err_node: Node.js 22+ was not found. Install it, then try again.
   remote_err_host_missing: Files required for mobile access are missing. Reinstall necoder.
   remote_err_host_start: The Remote host failed to start. See `~/.necoder/remote/host.log` for the reason.
@@ -1174,6 +1174,20 @@ settings:
   remote_err_timeout: Generating the QR timed out. Try again.
   remote_err_bad_payload: The QR payload was malformed. Check that necoder and the Remote host are on the same version.
   remote_expired: This QR expired. Generate a new pairing QR.
+  remote_devices_heading: Registered devices
+  remote_devices_empty: No registered devices
+  remote_devices_error: Could not load the device list
+  remote_device_phone: Phone
+  remote_device_online: Connected
+  remote_device_offline: Not connected
+  remote_device_waiting: Waiting for the QR scan
+  remote_device_paired: "Added %{when}"
+  remote_device_seen: "Last connected %{when}"
+  remote_device_projects: "%{count} projects"
+  remote_device_remove: Remove
+  remote_device_remove_confirm: Remove device
+  remote_device_cancel: Cancel
+  remote_device_remove_failed: Could not remove the device. Try again.
   cli_sub: Open necoder from the terminal with `ne <path>`.
   cli_row_label: ne command
   cli_row_sub_missing: "Installs to %{path} (`ne .` opens the current folder)"
@@ -1491,6 +1505,8 @@ link:
 toast:
   open_details: Details ›
   reveal: Reveal in Finder ›
+  remote_devices: Review devices ›
+  remote_device_added: "A new device (%{model}) was paired for phone access"
 review:
   tab_title: Review
   compare: Compare

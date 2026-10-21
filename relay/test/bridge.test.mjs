@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Bridge, leadingZeroBits, validateCommand, validSubscription } from '../host/bridge.mjs';
+import { Bridge, describeDevices, leadingZeroBits, validateCommand, validSubscription } from '../host/bridge.mjs';
 import { random } from '../public/crypto.mjs';
 import { createHash } from 'node:crypto';
 import webpush from 'web-push';
@@ -164,4 +164,65 @@ test('走っていたスレッドが終わったら完了を 1 回だけ push・
     await bridge.maybeNotify(shared, { projects: [{ id: 'project-b', threads: [{ id: 'x', running: false }] }] });
     assert.deepEqual(sent, ['done', 'attention']);
   } finally { webpush.sendNotification = original; }
+});
+
+test('端末一覧は失効済みと期限切れの QR を出さず、接続中・未接続・読み取り待ちを分ける', () => {
+  const now = 10_000;
+  const devices = [
+    { room: 'online', name: 'Phone', tasks: ['a'], paired: true, confirmed: true, pairedAt: 1, lastSeen: 2, model: 'iPhone' },
+    { room: 'offline', name: 'Phone', tasks: ['a'], paired: true, confirmed: true },
+    { room: 'waiting', name: 'Phone', tasks: ['a'], paired: false, expires: now + 1 },
+    { room: 'expired', name: 'Phone', tasks: ['a'], paired: false, expires: now - 1 },
+    { room: 'revoked', name: 'Phone', tasks: ['a'], paired: true, revoked: true },
+  ];
+  const listed = describeDevices(devices, device => device.room === 'online', now);
+  assert.deepEqual(listed.map(device => [device.id, device.status]), [['online', 'online'], ['offline', 'offline'], ['waiting', 'waiting']]);
+  assert.equal(listed[0].model, 'iPhone');
+  assert.equal(listed[1].model, null);
+  assert.equal(listed[2].expires, now + 1);
+});
+test('確認で受け取る端末の種類は既知の値だけ・最終接続の保存は間引く', async () => {
+  let saves = 0;
+  const bridge = new Bridge({ vapid: { publicKey: 'key' } }, [], { persist: async () => { saves++; }, ipc: async () => null });
+  const d = { ...device(), paired: true };
+  const opened = [];
+  const state = { channel: { open: async () => opened.shift(), seal: async value => value }, socket: { readyState: 0 } };
+  opened.push({ type: 'confirm', model: '<script>' });
+  await bridge.receive(d, state, {});
+  assert.equal(d.model, undefined);
+  opened.push({ type: 'confirm', model: 'Android' });
+  await bridge.receive(d, state, {});
+  assert.equal(d.model, 'Android');
+  assert.ok(d.lastSeen > 0);
+  // 最初の 1 回だけ lastSeen を保存し、続く確認は確認そのものの保存だけ。
+  assert.equal(saves, 3);
+});
+test('新しい端末は最初の確認で 1 回だけ知らせる: Mac へ IPC・ほかの登録済みのスマホへ Push', async () => {
+  const notices = [], pushes = [];
+  const fresh = { ...device(), paired: true };
+  const mine = { ...device(), paired: true, confirmed: true, subscription: {} };
+  const revoked = { ...device(), paired: true, confirmed: true, subscription: {}, revoked: true };
+  const unconfirmed = { ...device(), paired: true, subscription: {} };
+  const bridge = new Bridge({ vapid: { publicKey: 'key' } }, [fresh, mine, revoked, unconfirmed], {
+    persist: async () => {}, ipc: async (method, params) => { notices.push([method, params]); return null; },
+  });
+  bridge.push = async (target, type) => { pushes.push([target, type]); };
+  const opened = [];
+  const state = { channel: { open: async () => opened.shift(), seal: async value => value }, socket: { readyState: 0 } };
+  opened.push({ type: 'confirm', model: 'Android' });
+  await bridge.receive(fresh, state, {});
+  // 再接続のたびに来る確認では知らせない。
+  opened.push({ type: 'confirm', model: 'Android' });
+  await bridge.receive(fresh, state, {});
+  assert.deepEqual(notices, [['remote_device_added', { model: 'Android' }]]);
+  assert.deepEqual(pushes, [[mine, 'device_added']]);
+});
+test('GUI に知らせが届かなくても登録は止めない', async () => {
+  const fresh = { ...device(), paired: true };
+  const bridge = new Bridge({ vapid: { publicKey: 'key' } }, [fresh], {
+    persist: async () => {}, ipc: async () => { throw new Error('ENOENT'); },
+  });
+  const state = { channel: { open: async () => ({ type: 'confirm' }), seal: async value => value }, socket: { readyState: 0 } };
+  await bridge.receive(fresh, state, {});
+  assert.equal(fresh.confirmed, true);
 });
