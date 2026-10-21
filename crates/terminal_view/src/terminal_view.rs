@@ -13,6 +13,7 @@ mod element;
 mod keys;
 mod mouse;
 mod pty_guard;
+mod remote_pty;
 mod search;
 pub use appearance::{TerminalAppearance, TerminalColors, TerminalCursor};
 pub use dock::{
@@ -566,14 +567,30 @@ impl TerminalView {
         Self::new_with_shell(cwd, None, theme, cx)
     }
 
-    /// shell command を明示して PTY を起動する。Remote SSH はここへ `ssh -tt ...` を渡す。
+    /// shell command を明示して手元の PTY を起動する。
     pub fn new_with_shell(
         cwd: Option<PathBuf>,
         shell: Option<(String, Vec<String>)>,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (events_tx, mut events_rx) = unbounded::<AlacEvent>();
+        Self::create(cwd, shell, None, theme, cx)
+    }
+
+    /// 接続先の端末（PTY は接続先の daemon が持つ・`remote_pty`）。開くのは背景で行い、
+    /// 開くまでに打った鍵は溜めておく。
+    pub fn new_remote(remote: host::RemoteTerminal, theme: Theme, cx: &mut Context<Self>) -> Self {
+        Self::create(None, None, Some(remote), theme, cx)
+    }
+
+    fn create(
+        cwd: Option<PathBuf>,
+        shell: Option<(String, Vec<String>)>,
+        remote: Option<host::RemoteTerminal>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (events_tx, events_rx) = unbounded::<AlacEvent>();
         let listener = Listener(events_tx);
         let size = TerminalSize {
             columns: 80,
@@ -586,94 +603,110 @@ impl TerminalView {
             listener.clone(),
         )));
 
-        let mut env = HashMap::new();
-        // Task の環境（`.necoder/task.env`）はこのマシンのシェルに渡す。シェルを選んだ時（設定・「▾」・
-        // Windows は常に PowerShell を名指し）も同じ。接続先の端末（`ssh -tt …`）にだけは渡さない。
-        let remote = shell
-            .as_ref()
-            .is_some_and(|(program, _)| is_ssh_program(program));
-        if !remote {
-            if let Some(root) = &cwd {
-                match host::task_environment(host::LocalHost::shared().as_ref(), root) {
-                    Ok(task_env) => env.extend(task_env),
-                    Err(error) => eprintln!("terminal task.env: {error:#}"),
-                }
-            }
-        }
-        env.insert("TERM".to_string(), "xterm-256color".to_string());
-        env.insert("COLORTERM".to_string(), "truecolor".to_string());
-        // 接続先の端末（`ssh -tt …`）は前面のグループを見ても ssh 自身しか居ない（区切りで決める）。
-        #[cfg(unix)]
-        let over_ssh = shell
-            .as_ref()
-            .is_some_and(|(program, _)| is_ssh_program(program));
-        #[allow(unused_mut)]
-        let mut options = tty::Options {
-            shell: shell.map(|(program, args)| tty::Shell::new(windows_command_program(program), args)),
-            working_directory: cwd,
-            drain_on_exit: true,
-            env,
-            ..Default::default()
-        };
-        // Windows の alacritty は program と引数を空白で繋いだ 1 本のコマンドラインを作る。
-        // 既定（false）だと空白を含む引数が割れるので、引数は Windows の規則で引用させる
-        // （program は引用されないので [`windows_command_program`] が囲む）。
-        #[cfg(windows)]
-        {
-            options.escape_args = true;
-        }
         let window_size = WindowSize {
             num_lines: size.lines as u16,
             num_cols: size.columns as u16,
             cell_width: 8,
             cell_height: 16,
         };
-
-        let mut notifier = None;
-        let mut pump = None;
         let shell_activity = Arc::new(pty_guard::ShellActivity::default());
-        let pty = tty::new(&options, window_size, 0);
-        // PTY は下で EventLoop へ渡る。前面グループを読む口だけは先に手元へ残す。
         #[cfg(unix)]
-        let foreground = if over_ssh {
-            None
-        } else {
-            pty.as_ref().ok().and_then(ForegroundProbe::new)
-        };
-        match pty {
-            // kitty keyboard のスタック溢れで PTY スレッドが落ちるのを防ぐ（`pty_guard`）。
-            Ok(pty) => match EventLoop::new(
-                term.clone(),
-                listener,
-                pty_guard::GuardedPty::new(pty, shell_activity.clone()),
-                true,
-                false,
-            ) {
-                Ok(event_loop) => {
-                    notifier = Some(Notifier(event_loop.channel()));
-                    // IO スレッドを起動して detach（JoinHandle は保持しない。Drop の Shutdown で畳む）。
-                    event_loop.spawn();
-                    term_probe("pty", "起動");
-                    // pump: PTY 出力（Wakeup 等）でのみ起きる＝idle 0%。
-                    pump = Some(cx.spawn(async move |view, cx| {
-                        let mut received = 0_usize;
-                        while let Some(event) = events_rx.next().await {
-                            received += 1;
-                            term_probe("pump", format_args!("{received} 件目 {event:?}"));
-                            let closed = view
-                                .update(cx, |view, cx| view.on_alac_event(event, cx))
-                                .is_err();
-                            if closed {
-                                break;
-                            }
-                        }
-                        term_probe("pump", format_args!("終了（計 {received} 件）"));
-                    }));
+        let mut foreground = None;
+        let started = match remote {
+            // 接続先の端末。前面のグループは手元から見えない（区切り＝OSC 133 で決める）。
+            Some(remote) => {
+                let pty_size = host::PtySize {
+                    columns: window_size.num_cols,
+                    lines: window_size.num_lines,
+                    pixel_width: window_size.num_cols.saturating_mul(window_size.cell_width),
+                    pixel_height: window_size
+                        .num_lines
+                        .saturating_mul(window_size.cell_height),
+                };
+                let failure = |error: &str| {
+                    format!(
+                        "\r\n{}\r\n",
+                        i18n::t!("terminal.remote_open_failed", "error" => error)
+                    )
+                };
+                match remote_pty::RemotePty::start(remote, pty_size, failure) {
+                    Ok(pty) => Self::spawn_event_loop(
+                        term.clone(),
+                        listener,
+                        pty,
+                        shell_activity.clone(),
+                        events_rx,
+                        cx,
+                    ),
+                    Err(error) => {
+                        eprintln!("ターミナル: 接続先の端末の中継を作れない: {error}");
+                        None
+                    }
                 }
-                Err(error) => eprintln!("ターミナル: EventLoop 生成失敗: {error}"),
-            },
-            Err(error) => eprintln!("ターミナル: PTY 生成失敗: {error}"),
-        }
+            }
+            None => {
+                let mut env = HashMap::new();
+                // Task の環境（`.necoder/task.env`）はこのマシンのシェルに渡す。シェルを選んだ時（設定・「▾」・
+                // Windows は常に PowerShell を名指し）も同じ。人が選んだシェルが `ssh …` の時だけは渡さない。
+                let over_ssh = shell
+                    .as_ref()
+                    .is_some_and(|(program, _)| is_ssh_program(program));
+                if !over_ssh {
+                    if let Some(root) = &cwd {
+                        match host::task_environment(host::LocalHost::shared().as_ref(), root) {
+                            Ok(task_env) => env.extend(task_env),
+                            Err(error) => eprintln!("terminal task.env: {error:#}"),
+                        }
+                    }
+                }
+                env.insert("TERM".to_string(), "xterm-256color".to_string());
+                env.insert("COLORTERM".to_string(), "truecolor".to_string());
+                #[allow(unused_mut)]
+                let mut options = tty::Options {
+                    shell: shell.map(|(program, args)| {
+                        tty::Shell::new(windows_command_program(program), args)
+                    }),
+                    working_directory: cwd,
+                    drain_on_exit: true,
+                    env,
+                    ..Default::default()
+                };
+                // Windows の alacritty は program と引数を空白で繋いだ 1 本のコマンドラインを作る。
+                // 既定（false）だと空白を含む引数が割れるので、引数は Windows の規則で引用させる
+                // （program は引用されないので [`windows_command_program`] が囲む）。
+                #[cfg(windows)]
+                {
+                    options.escape_args = true;
+                }
+                match tty::new(&options, window_size, 0) {
+                    Ok(pty) => {
+                        // PTY は下で EventLoop へ渡る。前面グループを読む口だけは先に手元へ残す。
+                        #[cfg(unix)]
+                        {
+                            foreground = if over_ssh {
+                                None
+                            } else {
+                                ForegroundProbe::new(&pty)
+                            };
+                        }
+                        // kitty keyboard のスタック溢れで PTY スレッドが落ちるのを防ぐ（`pty_guard`）。
+                        Self::spawn_event_loop(
+                            term.clone(),
+                            listener,
+                            pty,
+                            shell_activity.clone(),
+                            events_rx,
+                            cx,
+                        )
+                    }
+                    Err(error) => {
+                        eprintln!("ターミナル: PTY 生成失敗: {error}");
+                        None
+                    }
+                }
+            }
+        };
+        let (notifier, pump) = started.unzip();
 
         let exited = notifier.is_none();
         Self {
@@ -715,6 +748,58 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             _pump: pump,
         }
+    }
+
+    /// PTY（手元の物でも接続先の中継でも）を alacritty の EventLoop に載せ、出力のたびに前景を
+    /// 起こす pump を立てる。返すのは入力の口と pump（どちらも失敗したら `None`＝死んだ端末）。
+    fn spawn_event_loop<P>(
+        term: Arc<FairMutex<Term<Listener>>>,
+        listener: Listener,
+        pty: P,
+        shell_activity: Arc<pty_guard::ShellActivity>,
+        mut events_rx: futures::channel::mpsc::UnboundedReceiver<AlacEvent>,
+        cx: &mut Context<Self>,
+    ) -> Option<(Notifier, gpui::Task<()>)>
+    where
+        P: alacritty_terminal::tty::EventedPty
+            + alacritty_terminal::event::OnResize
+            + Send
+            + 'static,
+    {
+        // kitty keyboard のスタック溢れで PTY スレッドが落ちるのを防ぐ（`pty_guard`）。
+        let event_loop = match EventLoop::new(
+            term,
+            listener,
+            pty_guard::GuardedPty::new(pty, shell_activity),
+            true,
+            false,
+        ) {
+            Ok(event_loop) => event_loop,
+            Err(error) => {
+                eprintln!("ターミナル: EventLoop 生成失敗: {error}");
+                return None;
+            }
+        };
+        let notifier = Notifier(event_loop.channel());
+        // IO スレッドを起動して detach（JoinHandle は保持しない。Drop の Shutdown で畳む）。
+        event_loop.spawn();
+        term_probe("pty", "起動");
+        // pump: PTY 出力（Wakeup 等）でのみ起きる＝idle 0%。
+        let pump = cx.spawn(async move |view, cx| {
+            let mut received = 0_usize;
+            while let Some(event) = events_rx.next().await {
+                received += 1;
+                term_probe("pump", format_args!("{received} 件目 {event:?}"));
+                let closed = view
+                    .update(cx, |view, cx| view.on_alac_event(event, cx))
+                    .is_err();
+                if closed {
+                    break;
+                }
+            }
+            term_probe("pump", format_args!("終了（計 {received} 件）"));
+        });
+        Some((notifier, pump))
     }
 
     /// PTY スレッドを起動せず、Dock のライフサイクルを決定論的に検証するための端末。

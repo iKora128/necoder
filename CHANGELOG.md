@@ -5,6 +5,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Added
+
+- **Remote SSH on Windows** (#79): opening an `ssh://` project from Windows now works, including the file tree, search, terminals, language servers, agents, port forwarding and `ne`. Before, it failed right away with "SSH control directory を作れない: /tmp/…". The Windows installer and zip now include the Linux server that necoder places on the host.
+
+### Changed
+
+- **Remote SSH uses one connection**: necoder now opens a single `ssh` per host and carries terminals, language servers, agents and forwarded ports inside it, instead of starting a separate `ssh` for each one on top of OpenSSH's ControlMaster. You are asked for a password or passphrase once per connection, including the first time the server is installed on the host.
+- **Terminals and agents on a remote host survive a dropped connection**: when the laptop sleeps or the VPN drops, the shell, language servers and agents keep running on the host. When necoder reconnects, the terminal shows what happened in the meantime and anything you typed while disconnected is delivered. The host stops them after 10 minutes without necoder.
+- **Faster Remote SSH**: each request now leaves in one write. Split writes could wait about 40 ms per round trip for TCP acknowledgements; a round trip to a nearby host now takes about 2 ms.
+
+### Fixed
+
+- **Reopening a remote project waited on the network**: when necoder restored a remote project, it asked Git on the host for the branch and HEAD while the window was busy. This now happens in the background.
+
+### 日本語
+
+#### 追加
+
+- **Windows から Remote SSH**（#79）：Windows で `ssh://` のプロジェクトを開けるようにしました。ファイルの一覧・検索・ターミナル・言語サーバー・エージェント・ポートの転送・`ne` が使えます。これまでは「SSH control directory を作れない: /tmp/…」ですぐ失敗していました。Windows のインストーラと zip に、necoder が接続先に置く Linux 用のサーバーを入れました。
+
+#### 変更
+
+- **Remote SSH の接続を 1 本に**：接続先ごとに `ssh` を 1 つだけ起こし、ターミナル・言語サーバー・エージェント・ポートの転送をその中に通すようにしました。これまでは OpenSSH の ControlMaster の上で、それぞれ別の `ssh` を起こしていました。パスワードやパスフレーズを訊かれるのは接続のたびに 1 回です（接続先に初めてサーバーを置く時も 1 回）。
+- **接続が切れても、接続先のターミナルとエージェントは止まりません**：ノートパソコンのスリープや VPN の切断のあいだも、シェル・言語サーバー・エージェントは接続先で動き続けます。繋ぎ直すと、そのあいだの出力がターミナルに出て、切れているあいだに打った分も届きます。necoder が 10 分繋がらなければ、接続先で止めます。
+- **Remote SSH を速く**：1 つの要求を 1 回の書き込みで送るようにしました。分けて書くと、TCP の確認応答を待って 1 往復ごとに約 40ms 止まることがありました。近い接続先との 1 往復は約 2ms です。
+
+#### 修正
+
+- **リモートのプロジェクトを開き直す時に、ネットワークを待っていた**：前回の続きでリモートのプロジェクトを開く時、接続先の Git にブランチと HEAD を訊くあいだ窓が止まっていました。裏で訊くようにしました。
+
 ## [0.1.31] - 2026-10-20
 
 This release makes the first start much easier, especially on Windows. A three-step guide takes you from launch to a ready AI thread, AI agents install and sign in with one button, and Windows gets an installer. It is delivered through auto-update.

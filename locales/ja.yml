@@ -1449,6 +1449,7 @@ terminal:
   command_start: "▶ necoder: 次のコマンドを実行します: %{command}"
   command_success: "【完了】necoder の設定画面に戻ると、次の手順に進めます（このタブは閉じてかまいません）"
   command_failure: "【失敗】うまくいきませんでした。上のメッセージを確認して、もう一度ボタンを押してください"
+  remote_open_failed: "接続先で端末を開けませんでした: %{error}"
   quick_tip: "よく使うコマンド（settings.json の quick_commands）"
   tab_title: ターミナル %{n}
   rename_title: 端末の名前
@@ -1769,6 +1770,7 @@ askpass:
   hint: Enter で送信・Escape で取り消し（入力内容は保存されません）
   hint_click: 入力欄をクリックしてから入力してください
   passphrase_tip: "毎回入力を求められないようにするには、ターミナルで %{command} を一度実行してください（鍵を ssh-agent に登録します）"
+  passphrase_tip_windows: "毎回入力を求められないようにするには、管理者の PowerShell で Get-Service ssh-agent | Set-Service -StartupType Automatic -PassThru | Start-Service を一度実行してから、%{command} を実行してください（Windows の ssh-agent は既定で止まっています）"
   retry: "入力が拒否されました（%{attempt} 回目）"
   cancelled: 入力が取り消されました
   err_busy: 別の SSH 入力を待っています
@@ -2011,7 +2013,7 @@ ports:
   open: 開く
   stop: "停止"
   stop_failed: "停止できませんでした（pid %{pid}）— 既に終了しているか、necoder 内のプロセスではありません"
-  unsupported: "この OS ではまだ利用できません（macOS / Linux）"
+  unsupported: "手元のポートの一覧はこの OS ではまだ使えません（macOS / Linux）。SSH の接続先のポートは使えます"
   remote_heading: "接続先 · %{host}"
   remote_empty: "接続先で待ち受けているポートはありません"
   remote_other_user: ほかのユーザーのプロセス

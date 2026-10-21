@@ -642,13 +642,9 @@ async fn startup_exit(
     if !closed {
         eprintln!("起動してすぐ終わったエージェントの stderr を読み切れなかった（残りは捨てる）");
     }
-    #[cfg(unix)]
-    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
-    #[cfg(not(unix))]
-    let signal = None;
     Some(AgentExited {
         code: status.code(),
-        signal,
+        signal: status.signal(),
         stderr: mask_secrets(tail.lines(), env),
     })
 }
@@ -7200,9 +7196,9 @@ mod resolve_on_host_tests {
                 .expect("calls lock")
                 .push((script, retry_safe));
             match self.probe {
-                Probe::Unreachable => anyhow::bail!(
-                    "Remote SSH 再接続に失敗: OpenSSH ControlMaster の接続に失敗: exit status: 255"
-                ),
+                Probe::Unreachable => {
+                    anyhow::bail!("Remote SSH 再接続に失敗: OpenSSH の接続に失敗: exit status: 255")
+                }
                 Probe::Missing => Ok(host::CommandOutput {
                     status_code: Some(1),
                     stdout: Vec::new(),

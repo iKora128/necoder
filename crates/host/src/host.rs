@@ -1,13 +1,21 @@
 //! local/remote 共通の host 境界と Remote SSH wire protocol。
 //!
 //! `std::fs` / `std::process` を UI・project model から隔離し、同じ API を local process と
-//! SSH 上の `necoder-remote-server` へ向ける。設計根拠は
-//! `docs/research/remote-ssh-2026.md`。Zed の GPL コードは取り込まず、公開仕様を基に独立実装する。
+//! SSH 上の `necoder-remote-server` へ向ける。設計根拠は `docs/research/remote-ssh-2026.md`、
+//! 通り道（ssh 1 本の上にファイル操作・プロセス・端末・TCP を載せる）は `docs/REMOTE-CHANNEL.md`。
+//! Zed の GPL コードは取り込まず、公開仕様を基に独立実装する。
+
+mod server_stream;
+mod ssh_link;
+mod stream;
+#[cfg(test)]
+mod stream_tests;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+use server_stream::{Link, ServerStreams};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 #[cfg(unix)]
@@ -19,8 +27,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
+use stream::{ClientStream, StreamHub, StreamKind, StreamReader, StreamWriter};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub use ssh_link::{
+    askpass_attempt, askpass_token_is_live, test_ssh_connection, SshConnectError, SshFailure,
+};
+pub use stream::{HostPty, ProcessExit, PtyExitWatch, PtySize};
+
+/// v4: ストリーム（プロセス・PTY・TCP）を同じ接続に載せた（docs/REMOTE-CHANNEL.md §2）。
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const FRAME_MAGIC: [u8; 4] = *b"SHRS";
@@ -31,8 +46,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SEARCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// ハンドシェイク（Hello）だけは短く切る。再接続の総待ち時間を有界にするための上限で、
-/// 「TCP は生きているが相手が黙っている」（sleep 復帰直後の死んだ ControlMaster 越し）を
-/// 30s ではなく 10s で見切る。見切った後は master を作り直して 1 回だけやり直す。
+/// 「TCP は生きているが相手が黙っている」（sleep 復帰直後の死んだ接続）を 30s ではなく 10s で見切る。
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// 生存確認（Ping）の待ち時間。heartbeat はこれで「切れた」と判定して張り直すので、
 /// sleep 復帰から復旧が始まるまでの遅れの上限になる（30s だと復帰のたびに 30s 待たされる）。
@@ -181,13 +195,21 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
-/// LSP/ACP など長寿命 stdio process。Drop 時に child と SSH session を確実に畳む。
+/// LSP/ACP など長寿命 stdio process。Drop 時に子を確実に畳む（remote は接続先の daemon に止めさせる）。
 pub struct HostProcess {
-    child: Child,
+    backend: ProcessBackend,
     stdin: Option<Box<dyn Write + Send>>,
     stdout: Option<Box<dyn Read + Send>>,
     stderr: StderrTail,
-    _transport: Option<Arc<SshTransport>>,
+}
+
+enum ProcessBackend {
+    Local(Child),
+    /// 接続先の daemon が持つプロセス（RPC のストリーム）。`_connection` は接続（ssh）を生かしておく。
+    Remote {
+        stream: Arc<ClientStream>,
+        _connection: Arc<dyn Send + Sync>,
+    },
 }
 
 impl HostProcess {
@@ -199,19 +221,25 @@ impl HostProcess {
         self.stdout.take().context("process stdout は既に取得済み")
     }
 
-    /// プロセスがまだ生きているか。再接続後の handle 再同期で「死んでいたら再 spawn」の判定に使う
-    /// （remote では ControlMaster が落ちると子 ssh セッションが終了する＝ここで検知できる・M13）。
+    /// プロセスがまだ生きているか。remote は接続が切れても daemon 側で生きていれば `true`
+    /// （繋ぎ直したら続きから流れる）。daemon がプロセスを見失った時だけ `false` になる。
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        self.try_exit_status().is_none()
     }
 
-    /// 終わっていればその終わり方（まだ動いていれば `None`）。remote では手元の `ssh` の終わり方
-    /// ＝リモートのコマンドの終了コード（ssh 自身の失敗は 255）。
-    pub fn try_exit_status(&mut self) -> Option<std::process::ExitStatus> {
-        self.child.try_wait().ok().flatten()
+    /// 終わっていればその終わり方（まだ動いていれば `None`）。
+    pub fn try_exit_status(&mut self) -> Option<ProcessExit> {
+        match &mut self.backend {
+            ProcessBackend::Local(child) => child
+                .try_wait()
+                .ok()
+                .flatten()
+                .map(ProcessExit::from_status),
+            ProcessBackend::Remote { stream, .. } => stream.exit(),
+        }
     }
 
-    /// stderr の末尾（[`StderrTail`]）。remote では ssh 自身の知らせも混ざる。
+    /// stderr の末尾（[`StderrTail`]）。
     pub fn stderr_tail(&self) -> StderrTail {
         self.stderr.clone()
     }
@@ -362,8 +390,13 @@ fn stderr_line(bytes: &[u8], truncated: bool) -> String {
 
 impl Drop for HostProcess {
     fn drop(&mut self) {
-        let _kill = self.child.kill();
-        let _wait = self.child.wait();
+        match &mut self.backend {
+            ProcessBackend::Local(child) => {
+                let _kill = child.kill();
+                let _wait = child.wait();
+            }
+            ProcessBackend::Remote { stream, .. } => stream.close(),
+        }
     }
 }
 
@@ -399,12 +432,76 @@ impl Drop for HostWatch {
     }
 }
 
-/// local PTY の shell、または ControlMaster を使う remote `ssh -tt` command。
+/// 端末の起こし方。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalLaunch {
+pub enum TerminalLaunch {
+    /// 手元の PTY で起こすプログラム（Windows の既定シェルの指定など）。
+    Program(TerminalProgram),
+    /// 接続先の daemon が PTY を持つ端末（入出力は RPC のストリームで中継する）。
+    Remote(RemoteTerminal),
+}
+
+/// 手元の PTY で起こすプログラムと引数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalProgram {
     pub program: String,
     pub args: Vec<String>,
 }
+
+/// 接続先で開く端末。[`Self::open`] は接続を待つので **UI スレッドから呼ばない**
+/// （`TerminalView` は背景のスレッドで開き、開くまでの打鍵は溜めておく）。
+#[derive(Clone)]
+pub struct RemoteTerminal {
+    opener: Arc<dyn Fn(PtySize) -> Result<HostPty> + Send + Sync>,
+    /// 表示用（`user@host`）。
+    label: String,
+    /// 等しさの鍵（接続先 + 開く場所）。同じ場所を指す launch は作り直しても等しい
+    /// （ドックが「launch が変わった」と誤って端末を作り直さない）。
+    key: String,
+}
+
+impl RemoteTerminal {
+    pub fn open(&self, size: PtySize) -> Result<HostPty> {
+        assert_off_main_thread("OpenTerminal");
+        (self.opener)(size)
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// テスト用: 任意の開き方を持つ端末。
+    #[doc(hidden)]
+    pub fn from_opener(
+        label: impl Into<String>,
+        opener: impl Fn(PtySize) -> Result<HostPty> + Send + Sync + 'static,
+    ) -> Self {
+        let label = label.into();
+        Self {
+            opener: Arc::new(opener),
+            key: label.clone(),
+            label,
+        }
+    }
+}
+
+impl std::fmt::Debug for RemoteTerminal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteTerminal")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
+/// 同じ接続先の同じ場所なら等しい。
+impl PartialEq for RemoteTerminal {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for RemoteTerminal {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextSearchSpec {
@@ -717,10 +814,10 @@ pub trait Host: Send + Sync {
     /// 到達不能が続くと 60 秒までバックオフするので、「復帰したのに次の試行まで待つ」を
     /// ユーザー操作で短絡するための入口。
     fn reconnect(&self) {}
-    /// 接続先の TCP ポート `remote_port` を手元の 127.0.0.1 へ転送する（O5・SSH の ControlMaster の
-    /// `-O forward -L`）。手元の番号は、同じ番号が空いていればそれ、塞がっていれば空いている番号。
-    /// 返すのは手元の番号（すでに転送していればその番号）。再接続したら張り直す。
-    /// 手元のプロジェクトは転送するものが無いので `Err`。**UI スレッドから呼ばない**（ネットワーク）。
+    /// 接続先の TCP ポート `remote_port` を手元の 127.0.0.1 へ転送する（O5・手元で待ち受け、来た接続を
+    /// RPC の TCP ストリームで中継する）。手元の番号は、同じ番号が空いていればそれ、塞がっていれば空いている番号。
+    /// 返すのは手元の番号（すでに転送していればその番号）。再接続しても待ち受けはそのまま。
+    /// 手元のプロジェクトは転送するものが無いので `Err`。
     fn forward_port(&self, _remote_port: u16) -> Result<u16> {
         bail!("手元のプロジェクトのポートは転送しない")
     }
@@ -892,13 +989,15 @@ impl Host for LocalHost {
     }
 
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess> {
-        spawn_process_local(spec, None)
+        spawn_process_local(spec)
     }
 
     fn terminal_launch(&self, _cwd: &Path) -> Result<Option<TerminalLaunch>> {
         if cfg!(windows) {
             // Windows は alacritty の既定が `powershell` 固定なので、pwsh を優先させる（§W4）。
-            return Ok(Some(pick_windows_shell(is_in_path)));
+            return Ok(Some(TerminalLaunch::Program(pick_windows_shell(
+                is_in_path,
+            ))));
         }
         // unix は alacritty の既定（`$SHELL` / passwd）に任せる
         // ＝ mac の挙動を 1 ミリも変えない（§D8）。
@@ -913,13 +1012,13 @@ impl Host for LocalHost {
 ///
 /// 探索を**引数で受け取る**のは、どのプラットフォームでもテストするため（`paths` crate と同じ理由。
 /// `#[cfg(windows)]` でテストを切ると Windows 上でしか検証されず、mac / Linux の CI が守れない）。
-fn pick_windows_shell(is_available: impl Fn(&str) -> bool) -> TerminalLaunch {
+fn pick_windows_shell(is_available: impl Fn(&str) -> bool) -> TerminalProgram {
     let program = ["pwsh", "powershell"]
         .into_iter()
         .find(|candidate| is_available(candidate))
         // どちらも PATH に無いのは考えにくいが、その時は alacritty と同じ既定へ倒す
         .unwrap_or("powershell");
-    TerminalLaunch {
+    TerminalProgram {
         program: program.to_string(),
         args: Vec::new(),
     }
@@ -1722,7 +1821,7 @@ fn run_user_command_over_process(
     capture_marked_pipe_in_background(stdout, buffer.clone(), live.clone(), pid.clone(), sender)?;
 
     let mut pipe_open = true;
-    let mut status: Option<std::process::ExitStatus> = None;
+    let mut status: Option<ProcessExit> = None;
     let mut exited_at: Option<std::time::Instant> = None;
     let mut stop_started_at: Option<std::time::Instant> = None;
     let mut killed = false;
@@ -1754,7 +1853,7 @@ fn run_user_command_over_process(
                     signal_remote_tree(host, &spec.cwd, pid, "KILL");
                     killed = true;
                 }
-                // KILL しても `ssh` が戻らない（接続が詰まった）＝手元の `ssh` を畳んで見切る。
+                // KILL しても終わりが届かない（接続が詰まった）＝見切って手元の handle を畳む。
                 (Some(started), _) if started.elapsed() >= USER_COMMAND_STOP_GRACE * 2 => break,
                 _ => {}
             }
@@ -1765,7 +1864,7 @@ fn run_user_command_over_process(
             }
         }
     }
-    drop(process); // 終わっていれば回収するだけ・見切った時は手元の `ssh` を止める
+    drop(process); // 終わっていれば片付けるだけ・見切った時は daemon に止めさせる
     let captured = buffer
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2009,10 +2108,7 @@ fn stop_user_command(child: &mut Child) {
     }
 }
 
-fn spawn_process_local(
-    spec: &CommandSpec,
-    transport: Option<Arc<SshTransport>>,
-) -> Result<HostProcess> {
+fn spawn_process_local(spec: &CommandSpec) -> Result<HostProcess> {
     let mut child = child_process::command(&spec.program)
         .args(&spec.args)
         .current_dir(&spec.cwd)
@@ -2027,11 +2123,10 @@ fn spawn_process_local(
     let stdout = child.stdout.take().context("process stdout が無い")?;
     let stderr = child.stderr.take().context("process stderr が無い")?;
     Ok(HostProcess {
-        child,
+        backend: ProcessBackend::Local(child),
         stdin: Some(Box::new(stdin)),
         stdout: Some(Box::new(stdout)),
         stderr: StderrTail::capture(stderr),
-        _transport: transport,
     })
 }
 
@@ -2044,6 +2139,8 @@ enum FrameKind {
     Response = 2,
     Error = 3,
     Event = 4,
+    /// ストリーム（プロセス・PTY・TCP）の中身と制御。id はストリーム id（`stream.rs`）。
+    Stream = 5,
 }
 
 impl FrameKind {
@@ -2053,6 +2150,7 @@ impl FrameKind {
             2 => Ok(Self::Response),
             3 => Ok(Self::Error),
             4 => Ok(Self::Event),
+            5 => Ok(Self::Stream),
             _ => bail!("unknown frame kind: {byte}"),
         }
     }
@@ -2112,6 +2210,37 @@ enum Request {
     Unwatch {
         project_id: u64,
     },
+    /// パイプの stdio でプロセスを起こす（LSP・ACP・人のコマンド）。`stream_id` は client が決める
+    /// （応答より先に出力が届いても、client はもう受け口を用意している）。
+    Spawn {
+        project_id: u64,
+        stream_id: u64,
+        spec: CommandSpec,
+    },
+    /// ログインシェルを PTY で起こす（端末）。`cwd` は project 相対。
+    OpenTerminal {
+        project_id: u64,
+        stream_id: u64,
+        cwd: PathBuf,
+        size: PtySize,
+        env: HashMap<String, String>,
+    },
+    /// 接続先の 127.0.0.1:`port` へ TCP で繋ぐ（ポート転送の 1 本）。
+    OpenTcp {
+        stream_id: u64,
+        port: u16,
+    },
+    /// 繋ぎ直した client が、ストリームの続きを頼む（受け取った位置から送り直してもらう）。
+    Attach {
+        stream_id: u64,
+        output_offset: u64,
+        error_offset: u64,
+    },
+    /// `ne` の open（[`ServerEvent::CliOpen`]）への答え。
+    CliOpenResult {
+        request: u64,
+        response: serde_json::Value,
+    },
     Ping,
     Shutdown,
 }
@@ -2120,6 +2249,11 @@ impl Request {
     /// 診断メッセージ用の短い名前（UI スレッド違反の指摘に「どの request か」を載せる）。
     fn name(&self) -> &'static str {
         match self {
+            Self::Spawn { .. } => "Spawn",
+            Self::OpenTerminal { .. } => "OpenTerminal",
+            Self::OpenTcp { .. } => "OpenTcp",
+            Self::Attach { .. } => "Attach",
+            Self::CliOpenResult { .. } => "CliOpenResult",
             Self::Hello { .. } => "Hello",
             Self::OpenProject { .. } => "OpenProject",
             Self::Canonicalize { .. } => "Canonicalize",
@@ -2179,6 +2313,12 @@ enum Response {
         stdout_len: usize,
         stderr_len: usize,
     },
+    /// ストリームを開いた（`Spawn` / `OpenTerminal` / `OpenTcp`）。
+    Opened,
+    /// 付け直した。`input_offset` = daemon が受け取った入力の位置（client はそこから送り直す）。
+    Attached {
+        input_offset: u64,
+    },
     Pong,
     Ack,
 }
@@ -2189,11 +2329,14 @@ struct WireError {
     message: String,
 }
 
-/// daemon → client の push イベント（[`FrameKind::Event`] frame の meta）。remote watch の変更通知。
+/// daemon → client の push イベント（[`FrameKind::Event`] frame の meta）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WatchEvent {
-    /// 変更/追加/削除のあった project 相対パス（1 イベントの上限内に収める）。
-    paths: Vec<PathBuf>,
+enum ServerEvent {
+    /// remote watch の変更通知。変更/追加/削除のあった project 相対パス（1 イベントの上限内に収める）。
+    Watch { paths: Vec<PathBuf> },
+    /// 接続先の端末で `ne <path>…` が打たれた。client は接続元の GUI で開き、
+    /// [`Request::CliOpenResult`] で答える。
+    CliOpen { request: u64, paths: Vec<String> },
 }
 
 /// remote watch が 1 イベントで運ぶ相対パスの上限（frame を肥大させない）。
@@ -2218,8 +2361,8 @@ impl std::fmt::Display for RemoteRequestError {
 impl std::error::Error for RemoteRequestError {}
 
 /// request が時間切れになった（相手から何も返らなかった）。「接続が閉じた」と区別するための型。
-/// [`SshConnector::connect`] は Hello が**これで**落ちたときだけ ControlMaster を作り直す
-/// （閉じたのなら master は生きていて、落ちたのは remote-server 側）。
+/// 時間切れは接続が黙っている（sleep 復帰直後の死んだ TCP）印で、閉じたのとは扱いが違う。
+/// （閉じたのなら ssh は終わっている）。
 /// [`ReconnectingClient`] はこれを受けたとき受信バイトの進みを見て「混んでいるだけ」を除外する。
 #[derive(Debug)]
 struct RequestTimeout {
@@ -2288,14 +2431,29 @@ fn write_frame(writer: &mut dyn Write, frame: &Frame) -> Result<()> {
     if frame.body.len() > MAX_BODY_LEN {
         bail!("frame body too large: {}", frame.body.len());
     }
-    writer.write_all(&FRAME_MAGIC)?;
-    writer.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
-    writer.write_all(&[frame.kind as u8, 0])?;
-    writer.write_all(&frame.id.to_le_bytes())?;
-    writer.write_all(&(frame.meta.len() as u32).to_le_bytes())?;
-    writer.write_all(&(frame.body.len() as u64).to_le_bytes())?;
-    writer.write_all(&frame.meta)?;
-    writer.write_all(&frame.body)?;
+    // 1 frame は 1 回の書き込みで出す。header と中身を分けて書くと、間の proxy / sshd がそれぞれを
+    // 別の TCP の塊で送り、Nagle と相手の遅延 ACK が噛み合って 1 往復ごとに ~40ms 待つ
+    // （`-T` の ssh は TCP_NODELAY を立てない・2026-10-21 実測: 45ms → 下記で 1ms 台）。
+    // 大きな body だけは写さずに続けて書く（塊が大きいので Nagle は効かない）。
+    const COALESCE_BODY_LIMIT: usize = 256 * 1024;
+    let inline_body = frame.body.len() <= COALESCE_BODY_LIMIT;
+    let mut bytes = Vec::with_capacity(
+        FRAME_HEADER_LEN + frame.meta.len() + if inline_body { frame.body.len() } else { 0 },
+    );
+    bytes.extend_from_slice(&FRAME_MAGIC);
+    bytes.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&[frame.kind as u8, 0]);
+    bytes.extend_from_slice(&frame.id.to_le_bytes());
+    bytes.extend_from_slice(&(frame.meta.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(frame.body.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&frame.meta);
+    if inline_body {
+        bytes.extend_from_slice(&frame.body);
+    }
+    writer.write_all(&bytes)?;
+    if !inline_body {
+        writer.write_all(&frame.body)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -2537,8 +2695,17 @@ fn handle_request(
         }
         // Watch/Unwatch は serve ループが watch マネージャへ回すのでここには来ない（handle_request は
         // 無状態でこの接続の watch チャネルを持たない）。万一直接届いても panic させず拒否する。
-        Request::Watch { .. } | Request::Unwatch { .. } => {
-            bail!("watch/unwatch は接続スコープで処理する（handle_request では未対応）")
+        Request::Watch { .. }
+        | Request::Unwatch { .. }
+        | Request::Spawn { .. }
+        | Request::OpenTerminal { .. }
+        | Request::OpenTcp { .. }
+        | Request::Attach { .. }
+        | Request::CliOpenResult { .. } => {
+            bail!(
+                "{} は接続スコープで処理する（handle_request では未対応）",
+                request.name()
+            )
         }
         Request::Ping => Ok((Response::Pong, Vec::new())),
         Request::Shutdown => {
@@ -2551,14 +2718,30 @@ fn handle_request(
     }
 }
 
-fn serve_stream(reader: impl Read, writer: impl Write + Send) -> Result<()> {
-    serve_stream_with_state(reader, writer, Arc::new(Mutex::new(ServerState::new())))
+/// 1 接続だけの server（`serve --stdio`・テスト）。接続が終わったら、持っているプロセスは全部止める
+/// （daemon ではないので、続きを受け取りに来る client は居ない）。
+fn serve_stream(reader: impl Read, writer: impl Write + Send + 'static) -> Result<()> {
+    let streams = Arc::new(ServerStreams::default());
+    let link = Link::new(Box::new(writer), None);
+    streams.connect(&link);
+    let result = serve_connection(
+        reader,
+        link.clone(),
+        Arc::new(Mutex::new(ServerState::new())),
+        streams.clone(),
+    );
+    streams.disconnect(&link);
+    streams.close_all();
+    result
 }
 
-fn serve_stream_with_state(
+/// 1 接続ぶんの request とストリームを捌く。`state`（開いた project）と `streams`（プロセス・端末）は
+/// daemon では接続をまたいで生き続ける。
+fn serve_connection(
     mut reader: impl Read,
-    mut writer: impl Write + Send,
+    link: Arc<Link>,
     state: SharedServerState,
+    streams: Arc<ServerStreams>,
 ) -> Result<()> {
     const SERVER_WORKERS: usize = 8;
     const REQUEST_QUEUE: usize = 32;
@@ -2566,14 +2749,13 @@ fn serve_stream_with_state(
     thread::scope(|scope| -> Result<()> {
         let (request_tx, request_rx) = mpsc::sync_channel::<Frame>(REQUEST_QUEUE);
         let request_rx = Arc::new(Mutex::new(request_rx));
-        let writer = Arc::new(Mutex::new(&mut writer));
         // remote watch（M13）: この接続スコープに 1 本の poll マネージャ。workers が Watch/Unwatch を
-        // 制御チャネルで送り、マネージャが差分を [`FrameKind::Event`] frame として共有 writer へ push する。
+        // 制御チャネルで送り、マネージャが差分を [`FrameKind::Event`] frame として push する。
         // 接続が切れて workers が終わると watch_tx が全て drop → マネージャも Disconnected で終了する。
         // watch 未使用の間は recv() で完全ブロック＝idle 0%。使用中だけ POLL 間隔で起きる。
         let (watch_tx, watch_rx) = mpsc::channel::<WatchControl>();
         {
-            let writer = writer.clone();
+            let link = link.clone();
             scope.spawn(move || {
                 let mut watching: Option<(PathBuf, HashMap<PathBuf, (u128, u64)>)> = None;
                 loop {
@@ -2601,7 +2783,7 @@ fn serve_stream_with_state(
                                 *previous = fresh;
                                 if !changed.is_empty() {
                                     if let Ok(meta) =
-                                        serde_json::to_vec(&WatchEvent { paths: changed })
+                                        serde_json::to_vec(&ServerEvent::Watch { paths: changed })
                                     {
                                         let frame = Frame {
                                             kind: FrameKind::Event,
@@ -2609,9 +2791,8 @@ fn serve_stream_with_state(
                                             meta,
                                             body: Vec::new(),
                                         };
-                                        if let Ok(mut writer) = writer.lock() {
-                                            let _written = write_frame(&mut **writer, &frame);
-                                        }
+                                        // 切れていれば届かないだけ（再接続で client が Watch を送り直す）。
+                                        let _written = link.write(&frame);
                                     }
                                 }
                             }
@@ -2622,62 +2803,92 @@ fn serve_stream_with_state(
         }
         for worker in 0..SERVER_WORKERS {
             let request_rx = request_rx.clone();
-            let writer = writer.clone();
+            let link = link.clone();
             let state = state.clone();
+            let streams = streams.clone();
             let watch_tx = watch_tx.clone();
-            scope.spawn(move || {
-                loop {
-                    let frame = match request_rx.lock() {
-                        Ok(receiver) => receiver.recv(),
-                        Err(_) => return,
-                    };
-                    let Ok(frame) = frame else {
-                        return;
-                    };
-                    let parsed = serde_json::from_slice::<Request>(&frame.meta)
-                        .context("invalid request metadata");
-                    let response = match parsed {
-                        // Watch/Unwatch は watch マネージャへ回して Ack（handle_request は無状態のため）。
-                        Ok(Request::Watch { project_id, root }) => {
-                            match server_resolve_existing(&state, project_id, &root) {
-                                Ok(absolute) => {
-                                    let _sent =
-                                        watch_tx.send(WatchControl::Start { root: absolute });
-                                    Ok((Response::Ack, Vec::new()))
-                                }
-                                Err(error) => Err(error),
-                            }
-                        }
-                        Ok(Request::Unwatch { .. }) => {
-                            let _sent = watch_tx.send(WatchControl::Stop);
-                            Ok((Response::Ack, Vec::new()))
-                        }
-                        Ok(request) => handle_request(&state, request, frame.body),
-                        Err(error) => Err(error),
-                    };
-                    let response = match response {
-                        Ok((response, body)) => Frame::response(frame.id, &response, body),
-                        Err(error) => Frame::error(frame.id, "request_failed", &error),
-                    };
-                    let write_result = response.and_then(|response| {
-                        let mut writer = writer
-                            .lock()
-                            .map_err(|_| anyhow!("remote writer lock poisoned"))?;
-                        write_frame(&mut **writer, &response)
-                    });
-                    if let Err(error) = write_result {
-                        remote_trace(&format!(
-                            "server worker {worker}: response write failed: {error:#}"
-                        ));
-                        return;
+            scope.spawn(move || loop {
+                let frame = match request_rx.lock() {
+                    Ok(receiver) => receiver.recv(),
+                    Err(_) => return,
+                };
+                let Ok(frame) = frame else {
+                    return;
+                };
+                let parsed = serde_json::from_slice::<Request>(&frame.meta)
+                    .context("invalid request metadata");
+                // Attach は応答を書いた**後**に続きを送る（client は応答で入力の位置を知ってから送り直す）。
+                let mut attached = None;
+                let response = match parsed {
+                    // Watch/Unwatch は watch マネージャへ回して Ack（handle_request は無状態のため）。
+                    Ok(Request::Watch { project_id, root }) => {
+                        server_resolve_existing(&state, project_id, &root).map(|absolute| {
+                            let _sent = watch_tx.send(WatchControl::Start { root: absolute });
+                            (Response::Ack, Vec::new())
+                        })
                     }
+                    Ok(Request::Unwatch { .. }) => {
+                        let _sent = watch_tx.send(WatchControl::Stop);
+                        Ok((Response::Ack, Vec::new()))
+                    }
+                    Ok(Request::Spawn {
+                        project_id,
+                        stream_id,
+                        mut spec,
+                    }) => server_resolve_existing(&state, project_id, &spec.cwd)
+                        .and_then(|cwd| {
+                            spec.cwd = cwd;
+                            streams.spawn_process(&link, stream_id, &spec)
+                        })
+                        .map(|()| (Response::Opened, Vec::new())),
+                    Ok(Request::OpenTerminal {
+                        project_id,
+                        stream_id,
+                        cwd,
+                        size,
+                        env,
+                    }) => server_resolve_existing(&state, project_id, &cwd)
+                        .and_then(|cwd| streams.open_terminal(&link, stream_id, &cwd, size, &env))
+                        .map(|()| (Response::Opened, Vec::new())),
+                    Ok(Request::OpenTcp { stream_id, port }) => streams
+                        .open_tcp(&link, stream_id, port)
+                        .map(|()| (Response::Opened, Vec::new())),
+                    Ok(Request::Attach {
+                        stream_id,
+                        output_offset,
+                        error_offset,
+                    }) => streams
+                        .attach(&link, stream_id, output_offset, error_offset)
+                        .map(|(input_offset, stream)| {
+                            attached = Some(stream);
+                            (Response::Attached { input_offset }, Vec::new())
+                        }),
+                    Ok(Request::CliOpenResult { request, response }) => {
+                        streams.cli_result(request, response);
+                        Ok((Response::Ack, Vec::new()))
+                    }
+                    Ok(request) => handle_request(&state, request, frame.body),
+                    Err(error) => Err(error),
+                };
+                let response = match response {
+                    Ok((response, body)) => Frame::response(frame.id, &response, body),
+                    Err(error) => Frame::error(frame.id, "request_failed", &error),
+                };
+                if let Err(error) = response.and_then(|response| link.write(&response)) {
+                    remote_trace(&format!(
+                        "server worker {worker}: response write failed: {error:#}"
+                    ));
+                    return;
+                }
+                if let Some(stream) = attached {
+                    stream.flush();
                 }
             });
         }
         // 親（read ループ）は watch を送らない。workers の clone だけが manager を生かす。
         drop(watch_tx);
 
-        loop {
+        let result = loop {
             remote_trace("server: waiting frame");
             let frame = match read_frame(&mut reader) {
                 Ok(frame) => frame,
@@ -2685,30 +2896,49 @@ fn serve_stream_with_state(
                     if error.downcast_ref::<std::io::Error>().is_some_and(|io| {
                         matches!(
                             io.kind(),
-                            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+                            std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::NotConnected
                         )
                     }) =>
                 {
-                    break;
+                    break Ok(());
                 }
-                Err(error) => return Err(error),
+                // daemon が新しい接続へ乗り換えて、この接続を切った。
+                Err(_) if !link.is_alive() => break Ok(()),
+                Err(error) => break Err(error),
             };
             remote_trace("server: received frame");
-            if frame.kind != FrameKind::Request {
-                bail!("server expected request frame");
+            match frame.kind {
+                FrameKind::Stream => streams.dispatch(frame),
+                FrameKind::Request => {
+                    let should_shutdown = serde_json::from_slice::<Request>(&frame.meta)
+                        .is_ok_and(|request| matches!(request, Request::Shutdown));
+                    if request_tx.send(frame).is_err() {
+                        break Err(anyhow!("remote request worker queue closed"));
+                    }
+                    if should_shutdown {
+                        break Ok(());
+                    }
+                }
+                kind => break Err(anyhow!("server が受け取れない frame: {kind:?}")),
             }
-            let should_shutdown = serde_json::from_slice::<Request>(&frame.meta)
-                .is_ok_and(|request| matches!(request, Request::Shutdown));
-            request_tx
-                .send(frame)
-                .map_err(|_| anyhow!("remote request worker queue closed"))?;
-            if should_shutdown {
-                break;
-            }
-        }
+        };
         drop(request_tx);
-        Ok(())
+        result
     })
+}
+
+/// daemon の置き場（owner-only）。macOS の SUN_LEN は短いので `/tmp` 直下の短い名前にする。
+#[cfg(unix)]
+fn session_directory() -> PathBuf {
+    // SAFETY: getuid は失敗しない（引数もメモリも触らない）。
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!(
+        "/tmp/necoder-remote-{uid}-{SERVER_VERSION}-p{PROTOCOL_VERSION}"
+    ))
 }
 
 #[cfg(unix)]
@@ -2716,21 +2946,17 @@ fn session_socket(session: &str) -> Result<PathBuf> {
     if session.len() != 64 || !session.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("session id が不正");
     }
-    let uid = child_process::command("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit()))
-        .context("remote uid を取得できない")?;
-    // macOS の SUN_LEN は短い。owner-only directory + 160-bit socket name で安全性と長さを両立する。
-    Ok(PathBuf::from(format!(
-        "/tmp/necoder-remote-{uid}-{SERVER_VERSION}-p{PROTOCOL_VERSION}"
-    ))
-    .join(format!("{}.sock", &session[..40])))
+    // owner-only directory + 160-bit socket name で安全性と長さを両立する。
+    Ok(session_directory().join(format!("{}.sock", &session[..40])))
 }
 
+/// client が 1 つも繋がっていない時間がこれだけ続いたら、daemon は持っているプロセスと端末を止めて終わる
+/// （以前の ControlPersist=600 と同じ長さ）。
+#[cfg(unix)]
+const DAEMON_IDLE: Duration = Duration::from_secs(600);
+
+/// session ごとの daemon。プロセスと端末を持ち、接続が切れても生かしておく。新しい接続が来たら
+/// それをいまの client にし、古い接続は切る（1 session = 1 client・docs/REMOTE-CHANNEL.md §2）。
 #[cfg(unix)]
 fn serve_daemon(socket: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -2748,6 +2974,15 @@ fn serve_daemon(socket: &Path) -> Result<()> {
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     let state = Arc::new(Mutex::new(ServerState::new()));
+    let streams = Arc::new(ServerStreams::default());
+    // `ne` が無くても Remote SSH 本体は使える。受け口を作れなければ警告だけ（端末の `ne` が使えない）。
+    let cli_gate = match RemoteCliGate::start(socket, &streams) {
+        Ok(gate) => Some(gate),
+        Err(error) => {
+            eprintln!("necoder-remote-server: `ne` の受け口を作れない: {error:#}");
+            None
+        }
+    };
     let mut idle_since = Instant::now();
     let result = loop {
         match listener.accept() {
@@ -2755,9 +2990,32 @@ fn serve_daemon(socket: &Path) -> Result<()> {
                 remote_trace("daemon: accepted proxy");
                 stream.set_nonblocking(false)?;
                 let reader = stream.try_clone()?;
-                if let Err(error) = serve_stream_with_state(reader, stream, state.clone()) {
-                    eprintln!("remote proxy session error: {error:#}");
+                let closer = stream.try_clone()?;
+                let link = Link::new(
+                    Box::new(stream),
+                    Some(Box::new(move || {
+                        let _closed = closer.shutdown(std::net::Shutdown::Both);
+                    })),
+                );
+                streams.connect(&link);
+                let state = state.clone();
+                let streams = streams.clone();
+                let spawned = thread::Builder::new()
+                    .name("necoder-daemon-connection".to_string())
+                    .spawn(move || {
+                        if let Err(error) =
+                            serve_connection(reader, link.clone(), state, streams.clone())
+                        {
+                            eprintln!("remote proxy session error: {error:#}");
+                        }
+                        streams.disconnect(&link);
+                    });
+                if let Err(error) = spawned {
+                    eprintln!("necoder-remote-server: 接続のスレッドを起動できない: {error}");
                 }
+                idle_since = Instant::now();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if state
                     .lock()
                     .map_err(|_| anyhow!("server state lock poisoned"))?
@@ -2765,10 +3023,9 @@ fn serve_daemon(socket: &Path) -> Result<()> {
                 {
                     break Ok(());
                 }
-                idle_since = Instant::now();
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if idle_since.elapsed() >= Duration::from_secs(600) {
+                if streams.has_client() {
+                    idle_since = Instant::now();
+                } else if idle_since.elapsed() >= DAEMON_IDLE {
                     break Ok(());
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -2776,14 +3033,139 @@ fn serve_daemon(socket: &Path) -> Result<()> {
             Err(error) => break Err(error.into()),
         }
     };
+    streams.close_all();
+    drop(cli_gate);
     let _cleanup = std::fs::remove_file(socket);
     result
+}
+
+/// 接続先の端末の `ne` の受け口（daemon の Unix socket）。`ne` の open を client（接続元の GUI）へ
+/// Event で頼み、答えを返す。以前は ssh の `-O forward -R` で GUI の socket を接続先へ引いていた。
+#[cfg(unix)]
+struct RemoteCliGate {
+    socket: PathBuf,
+    bin_directory: PathBuf,
+}
+
+#[cfg(unix)]
+impl RemoteCliGate {
+    fn start(session_socket: &Path, streams: &Arc<ServerStreams>) -> Result<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let socket = session_socket.with_extension("cli");
+        let bin_directory = session_socket.with_extension("bin");
+        if socket.exists() {
+            let _stale = std::fs::remove_file(&socket);
+        }
+        let listener = UnixListener::bind(&socket)
+            .with_context(|| format!("`ne` の socket を bind できない: {}", socket.display()))?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::create_dir_all(&bin_directory)?;
+        std::fs::set_permissions(&bin_directory, std::fs::Permissions::from_mode(0o700))?;
+        let executable = std::env::current_exe().context("remote server の実体が分からない")?;
+        let shim = bin_directory.join("ne");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nexec {} cli \"$@\"\n",
+                quote_posix(&executable.to_string_lossy())
+            ),
+        )?;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700))?;
+        let path = std::env::var("PATH").unwrap_or_default();
+        streams.set_terminal_env(vec![
+            (
+                "PATH".to_string(),
+                format!("{}:{path}", bin_directory.display()),
+            ),
+            ("NECODER_GUI_SOCK".to_string(), socket.display().to_string()),
+        ]);
+        let streams = streams.clone();
+        thread::Builder::new()
+            .name("necoder-remote-cli".to_string())
+            .spawn(move || {
+                for connection in listener.incoming() {
+                    let Ok(connection) = connection else {
+                        break;
+                    };
+                    let streams = streams.clone();
+                    let spawned = thread::Builder::new()
+                        .name("necoder-remote-cli-open".to_string())
+                        .spawn(move || {
+                            if let Err(error) = answer_remote_cli(connection, &streams) {
+                                remote_trace(&format!("`ne` に答えられない: {error:#}"));
+                            }
+                        });
+                    if let Err(error) = spawned {
+                        remote_trace(&format!("`ne` のスレッドを起動できない: {error}"));
+                    }
+                }
+            })
+            .context("`ne` の受け口のスレッドを起動できない")?;
+        Ok(Self {
+            socket,
+            bin_directory,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RemoteCliGate {
+    fn drop(&mut self) {
+        let _socket = std::fs::remove_file(&self.socket);
+        let _shims = std::fs::remove_dir_all(&self.bin_directory);
+    }
+}
+
+/// `ne` の 1 接続（1 行の JSON 要求 → 1 行の JSON 応答）。受け付けるのは `open` だけ。
+#[cfg(unix)]
+fn answer_remote_cli(
+    mut connection: std::os::unix::net::UnixStream,
+    streams: &ServerStreams,
+) -> Result<()> {
+    connection.set_read_timeout(Some(Duration::from_secs(60)))?;
+    let mut line = String::new();
+    BufReader::new(&mut connection)
+        .take((MAX_META_LEN + 1) as u64)
+        .read_line(&mut line)?;
+    if line.is_empty() {
+        return Ok(());
+    }
+    let answer = match serde_json::from_str::<serde_json::Value>(&line) {
+        Ok(request)
+            if request.get("method").and_then(serde_json::Value::as_str) == Some("open") =>
+        {
+            let paths = request
+                .get("params")
+                .and_then(|params| params.get("paths"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect();
+            streams.cli_open(paths)
+        }
+        Ok(_) => serde_json::json!({
+            "ok": false,
+            "error": "remote terminal から許可されている操作は open だけです",
+        }),
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("要求が JSON ではない: {error}"),
+        }),
+    };
+    writeln!(connection, "{answer}")?;
+    connection.flush()?;
+    Ok(())
 }
 
 #[cfg(unix)]
 fn connect_session_proxy(session: &str) -> Result<()> {
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt as _;
 
     let socket = session_socket(session)?;
     let mut stream = match UnixStream::connect(&socket) {
@@ -2794,13 +3176,25 @@ fn connect_session_proxy(session: &str) -> Result<()> {
         Err(_) => {
             let executable =
                 std::env::current_exe().context("remote server executable path が無い")?;
+            let directory = session_directory();
+            std::fs::create_dir_all(&directory)?;
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+            }
+            // daemon は ssh の接続より長く生きる。stderr を ssh へ繋いだままにすると、接続が切れた後の
+            // 書き込みが失敗して daemon が落ちる（`eprintln!` は書けないと panic する）。置き場のログへ向ける。
+            let log = std::fs::File::create(socket.with_extension("log"))
+                .context("daemon のログを作れない")?;
             child_process::command(executable)
                 .arg("daemon")
                 .arg("--socket")
                 .arg(&socket)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::from(log))
+                // proxy（= ssh のセッション）のグループから外す。セッションへのシグナルで daemon が巻き込まれない。
+                .process_group(0)
                 .spawn()
                 .context("remote session daemon を起動できない")?;
             let mut connected = None;
@@ -2844,8 +3238,8 @@ fn connect_session_proxy(session: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remote SSH の統合ターミナルに置く軽量 `ne`。`NECODER_GUI_SOCK` は SSH reverse forward
-/// の接続先であり、その先のローカル gateway が `open` 以外を拒否して接続先 identity を付ける。
+/// Remote SSH の統合ターミナルに置く軽量 `ne`。`NECODER_GUI_SOCK` は daemon の `ne` の受け口
+/// （[`RemoteCliGate`]）で、daemon が接続元の GUI へ open だけを頼む。
 #[cfg(unix)]
 fn run_remote_cli(args: &[String]) -> Result<()> {
     use std::os::unix::net::UnixStream;
@@ -2891,7 +3285,7 @@ fn run_remote_cli(args: &[String]) -> Result<()> {
         .context("この ne は necoder の Remote SSH ターミナル内でのみ使えます")?;
     let mut stream = UnixStream::connect(&socket)
         .with_context(|| format!("接続元の necoder に接続できません（{}）", socket.display()))?;
-    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(90)))?;
     let request = serde_json::json!({ "method": "open", "params": { "paths": paths } });
     writeln!(stream, "{request}").context("接続元への open 送信に失敗")?;
     stream.flush()?;
@@ -2942,14 +3336,10 @@ pub fn serve_remote_server_cli() -> Result<()> {
             Ok(())
         }
         [command] if command == "serve" => {
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            serve_stream(stdin.lock(), stdout)
+            serve_stream(std::io::stdin().lock(), std::io::stdout())
         }
         [command, flag] if command == "serve" && flag == "--stdio" => {
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            serve_stream(stdin.lock(), stdout)
+            serve_stream(std::io::stdin().lock(), std::io::stdout())
         }
         #[cfg(unix)]
         [command, flag, session] if command == "proxy" && flag == "--session" => {
@@ -2967,9 +3357,14 @@ pub fn serve_remote_server_cli() -> Result<()> {
 
 // ── Multiplexed RPC client ──
 
+/// 接続の子プロセス（ssh / テストの server）。drop で落として回収する。
 struct ProcessOwner(Mutex<Option<Child>>);
 
 impl ProcessOwner {
+    fn new(child: Child) -> Self {
+        Self(Mutex::new(Some(child)))
+    }
+
     /// session プロセスを落として回収する。2 回目以降は no-op。
     fn kill(&self) {
         let Ok(mut slot) = self.0.lock() else {
@@ -2978,6 +3373,21 @@ impl ProcessOwner {
         if let Some(mut child) = slot.take() {
             let _kill = child.kill();
             let _wait = child.wait();
+        }
+    }
+
+    /// 終わるまで最長 `timeout` 待ち、終わっていればその終わり方（回収はしない＝drop が回収する）。
+    fn wait_for_exit(&self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let status = self.0.lock().ok().and_then(|mut slot| {
+                slot.as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten())
+            });
+            if status.is_some() || std::time::Instant::now() >= deadline {
+                return status;
+            }
+            thread::sleep(Duration::from_millis(20));
         }
     }
 }
@@ -3005,16 +3415,53 @@ impl Read for CountingReader {
     }
 }
 
-/// remote watch の [`FrameKind::Event`] frame を現在の購読者へ配る共有シンク。RpcClient を跨いで
+/// 接続先から届く push（watch の変更・`ne` の open・ストリーム）の受け口。RpcClient を跨いで
 /// （再接続でも）生き続けるよう [`ReconnectingClient`] が Arc で保持し、各 RpcClient の reader が
-/// Event をここへ流す。購読が無ければ捨てる。
+/// ここへ流す。watch の購読が無ければ変更通知は捨てる。
 #[derive(Default)]
-struct WatchEventSink {
+struct EventSink {
     sender: Mutex<Option<(u64, mpsc::Sender<Vec<PathBuf>>)>>,
     next_subscription_id: AtomicU64,
+    /// プロセス・端末・TCP のストリーム。
+    streams: Arc<StreamHub>,
+    /// `ne` の open を接続元の GUI へ渡す時に刻む接続先（`ssh://user@host:port`）。空なら断る。
+    authority: String,
 }
 
-impl WatchEventSink {
+impl EventSink {
+    fn with_authority(authority: impl Into<String>) -> Self {
+        Self {
+            authority: authority.into(),
+            ..Self::default()
+        }
+    }
+
+    /// reader スレッドから呼ぶ。**ブロックしない**（`ne` の open は別スレッドで GUI に頼む）。
+    fn receive_event(&self, event: ServerEvent) {
+        match event {
+            ServerEvent::Watch { paths } => self.dispatch(paths),
+            ServerEvent::CliOpen { request, paths } => {
+                let authority = self.authority.clone();
+                let streams = self.streams.clone();
+                let spawned = thread::Builder::new()
+                    .name("necoder-remote-open".to_string())
+                    .spawn(move || {
+                        let response = open_remote_paths_in_gui(&authority, &paths);
+                        let Some(link) = streams.current_link() else {
+                            return;
+                        };
+                        if let Err(error) =
+                            link.request(&Request::CliOpenResult { request, response }, Vec::new())
+                        {
+                            eprintln!("Remote SSH: `ne` の答えを返せない: {error:#}");
+                        }
+                    });
+                if let Err(error) = spawned {
+                    eprintln!("Remote SSH: `ne` のスレッドを起動できない: {error}");
+                }
+            }
+        }
+    }
     /// 新しい購読を現在の配送先にする。戻り値は、古い keeper が新しい
     /// 購読を誤って解除しないための世代 ID。
     fn subscribe(&self, sender: mpsc::Sender<Vec<PathBuf>>) -> u64 {
@@ -3047,13 +3494,66 @@ impl WatchEventSink {
         }
     }
 
-    fn dispatch(&self, event: WatchEvent) {
+    fn dispatch(&self, paths: Vec<PathBuf>) {
         if let Ok(slot) = self.sender.lock() {
             if let Some((_, sender)) = slot.as_ref() {
-                let _sent = sender.send(event.paths);
+                let _sent = sender.send(paths);
             }
         }
     }
+}
+
+/// 接続先の端末の `ne` が頼んだパスを、接続元の GUI で開く（GUI の制御口の `open_remote`）。
+/// 返すのは `ne` へそのまま返す 1 行 JSON（`{"ok":…}`）。
+///
+/// GUI の制御口は手元の Unix socket（mac / Linux）か名前付きパイプ（Windows）。この関数は GUI の
+/// プロセスの中で走るが、口を通すことで「接続先 identity をここで刻む」検査を 1 か所（`control_ipc`）に保つ。
+fn open_remote_paths_in_gui(authority: &str, paths: &[String]) -> serde_json::Value {
+    if authority.is_empty() {
+        return serde_json::json!({ "ok": false, "error": "この接続は `ne` を受け付けない" });
+    }
+    let request = serde_json::json!({
+        "method": "open_remote",
+        "params": { "authority": authority, "paths": paths },
+    });
+    match gui_control_request(&request) {
+        Ok(response) => response,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("接続元の necoder へ渡せませんでした: {error:#}"),
+        }),
+    }
+}
+
+/// GUI の制御口へ 1 往復（1 行 JSON の要求 → 1 行 JSON の応答）。
+fn gui_control_request(request: &serde_json::Value) -> Result<serde_json::Value> {
+    use std::io::{BufRead as _, BufReader};
+
+    let socket = paths::runtime_socket().context("GUI の制御口が無い")?;
+    #[cfg(unix)]
+    let connection = {
+        let connection = std::os::unix::net::UnixStream::connect(&socket)
+            .with_context(|| format!("GUI socket（{}）に接続できない", socket.display()))?;
+        connection.set_read_timeout(Some(Duration::from_secs(60)))?;
+        connection
+    };
+    // 名前付きパイプはファイルとして開ける（クライアント側は CreateFileW と同じ）。
+    #[cfg(windows)]
+    let connection = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&socket)
+        .with_context(|| format!("GUI のパイプ（{}）に接続できない", socket.display()))?;
+    let mut writer = &connection;
+    writeln!(writer, "{request}").context("GUI へ送れない")?;
+    writer.flush()?;
+    let mut line = String::new();
+    BufReader::new(&connection)
+        .take((MAX_META_LEN + 1) as u64)
+        .read_line(&mut line)
+        .context("GUI 応答を読めない")?;
+    anyhow::ensure!(!line.is_empty(), "GUI 応答が空です");
+    serde_json::from_str(&line).context("GUI 応答が JSON ではない")
 }
 
 struct RpcClient {
@@ -3067,7 +3567,7 @@ struct RpcClient {
 
 fn rpc_client_from_command(
     mut command: Command,
-    event_sink: Arc<WatchEventSink>,
+    event_sink: Arc<EventSink>,
 ) -> Result<Arc<RpcClient>> {
     command.stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut child = command
@@ -3089,7 +3589,7 @@ impl RpcClient {
         reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
         owner: Option<Arc<ProcessOwner>>,
-        event_sink: Arc<WatchEventSink>,
+        event_sink: Arc<EventSink>,
     ) -> Arc<Self> {
         let pending = Arc::new(Mutex::new(HashMap::<
             u64,
@@ -3107,13 +3607,21 @@ impl RpcClient {
                 let failure = loop {
                     match read_frame(&mut reader) {
                         Ok(frame) => {
-                            // Event frame（id を持たない push 通知）は watch シンクへ振り分ける。
-                            if matches!(frame.kind, FrameKind::Event) {
-                                if let Ok(event) = serde_json::from_slice::<WatchEvent>(&frame.meta)
-                                {
-                                    event_sink.dispatch(event);
+                            // Event frame（id を持たない push 通知）と Stream frame は受け口へ振り分ける。
+                            match frame.kind {
+                                FrameKind::Event => {
+                                    if let Ok(event) =
+                                        serde_json::from_slice::<ServerEvent>(&frame.meta)
+                                    {
+                                        event_sink.receive_event(event);
+                                    }
+                                    continue;
                                 }
-                                continue;
+                                FrameKind::Stream => {
+                                    event_sink.streams.dispatch(frame);
+                                    continue;
+                                }
+                                FrameKind::Request | FrameKind::Response | FrameKind::Error => {}
                             }
                             let sender = reader_pending
                                 .lock()
@@ -3145,6 +3653,15 @@ impl RpcClient {
     /// この接続で受信した総バイト数。2 時点の差が 0 なら、その間 相手から何も届いていない。
     fn received_bytes(&self) -> u64 {
         self.received.load(Ordering::Relaxed)
+    }
+
+    /// 応答を待たない frame（ストリームの中身と制御）を送る。
+    fn send_frame(&self, frame: &Frame) -> Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("remote writer lock poisoned"))?;
+        write_frame(writer.as_mut(), frame)
     }
 
     /// この接続を見限る: 応答待ちの全 request を即座にエラーで返し、session プロセスを落とす。
@@ -3582,1165 +4099,6 @@ fn percent_decode_path(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(decoded))
 }
 
-/// 1 destination に1本だけ作る system OpenSSH multiplex transport。
-/// ControlMaster（と、master になり得る standalone session）に付ける接続オプション。
-const MASTER_OPTIONS: [&str; 5] = [
-    // 死んだ/到達不能なホストで GUI が無限にハングしないよう接続打ち切りを入れる
-    // （既定は OS の TCP タイムアウト任せ＝分単位。sleep/VPN 断からの復帰性に効く）。
-    "ConnectTimeout=10",
-    "ControlPersist=600",
-    "ServerAliveInterval=15",
-    "ServerAliveCountMax=3",
-    "ExitOnForwardFailure=yes",
-];
-
-/// OpenSSH が接続に失敗した理由の種類（接続のトーストで案内を出し分ける・文言は GUI 側で i18n）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SshFailure {
-    /// 指紋を確かめていないホスト（初めて・確認を断った）。
-    HostKeyUnknown,
-    /// 覚えている指紋と違う（作り直した・なりすましの恐れ）。
-    HostKeyChanged,
-    /// 鍵・パスワードが通らない。
-    Authentication,
-    /// 鍵を試しすぎて切られた（agent に鍵が多い）。
-    TooManyKeys,
-    /// ホスト名が引けない。
-    UnknownHost,
-    /// 接続を断られた（sshd が居ない・ポート違い）。
-    Refused,
-    /// 応答が無い（ネットワーク・VPN・ファイアウォール）。
-    TimedOut,
-    /// `~/.ssh` や鍵の権限が広すぎて OpenSSH が読まない。
-    BadPermissions,
-    /// 鍵交換・暗号の方式が合わない（古い sshd）。
-    Negotiation,
-}
-
-impl SshFailure {
-    /// OpenSSH のログから種類を当てる（知らない書き方なら `None`＝ログをそのまま見せる）。
-    /// 順番が意味を持つ: 指紋の変化は「Host key verification failed」も伴い、権限の広い鍵は
-    /// 続けて「Permission denied」も出すので、より具体的な方を先に見る。
-    pub fn classify(log: &str) -> Option<Self> {
-        let has = |needle: &str| log.contains(needle);
-        if has("REMOTE HOST IDENTIFICATION HAS CHANGED") {
-            Some(Self::HostKeyChanged)
-        } else if has("Bad owner or permissions") || has("UNPROTECTED PRIVATE KEY FILE") {
-            Some(Self::BadPermissions)
-        } else if has("Host key verification failed") || has("host key is known for") {
-            Some(Self::HostKeyUnknown)
-        } else if has("Too many authentication failures") {
-            Some(Self::TooManyKeys)
-        } else if has("Permission denied") {
-            Some(Self::Authentication)
-        } else if has("Could not resolve hostname") {
-            Some(Self::UnknownHost)
-        } else if has("Connection refused") {
-            Some(Self::Refused)
-        } else if has("timed out") {
-            Some(Self::TimedOut)
-        } else if has("Unable to negotiate") {
-            Some(Self::Negotiation)
-        } else {
-            None
-        }
-    }
-}
-
-/// ControlMaster が立たなかった。OpenSSH が理由を書いていればそれと、分かれば種類を持つ
-/// （GUI は `anyhow::Error::downcast_ref` で取り出して案内を出す）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SshConnectError {
-    pub failure: Option<SshFailure>,
-    /// OpenSSH が書いた理由（空行と前後の空白を落とした行）。
-    pub reason: String,
-    status: String,
-}
-
-impl SshConnectError {
-    /// ssh の終わり方（`exit status: 255`）と、OpenSSH がログへ書いた文から作る。
-    pub fn new(status: impl Into<String>, log: &str) -> Self {
-        let reason = log
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        Self {
-            failure: SshFailure::classify(&reason),
-            reason,
-            status: status.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for SshConnectError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "OpenSSH ControlMaster の接続に失敗: {}",
-            self.status
-        )?;
-        if !self.reason.is_empty() {
-            write!(formatter, ": {}", self.reason)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for SshConnectError {}
-
-/// master を起こした ssh の終わり方とログから結果を作る。ログは従来どおり stderr にも流す
-/// （「known hosts に足した」などの警告も含めて、以前は stderr にそのまま出ていた）。
-fn master_result(success: bool, status: &str, log: &str) -> Result<()> {
-    if !log.trim().is_empty() {
-        eprint!("{log}");
-    }
-    if success {
-        return Ok(());
-    }
-    Err(anyhow::Error::new(SshConnectError::new(status, log)))
-}
-
-/// 接続を確かめる（O37・G01）。ControlMaster も server の配備もせず、`ssh <destination> true` を
-/// 1 回だけ走らせる（鍵のパスフレーズやホスト鍵の確認は askpass で訊く・10 秒で打ち切る）。
-/// 成功なら掛かった時間、失敗なら理由つきの [`SshConnectError`]（種類は [`SshFailure`]）。
-/// blocking なので背景で呼ぶ。
-pub fn test_ssh_connection(project: &SshProject) -> Result<Duration> {
-    static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
-    let log = std::env::temp_dir().join(format!(
-        "necoder-ssh-test-{}-{}.log",
-        std::process::id(),
-        NEXT_TEST.fetch_add(1, Ordering::Relaxed)
-    ));
-    let started = std::time::Instant::now();
-    let mut command = ssh_command();
-    command
-        .args(["-o", "ConnectTimeout=10"])
-        .arg("-E")
-        .arg(&log);
-    if let Some(port) = project.port {
-        command.args(["-p", &port.to_string()]);
-    }
-    let status = command
-        .arg(project.destination())
-        .arg("true")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("ssh を起動できない")?;
-    let elapsed = started.elapsed();
-    let written = std::fs::read(&log).unwrap_or_default();
-    if let Err(error) = std::fs::remove_file(&log) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("Remote SSH: 接続テストのログを消せない: {error}");
-        }
-    }
-    master_result(
-        status.success(),
-        &status.to_string(),
-        &String::from_utf8_lossy(&written),
-    )?;
-    Ok(elapsed)
-}
-
-/// Remote terminal の `ne` から接続元 GUI へ戻る、open 専用のローカル gateway。
-///
-/// GUI の `gui.sock` をそのまま `ssh -R` すると、remote 上の任意プロセスへ fleet/send など
-/// 制御 IPC の全権限まで渡してしまう。そこで SSH が転送する先をこの socket に限定し、`open`
-/// 以外を拒否した上で、接続先 identity をローカル側で刻んだ `open_remote` へ変換する。
-#[cfg(unix)]
-struct RemoteCliGateway {
-    socket: PathBuf,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[cfg(unix)]
-impl RemoteCliGateway {
-    fn bind(socket: PathBuf, gui_socket: PathBuf, authority: String) -> Result<Self> {
-        use std::os::unix::fs::PermissionsExt as _;
-        use std::os::unix::net::UnixListener;
-
-        let listener = UnixListener::bind(&socket).with_context(|| {
-            format!("remote CLI gateway を bind できない: {}", socket.display())
-        })?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread_stop = stop.clone();
-        let cleanup_socket = socket.clone();
-        thread::Builder::new()
-            .name("necoder-remote-cli-gateway".to_string())
-            .spawn(move || {
-                for stream in listener.incoming() {
-                    if thread_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    match stream {
-                        Ok(mut stream) => {
-                            if let Err(error) = forward_remote_cli_open(
-                                &mut stream,
-                                &gui_socket,
-                                &authority,
-                            ) {
-                                let response = serde_json::json!({
-                                    "ok": false,
-                                    "error": format!("接続元の necoder へ渡せませんでした: {error:#}"),
-                                });
-                                let _written = writeln!(stream, "{response}");
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("remote CLI gateway の accept に失敗: {error}");
-                            break;
-                        }
-                    }
-                }
-                let _cleanup = std::fs::remove_file(cleanup_socket);
-            })
-            .context("remote CLI gateway thread を起動できない")?;
-        Ok(Self { socket, stop })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for RemoteCliGateway {
-    fn drop(&mut self) {
-        use std::os::unix::net::UnixStream;
-
-        self.stop.store(true, Ordering::Release);
-        // blocking accept を起こす。接続後は stop を先に見るので要求として処理されない。
-        let _wake = UnixStream::connect(&self.socket);
-    }
-}
-
-/// gateway の 1 接続を処理する。remote から受け付ける method は `open` だけ。
-#[cfg(unix)]
-fn forward_remote_cli_open(
-    remote: &mut std::os::unix::net::UnixStream,
-    gui_socket: &Path,
-    authority: &str,
-) -> Result<()> {
-    use std::os::unix::net::UnixStream;
-
-    remote.set_read_timeout(Some(Duration::from_secs(60)))?;
-    let mut line = String::new();
-    // `try_open_in_running_gui` の生存確認は connect して即 close する。その接続は静かに無視する。
-    if BufReader::new(&mut *remote)
-        .take((MAX_META_LEN + 1) as u64)
-        .read_line(&mut line)?
-        == 0
-    {
-        return Ok(());
-    }
-    anyhow::ensure!(
-        line.len() <= MAX_META_LEN,
-        "remote CLI request が大きすぎる"
-    );
-    let request: serde_json::Value =
-        serde_json::from_str(&line).context("remote CLI request が JSON ではない")?;
-    anyhow::ensure!(
-        request.get("method").and_then(serde_json::Value::as_str) == Some("open"),
-        "remote terminal から許可されている操作は open だけです"
-    );
-    let paths: Vec<&str> = request
-        .get("params")
-        .and_then(|params| params.get("paths"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .collect();
-    let forwarded = serde_json::json!({
-        "method": "open_remote",
-        "params": { "authority": authority, "paths": paths },
-    });
-    let mut gui = UnixStream::connect(gui_socket)
-        .with_context(|| format!("GUI socket（{}）に接続できない", gui_socket.display()))?;
-    gui.set_read_timeout(Some(Duration::from_secs(60)))?;
-    writeln!(gui, "{forwarded}").context("GUI への open 転送に失敗")?;
-    gui.flush()?;
-    let mut response = String::new();
-    BufReader::new(gui)
-        .take((MAX_META_LEN + 1) as u64)
-        .read_line(&mut response)
-        .context("GUI 応答を読めない")?;
-    anyhow::ensure!(!response.is_empty(), "GUI 応答が空です");
-    anyhow::ensure!(response.len() <= MAX_META_LEN, "GUI 応答が大きすぎる");
-    remote.write_all(response.as_bytes())?;
-    remote.flush()?;
-    Ok(())
-}
-
-#[cfg(unix)]
-struct RemoteCliForward {
-    remote_socket: PathBuf,
-    remote_bin_dir: PathBuf,
-    _gateway: RemoteCliGateway,
-}
-
-struct SshTransport {
-    project: SshProject,
-    control_dir: PathBuf,
-    control_path: PathBuf,
-    #[cfg(unix)]
-    remote_cli_forward: Option<RemoteCliForward>,
-    /// 張っているポートの転送（接続先の番号, 手元の番号・O5）。master を張り直したら張り直す。
-    port_forwards: Mutex<Vec<(u16, u16)>>,
-}
-
-impl SshTransport {
-    /// 制御ソケットの置き場だけ用意する。**ここではネットワークに触らない**。
-    /// master は最初に必要になった時点で [`Self::ensure_master`] が起こす。
-    fn new(project: &SshProject) -> Result<Arc<Self>> {
-        static NEXT_CONTROL: AtomicU64 = AtomicU64::new(1);
-        let serial = NEXT_CONTROL.fetch_add(1, Ordering::Relaxed);
-        let identity_hash = content_hash(project.identity().as_bytes());
-        // UNIX domain socket の長さ制限を避けるため短い /tmp 配下を使う。directory は owner-only。
-        let control_dir = PathBuf::from(format!(
-            "/tmp/necoder-ssh-{}-{identity_hash:016x}-{serial}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&control_dir).with_context(|| {
-            format!(
-                "SSH control directory を作れない: {}",
-                control_dir.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let control_path = control_dir.join("master");
-        #[cfg(unix)]
-        let remote_cli_forward = if let Some(gui_socket) = paths::runtime_socket() {
-            let token = random_session_id()?;
-            let token = &token[..24];
-            let gateway_socket = control_dir.join("cli-gateway.sock");
-            match RemoteCliGateway::bind(gateway_socket, gui_socket, project.identity()) {
-                Ok(gateway) => Some(RemoteCliForward {
-                    remote_socket: PathBuf::from(format!("/tmp/necoder-cli-{token}.sock")),
-                    remote_bin_dir: PathBuf::from(format!("/tmp/necoder-cli-{token}")),
-                    _gateway: gateway,
-                }),
-                Err(error) => {
-                    // Remote SSH 本体は使えるように保つ。端末内 `ne` だけが無効になる。
-                    eprintln!(
-                        "remote CLI gateway を準備できない（ne は接続元へ戻りません）: {error:#}"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        Ok(Arc::new(Self {
-            project: project.clone(),
-            control_dir,
-            control_path,
-            #[cfg(unix)]
-            remote_cli_forward,
-            port_forwards: Mutex::new(Vec::new()),
-        }))
-    }
-
-    /// 置き場を用意して master も起こす（対話的に開くとき＝失敗を即その場で返したいとき）。
-    fn connect(project: &SshProject) -> Result<Arc<Self>> {
-        let transport = Self::new(project)?;
-        transport.start_master()?;
-        Ok(transport)
-    }
-
-    fn start_master(&self) -> Result<()> {
-        // OpenSSH の理由（指紋・鍵・名前・拒否…）は `-E` でこのログへ書かせる。stderr に任せると
-        // 終わり方（exit 255）しか分からず、トーストで案内を出し分けられない。stderr をパイプで
-        // 読む形は、`-f` で背景に回った master がパイプを握り続けて読み終わらないので使わない。
-        // 前の試行の分が混ざらないよう先に消す（`-E` は追記）。control_dir ごと Drop で消える。
-        let log = self.control_dir.join("master.log");
-        if let Err(error) = std::fs::remove_file(&log) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("Remote SSH: 前の接続ログを消せない: {error}");
-            }
-        }
-        let mut master = ssh_command();
-        master
-            .args(["-M", "-N", "-f"])
-            .arg("-o")
-            .arg(format!("ControlPath={}", self.control_path.display()));
-        for option in MASTER_OPTIONS {
-            master.args(["-o", option]);
-        }
-        if let Some(port) = self.project.port {
-            master.args(["-p", &port.to_string()]);
-        }
-        let status = master
-            .arg("-E")
-            .arg(&log)
-            .arg(self.project.destination())
-            .status()
-            .context("OpenSSH ControlMaster を起動できない")?;
-        // 何も書かれていなければファイルはできない（= 理由なし）。背景に回った master が後で書く分
-        // （切断の理由など）も同じファイルに残る。
-        let written = std::fs::read(&log).unwrap_or_default();
-        master_result(
-            status.success(),
-            &status.to_string(),
-            &String::from_utf8_lossy(&written),
-        )?;
-        // `ne` gateway の reverse forward は master が立ってから足す。master 起動の `-R` に
-        // 同居させると、前回の master が異常終了して remote に残った socket で bind が落ち、
-        // `ExitOnForwardFailure=yes` が master ごと exit 255 にして**再接続が永久に失敗**する
-        // （2026-09-08 実機: sleep 復帰後の張り直しが 100 回以上同じエラーで落ち、端末を開き直した
-        // ときだけ standalone session が `-R` 無しの master になって回復していた）。
-        #[cfg(unix)]
-        self.install_cli_forward();
-        self.reinstall_port_forwards();
-        Ok(())
-    }
-
-    /// ポートの転送を 1 つ頼む / やめる（`operation` = `forward` / `cancel`）。手元は 127.0.0.1 だけで待つ
-    /// （同じ LAN の他の機械からは届かない）。
-    fn port_forward_request(&self, operation: &str, local: u16, remote: u16) -> Result<()> {
-        let mut request = ssh_command();
-        request
-            .args(["-S", &self.control_path.to_string_lossy(), "-O", operation])
-            .arg("-L")
-            .arg(format!("127.0.0.1:{local}:127.0.0.1:{remote}"));
-        if let Some(port) = self.project.port {
-            request.args(["-p", &port.to_string()]);
-        }
-        let output = request
-            .arg(self.project.destination())
-            .stdin(Stdio::null())
-            .output()
-            .context("OpenSSH にポートの転送を頼めない")?;
-        anyhow::ensure!(
-            output.status.success(),
-            "ポートの転送に失敗（{operation} {local} → {remote}）: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        Ok(())
-    }
-
-    /// `remote` を手元へ転送する（[`Host::forward_port`]）。
-    fn forward_port(&self, remote: u16) -> Result<u16> {
-        assert_off_main_thread("forward_port");
-        let known = self
-            .port_forwards
-            .lock()
-            .map_err(|_| anyhow!("転送の一覧が壊れている"))?
-            .iter()
-            .find(|(forwarded, _)| *forwarded == remote)
-            .map(|(_, local)| *local);
-        if let Some(local) = known {
-            return Ok(local);
-        }
-        self.ensure_master()?;
-        let local = free_local_port(remote)?;
-        self.port_forward_request("forward", local, remote)?;
-        self.port_forwards
-            .lock()
-            .map_err(|_| anyhow!("転送の一覧が壊れている"))?
-            .push((remote, local));
-        Ok(local)
-    }
-
-    /// `remote` の転送をやめる（[`Host::cancel_forward`]）。
-    fn cancel_forward(&self, remote: u16) -> Result<()> {
-        assert_off_main_thread("cancel_forward");
-        let local = {
-            let mut forwards = self
-                .port_forwards
-                .lock()
-                .map_err(|_| anyhow!("転送の一覧が壊れている"))?;
-            let position = forwards
-                .iter()
-                .position(|(forwarded, _)| *forwarded == remote)
-                .ok_or_else(|| anyhow!("{remote} は転送していない"))?;
-            forwards.remove(position).1
-        };
-        self.port_forward_request("cancel", local, remote)
-    }
-
-    fn forwarded_ports(&self) -> Vec<(u16, u16)> {
-        self.port_forwards
-            .lock()
-            .map(|forwards| forwards.clone())
-            .unwrap_or_default()
-    }
-
-    /// master を張り直した後、前の転送を同じ番号で張り直す（sleep 復帰の再接続でも localhost が生きる）。
-    /// 張れなかった物は一覧から外す（手元の番号が他に取られた等）。
-    fn reinstall_port_forwards(&self) {
-        let Ok(mut forwards) = self.port_forwards.lock() else {
-            return;
-        };
-        forwards.retain(|(remote, local)| {
-            match self.port_forward_request("forward", *local, *remote) {
-                Ok(()) => true,
-                Err(error) => {
-                    eprintln!("Remote SSH: ポートの転送を張り直せない: {error:#}");
-                    false
-                }
-            }
-        });
-    }
-
-    /// remote の `ne` が GUI へ戻るための reverse forward を、生きている master へ後付けする。
-    ///
-    /// 転送の成否は `ne` が使えるかにしか影響しないので、失敗しても接続は続ける（警告だけ）。
-    /// 先に前回の socket を消すのは、`-R` の unix socket を bind するのは **remote の sshd** で、
-    /// 古い socket を消すかは sshd_config 側の `StreamLocalBindUnlink`（既定 no）が決めるため。
-    /// client 側の同名オプションは `-L` にしか効かない。
-    #[cfg(unix)]
-    fn install_cli_forward(&self) {
-        let Some(forward) = &self.remote_cli_forward else {
-            return;
-        };
-        let remote_socket = forward.remote_socket.to_string_lossy().to_string();
-        // token 付きの専用パスだけを対象にし、remote の通常ファイルには触れない。
-        let stale = self
-            .command(false, &format!("rm -f -- {}", quote_posix(&remote_socket)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if let Err(error) = stale {
-            eprintln!("Remote SSH: 前回の `ne` gateway socket を消せない: {error}");
-        }
-        let mut request = ssh_command();
-        request
-            .args(["-S", &self.control_path.to_string_lossy(), "-O", "forward"])
-            .arg("-R")
-            .arg(format!(
-                "{remote_socket}:{}",
-                forward._gateway.socket.display()
-            ));
-        if let Some(port) = self.project.port {
-            request.args(["-p", &port.to_string()]);
-        }
-        let status = request
-            .arg(self.project.destination())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Ok(status) if status.success() => {}
-            Ok(status) => eprintln!(
-                "Remote SSH: `ne` gateway の転送を張れない（remote の `ne` は使えないが接続は続く）: {status}"
-            ),
-            Err(error) => eprintln!(
-                "Remote SSH: `ne` gateway の転送を要求できない（remote の `ne` は使えないが接続は続く）: {error}"
-            ),
-        }
-    }
-
-    fn ensure_master(&self) -> Result<()> {
-        // `terminal_launch` / `spawn_process` は request を経由しないが、ここで master を
-        // 起こす＝接続そのもの。UI スレッドから呼ばれていないかは request と同じ検査に掛ける。
-        assert_off_main_thread("ensure_master");
-        let status = ssh_command()
-            .args(["-S", &self.control_path.to_string_lossy(), "-O", "check"])
-            .arg(self.project.destination())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("OpenSSH ControlMaster を確認できない")?;
-        if status.success() {
-            return Ok(());
-        }
-        let _stale = std::fs::remove_file(&self.control_path);
-        self.start_master()
-    }
-
-    /// RPC session 用の引数。master は [`Self::ensure_master`] が別途起こしている前提
-    /// （`ControlMaster=no`・無ければ失敗する）。
-    fn session_args(&self, tty: bool, remote_command: &str) -> Vec<String> {
-        self.session_args_with(tty, remote_command, false)
-    }
-
-    /// `standalone` = master が無ければ**この session 自身が master になる**（`ControlMaster=auto`）。
-    ///
-    /// 端末・LSP・ACP のプロセスはこれで起こす。事前に `ensure_master` で接続を確かめる必要が
-    /// なくなり、「起動仕様を組むだけ」の関数がネットワークに触らずに済む（UI スレッドから
-    /// 呼ばれる。sleep 復帰直後だとそこで master の張り直しを待って固まっていた）。
-    /// master が居れば従来どおり多重化に乗る。居なければ TCP をこの session が張り、終了後も
-    /// `ControlPersist` で残るので次からは多重化される。
-    fn session_args_with(&self, tty: bool, remote_command: &str, standalone: bool) -> Vec<String> {
-        let mut args = vec![
-            if tty { "-tt" } else { "-T" }.to_string(),
-            "-S".to_string(),
-            self.control_path.display().to_string(),
-        ];
-        if standalone {
-            for option in MASTER_OPTIONS {
-                args.extend(["-o".to_string(), option.to_string()]);
-            }
-            args.extend(["-o".to_string(), "ControlMaster=auto".to_string()]);
-        } else {
-            args.extend(["-o".to_string(), "ControlMaster=no".to_string()]);
-        }
-        if let Some(port) = self.project.port {
-            args.extend(["-p".to_string(), port.to_string()]);
-        }
-        args.push(self.project.destination());
-        args.push(remote_command.to_string());
-        args
-    }
-
-    fn command(&self, tty: bool, remote_command: &str) -> Command {
-        let mut command = ssh_command();
-        command.args(self.session_args(tty, remote_command));
-        command
-    }
-
-    /// master 無しでも自力で繋ぐ session（[`Self::session_args_with`] の `standalone`）。
-    fn standalone_command(&self, tty: bool, remote_command: &str) -> Command {
-        let mut command = ssh_command();
-        command.args(self.session_args_with(tty, remote_command, true));
-        command
-    }
-
-    fn output(&self, remote_command: &str) -> Result<CommandOutput> {
-        let output = self
-            .command(false, remote_command)
-            .stdin(Stdio::null())
-            .output()
-            .context("SSH bootstrap command を実行できない")?;
-        Ok(CommandOutput {
-            status_code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
-    }
-
-    fn compatible_server(&self, command: &str) -> bool {
-        let probe = format!("exec {} version", quote_posix(command));
-        self.output(&probe).is_ok_and(|output| {
-            output.success()
-                && String::from_utf8_lossy(&output.stdout).trim()
-                    == format!("{SERVER_VERSION} protocol={PROTOCOL_VERSION}")
-        })
-    }
-
-    fn ensure_remote_server(&self, preferred_command: &str) -> Result<String> {
-        if self.compatible_server(preferred_command) {
-            return Ok(preferred_command.to_string());
-        }
-
-        // remote の platform を先に検出（配備バイナリを remote target に合わせて選ぶため・#1）。
-        let platform =
-            self.output("printf '%s\\n%s\\n%s\\n' \"$HOME\" \"$(uname -s)\" \"$(uname -m)\"")?;
-        if !platform.success() {
-            bail!(
-                "remote platform を検出できない: {}",
-                String::from_utf8_lossy(&platform.stderr).trim()
-            );
-        }
-        let platform =
-            String::from_utf8(platform.stdout).context("remote platform 応答が UTF-8 ではない")?;
-        let mut lines = platform.lines();
-        let home = lines
-            .next()
-            .filter(|home| !home.is_empty())
-            .context("remote HOME が空")?;
-        let remote_os = lines.next().context("remote OS 応答が無い")?;
-        let remote_arch = lines.next().context("remote arch 応答が無い")?;
-
-        // 配備バイナリ: 明示指定（同一プラットフォーム検査を飛ばす）→ remote target 用の自動発見
-        // （per-target キャッシュ / .app 同梱 / same-platform の dev ビルド・#1）。
-        let explicit_artifact = std::env::var_os("NECODER_REMOTE_SERVER_BINARY").map(PathBuf::from);
-        let artifact = explicit_artifact
-            .clone()
-            .or_else(|| find_remote_server_for(remote_os, remote_arch))
-            .with_context(|| {
-                format!(
-                    "remote ({remote_os}/{remote_arch}) 用の necoder-remote-server が見つからない。\
-                     CI 生成物を ~/.local/share/necoder/remote/artifacts/<target>/ に置くか、\
-                     NECODER_REMOTE_SERVER_BINARY=<remote向けartifact> を指定してください"
-                )
-            })?;
-        if !artifact.is_file() {
-            bail!(
-                "remote server artifact がファイルではない: {}",
-                artifact.display()
-            );
-        }
-
-        let install_dir = PathBuf::from(home)
-            .join(".local/share/necoder/remote/servers")
-            .join(format!("{SERVER_VERSION}-p{PROTOCOL_VERSION}"));
-        let installed = install_dir.join("necoder-remote-server");
-        if self.compatible_server(&installed.to_string_lossy()) {
-            return Ok(installed.to_string_lossy().to_string());
-        }
-        let temporary = install_dir.join(format!(".upload-{}", std::process::id()));
-        let bootstrap = format!(
-            "umask 077 && mkdir -p {} && cat > {} && chmod 700 {} && mv -f {} {}",
-            quote_posix(&install_dir.to_string_lossy()),
-            quote_posix(&temporary.to_string_lossy()),
-            quote_posix(&temporary.to_string_lossy()),
-            quote_posix(&temporary.to_string_lossy()),
-            quote_posix(&installed.to_string_lossy()),
-        );
-        let mut child = self
-            .command(false, &bootstrap)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("remote server upload session を起動できない")?;
-        let mut source = std::fs::File::open(&artifact).with_context(|| {
-            format!("remote server artifact を読めない: {}", artifact.display())
-        })?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .context("remote server upload stdin が無い")?;
-        std::io::copy(&mut source, &mut stdin).context("remote server artifact の転送に失敗")?;
-        drop(stdin);
-        let status = child
-            .wait()
-            .context("remote server upload の終了を待てない")?;
-        if !status.success() {
-            bail!("remote server upload に失敗: {status}");
-        }
-
-        // checksum: 転送破損/改竄を検出する（version 文字列一致より厳密）。両端でハッシュツール
-        // （sha256sum / shasum）が使えるときだけ突合し、片方でも欠ければ version/protocol 検査に委ねる。
-        if let Some(expected) = local_file_sha256(&artifact) {
-            let probe = format!(
-                "sha256sum {path} 2>/dev/null || shasum -a 256 {path} 2>/dev/null || true",
-                path = quote_posix(&installed.to_string_lossy())
-            );
-            if let Ok(output) = self.output(&probe) {
-                if let Some(actual) = parse_sha256_hex(&output.stdout) {
-                    if actual != expected {
-                        // 壊れたバイナリを残さない（次回は再アップロードからやり直せる）。
-                        let _rm = self.output(&format!(
-                            "rm -f {}",
-                            quote_posix(&installed.to_string_lossy())
-                        ));
-                        bail!(
-                            "配備した remote server の checksum 不一致（転送破損の可能性）: \
-                             expected {expected}, actual {actual}"
-                        );
-                    }
-                }
-            }
-        }
-
-        let installed = installed.to_string_lossy().to_string();
-        if !self.compatible_server(&installed) {
-            bail!("配備した remote server の version/protocol 検証に失敗");
-        }
-        // 検証に通ってから、現行 version 以外の古い server を掃除する（best-effort）。
-        self.cleanup_old_servers(&install_dir);
-        Ok(installed)
-    }
-
-    /// `~/.local/share/necoder/remote/servers/` 配下の、現行 version 以外の server ディレクトリを
-    /// 削除する（best-effort）。version が上がるたびに旧バイナリが溜まって容量を食うのを防ぐ。
-    fn cleanup_old_servers(&self, install_dir: &Path) {
-        let Some(servers_dir) = install_dir.parent() else {
-            return;
-        };
-        let Some(current) = install_dir.file_name().and_then(|name| name.to_str()) else {
-            return;
-        };
-        let sweep = format!(
-            "cd {dir} 2>/dev/null || exit 0; for entry in */; do [ -d \"$entry\" ] || continue; \
-             name=\"${{entry%/}}\"; [ \"$name\" = {cur} ] && continue; rm -rf -- \"$name\"; done",
-            dir = quote_posix(&servers_dir.to_string_lossy()),
-            cur = quote_posix(current),
-        );
-        let _swept = self.output(&sweep);
-    }
-}
-
-fn find_local_remote_server() -> Option<PathBuf> {
-    let current = std::env::current_exe().ok()?;
-    let sibling = current.parent()?.join("necoder-remote-server");
-    if sibling.is_file() {
-        return Some(sibling);
-    }
-    // 開発ビルド限定の fallback。release では CARGO_MANIFEST_DIR（ビルドマシンの絶対パス）を
-    // 配布バイナリに焼き込まない — release.yml のビルドパス焼き込みガードが 0 件を前提にする。
-    #[cfg(debug_assertions)]
-    {
-        let development =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/necoder-remote-server");
-        if development.is_file() {
-            return Some(development);
-        }
-    }
-    None
-}
-
-/// `ssh` サブプロセスの土台。`NECODER_SSH_CONFIG` が指定されていれば `-F <config>` を先頭に
-/// 前置きする。テスト（Docker の隔離ホスト）やサンドボックス運用で、ユーザーの `~/.ssh/config`
-/// や `known_hosts` を汚さずに remote を検証するための seam。未指定なら system ssh の既定どおり。
-///
-/// GUI から起こす ssh には TTY が無いので、パスワード / passphrase / host key 確認は
-/// `SSH_ASKPASS` 経由で GUI に訊く（[`install_askpass`]）。
-/// 手元で待てるポート（`preferred` が空いていればそれ・塞がっていれば OS が選んだ空き番号）。
-fn free_local_port(preferred: u16) -> Result<u16> {
-    if std::net::TcpListener::bind(("127.0.0.1", preferred)).is_ok() {
-        return Ok(preferred);
-    }
-    let listener =
-        std::net::TcpListener::bind(("127.0.0.1", 0)).context("手元に空いているポートが無い")?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn ssh_command() -> Command {
-    let mut command = child_process::command("ssh");
-    if let Some(config) = std::env::var_os("NECODER_SSH_CONFIG") {
-        command.arg("-F").arg(config);
-    }
-    #[cfg(unix)]
-    install_askpass(&mut command);
-    command
-}
-
-// ---------------------------------------------------------------------------
-// GUI askpass（ROADMAP「残: GUI askpass」）
-// ---------------------------------------------------------------------------
-
-/// 発行した askpass token の寿命。1 回の接続試行（再入力 3 回ぶん）を見込んだ上限で、
-/// 切れた token は次の発行時に掃除される。
-#[cfg(unix)]
-const ASKPASS_TOKEN_TTL: Duration = Duration::from_secs(180);
-
-/// 1 回の接続試行に対して発行した askpass token と、その token で訊かれた回数。
-///
-/// GUI から秘密を引き出せるのは、**その ssh のために発行した token を持つ子プロセスだけ**。
-/// token は `ssh` の環境変数にしか置かないので、`gui.sock` を開けるだけの別プロセスは
-/// パスワード入力欄を出せない（`gui.sock` は 0600 だが、秘密を返す口は更に絞る）。
-///
-/// `asked` は**同じ問い**が何回来たかを prompt 文字列ごとに数える。OpenSSH は入力を間違えると
-/// 同じ prompt で askpass を呼び直す（既定 3 回）ので、2 回目以降は GUI が「失敗したので
-/// もう一度」と言える。prompt ごとに分けるのは、passphrase → password のように**別の問い**へ
-/// 進んだときに再入力と誤表示しないため。
-#[cfg(unix)]
-struct AskpassIssue {
-    token: String,
-    issued: std::time::Instant,
-    asked: Vec<(String, u32)>,
-}
-
-#[cfg(unix)]
-static ASKPASS_TOKENS: Mutex<Vec<AskpassIssue>> = Mutex::new(Vec::new());
-
-/// 128bit の乱数 token を hex で作る。`/dev/urandom` が読めなければ askpass を諦める
-/// （推測可能な token を配るくらいなら、従来どおり「TTY が無いので失敗」の方が安全）。
-#[cfg(unix)]
-fn askpass_random_token() -> Option<String> {
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .ok()?
-        .read_exact(&mut bytes)
-        .ok()?;
-    let mut token = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        if write!(token, "{byte:02x}").is_err() {
-            return None;
-        }
-    }
-    Some(token)
-}
-
-/// token を 1 つ発行して登録する（期限切れはこの機会に捨てる）。
-#[cfg(unix)]
-fn issue_askpass_token() -> Option<String> {
-    let token = askpass_random_token()?;
-    let mut tokens = ASKPASS_TOKENS.lock().ok()?;
-    let now = std::time::Instant::now();
-    tokens.retain(|issue| now.duration_since(issue.issued) < ASKPASS_TOKEN_TTL);
-    tokens.push(AskpassIssue {
-        token: token.clone(),
-        issued: now,
-        asked: Vec::new(),
-    });
-    Some(token)
-}
-
-/// GUI 側の検証。「今このプロセスが出した、まだ生きている token か」だけを見る。
-///
-/// 使い捨てにはしない — OpenSSH は 1 回の接続で鍵の passphrase とパスワードを続けて訊くことが
-/// あり、再入力（`NumberOfPasswordPrompts`）もあるため、寿命は TTL で切る。
-#[cfg(unix)]
-pub fn askpass_token_is_live(token: &str) -> bool {
-    let Ok(mut tokens) = ASKPASS_TOKENS.lock() else {
-        return false;
-    };
-    let now = std::time::Instant::now();
-    tokens.retain(|issue| now.duration_since(issue.issued) < ASKPASS_TOKEN_TTL);
-    tokens.iter().any(|issue| issue.token == token)
-}
-
-/// token を検証しつつ「この問いは何回目か」を 1 始まりで返す（生きていなければ `None`）。
-/// 2 以上 = 直前の入力が拒否されて OpenSSH が訊き直している、と GUI が判断できる。
-#[cfg(unix)]
-pub fn askpass_attempt(token: &str, prompt: &str) -> Option<u32> {
-    let mut tokens = ASKPASS_TOKENS.lock().ok()?;
-    let now = std::time::Instant::now();
-    tokens.retain(|issue| now.duration_since(issue.issued) < ASKPASS_TOKEN_TTL);
-    let issue = tokens.iter_mut().find(|issue| issue.token == token)?;
-    if let Some((_, count)) = issue
-        .asked
-        .iter_mut()
-        .find(|(seen, _)| seen == prompt)
-    {
-        *count += 1;
-        return Some(*count);
-    }
-    issue.asked.push((prompt.to_string(), 1));
-    Some(1)
-}
-
-/// この `ssh` に「訊く先」を持たせる。
-///
-/// - `SSH_ASKPASS` = necoder 自身（起動時に `NECODER_ASKPASS_TOKEN` を見て askpass モードに入る）
-/// - `SSH_ASKPASS_REQUIRE=force` = TTY の有無に依らず askpass を使う（OpenSSH 8.4+ の公開仕様）
-///
-/// 何もせず返る条件（いずれも「GUI に訊けない・訊くべきでない」場合）:
-/// 利用者が自前の `SSH_ASKPASS` を持っている / `NECODER_ASKPASS_DISABLE` / GUI socket が無い
-/// （headless CLI・統合テスト・`necoder-remote-server`）。
-#[cfg(unix)]
-fn install_askpass(command: &mut Command) {
-    if std::env::var_os("SSH_ASKPASS").is_some()
-        || std::env::var_os("NECODER_ASKPASS_DISABLE").is_some()
-    {
-        return;
-    }
-    // 自分自身が askpass として呼ばれている最中なら、その子に token を配り直さない。
-    if std::env::var_os("NECODER_ASKPASS_TOKEN").is_some() {
-        return;
-    }
-    let Some(socket) = paths::runtime_socket() else {
-        return;
-    };
-    if !socket.exists() {
-        return;
-    }
-    let Ok(executable) = std::env::current_exe() else {
-        return;
-    };
-    let Some(token) = issue_askpass_token() else {
-        return;
-    };
-    command
-        .env("SSH_ASKPASS", executable)
-        .env("SSH_ASKPASS_REQUIRE", "force")
-        .env("NECODER_ASKPASS_TOKEN", token);
-}
-
-/// ローカルのハッシュツール（`sha256sum` か BSD/macOS の `shasum -a 256`）で SHA-256 hex を計算する。
-/// どちらも無ければ `None`（checksum 検証は best-effort でスキップし、version/protocol 検査に委ねる）。
-fn local_file_sha256(path: &Path) -> Option<String> {
-    let path = path.to_string_lossy().to_string();
-    let candidates: [(&str, Vec<String>); 2] = [
-        ("sha256sum", vec![path.clone()]),
-        ("shasum", vec!["-a".to_string(), "256".to_string(), path]),
-    ];
-    for (program, args) in candidates {
-        if let Ok(output) = child_process::command(program).args(&args).output() {
-            if output.status.success() {
-                if let Some(hex) = parse_sha256_hex(&output.stdout) {
-                    return Some(hex);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// `sha256sum` / `shasum -a 256` の出力（`<hex>  <path>`）から先頭の 64 桁 hex を取り出す。
-fn parse_sha256_hex(stdout: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(stdout);
-    let token = text.split_whitespace().next()?;
-    // GNU coreutils は filename に特殊文字があると `\<hash>` と行頭 `\` を付ける。
-    let token = token.trim_start_matches('\\');
-    (token.len() == 64 && token.chars().all(|character| character.is_ascii_hexdigit()))
-        .then(|| token.to_ascii_lowercase())
-}
-
-/// 構造化接続ログ（1 行 = 1 フェーズ・stderr）。接続は低頻度イベントなので常時出す。
-/// 失敗診断（どの段で・どれだけ掛かったか）を残すのが目的。
-fn ssh_log(destination: &str, phase: &str, elapsed_from: Option<std::time::Instant>) {
-    match elapsed_from {
-        Some(started) => {
-            eprintln!(
-                "[ssh {destination}] {phase} ({}ms)",
-                started.elapsed().as_millis()
-            );
-        }
-        None => eprintln!("[ssh {destination}] {phase}"),
-    }
-}
-
-/// remote の uname (os, arch) を Rust target triple へ（配備バイナリの探索キー・#1）。
-/// Linux は static-musl（glibc 依存なし）、macOS は apple-darwin。未知は None。
-fn remote_target_triple(remote_os: &str, remote_arch: &str) -> Option<String> {
-    let os = match remote_os.to_ascii_lowercase().as_str() {
-        "linux" => "unknown-linux-musl",
-        "darwin" => "apple-darwin",
-        _ => return None,
-    };
-    let arch = match remote_arch.to_ascii_lowercase().as_str() {
-        "x86_64" | "amd64" => "x86_64",
-        "aarch64" | "arm64" => "aarch64",
-        _ => return None,
-    };
-    Some(format!("{arch}-{os}"))
-}
-
-/// remote target 用の配備バイナリを探す（#1 の自動発見・env 指定なしで mac→Linux を通す）:
-/// 1) per-target キャッシュ `~/.local/share/necoder/remote/artifacts/<triple>/necoder-remote-server`
-/// 2) .app 同梱 `<exe>/../Resources/remote/<triple>/necoder-remote-server`（インストール版）
-/// 3) same-platform なら従来の sibling / dev ビルド（[`find_local_remote_server`]）
-fn find_remote_server_for(remote_os: &str, remote_arch: &str) -> Option<PathBuf> {
-    if let Some(triple) = remote_target_triple(remote_os, remote_arch) {
-        if let Some(home) = paths::home_dir() {
-            let cached = home
-                .join(".local/share/necoder/remote/artifacts")
-                .join(&triple)
-                .join("necoder-remote-server");
-            if cached.is_file() {
-                return Some(cached);
-            }
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let bundled = dir
-                    .join("../Resources/remote")
-                    .join(&triple)
-                    .join("necoder-remote-server");
-                if bundled.is_file() {
-                    return Some(bundled);
-                }
-            }
-        }
-    }
-    if same_platform(remote_os, remote_arch) {
-        return find_local_remote_server();
-    }
-    None
-}
-
-fn same_platform(remote_os: &str, remote_arch: &str) -> bool {
-    let remote_os = remote_os.to_ascii_lowercase();
-    let os = match remote_os.as_str() {
-        "darwin" => "macos",
-        "linux" => "linux",
-        other => other,
-    };
-    let remote_arch = remote_arch.to_ascii_lowercase();
-    let arch = match remote_arch.as_str() {
-        "arm64" => "aarch64",
-        "amd64" => "x86_64",
-        other => other,
-    };
-    os == std::env::consts::OS && arch == std::env::consts::ARCH
-}
-
-impl SshTransport {
-    /// ControlMaster を明示終了する（多重化された全 session が同時に落ちる）。通常の Drop と、
-    /// 障害注入テストの「ControlMaster kill → 次 request が再接続で回復」検証の両方で使う。
-    fn exit_master(&self) {
-        let mut command = ssh_command();
-        command
-            .args(["-S", &self.control_path.to_string_lossy(), "-O", "exit"])
-            .arg(self.project.destination())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let _status = command.status();
-    }
-}
-
-impl Drop for SshTransport {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(forward) = &self.remote_cli_forward {
-            // token 付きの専用パスだけを対象にし、remote の通常ファイルには触れない。
-            let cleanup = format!(
-                "rm -f -- {socket} {shim}; rmdir -- {bin} 2>/dev/null || true",
-                socket = quote_posix(&forward.remote_socket.to_string_lossy()),
-                shim = quote_posix(&forward.remote_bin_dir.join("ne").to_string_lossy()),
-                bin = quote_posix(&forward.remote_bin_dir.to_string_lossy()),
-            );
-            let _cleaned = self.output(&cleanup);
-        }
-        self.exit_master();
-        #[cfg(unix)]
-        drop(self.remote_cli_forward.take());
-        let _cleanup = std::fs::remove_dir_all(&self.control_dir);
-    }
-}
-
-struct SshConnector {
-    transport: Arc<SshTransport>,
-    /// 配備前は設定値、配備後は解決済みのコマンド。遅延接続では最初の接続まで配備しないので、
-    /// 「まだ確かめていない」状態を持てる必要がある。
-    server_command: Arc<Mutex<String>>,
-    /// 配備の確認が済んだか。済んだ後は再接続のたびに配備し直さない。
-    server_ready: std::sync::atomic::AtomicBool,
-    session: String,
-}
-
-impl SshConnector {
-    fn command(&self) -> Command {
-        let server_command = self
-            .server_command
-            .lock()
-            .map(|command| command.clone())
-            .unwrap_or_default();
-        let remote_command = format!(
-            "exec {} proxy --session {}",
-            quote_posix(&server_command),
-            quote_posix(&self.session)
-        );
-        let mut command = self.transport.command(false, &remote_command);
-        command.stderr(Stdio::inherit());
-        command
-    }
-
-    /// remote-server が使える状態か確かめ、必要なら配備する（初回だけ）。
-    fn ensure_server(&self) -> Result<()> {
-        if self.server_ready.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let preferred = self
-            .server_command
-            .lock()
-            .map_err(|_| anyhow!("remote server command lock poisoned"))?
-            .clone();
-        let resolved = self
-            .transport
-            .ensure_remote_server(&preferred)
-            .context("remote-server の配備に失敗")?;
-        *self
-            .server_command
-            .lock()
-            .map_err(|_| anyhow!("remote server command lock poisoned"))? = resolved;
-        self.server_ready.store(true, Ordering::Release);
-        Ok(())
-    }
-
-    /// 新しい session を張って Hello を交わす（[`HELLO_TIMEOUT`] で打ち切る）。
-    fn handshake(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
-        let client = rpc_client_from_command(self.command(), event_sink)?;
-        verify_hello(&client)?;
-        Ok(client)
-    }
-}
-
 /// Hello を交わして protocol 版を確かめる。接続経路（ssh / テストの UnixStream）に依らず同じ。
 fn verify_hello(client: &RpcClient) -> Result<()> {
     let (hello, _) = client.request(
@@ -4761,38 +4119,11 @@ fn verify_hello(client: &RpcClient) -> Result<()> {
     Ok(())
 }
 
-/// 接続を張る側の抽象。実物は [`SshConnector`]（OpenSSH ControlMaster 越し）。
+/// 接続を張る側の抽象。実物は [`ssh_link::SshConnector`]（system OpenSSH の 1 本の接続）。
 /// [`ReconnectingClient`] の再接続ロジックを ssh 無しで検証できるよう、テストは
-/// UnixStream の対で同じ protocol を喋る connector を差す。
+/// 同じ protocol を喋る byte stream の対を返す connector を差す。
 trait Connector: Send + Sync {
-    fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>>;
-}
-
-impl Connector for SshConnector {
-    fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
-        self.transport.ensure_master()?;
-        self.ensure_server()?;
-        match self.handshake(event_sink.clone()) {
-            Ok(client) => Ok(client),
-            // `ssh -O check` は **master プロセスが生きているか**しか見ない。sleep 復帰直後は
-            // master は生きたまま TCP だけ死んでいることがあり（ServerAlive が気付くまで最大 45s）、
-            // check を通った master 越しの新 session が黙って固まる。1 回で見切って
-            // master ごと作り直す — 待ち続けるより速いし、結果も決定的になる。
-            //
-            // 作り直すのは **Hello が時間切れ**（相手が黙っている）のときだけ。session が即座に
-            // 閉じたのなら master は通っていて、落ちたのは remote-server の起動側（バイナリが無い・
-            // 落ちた）。そこで master を殺しても直らず、同じ master に乗っている端末を巻き添えに
-            // するだけになる。
-            Err(stale) if stale.downcast_ref::<RequestTimeout>().is_some() => {
-                self.transport.exit_master();
-                self.transport.start_master().with_context(|| {
-                    format!("ControlMaster の作り直しに失敗（元の失敗: {stale:#}）")
-                })?;
-                self.handshake(event_sink)
-            }
-            Err(error) => Err(error),
-        }
-    }
+    fn connect(&self, event_sink: Arc<EventSink>) -> Result<Arc<RpcClient>>;
 }
 
 struct ReconnectingClient {
@@ -4804,7 +4135,7 @@ struct ReconnectingClient {
     /// 直近の接続失敗（時刻とメッセージ）。待っている間に起きた失敗を、待ち人が
     /// もう一度やり直さないための印（[`Self::connect_now`]）。
     last_failure: Mutex<Option<(std::time::Instant, String)>>,
-    event_sink: Arc<WatchEventSink>,
+    event_sink: Arc<EventSink>,
     generation: AtomicU64,
     /// いまの接続状態（[`ConnectionState::as_u8`]）。UI が I/O 無しで読める唯一の窓。
     state: AtomicU8,
@@ -4816,26 +4147,29 @@ impl ReconnectingClient {
     fn new(
         current: Arc<RpcClient>,
         connector: Option<Arc<dyn Connector>>,
-        event_sink: Arc<WatchEventSink>,
+        event_sink: Arc<EventSink>,
     ) -> Arc<Self> {
         Self::with_current(Some(current), connector, event_sink)
     }
 
     /// 接続を張らずに作る。最初の request まで ssh を起こさない（起動を止めないため）。
-    fn disconnected(connector: Arc<dyn Connector>, event_sink: Arc<WatchEventSink>) -> Arc<Self> {
+    fn disconnected(connector: Arc<dyn Connector>, event_sink: Arc<EventSink>) -> Arc<Self> {
         Self::with_current(None, Some(connector), event_sink)
     }
 
     fn with_current(
         current: Option<Arc<RpcClient>>,
         connector: Option<Arc<dyn Connector>>,
-        event_sink: Arc<WatchEventSink>,
+        event_sink: Arc<EventSink>,
     ) -> Arc<Self> {
         let initial_state = if current.is_some() {
             ConnectionState::Connected
         } else {
             ConnectionState::Unconnected
         };
+        if let Some(current) = &current {
+            event_sink.streams.set_link(current);
+        }
         let client = Arc::new(Self {
             current: Mutex::new(current),
             connector,
@@ -4906,7 +4240,7 @@ impl ReconnectingClient {
         }
     }
 
-    fn event_sink(&self) -> Arc<WatchEventSink> {
+    fn event_sink(&self) -> Arc<EventSink> {
         self.event_sink.clone()
     }
 
@@ -4989,7 +4323,7 @@ impl ReconnectingClient {
         match current.request(request, body.clone()) {
             Ok(response) => Ok(response),
             // peer が request を処理して返したエラーは接続障害ではない。保存競合や ENOENT で
-            // ControlMaster を張り直さず、そのまま呼び出し元へ返す。
+            // 接続を張り直さず、そのまま呼び出し元へ返す。
             Err(error) if error.downcast_ref::<RemoteRequestError>().is_some() => Err(error),
             // 時間切れでも、その間に受信が進んでいるなら接続は生きている（混んでいるだけ）。
             // 張り直すと進行中の転送を巻き添えにする上、再送がまた回線を埋める。
@@ -5087,6 +4421,9 @@ impl ReconnectingClient {
             .current
             .lock()
             .map_err(|_| anyhow!("remote client lock poisoned"))? = Some(replacement.clone());
+        // 端末・LSP・エージェントのストリームを新しい接続へ付け直す（daemon 側で生きていれば続きから）。
+        self.event_sink.streams.set_link(&replacement);
+        self.event_sink.streams.reattach(&replacement);
         // 世代を進める → watch keeper が新接続で監視を張り直す。
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.set_state(ConnectionState::Connected);
@@ -5098,82 +4435,46 @@ pub struct RemoteHost {
     id: String,
     display_name: String,
     root: PathBuf,
-    project_id: AtomicU64,
+    /// daemon が付けた project の番号。端末を開く口（[`RemoteTerminal`]）とも共有する
+    /// （daemon が作り直されたら付け直した番号を全員が見る）。
+    project_id: Arc<AtomicU64>,
     client: Arc<ReconnectingClient>,
     /// watch の入れ替えと Unwatch を直列化する。`open_project` で作る別 root とも共有。
     watch_control: Arc<Mutex<()>>,
     ssh_project: Option<SshProject>,
-    transport: Option<Arc<SshTransport>>,
-    /// terminal を開く時点での remote-server 実体。遅延接続後の自動配備結果も共有される。
-    #[cfg(unix)]
-    remote_server_command: Option<Arc<Mutex<String>>>,
+    connector: Option<Arc<ssh_link::SshConnector>>,
+    /// ポートの転送（手元の待ち受け）。同じ接続の別 root とも共有する。
+    forwards: Arc<PortForwards>,
 }
 
 impl RemoteHost {
-    /// system OpenSSH の ControlMaster を作り、互換 server を配備して session proxy へ接続する。
+    /// system OpenSSH で 1 本繋ぎ、互換 server を（無ければ同じ接続の中で配備して）session proxy へ接続する。
     pub fn connect_ssh(project: &SshProject, server_command: &str) -> Result<Arc<Self>> {
-        if server_command.is_empty() || server_command.contains(['\n', '\r', '\0']) {
-            bail!("invalid remote server command");
-        }
-        // 構造化接続ログ: フェーズごとの所要を stderr に出し、失敗はどの段で落ちたかを
-        // エラー文脈（context）に載せる → トーストの `{:#}` に段名がそのまま出る。
-        let destination = project.destination();
-        ssh_log(&destination, "接続開始", None);
-
-        let phase = std::time::Instant::now();
-        let transport = SshTransport::connect(project).context("SSH ControlMaster の確立に失敗")?;
-        ssh_log(&destination, "ControlMaster 確立", Some(phase));
-
-        let phase = std::time::Instant::now();
-        let server_command = transport
-            .ensure_remote_server(server_command)
-            .context("remote-server の配備に失敗")?;
-        ssh_log(&destination, "remote-server 配備", Some(phase));
-
+        let connector = Arc::new(ssh_link::SshConnector::new(project, server_command)?);
+        let event_sink = Arc::new(EventSink::with_authority(project.identity()));
+        let client = connector
+            .connect(event_sink.clone())
+            .context("SSH の接続に失敗")?;
         // path 未指定（空）= 標準 SSH と同じく remote の $HOME をルートにする（#5・「ホスト選ぶ→home」）。
         let project = if project.path.as_os_str().is_empty() {
-            let home = transport
-                .output("printf %s \"$HOME\"")
-                .context("remote $HOME の解決に失敗")?;
-            anyhow::ensure!(
-                home.success(),
-                "remote の $HOME を取得できない: {}",
-                String::from_utf8_lossy(&home.stderr).trim()
-            );
-            let home = String::from_utf8_lossy(&home.stdout).trim().to_string();
-            anyhow::ensure!(!home.is_empty(), "remote の $HOME が空");
+            let home = connector.home().context("remote の $HOME が分からない")?;
             SshProject {
-                path: PathBuf::from(home),
+                path: home,
                 ..project.clone()
             }
         } else {
             project.clone()
         };
-        let project = &project;
-        let session = random_session_id()?;
-        let remote_server_command = Arc::new(Mutex::new(server_command));
-        let connector = Arc::new(SshConnector {
-            transport: transport.clone(),
-            // 対話経路では上で配備済み。再接続で配備し直さないよう ready を立てておく。
-            server_command: remote_server_command,
-            server_ready: std::sync::atomic::AtomicBool::new(true),
-            session,
-        });
-        let command = connector.command();
-        let display_name = project.destination();
-        let phase = std::time::Instant::now();
-        let host = Self::connect_process_inner(
-            command,
+        Self::connect_client(
+            client,
             project.identity(),
-            display_name,
+            project.destination(),
             &project.path,
             Some(project.clone()),
-            Some(transport),
             Some(connector),
+            event_sink,
         )
-        .context("session proxy 接続 / protocol handshake に失敗")?;
-        ssh_log(&destination, "session 確立（接続完了）", Some(phase));
-        Ok(host)
+        .context("session proxy 接続 / protocol handshake に失敗")
     }
 
     /// **繋がずに** SSH host を作る（起動時の復元用）。
@@ -5185,37 +4486,26 @@ impl RemoteHost {
     /// `root` が要るのは、`$HOME` の解決に接続が要るため。空パスは対話経路
     /// （[`Self::connect_ssh`]）でしか扱えない。
     pub fn lazy_ssh(project: &SshProject, server_command: &str) -> Result<Arc<Self>> {
-        if server_command.is_empty() || server_command.contains(['\n', '\r', '\0']) {
-            bail!("invalid remote server command");
-        }
         anyhow::ensure!(
             !project.path.as_os_str().is_empty(),
             "遅延接続には保存済みの root が要る（$HOME 解決は接続が必要）"
         );
-        let transport = SshTransport::new(project).context("SSH control directory の準備に失敗")?;
-        let remote_server_command = Arc::new(Mutex::new(server_command.to_string()));
-        let connector = Arc::new(SshConnector {
-            transport: transport.clone(),
-            server_command: remote_server_command.clone(),
-            // 未配備。最初の接続で `ensure_server` が確かめる。
-            server_ready: std::sync::atomic::AtomicBool::new(false),
-            session: random_session_id()?,
-        });
-        let event_sink = Arc::new(WatchEventSink::default());
-        let client = ReconnectingClient::disconnected(connector as Arc<dyn Connector>, event_sink);
+        let connector = Arc::new(ssh_link::SshConnector::new(project, server_command)?);
+        let event_sink = Arc::new(EventSink::with_authority(project.identity()));
+        let client =
+            ReconnectingClient::disconnected(connector.clone() as Arc<dyn Connector>, event_sink);
         Ok(Arc::new(Self {
             id: project.identity(),
             display_name: project.destination(),
             root: project.path.clone(),
             // 未接続なので project id はまだ無い。最初の request が `unknown project id` を
             // 受けて `OpenProject` し直す既存経路に乗る（daemon 再起動時と同じ扱い）。
-            project_id: AtomicU64::new(0),
+            project_id: Arc::new(AtomicU64::new(0)),
             client,
             watch_control: Arc::new(Mutex::new(())),
             ssh_project: Some(project.clone()),
-            transport: Some(transport),
-            #[cfg(unix)]
-            remote_server_command: Some(remote_server_command),
+            connector: Some(connector),
+            forwards: Arc::default(),
         }))
     }
 
@@ -5226,56 +4516,61 @@ impl RemoteHost {
         display_name: String,
         root: &Path,
     ) -> Result<Arc<Self>> {
-        Self::connect_process_inner(command, id, display_name, root, None, None, None)
-    }
-
-    fn connect_process_inner(
-        command: Command,
-        id: String,
-        display_name: String,
-        root: &Path,
-        ssh_project: Option<SshProject>,
-        transport: Option<Arc<SshTransport>>,
-        connector: Option<Arc<SshConnector>>,
-    ) -> Result<Arc<Self>> {
-        let event_sink = Arc::new(WatchEventSink::default());
+        let event_sink = Arc::new(EventSink::with_authority(id.clone()));
         let client = rpc_client_from_command(command, event_sink.clone())?;
-        Self::connect_client(
-            client,
-            id,
-            display_name,
-            root,
-            ssh_project,
-            transport,
-            connector,
-            event_sink,
-        )
+        Self::connect_client(client, id, display_name, root, None, None, event_sink)
     }
 
-    // 唯一の呼び出し元が `UnixStream::pair()` を使う unix 限定テストなので cfg を揃える
-    // （揃えないと Windows で dead_code 警告になる）。
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     fn connect_io(
         reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
         id: String,
         display_name: String,
         requested_root: &Path,
-        ssh_project: Option<SshProject>,
-        transport: Option<Arc<SshTransport>>,
     ) -> Result<Arc<Self>> {
-        let event_sink = Arc::new(WatchEventSink::default());
+        let event_sink = Arc::new(EventSink::with_authority(id.clone()));
         let client = RpcClient::new(reader, writer, None, event_sink.clone());
         Self::connect_client(
             client,
             id,
             display_name,
             requested_root,
-            ssh_project,
-            transport,
+            None,
             None,
             event_sink,
         )
+    }
+
+    /// テスト用: 任意の connector（byte stream の対を返す）で繋ぎ直せる host。
+    #[cfg(test)]
+    fn connect_with(
+        connector: Arc<dyn Connector>,
+        id: String,
+        requested_root: &Path,
+    ) -> Result<Arc<Self>> {
+        let event_sink = Arc::new(EventSink::with_authority(id.clone()));
+        let client = ReconnectingClient::disconnected(connector, event_sink);
+        let (opened, _) = client.request(
+            &Request::OpenProject {
+                path: requested_root.to_path_buf(),
+            },
+            Vec::new(),
+        )?;
+        let Response::ProjectOpened { project_id, root } = opened else {
+            bail!("remote server returned invalid open-project response");
+        };
+        Ok(Arc::new(Self {
+            id: id.clone(),
+            display_name: id,
+            root,
+            project_id: Arc::new(AtomicU64::new(project_id)),
+            client,
+            watch_control: Arc::new(Mutex::new(())),
+            ssh_project: None,
+            connector: None,
+            forwards: Arc::default(),
+        }))
     }
 
     fn connect_client(
@@ -5284,16 +4579,13 @@ impl RemoteHost {
         display_name: String,
         requested_root: &Path,
         ssh_project: Option<SshProject>,
-        transport: Option<Arc<SshTransport>>,
-        connector: Option<Arc<SshConnector>>,
-        event_sink: Arc<WatchEventSink>,
+        connector: Option<Arc<ssh_link::SshConnector>>,
+        event_sink: Arc<EventSink>,
     ) -> Result<Arc<Self>> {
-        #[cfg(unix)]
-        let remote_server_command = connector
-            .as_ref()
-            .map(|connector| connector.server_command.clone());
-        let connector = connector.map(|connector| connector as Arc<dyn Connector>);
-        let client = ReconnectingClient::new(client, connector, event_sink);
+        let reconnector = connector
+            .clone()
+            .map(|connector| connector as Arc<dyn Connector>);
+        let client = ReconnectingClient::new(client, reconnector, event_sink);
         let (hello, _) = client.request(
             &Request::Hello {
                 client_version: SERVER_VERSION.to_string(),
@@ -5322,13 +4614,12 @@ impl RemoteHost {
             id,
             display_name,
             root,
-            project_id: AtomicU64::new(project_id),
+            project_id: Arc::new(AtomicU64::new(project_id)),
             client,
             watch_control: Arc::new(Mutex::new(())),
             ssh_project,
-            transport,
-            #[cfg(unix)]
-            remote_server_command,
+            connector,
+            forwards: Arc::default(),
         }))
     }
 
@@ -5336,12 +4627,13 @@ impl RemoteHost {
         &self.root
     }
 
-    /// 障害注入テスト用: ControlMaster を落とす。SSH host のときだけ効く（local proxy は no-op）。
-    /// 落とした後の request は [`ReconnectingClient`] が master 再生成 + 再接続で回復するはず。
+    /// 障害注入テスト用: いまの接続（ssh）を落とす。SSH host のときだけ効く（local proxy は no-op）。
+    /// 落とした後の request は [`ReconnectingClient`] が繋ぎ直して回復し、端末・プロセスは
+    /// daemon 側で生き残って続きから流れるはず。
     #[doc(hidden)]
-    pub fn debug_stop_master(&self) {
-        if let Some(transport) = &self.transport {
-            transport.exit_master();
+    pub fn debug_drop_connection(&self) {
+        if let Some(connector) = &self.connector {
+            connector.drop_connection();
         }
     }
 
@@ -5365,12 +4657,7 @@ impl RemoteHost {
     }
 
     fn relative(&self, path: &Path) -> Result<PathBuf> {
-        if path == self.root {
-            return Ok(PathBuf::new());
-        }
-        path.strip_prefix(&self.root)
-            .map(Path::to_path_buf)
-            .with_context(|| format!("path is outside remote project: {}", path.display()))
+        relative_to(&self.root, path)
     }
 
     fn absolute(&self, relative: PathBuf) -> PathBuf {
@@ -5391,13 +4678,12 @@ impl RemoteHost {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             root,
-            project_id: AtomicU64::new(project_id),
+            project_id: Arc::new(AtomicU64::new(project_id)),
             client: self.client.clone(),
             watch_control: self.watch_control.clone(),
             ssh_project: self.ssh_project.clone(),
-            transport: self.transport.clone(),
-            #[cfg(unix)]
-            remote_server_command: self.remote_server_command.clone(),
+            connector: self.connector.clone(),
+            forwards: self.forwards.clone(),
         }))
     }
 
@@ -5407,39 +4693,14 @@ impl RemoteHost {
         body: Vec<u8>,
         retry_safe: bool,
     ) -> Result<(Response, Vec<u8>)> {
-        let project_id = self.project_id.load(Ordering::Acquire);
-        let first = if retry_safe {
-            self.client.request(&request(project_id), body.clone())
-        } else {
-            self.client
-                .request_nonretry(&request(project_id), body.clone())
-        };
-        match first {
-            Ok(response) => Ok(response),
-            Err(error)
-                if error
-                    .downcast_ref::<RemoteRequestError>()
-                    .is_some_and(|error| error.message.contains("unknown project id")) =>
-            {
-                // daemon 自体が再起動した場合。最初の request は拒否済みなので再送しても重複しない。
-                let (opened, _) = self.client.request(
-                    &Request::OpenProject {
-                        path: self.root.clone(),
-                    },
-                    Vec::new(),
-                )?;
-                let Response::ProjectOpened { project_id, .. } = opened else {
-                    bail!("remote server returned invalid reopen-project response");
-                };
-                self.project_id.store(project_id, Ordering::Release);
-                if retry_safe {
-                    self.client.request(&request(project_id), body)
-                } else {
-                    self.client.request_nonretry(&request(project_id), body)
-                }
-            }
-            Err(error) => Err(error),
-        }
+        scoped_request(
+            &self.client,
+            &self.project_id,
+            &self.root,
+            request,
+            body,
+            retry_safe,
+        )
     }
 
     /// project 全体（相対 root = 空）の変更監視を daemon へ要求する。冪等（Start は張り直し）。
@@ -5531,9 +4792,7 @@ impl RemoteHost {
         }
         Ok(HostWatch { receiver, stop })
     }
-}
 
-impl RemoteHost {
     /// `retry_safe` = 再接続後に同じ request を再送してよいか（冪等な探索だけ true）。
     /// 非冪等（書き込みや副作用のある script）は「結果不明」のまま失敗として返す。
     fn run_command_with(&self, spec: &CommandSpec, retry_safe: bool) -> Result<CommandOutput> {
@@ -5567,6 +4826,254 @@ impl RemoteHost {
     }
 }
 
+fn relative_to(root: &Path, path: &Path) -> Result<PathBuf> {
+    if path == root {
+        return Ok(PathBuf::new());
+    }
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .with_context(|| format!("path is outside remote project: {}", path.display()))
+}
+
+/// project を指す request を送る。daemon が作り直されて project の番号を知らなければ、開き直して
+/// 1 回だけ送り直す（最初の request は拒否済みなので重複しない）。
+fn scoped_request(
+    client: &ReconnectingClient,
+    project_id: &AtomicU64,
+    root: &Path,
+    request: impl Fn(u64) -> Request,
+    body: Vec<u8>,
+    retry_safe: bool,
+) -> Result<(Response, Vec<u8>)> {
+    let send = |id: u64, body: Vec<u8>| {
+        if retry_safe {
+            client.request(&request(id), body)
+        } else {
+            client.request_nonretry(&request(id), body)
+        }
+    };
+    match send(project_id.load(Ordering::Acquire), body.clone()) {
+        Ok(response) => Ok(response),
+        Err(error)
+            if error
+                .downcast_ref::<RemoteRequestError>()
+                .is_some_and(|error| error.message.contains("unknown project id")) =>
+        {
+            let (opened, _) = client.request(
+                &Request::OpenProject {
+                    path: root.to_path_buf(),
+                },
+                Vec::new(),
+            )?;
+            let Response::ProjectOpened { project_id: id, .. } = opened else {
+                bail!("remote server returned invalid reopen-project response");
+            };
+            project_id.store(id, Ordering::Release);
+            send(id, body)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 接続先で端末を開く（[`RemoteTerminal::open`] の中身）。
+fn open_remote_terminal(
+    client: &Arc<ReconnectingClient>,
+    project_id: &AtomicU64,
+    root: &Path,
+    cwd: &Path,
+    size: PtySize,
+) -> Result<HostPty> {
+    let stream = client.event_sink().streams.register(StreamKind::Terminal);
+    let stream_id = stream.id();
+    let opened = scoped_request(
+        client,
+        project_id,
+        root,
+        |project_id| Request::OpenTerminal {
+            project_id,
+            stream_id,
+            cwd: cwd.to_path_buf(),
+            size,
+            env: HashMap::new(),
+        },
+        Vec::new(),
+        false,
+    );
+    match opened {
+        Ok((Response::Opened, _)) => {
+            stream.mark_ready();
+            let connection: Arc<dyn Send + Sync> = client.clone();
+            Ok(HostPty::new(stream, connection))
+        }
+        Ok(_) => {
+            stream.close();
+            bail!("接続先が端末を開けなかった（不正な応答）")
+        }
+        Err(error) => {
+            stream.close();
+            Err(error).context("接続先で端末を開けない")
+        }
+    }
+}
+
+/// 手元の 127.0.0.1 で待ち受けて、来た接続を 1 本ずつ接続先の TCP へ中継する（ポート転送・O5）。
+///
+/// 待ち受けは手元にあるので、接続が切れて繋ぎ直しても張り直しは要らない（新しい接続は
+/// いまの接続の上で開く）。以前は ControlMaster の `-O forward` を張り直していた。
+#[derive(Default)]
+struct PortForwards {
+    entries: Mutex<Vec<PortForward>>,
+}
+
+struct PortForward {
+    remote: u16,
+    local: u16,
+    stop: Arc<AtomicBool>,
+}
+
+impl PortForwards {
+    fn forward(&self, client: &Arc<ReconnectingClient>, remote: u16) -> Result<u16> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow!("転送の一覧が壊れている"))?;
+        if let Some(known) = entries.iter().find(|entry| entry.remote == remote) {
+            return Ok(known.local);
+        }
+        // 同じ番号が空いていればそれ、塞がっていれば OS が選んだ空き番号。
+        let listener = std::net::TcpListener::bind(("127.0.0.1", remote))
+            .or_else(|_| std::net::TcpListener::bind(("127.0.0.1", 0)))
+            .context("手元に空いているポートが無い")?;
+        let local = listener.local_addr()?.port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept_stop = stop.clone();
+        let client = Arc::downgrade(client);
+        thread::Builder::new()
+            .name(format!("necoder-forward-{remote}"))
+            .spawn(move || {
+                for connection in listener.incoming() {
+                    if accept_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Ok(connection) = connection else {
+                        continue;
+                    };
+                    let Some(client) = client.upgrade() else {
+                        break;
+                    };
+                    let spawned = thread::Builder::new()
+                        .name(format!("necoder-forward-{remote}-connection"))
+                        .spawn(move || {
+                            if let Err(error) = relay_forwarded(&client, remote, connection) {
+                                eprintln!(
+                                    "Remote SSH: ポート {remote} の転送の 1 本が切れた: {error:#}"
+                                );
+                            }
+                        });
+                    if let Err(error) = spawned {
+                        eprintln!("Remote SSH: 転送のスレッドを起動できない: {error}");
+                    }
+                }
+            })
+            .context("転送の待ち受けを起動できない")?;
+        entries.push(PortForward {
+            remote,
+            local,
+            stop,
+        });
+        Ok(local)
+    }
+
+    fn cancel(&self, remote: u16) -> Result<()> {
+        let entry = {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| anyhow!("転送の一覧が壊れている"))?;
+            let position = entries
+                .iter()
+                .position(|entry| entry.remote == remote)
+                .ok_or_else(|| anyhow!("{remote} は転送していない"))?;
+            entries.remove(position)
+        };
+        entry.stop_listening();
+        Ok(())
+    }
+
+    fn list(&self) -> Vec<(u16, u16)> {
+        self.entries
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| (entry.remote, entry.local))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl PortForward {
+    /// 待ち受けを止める（止まっている accept を、自分へ繋いで起こす）。中継中の接続はそのまま続く。
+    fn stop_listening(&self) {
+        self.stop.store(true, Ordering::Release);
+        if let Err(error) = std::net::TcpStream::connect(("127.0.0.1", self.local)) {
+            eprintln!("Remote SSH: 転送の待ち受けを止められない: {error}");
+        }
+    }
+}
+
+impl Drop for PortForwards {
+    fn drop(&mut self) {
+        if let Ok(entries) = self.entries.get_mut() {
+            for entry in entries.drain(..) {
+                entry.stop_listening();
+            }
+        }
+    }
+}
+
+/// 転送の 1 本: 手元の接続 ↔ 接続先の TCP。片方が閉じたら、もう片方の書く側も閉じる。
+fn relay_forwarded(
+    client: &Arc<ReconnectingClient>,
+    remote: u16,
+    connection: std::net::TcpStream,
+) -> Result<()> {
+    let stream = client.event_sink().streams.register(StreamKind::Tcp);
+    let stream_id = stream.id();
+    let opened = client.request_nonretry(
+        &Request::OpenTcp {
+            stream_id,
+            port: remote,
+        },
+        Vec::new(),
+    );
+    let handle = stream::TcpStreamHandle::new(stream.clone());
+    match opened {
+        Ok((Response::Opened, _)) => stream.mark_ready(),
+        Ok(_) => bail!("接続先が TCP を開けなかった（不正な応答）"),
+        Err(error) => return Err(error).context("接続先の TCP に繋げない"),
+    }
+    connection.set_nodelay(true)?;
+    let mut upstream = handle.writer();
+    let mut local_reader = connection.try_clone()?;
+    let uploader = thread::Builder::new()
+        .name(format!("necoder-forward-{remote}-up"))
+        .spawn(move || {
+            let _copied = std::io::copy(&mut local_reader, &mut upstream);
+            // drop(upstream) で接続先へ EOF が届く。
+        })?;
+    let mut downstream = handle.reader();
+    let mut local_writer = connection.try_clone()?;
+    let _copied = std::io::copy(&mut downstream, &mut local_writer);
+    let _closed = connection.shutdown(std::net::Shutdown::Write);
+    if uploader.join().is_err() {
+        eprintln!("Remote SSH: 転送の上りのスレッドが落ちた");
+    }
+    drop(handle);
+    Ok(())
+}
+
 impl Host for RemoteHost {
     fn id(&self) -> &str {
         &self.id
@@ -5593,24 +5100,15 @@ impl Host for RemoteHost {
     }
 
     fn forward_port(&self, remote_port: u16) -> Result<u16> {
-        match &self.transport {
-            Some(transport) => transport.forward_port(remote_port),
-            None => bail!("SSH で繋いでいないのでポートを転送できない"),
-        }
+        self.forwards.forward(&self.client, remote_port)
     }
 
     fn cancel_forward(&self, remote_port: u16) -> Result<()> {
-        match &self.transport {
-            Some(transport) => transport.cancel_forward(remote_port),
-            None => bail!("{remote_port} は転送していない"),
-        }
+        self.forwards.cancel(remote_port)
     }
 
     fn forwarded_ports(&self) -> Vec<(u16, u16)> {
-        self.transport
-            .as_ref()
-            .map(|transport| transport.forwarded_ports())
-            .unwrap_or_default()
+        self.forwards.list()
     }
 
     fn project_uri(&self, path: &Path) -> Option<String> {
@@ -5773,7 +5271,7 @@ impl Host for RemoteHost {
         self.run_command_with(spec, true)
     }
 
-    /// daemon の 1 往復ではなく `ssh` の子として走らせる＝途中で止められ、出力も流れる。
+    /// daemon の 1 往復ではなくストリームの子として走らせる＝途中で止められ、出力も流れる。
     fn run_user_command(
         &self,
         spec: &CommandSpec,
@@ -5788,113 +5286,82 @@ impl Host for RemoteHost {
         true
     }
 
+    /// 接続先の daemon にプロセスを起こさせ、stdio をストリームで繋ぐ。
+    ///
+    /// **待たずに返す**（UI スレッドから呼ばれる経路がある・接続を待つと固まる）。起動の request は
+    /// 背景で送り、それまでに書いた stdin は溜めておいて、起きてから流す。起動に失敗したら stdout は
+    /// すぐ閉じ、理由は stderr の末尾（[`HostProcess::stderr_tail`]）に出る。
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess> {
-        let transport = self
-            .transport
-            .clone()
-            .context("SSH process transport が無い")?;
-        // ここで `ensure_master` は呼ばない（UI スレッドから来る＝接続待ちで固まる）。
-        // session は master が無ければ自分で繋ぐ（standalone）。
-        self.relative(&spec.cwd)?;
         for key in spec.env.keys() {
             if !valid_env_key(key) {
                 bail!("不正な environment key: {key}");
             }
         }
-        let mut words = vec![quote_posix(&spec.program)];
-        words.extend(spec.args.iter().map(|arg| quote_posix(arg)));
-        let env = spec
-            .env
-            .iter()
-            .map(|(key, value)| quote_posix(&format!("{key}={value}")))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let env = if env.is_empty() {
-            String::new()
-        } else {
-            format!("env {env} ")
-        };
-        let remote_command = format!(
-            "cd {} && exec {env}{}",
-            quote_posix(&spec.cwd.to_string_lossy()),
-            words.join(" ")
-        );
-        let mut child = transport
-            .standalone_command(false, &remote_command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // リモートの子の stderr と ssh 自身の知らせの末尾（[`StderrTail`]）。
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("remote process を起動できない: {}", spec.program))?;
-        let stdin = child.stdin.take().context("remote process stdin が無い")?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("remote process stdout が無い")?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("remote process stderr が無い")?;
+        let mut spec = spec.clone();
+        spec.cwd = self.relative(&spec.cwd)?;
+        let stream = self
+            .client
+            .event_sink()
+            .streams
+            .register(StreamKind::Process);
+        let stream_id = stream.id();
+        let client = self.client.clone();
+        let project_id = self.project_id.clone();
+        let root = self.root.clone();
+        let opening = stream.clone();
+        let program = spec.program.clone();
+        thread::Builder::new()
+            .name("necoder-remote-spawn".to_string())
+            .spawn(move || {
+                let opened = scoped_request(
+                    &client,
+                    &project_id,
+                    &root,
+                    |project_id| Request::Spawn {
+                        project_id,
+                        stream_id,
+                        spec: spec.clone(),
+                    },
+                    Vec::new(),
+                    false,
+                );
+                match opened {
+                    Ok((Response::Opened, _)) => opening.mark_ready(),
+                    Ok(_) => opening.fail(&format!("{program} を起動できない（不正な応答）")),
+                    Err(error) => opening.fail(&format!("{program} を起動できない: {error:#}")),
+                }
+            })
+            .context("remote process を起こすスレッドを起動できない")?;
+        let connection: Arc<dyn Send + Sync> = self.client.clone();
         Ok(HostProcess {
-            child,
-            stdin: Some(Box::new(stdin)),
-            stdout: Some(Box::new(stdout)),
-            stderr: StderrTail::capture(stderr),
-            _transport: Some(transport),
+            backend: ProcessBackend::Remote {
+                stream: stream.clone(),
+                _connection: connection,
+            },
+            stdin: Some(Box::new(StreamWriter::new(stream.clone()))),
+            stdout: Some(Box::new(StreamReader::new(
+                stream.clone(),
+                stream::CHANNEL_OUTPUT,
+            ))),
+            stderr: StderrTail::capture(StreamReader::new(stream, stream::CHANNEL_ERROR)),
         })
     }
 
+    /// 接続先の daemon が PTY を持つ端末。開くのは `TerminalView` が背景で行う
+    /// （ここはネットワークに触らない＝UI スレッドから呼んでよい）。
     fn terminal_launch(&self, cwd: &Path) -> Result<Option<TerminalLaunch>> {
-        let transport = self
-            .transport
-            .as_ref()
-            .context("SSH terminal transport が無い")?;
-        // 起動仕様を組むだけ。ネットワークには触らない（session が master 無しでも自分で繋ぐ）。
-        // 以前はここで `ensure_master` を呼んでおり、端末を開くたび・project を開くたびに
-        // UI スレッドで接続確認（切れていれば張り直し）を待っていた。
-        self.relative(cwd)?;
-        let basic_command = || {
-            format!(
-                "cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
-                quote_posix(&cwd.to_string_lossy())
-            )
-        };
-        #[cfg(unix)]
-        let remote_command = match (
-            &transport.remote_cli_forward,
-            self.remote_server_command
-                .as_ref()
-                .and_then(|command| command.lock().ok())
-                .map(|command| command.clone()),
-        ) {
-            (Some(forward), Some(server_command)) if !server_command.is_empty() => {
-                // login shell の中でも `ne` が必ずこの接続元へ戻るよう、配備済みの軽量
-                // remote-server を CLI として呼ぶ専用 shim を一時 PATH の先頭へ置く。
-                let shim = format!(
-                    "#!/bin/sh\nexec {} cli \"$@\"\n",
-                    quote_posix(&server_command)
-                );
-                format!(
-                    "umask 077 && mkdir -p {bin} && printf %s {shim_body} > {shim} && \
-                     chmod 700 {shim} && cd {cwd} && \
-                     export PATH={bin}:\"$PATH\" NECODER_GUI_SOCK={socket} && \
-                     exec \"${{SHELL:-/bin/sh}}\" -l",
-                    bin = quote_posix(&forward.remote_bin_dir.to_string_lossy()),
-                    shim_body = quote_posix(&shim),
-                    shim = quote_posix(&forward.remote_bin_dir.join("ne").to_string_lossy()),
-                    cwd = quote_posix(&cwd.to_string_lossy()),
-                    socket = quote_posix(&forward.remote_socket.to_string_lossy()),
-                )
-            }
-            _ => basic_command(),
-        };
-        #[cfg(not(unix))]
-        let remote_command = basic_command();
-        Ok(Some(TerminalLaunch {
-            program: "ssh".to_string(),
-            args: transport.session_args_with(true, &remote_command, true),
-        }))
+        let relative = self.relative(cwd)?;
+        let client = self.client.clone();
+        let project_id = self.project_id.clone();
+        let root = self.root.clone();
+        let key = format!("{}#{}", self.id, cwd.display());
+        Ok(Some(TerminalLaunch::Remote(RemoteTerminal {
+            opener: Arc::new(move |size| {
+                open_remote_terminal(&client, &project_id, &root, &relative, size)
+            }),
+            label: self.display_name.clone(),
+            key,
+        })))
     }
 
     fn watch(self: Arc<Self>) -> Result<Option<HostWatch>> {
@@ -5920,12 +5387,12 @@ fn remote_trace(message: &str) {
     }
 }
 
-fn random_session_id() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .context("session id 用の OS random source を開けない")?
-        .read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+/// 接続先の sh へ二重引用符の中にそのまま埋め込める文字だけか（`$` `"` `` ` `` `\` などで
+/// 意味が変わらない・remote-server のコマンド名やパス）。
+fn paths_safe_for_shell(value: &str) -> bool {
+    value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '/' | '+' | '-')
+    })
 }
 
 #[cfg(test)]
@@ -6090,7 +5557,7 @@ mod windows_terminal_tests {
             .expect("スクリプトを書けない");
 
         let spec = CommandSpec::new(script.to_string_lossy(), &dir);
-        let mut process = spawn_process_local(&spec, None)
+        let mut process = spawn_process_local(&spec)
             .expect(".cmd を起動できない（Rust の Command が .cmd を扱えなくなった可能性）");
         let mut stdout = process.take_stdout().expect("stdout が無い");
         let mut output = String::new();
@@ -6113,7 +5580,9 @@ mod windows_terminal_tests {
             .terminal_launch(Path::new("."))
             .expect("terminal_launch は失敗しない");
         if cfg!(windows) {
-            let launch = launch.expect("Windows では既定シェルを明示する");
+            let Some(TerminalLaunch::Program(launch)) = launch else {
+                panic!("Windows では既定シェルを明示する: {launch:?}");
+            };
             assert!(
                 launch.program == "pwsh" || launch.program == "powershell",
                 "想定外のシェル: {}",
@@ -6128,8 +5597,7 @@ mod windows_terminal_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::os::unix::net::UnixStream;
+    use crate::stream_tests::stream_pair;
 
     /// 長寿命の子の stderr の末尾: すぐ落ちた子の最後の行と終わり方が取れる（読む側が追いつくまで
     /// 待てる）。stdout は ACP 用にそのまま残る。
@@ -6564,7 +6032,7 @@ mod tests {
 
     #[test]
     fn stale_watch_cannot_clear_replacement_subscription() {
-        let sink = WatchEventSink::default();
+        let sink = EventSink::default();
         let (first_sender, first_receiver) = mpsc::channel();
         let first = sink.subscribe(first_sender);
         let (second_sender, second_receiver) = mpsc::channel();
@@ -6576,9 +6044,7 @@ mod tests {
             "購読の入れ替えで古い pump を終了させる"
         );
         assert!(!sink.clear_if_current(first));
-        sink.dispatch(WatchEvent {
-            paths: vec![PathBuf::from("new.txt")],
-        });
+        sink.dispatch(vec![PathBuf::from("new.txt")]);
         assert_eq!(
             second_receiver.recv_timeout(Duration::from_secs(1)),
             Ok(vec![PathBuf::from("new.txt")]),
@@ -6603,97 +6069,6 @@ mod tests {
     }
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
-
-    #[cfg(unix)]
-    fn short_socket_scratch() -> PathBuf {
-        let path = PathBuf::from(format!(
-            "/tmp/necoder-gw-{}-{}",
-            std::process::id(),
-            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _removed = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn remote_cli_gateway_only_forwards_open_with_trusted_authority() {
-        use std::os::unix::net::UnixListener;
-
-        let root = short_socket_scratch();
-        let gui_socket = root.join("gui.sock");
-        let gateway_socket = root.join("gateway.sock");
-        let gui_listener = UnixListener::bind(&gui_socket).unwrap();
-        let gui = thread::spawn(move || {
-            let (mut stream, _) = gui_listener.accept().unwrap();
-            let mut request = String::new();
-            BufReader::new(&mut stream).read_line(&mut request).unwrap();
-            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-            assert_eq!(request["method"], "open_remote");
-            assert_eq!(request["params"]["authority"], "ssh://dev@example.com");
-            assert_eq!(request["params"]["paths"][0], "/srv/project");
-            writeln!(
-                stream,
-                "{}",
-                serde_json::json!({ "ok": true, "result": { "opened": 1 } })
-            )
-            .unwrap();
-        });
-        let gateway = RemoteCliGateway::bind(
-            gateway_socket.clone(),
-            gui_socket,
-            "ssh://dev@example.com".to_string(),
-        )
-        .unwrap();
-        let mut remote = UnixStream::connect(gateway_socket).unwrap();
-        writeln!(
-            remote,
-            "{}",
-            serde_json::json!({
-                "method": "open",
-                "params": { "paths": ["/srv/project"] },
-            })
-        )
-        .unwrap();
-        let mut response = String::new();
-        BufReader::new(remote).read_line(&mut response).unwrap();
-        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["result"]["opened"], 1);
-        gui.join().unwrap();
-        drop(gateway);
-        let _removed = std::fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn remote_cli_gateway_rejects_control_methods() {
-        let root = short_socket_scratch();
-        let gateway_socket = root.join("gateway.sock");
-        let gateway = RemoteCliGateway::bind(
-            gateway_socket.clone(),
-            root.join("no-gui.sock"),
-            "ssh://dev@example.com".to_string(),
-        )
-        .unwrap();
-        let mut remote = UnixStream::connect(gateway_socket).unwrap();
-        writeln!(
-            remote,
-            "{}",
-            serde_json::json!({ "method": "send", "params": {} })
-        )
-        .unwrap();
-        let mut response = String::new();
-        BufReader::new(remote).read_line(&mut response).unwrap();
-        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(response["ok"], false);
-        assert!(response["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("open だけ")));
-        drop(gateway);
-        let _removed = std::fs::remove_dir_all(root);
-    }
 
     /// O37（G01）: 接続先の登録は config の末尾に足すだけ。同じ名前・書けない値は断り、元の行は触らない。
     #[test]
@@ -6833,55 +6208,6 @@ Host gpu
     }
 
     #[test]
-    fn remote_target_triple_maps_uname_to_musl() {
-        // Linux は static-musl・arch 別名（amd64/arm64）も吸収する（#1 の自動発見キー）。
-        assert_eq!(
-            remote_target_triple("Linux", "x86_64").as_deref(),
-            Some("x86_64-unknown-linux-musl")
-        );
-        assert_eq!(
-            remote_target_triple("linux", "aarch64").as_deref(),
-            Some("aarch64-unknown-linux-musl")
-        );
-        assert_eq!(
-            remote_target_triple("Linux", "arm64").as_deref(),
-            Some("aarch64-unknown-linux-musl")
-        );
-        assert_eq!(
-            remote_target_triple("Darwin", "arm64").as_deref(),
-            Some("aarch64-apple-darwin")
-        );
-        // 未知の OS/arch は None（＝自動発見せず明示指定を促す）。
-        assert_eq!(remote_target_triple("Windows", "x86_64"), None);
-        assert_eq!(remote_target_triple("Linux", "riscv64"), None);
-    }
-
-    #[test]
-    fn parse_sha256_hex_reads_both_gnu_and_bsd_output() {
-        let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        // GNU sha256sum: `<hex>  <path>`
-        assert_eq!(
-            parse_sha256_hex(format!("{hash}  server\n").as_bytes()).as_deref(),
-            Some(hash)
-        );
-        // BSD/macOS shasum -a 256: 同形式・大文字も吸収
-        assert_eq!(
-            parse_sha256_hex(format!("{}  ./server", hash.to_ascii_uppercase()).as_bytes())
-                .as_deref(),
-            Some(hash)
-        );
-        // GNU の filename エスケープ（行頭 `\`）を剥がす
-        assert_eq!(
-            parse_sha256_hex(format!("\\{hash}  weird\\nname").as_bytes()).as_deref(),
-            Some(hash)
-        );
-        // ツール不在などで空/非 hex のときは None
-        assert_eq!(parse_sha256_hex(b""), None);
-        assert_eq!(parse_sha256_hex(b"sha256sum: not found"), None);
-        assert_eq!(parse_sha256_hex(b"abc123  short"), None);
-    }
-
-    #[test]
     fn frame_round_trip_and_limits() {
         let request = Request::Ping;
         let frame = Frame::request(42, &request, b"body".to_vec()).unwrap();
@@ -7009,20 +6335,12 @@ Host gpu
     }
 
     #[test]
-    fn a_failed_master_carries_what_openssh_wrote() {
-        assert!(master_result(
-            true,
-            "exit status: 0",
-            "Warning: Permanently added 'devbox'.\n"
-        )
-        .is_ok());
-        let error = master_result(
-            false,
+    fn a_failed_connection_carries_what_openssh_wrote() {
+        let error = anyhow::Error::new(SshConnectError::new(
             "exit status: 255",
             "\r\nuser@devbox: Permission denied (publickey).\r\n\n",
-        )
-        .expect_err("失敗は理由つき")
-        .context("SSH ControlMaster の確立に失敗");
+        ))
+        .context("SSH の接続に失敗");
         let connect = error
             .downcast_ref::<SshConnectError>()
             .expect("文脈を足しても取り出せる");
@@ -7033,14 +6351,14 @@ Host gpu
         );
         assert_eq!(
             format!("{error:#}"),
-            "SSH ControlMaster の確立に失敗: OpenSSH ControlMaster の接続に失敗: exit status: 255: \
+            "SSH の接続に失敗: OpenSSH の接続に失敗: exit status: 255: \
              user@devbox: Permission denied (publickey)."
         );
-        let silent = master_result(false, "exit status: 255", "").expect_err("理由が無くても失敗");
+        let silent = SshConnectError::new("exit status: 255", "");
         assert_eq!(
             silent.to_string(),
-            "OpenSSH ControlMaster の接続に失敗: exit status: 255",
-            "書かれていなければ今までと同じ文"
+            "OpenSSH の接続に失敗: exit status: 255",
+            "書かれていなければ終わり方だけ"
         );
     }
 
@@ -7078,8 +6396,8 @@ Host gpu
         )
         .unwrap();
 
-        // UnixStream pair は SSH stdio と同じ全二重 byte stream。sandbox 内でも実 protocol を通せる。
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        // byte stream の対は SSH stdio と同じ全二重。sandbox 内でも実 protocol を通せる。
+        let (client_stream, server_stream) = stream_pair().unwrap();
         let server = thread::spawn(move || {
             let reader = server_stream.try_clone().unwrap();
             serve_stream(reader, server_stream).unwrap();
@@ -7092,8 +6410,6 @@ Host gpu
             "test".to_string(),
             "Test Remote".to_string(),
             &scratch_root,
-            None,
-            None,
         )
         .unwrap();
 
@@ -7193,18 +6509,16 @@ Host gpu
         let _removed = std::fs::remove_dir_all(scratch_root);
     }
 
-    /// UnixStream の対で実 protocol を喋る connector。ssh 無しで [`ReconnectingClient`] の
+    /// byte stream の対（loopback TCP）で実 protocol を喋る connector。ssh 無しで [`ReconnectingClient`] の
     /// 再接続ロジック（見限り・張り直し・透過再送）を検証するための差し替え。
-    #[cfg(unix)]
     struct PairConnector {
         connections: AtomicU64,
     }
 
-    #[cfg(unix)]
     impl Connector for PairConnector {
-        fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+        fn connect(&self, event_sink: Arc<EventSink>) -> Result<Arc<RpcClient>> {
             self.connections.fetch_add(1, Ordering::Relaxed);
-            let (client_stream, server_stream) = UnixStream::pair()?;
+            let (client_stream, server_stream) = stream_pair()?;
             thread::spawn(move || {
                 let reader = server_stream.try_clone().expect("server stream clone");
                 let _served = serve_stream(reader, server_stream);
@@ -7218,9 +6532,8 @@ Host gpu
 
     /// 相手が黙っている接続（sleep 復帰直後の「TCP だけ死んだ」の再現）。server 側の端を返す
     /// ので、drop すれば client の reader は EOF で終わる。
-    #[cfg(unix)]
-    fn silent_client(event_sink: Arc<WatchEventSink>) -> (Arc<RpcClient>, UnixStream) {
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+    fn silent_client(event_sink: Arc<EventSink>) -> (Arc<RpcClient>, std::net::TcpStream) {
+        let (client_stream, server_stream) = stream_pair().unwrap();
         let reader = Box::new(client_stream.try_clone().unwrap());
         (
             RpcClient::new(reader, Box::new(client_stream), None, event_sink),
@@ -7229,22 +6542,19 @@ Host gpu
     }
 
     /// 到達不能ホストの再現: 接続を張ろうとすると必ず失敗する connector。
-    #[cfg(unix)]
     struct UnreachableConnector;
 
-    #[cfg(unix)]
     impl Connector for UnreachableConnector {
-        fn connect(&self, _event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+        fn connect(&self, _event_sink: Arc<EventSink>) -> Result<Arc<RpcClient>> {
             bail!("host unreachable (test)")
         }
     }
 
     /// 接続状態は「張り直しの前後」で Connecting → Connected と遷移し、購読者に変化だけが届く。
     /// statusbar の SSH チップはこの遷移を見て色と再接続ボタンを出す（2026-09-08）。
-    #[cfg(unix)]
     #[test]
     fn connection_state_follows_reconnect() {
-        let sink = Arc::new(WatchEventSink::default());
+        let sink = Arc::new(EventSink::default());
         let (dead, _server_end) = silent_client(sink.clone());
         let connector = Arc::new(PairConnector {
             connections: AtomicU64::new(0),
@@ -7266,10 +6576,9 @@ Host gpu
     }
 
     /// 張り直しに失敗すると Disconnected に落ち、遅延接続はまだ繋いでいない Unconnected で始まる。
-    #[cfg(unix)]
     #[test]
     fn connection_state_reports_disconnected_when_reconnect_fails() {
-        let sink = Arc::new(WatchEventSink::default());
+        let sink = Arc::new(EventSink::default());
         let (dead, _server_end) = silent_client(sink.clone());
         let client = ReconnectingClient::new(
             dead,
@@ -7286,15 +6595,14 @@ Host gpu
 
         let lazy = ReconnectingClient::disconnected(
             Arc::new(UnreachableConnector) as Arc<dyn Connector>,
-            Arc::new(WatchEventSink::default()),
+            Arc::new(EventSink::default()),
         );
         assert_eq!(lazy.state(), ConnectionState::Unconnected);
     }
 
-    #[cfg(unix)]
     #[test]
     fn request_timeout_is_typed_and_distinguishable_from_close() {
-        let sink = Arc::new(WatchEventSink::default());
+        let sink = Arc::new(EventSink::default());
         let (silent, server_end) = silent_client(sink);
         let before = silent.received_bytes();
         let error = silent
@@ -7315,11 +6623,10 @@ Host gpu
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn reconnect_fails_requests_waiting_on_the_dead_connection_fast() {
         let scratch_root = scratch("reconnect");
-        let sink = Arc::new(WatchEventSink::default());
+        let sink = Arc::new(EventSink::default());
         let (dead, _server_end) = silent_client(sink.clone());
         let connector = Arc::new(PairConnector {
             connections: AtomicU64::new(0),
@@ -7356,15 +6663,13 @@ Host gpu
 
     /// 必ず失敗する connector（到達不能なホストの代役）。1 回の試行に時間がかかることまで含めて
     /// 再現するため、失敗の前に少し眠る。
-    #[cfg(unix)]
     struct FailingConnector {
         attempts: Arc<AtomicU64>,
         delay: Duration,
     }
 
-    #[cfg(unix)]
     impl Connector for FailingConnector {
-        fn connect(&self, _event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+        fn connect(&self, _event_sink: Arc<EventSink>) -> Result<Arc<RpcClient>> {
             self.attempts.fetch_add(1, Ordering::Relaxed);
             thread::sleep(self.delay);
             bail!("host に到達できない（テスト）")
@@ -7377,10 +6682,9 @@ Host gpu
     /// 「切れている間は何をしても終わらない」になる（2026-09-07 のユーザー報告の体感）。
     /// 待っている間に起きた失敗はそのまま受け取り、**到着より前**の失敗しか無いとき
     /// （＝ユーザーの新しい操作）だけ繋ぎに行く。
-    #[cfg(unix)]
     #[test]
     fn queued_requests_do_not_each_pay_for_their_own_failed_reconnect() {
-        let sink = Arc::new(WatchEventSink::default());
+        let sink = Arc::new(EventSink::default());
         let (dead, _server_end) = silent_client(sink.clone());
         let attempts = Arc::new(AtomicU64::new(0));
         let connector = Arc::new(FailingConnector {
@@ -7415,10 +6719,9 @@ Host gpu
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn heartbeat_keeps_a_slow_but_flowing_connection() {
-        let sink = Arc::new(WatchEventSink::default());
+        let sink = Arc::new(EventSink::default());
         let (busy, mut server_end) = silent_client(sink.clone());
         let connector = Arc::new(PairConnector {
             connections: AtomicU64::new(0),
@@ -7513,59 +6816,4 @@ mod task_environment_tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-}
-
-/// askpass（GUI への秘密の訊き方）だけを見るテスト。
-#[cfg(all(test, unix))]
-mod askpass_tests {
-    use super::*;
-
-    /// askpass token: 発行したものだけが生き、知らない値は通らない。
-    /// （GUI 側 `control_ipc` の "askpass" はこの判定だけを根拠に秘密を返す。）
-    #[test]
-    fn askpass_token_only_matches_issued_value() {
-        let token = issue_askpass_token().expect("/dev/urandom から token を作れる");
-        assert_eq!(token.len(), 32, "128bit を hex で = 32 文字");
-        assert!(askpass_token_is_live(&token));
-        assert!(!askpass_token_is_live("deadbeef"), "発行していない値は通さない");
-        assert!(!askpass_token_is_live(""), "空も通さない");
-        let second = issue_askpass_token().expect("2 本目も作れる");
-        assert_ne!(token, second, "接続ごとに別の token");
-        assert!(askpass_token_is_live(&token), "TTL 内なら先の token も生きている");
-    }
-
-    /// 同じ問いの回数だけが増え、別の問い・別の token では 1 に戻る
-    /// （GUI の「入力が拒否されました」表示の根拠）。
-    #[test]
-    fn askpass_attempt_counts_repeats_per_prompt() {
-        let token = issue_askpass_token().expect("token を作れる");
-        let password = "user@example.internal's password:";
-        let passphrase = "Enter passphrase for key '/home/user/.ssh/id_ed25519':";
-        assert_eq!(askpass_attempt(&token, password), Some(1));
-        assert_eq!(askpass_attempt(&token, password), Some(2), "同じ問い = 再入力");
-        assert_eq!(
-            askpass_attempt(&token, passphrase),
-            Some(1),
-            "別の問いは 1 回目から"
-        );
-        let other = issue_askpass_token().expect("別の接続の token");
-        assert_eq!(askpass_attempt(&other, password), Some(1), "token ごとに独立");
-        assert_eq!(askpass_attempt("deadbeef", password), None, "無効な token");
-    }
-
-    /// `install_askpass`: 利用者の `SSH_ASKPASS` があれば触らない（環境の尊重）。
-    /// env は同一プロセス共有なので、判定に使う関数の入口だけを直接確かめる。
-    #[test]
-    fn install_askpass_respects_disable_switch() {
-        // SAFETY: このテストは env を書き換える。並行実行される他テストは
-        // NECODER_ASKPASS_DISABLE を読まないので影響しない。
-        unsafe { std::env::set_var("NECODER_ASKPASS_DISABLE", "1") };
-        let mut command = child_process::command("ssh");
-        install_askpass(&mut command);
-        assert!(
-            command.get_envs().next().is_none(),
-            "無効化されているときは env を足さない"
-        );
-        unsafe { std::env::remove_var("NECODER_ASKPASS_DISABLE") };
-    }
 }

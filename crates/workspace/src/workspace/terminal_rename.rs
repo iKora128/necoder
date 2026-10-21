@@ -313,6 +313,7 @@ mod tests {
                 TerminalLaunch {
                     cwd: None,
                     shell: None,
+                    remote: None,
                 },
                 Theme::dark(),
             );
@@ -343,6 +344,7 @@ mod tests {
                 TerminalLaunch {
                     cwd: None,
                     shell: None,
+                    remote: None,
                 },
                 Theme::dark(),
             );

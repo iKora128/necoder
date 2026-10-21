@@ -170,7 +170,7 @@ if [ "$mode" = gui ]; then
 else
     echo "==> Running the real SSH end-to-end suite"
     # 疎通を「黙って」止める手段を渡す（container を凍結 = TCP は張ったまま応答だけ消える）。
-    # laptop の sleep 復帰直後と同じ形で、ControlMaster kill（EOF が届く）では再現できない。
+    # laptop の sleep 復帰直後と同じ形で、ssh を落とす（EOF が届く）のでは再現できない。
     compose_command="docker compose --project-name $compose_project --file $fixture_dir/compose.yml"
     NECODER_SSH_CONFIG="$ssh_config" \
     NECODER_REMOTE_TEST_URI="ssh://necoder-docker/home/dev/work/sample" \

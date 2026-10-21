@@ -1448,6 +1448,7 @@ terminal:
   command_start: "▶ necoder: running %{command}"
   command_success: "[Done] Go back to necoder Settings for the next step (you can close this tab)"
   command_failure: "[Failed] That did not work. Check the messages above and press the button again"
+  remote_open_failed: "Could not open a terminal on the host: %{error}"
   quick_tip: "Quick commands (quick_commands in settings.json)"
   tab_title: Terminal %{n}
   rename_title: Terminal name
@@ -1768,6 +1769,7 @@ askpass:
   hint: Enter to send, Escape to cancel (nothing is stored)
   hint_click: Click the field to start typing
   passphrase_tip: "To stop being asked every time, run %{command} once in a terminal (it hands the key to ssh-agent)"
+  passphrase_tip_windows: "To stop being asked every time, run Get-Service ssh-agent | Set-Service -StartupType Automatic -PassThru | Start-Service once in an administrator PowerShell, then run %{command} (the Windows ssh-agent is stopped by default)"
   retry: "Authentication failed (attempt %{attempt})"
   cancelled: Input cancelled
   err_busy: Another SSH prompt is waiting
@@ -2010,7 +2012,7 @@ ports:
   open: Open
   stop: Stop
   stop_failed: "Could not stop pid %{pid}: it already exited or is not a process inside necoder"
-  unsupported: Not available on this OS yet (macOS / Linux)
+  unsupported: "Listing this computer's ports isn't available on this OS yet (macOS / Linux). Ports on SSH hosts work"
   remote_heading: "Remote · %{host}"
   remote_empty: "No listening ports on the host"
   remote_other_user: Another user's process

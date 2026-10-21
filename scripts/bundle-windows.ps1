@@ -118,6 +118,25 @@ Copy-Item 'third_party/licenses' (Join-Path $stage 'licenses') -Recurse
 New-Item -ItemType Directory -Path (Join-Path $stage 'control') -Force | Out-Null
 Copy-Item 'relay/dist/host.mjs', 'relay/dist/THIRD_PARTY_LICENSES.txt' (Join-Path $stage 'control')
 
+# ── Remote SSH の接続先に置く Linux 用 remote-server（docs/REMOTE-CHANNEL.md §3）──
+# 接続の bootstrap が `<exe のフォルダ>/remote/<triple>/` から探して、同じ接続の中で送り込む。
+# 無いと Windows から Linux へ繋いだ時に「接続先用の necoder-remote-server が見つからない」で止まる
+# （mac の bundle-mac.sh が .app の Resources/remote/ に入れているのと同じ物）。
+# CI（release.yml）は remote-servers ジョブの成果物を `<TargetDir>/<triple>/release/` に落としてから呼ぶ。
+foreach ($triple in 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl') {
+    $artifact = Join-Path $TargetDir "$triple\release\necoder-remote-server"
+    if (Test-Path $artifact) {
+        $destination = Join-Path $stage "remote\$triple"
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        Copy-Item $artifact (Join-Path $destination 'necoder-remote-server')
+        Write-Host "  remote server 同梱: $triple"
+    } elseif ($env:NECODER_REQUIRE_REMOTE_SERVERS -eq '1') {
+        throw "Linux 用 remote server がありません: $artifact"
+    } else {
+        Write-Warning "Linux 用 remote server が無いので同梱しません（$artifact）。Remote SSH の初回の配備ができません"
+    }
+}
+
 # ── ポータブル版 zip ──
 $zip = Join-Path $OutDir 'necoder-windows-x64.zip'
 if (Test-Path $zip) { Remove-Item $zip -Force }

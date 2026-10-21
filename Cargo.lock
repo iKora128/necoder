@@ -3156,12 +3156,15 @@ version = "0.1.31"
 dependencies = [
  "anyhow",
  "child_process",
+ "flate2",
+ "getrandom 0.3.4",
  "ignore",
  "libc",
  "paths",
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "url",
  "windows-sys 0.61.2",
 ]
@@ -7278,6 +7281,7 @@ name = "terminal_view"
 version = "0.1.31"
 dependencies = [
  "alacritty_terminal",
+ "anyhow",
  "editor_view",
  "futures",
  "gpui",

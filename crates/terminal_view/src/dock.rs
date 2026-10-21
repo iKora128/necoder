@@ -12,11 +12,13 @@ use ui::Tooltip;
 pub struct TerminalLaunch {
     pub cwd: Option<PathBuf>,
     pub shell: Option<(String, Vec<String>)>,
+    /// SSH 先の端末（PTY は接続先の daemon が持つ）。あれば `cwd` / `shell` は使わない。
+    pub remote: Option<host::RemoteTerminal>,
 }
 
 impl TerminalLaunch {
     /// 設定で選んだシェルを当てた launch（O25）。当てるのは**手元の端末**（cwd を持つ launch）だけ:
-    /// SSH 先の端末は `ssh -tt …` 自体が launch で cwd を持たないので、そのまま（接続先のシェルに任せる）。
+    /// SSH 先の端末は cwd を持たないので、そのまま（接続先のログインシェルに任せる）。
     /// シェルが空なら何もしない（OS の既定 = mac / Linux は `$SHELL`・Windows は pwsh → powershell）。
     pub fn with_shell(mut self, shell: Option<&TerminalShell>) -> Self {
         let Some(shell) = shell else {
@@ -214,7 +216,10 @@ impl TerminalDock {
             return terminal;
         }
         let terminal = cx.new(|cx| {
-            let mut terminal = TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx);
+            let mut terminal = match launch.remote {
+                Some(remote) => TerminalView::new_remote(remote, theme, cx),
+                None => TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx),
+            };
             terminal.accent = accent;
             terminal
         });
@@ -414,6 +419,7 @@ impl TerminalDock {
         let launch = TerminalLaunch {
             cwd: self.launch.cwd.clone(),
             shell: Some((program, args)),
+            remote: None,
         };
         self.open_command(launch, title, window, cx);
     }
@@ -1054,6 +1060,7 @@ mod tests {
         let local = TerminalLaunch {
             cwd: Some(PathBuf::from("/work/necoder")),
             shell: None,
+            remote: None,
         };
         assert_eq!(
             local.clone().with_shell(Some(&fish())).shell,
@@ -1062,6 +1069,7 @@ mod tests {
         let windows_default = TerminalLaunch {
             cwd: Some(PathBuf::from(r"C:\work")),
             shell: Some(("pwsh".to_string(), Vec::new())),
+            remote: None,
         };
         assert_eq!(
             windows_default
@@ -1072,7 +1080,10 @@ mod tests {
         );
         let remote = TerminalLaunch {
             cwd: None,
-            shell: Some(("ssh".to_string(), vec!["-tt".to_string()])),
+            shell: None,
+            remote: Some(host::RemoteTerminal::from_opener("dev@devbox", |_size| {
+                Err(anyhow::anyhow!("試験では開かない"))
+            })),
         };
         assert_eq!(
             remote.clone().with_shell(Some(&fish())),

@@ -92,6 +92,7 @@
 - [x] **UI スレッドの remote I/O ゼロ化** — 2026-09-07。9/5〜9/7 で潰し残した 6 経路（レールへの追加 `open_folder_in_rail` = `Worktree::with_host` + git 問い合わせ / `open_folder_as_window` / `open_dir_in_rail` の `host_for_project` / `toggle_split` の読み / `revert_hunk` の HEAD 取得 / hot exit 復元 / `ssh://` 引数起動）を背景へ。remote の新窓は復元と同じ遅延経路（`ProjectSource::restored` → `hydrate_restored_projects`）で組む。`assert_off_main_thread` の既定を **debug は panic・release は警告** に倒した。回帰テスト `adding_a_remote_project_to_the_rail_never_blocks_the_ui_thread` / `splitting_a_remote_file_never_blocks_the_ui_thread`。**残: metal のある環境でスリープ復帰の実機確認**
 - [x] **SSH 切断後の ACP セッション再開 + 接続状態の表示** — 2026-09-08。ユーザー報告「workspace で作業中に SSH が切れると、送るたびに `Incoming transport closed` が返る。再接続ボタンを置くべきか」。①**acp_client**: transport 断（`is_incoming_transport_closed`・待機中は `incoming_closed`）でセッションを畳んで `AgentEvent::SessionLost` → 以前は「そのターンだけ Failed」で維持していたためゾンビ化していた。②**session/load**: `SessionPreferences::resume` に前回 id を渡し、エージェントが `loadSession` を広告していれば同じ会話を引き継ぐ（履歴の再生は仮 attach で受けて捨てる＝二重表示しない・失敗は新規へ）。id は `storage.thread_sessions` に残し再起動後も効く。③**agent_panel**: composer 直上に「セッションが切れました」バナー + 「再開」チップ、引き継げた/引き継げなかったの一言、セッション通し番号で古いポンプの後始末を誤配送しない。④**host/workspace**: `Host::connection_state / watch_connection / reconnect` を追加し、statusbar の SSH チップが 接続済み/接続中/切断/未接続 を色で映し「再接続」チップで heartbeat のバックオフを短絡。**検証**: host 23 / storage 14 / acp_client 23（偽エージェントで transport 断 2 本・load 2 本）/ agent_panel 30 / workspace 51 / i18n 6 緑。**残: metal のある環境で実機確認（スリープ復帰→送信で再開・チップの色・再接続チップ）・LSP/PTY の同種の再 spawn**
 - → **未チェック残件（ベンチ・musl 配布・dirty backup・障害注入 test・Remote Projects UI・受入）は M13 へ移動**（2026-07-15 判断: 日常機能 M10〜M12 を先に消化する）
+- [x] **通り道の作り直し: ssh 1 本の上に全部を載せる**（2026-10-21・#79「Windows で接続できない」・正は [`REMOTE-CHANNEL.md`](./REMOTE-CHANNEL.md)）。ControlMaster をやめ、ssh は接続 1 回に 1 プロセス。端末・LSP・ACP・ポート転送は同じ RPC のストリーム（protocol v4）で運び、PTY とプロセスは接続先の daemon が持つ＝**スリープや VPN 断で ssh が切れても端末とエージェントが死なず、繋ぎ直すと続きから見える**（O35）。配備も同じ接続の中＝パスワードでも認証は 1 回。手元の OS に依らず同じコード＝**Windows でも使える**（M15 W9）。1 frame を 1 回で書くようにして往復 45ms → 2ms。**検証**: host Windows 47 / Linux 58・実 SSH（Windows の ssh.exe → WSL）10 本すべて（無言で死んだ回線からの復帰を含む）・GUI で端末を目視。**残: mac の実機確認・askpass（パスワード / パスフレーズ / ホスト鍵）の実機確認**
 
 設計と根拠: [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md)。
 
@@ -254,6 +255,7 @@ FEATURES で later タグの checkpoint / @mention / ⌘K / Todos をここへ�
 - [ ] **W4 ターミナル・Git・ACP** — ConPTY + PowerShell / `git.exe` / `claude.cmd` 起動
 - [ ] **W5 検証ループと CI 常設** — **`ci.yml` の `check-windows` は 2026-08-22 に新設済み**（`-D warnings` + `cargo test --workspace`・PR で走る必須ジョブ）。残りは PowerShell 版の検証スクリプト（screenshot / startup-time / memory-usage）
 - [ ] **W6 配布** — 署名なし zip → Authenticode。MSIX/Store は当面やらない
+- [x] **W9 Remote SSH** — 2026-10-21（#79）。当面やらない（§D6）を撤回し、ControlMaster に頼らない通り道に作り直して Windows でも使えるようにした（M9 の同日の項・[`REMOTE-CHANNEL.md`](./REMOTE-CHANNEL.md)）。**残: askpass の実機確認・インストーラ版からの初回配備の実機確認**
 
 ## M16 — Chat モード（「プロジェクトに紐づかない相談も necoder の中で済む」）
 

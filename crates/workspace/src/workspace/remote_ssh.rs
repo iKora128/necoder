@@ -227,7 +227,7 @@ impl Workspace {
     }
 
     /// SSH 接続 →（成功したら）**現在のウィンドウのレールに開く**（ウィンドウモデル: 新窓は
-    /// 明示操作のときだけ・ユーザー要件「勝手に窓を開かない」）。接続は ControlMaster + server 配備で
+    /// 明示操作のときだけ・ユーザー要件「勝手に窓を開かない」）。接続は ssh 1 本 + server 配備で
     /// 数秒〜かかるため背景で行い、失敗はトーストで返す。system OpenSSH に委ねるので
     /// ~/.ssh/config の Host エイリアス・鍵・ProxyJump・agent がそのまま効く。
     pub(crate) fn connect_ssh_and_open(&mut self, uri: String, cx: &mut Context<Self>) {
@@ -430,6 +430,11 @@ pub(crate) fn passphrase_tip(prompt: &str) -> Option<String> {
     } else {
         format!("ssh-add {key}")
     };
+    // Windows の OpenSSH の ssh-agent はサービスで、既定で止まっている（無効）。先に起こさないと
+    // `ssh-add` は「agent に繋がらない」で失敗する。
+    if cfg!(windows) {
+        return Some(i18n::t!("askpass.passphrase_tip_windows", "command" => command));
+    }
     Some(i18n::t!("askpass.passphrase_tip", "command" => command))
 }
 
@@ -856,7 +861,7 @@ mod tests {
                 "exit status: 255",
                 "me@devbox: Permission denied (publickey).\n",
             ))
-            .context("SSH ControlMaster の確立に失敗");
+            .context("SSH の接続に失敗");
             workspace.report_ssh_failure("devbox", &rejected, cx);
             let toast = workspace.notifications.toasts.last().expect("知らせ");
             assert!(

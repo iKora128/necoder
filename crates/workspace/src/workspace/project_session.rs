@@ -737,7 +737,7 @@ impl Workspace {
             } else {
                 cx.new(|cx| AgentPanel::new(theme.clone(), cx))
             };
-            // remote の `terminal_launch` は ControlMaster を起こす＝接続そのもの。復元では
+            // remote の端末は接続を待って開く。復元では
             // ここで待たず、繋がってから `hydrate_restored_projects` が `reset_launch` で入れ直す。
             let defer_terminal = restored_indexes.contains(&index)
                 && projects
@@ -1251,19 +1251,22 @@ impl Workspace {
             let ignore_path = root.join(".gitignore");
             let probe_root = root.clone();
             cx.spawn(async move |workspace, cx| {
-                let (reachable, contents) = cx
+                let (reachable, contents, git) = cx
                     .background_executor()
                     .spawn(async move {
                         // 1 手目が実際の接続になる。ここで繋がらなければ以降は触らない
                         // （繋がらない host を UI スレッドから触ると、そこで再接続を待つ）。
                         if host.metadata(&probe_root).is_err() {
-                            return (false, None);
+                            return (false, None, None);
                         }
                         let contents = host
                             .read_file(&ignore_path)
                             .ok()
                             .and_then(|content| String::from_utf8(content.bytes).ok());
-                        (true, contents)
+                        // git に聞く項目（repository_id / HEAD / task ブランチ）もここで読む
+                        // （git は接続先で走る＝往復するので UI スレッドに載せない）。
+                        let git = WorktreeGitFacts::read(host.as_ref(), &probe_root, None);
+                        (true, contents, Some(git))
                     })
                     .await;
                 let _ = workspace.update(cx, |workspace, cx| {
@@ -1286,8 +1289,10 @@ impl Workspace {
                     if let Some(contents) = contents {
                         slot.worktree.set_ignore_source(&contents);
                     }
-                    // git に聞く項目（repository_id / HEAD / task ブランチ）をここで確定させる。
-                    slot.task_space = TaskSpace::for_worktree(&slot.worktree, None);
+                    // git に聞いた項目（repository_id / HEAD / task ブランチ）をここで確定させる。
+                    if let Some(git) = git {
+                        slot.task_space = TaskSpace::from_git_facts(&slot.worktree, git);
+                    }
                     // 端末の起動先も入れ直す（構築時は空で置いてある）。
                     let launch = Self::terminal_launch_for(Some(slot));
                     if let Some(session) = workspace.project_sessions.sessions.get(index) {

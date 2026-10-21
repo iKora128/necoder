@@ -58,8 +58,16 @@ impl Workspace {
                     .ok()
                     .flatten()
             })
-            .map(|launch| (launch.program, launch.args));
-        let launch = TerminalLaunch { cwd: home, shell };
+            .and_then(|launch| match launch {
+                host::TerminalLaunch::Program(launch) => Some((launch.program, launch.args)),
+                // 手元の host は接続先の端末を返さない。
+                host::TerminalLaunch::Remote(_) => None,
+            });
+        let launch = TerminalLaunch {
+            cwd: home,
+            shell,
+            remote: None,
+        };
         let theme = self.theme.clone();
         let accent = self.theme.fg2;
         let key = Self::shortcut_label_for("workspace::ToggleFloatingTerminal").unwrap_or_default();

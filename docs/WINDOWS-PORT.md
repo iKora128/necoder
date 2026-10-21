@@ -291,11 +291,24 @@ Windows にはグローバルメニューバーが無い。
 - 本実装は「タイトルバー内のアプリ内メニュー」= VSCode 方式。**UI-SPEC への追記が必要**（色の許可リストに触れないこと）
 - 既存の 8 メニュー・72 個の i18n キー（`menu.*`）はそのまま流用できる＝**データは既にある**
 
-### D6. Remote SSH（`host` crate）は当面 Windows 非対応とする
+### D6. Remote SSH は Windows でも使える（2026-10-21 に方針を変えた・#79）
 
-`id -u` / `mkfifo` / Unix socket / `sh -l` 前提が深く、ControlMaster にも依存している。
-**Windows 版の初回リリースでは cfg で機能ごと落とし、UI で「Windows では未対応」と明示**する。
-（`OpenSSH for Windows` には ControlMaster が無いため、素直な移植ができない）
+**旧方針（〜2026-10-20）**: 「`id -u` / `mkfifo` / Unix socket / `sh -l` 前提が深く、ControlMaster にも依存している。
+Windows 版では cfg で機能ごと落とし、UI で『Windows では未対応』と明示する」。実際には一部が `#[cfg(unix)]` で外れただけで、
+コマンドラインの `ssh://` も画面の入り口も Windows で試せてしまい、`/tmp` を作れずに意味の分からないエラーで落ちていた（#79）。
+
+**新方針**: 通り道を作り直して、手元の OS に依らず同じコードで動かす（設計と受入条件の正は [`REMOTE-CHANNEL.md`](./REMOTE-CHANNEL.md)）。
+
+- Windows の OpenSSH（9.5 で確認）は ControlMaster を持たず、`ControlPath` を付けただけで `getsockname failed: Not a socket`
+  で落ちる。そこで **ssh は接続 1 回に 1 プロセス**にし、端末・LSP・ACP・ポート転送は自前の RPC のストリームで多重化する
+  （`-o ControlMaster=no -o ControlPath=none` を必ず付ける＝利用者の config が多重化を有効にしていても Windows で落ちない）
+- remote-server の配備も同じ接続の中で済ませる＝パスワード認証でも認証は接続のたびに 1 回
+- 手元で `/tmp`・`/dev/urandom`・Unix socket を使わない（乱数は `getrandom`・端末の中継は Windows では loopback TCP の対）
+- askpass は Windows でも使う（制御口は名前付きパイプ・GUI のプロセスだけが付ける）
+- Windows のインストーラと zip は Linux 用 remote-server を `<exe のフォルダ>/remote/<triple>/` に同梱する
+- **Windows の実機で確認したこと（2026-10-21）**: ssh.exe → WSL のユーザー権限の sshd で実 SSH の試験 10 本がすべて緑
+  （`scripts/test-remote-ssh-wsl.ps1`）・GUI から接続先のファイル一覧・端末（打鍵・色・題名）・エージェントの起動を目視。
+  **未確認**: パスワード / パスフレーズ / 初めてのホスト鍵の確認が GUI の入力欄に出ること（試験の sshd は鍵だけ）
 
 ### D7. 配布は「zip → インストーラ → Authenticode」の順
 
@@ -351,9 +364,10 @@ VS Code（Remote - WSL）も Zed（`open folder in wsl`）も、**WSL の中に�
 直接開くのは「遅い・git の所有者チェックに引っかかる・Linux のツールが使えない」ので不採用。
 
 necoder は既に同じ形の部品を持っている — Remote SSH の **`necoder-remote-server`（Linux 用・`host` crate）**。
-WSL 対応はこれの**輸送路を `ssh` から `wsl.exe -d <distro> -- <server>` の標準入出力に替えるだけ**で
-組める見込み（ControlMaster も鍵も要らない分、SSH より単純）。ただし `host` の Remote SSH は
-`#[cfg(unix)]` で Windows から外してある（§D6）ので、輸送路の抽象を cfg の外へ出す作業が先に要る。
+WSL 対応はこれの**輸送路を `ssh` から `wsl.exe -d <distro> -- <bootstrap>` の標準入出力に替えるだけ**で
+組める。2026-10-21 に Remote SSH を「ssh 1 本の標準入出力の上に全部を載せる」形にした（§D6・REMOTE-CHANNEL.md）ので、
+輸送路の抽象（`host::Connector`）はもう cfg の外にあり、端末・LSP・ACP もその上を通る。残りは `wsl.exe` で bootstrap を
+起こす connector と、WSL のディストリを選ぶ UI。
 
 W7 では **ターミナルのシェルに WSL のディストリを選べる**ところまで（`wsl -d <distro>`。作業フォルダは
 `wsl.exe` が `/mnt/c/…` に読み替える）。エージェントを WSL の中で動かす・WSL のフォルダをプロジェクトに
@@ -427,7 +441,7 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
 - [x] `logging.rs` の Windows 実装 — `log_dir()` が全プラットフォームで実パスを返すようになった
       （以前は `cfg(not(unix))` で `None`＝置き場すら決まらなかった）
 - [x] `shell_env` は Windows で no-op。**未使用 import 3 件も cfg で潰した**（受入条件の警告 0）
-- [x] `host` crate の Remote SSH は Windows で cfg 除外（§D6）— 既存の `#[cfg(unix)]` が効いていた
+- [x] `host` crate の Remote SSH は Windows で cfg 除外（§D6）— 既存の `#[cfg(unix)]` が効いていた（→ 2026-10-21 に撤回。§D6・W9 で Windows でも動くようにした）
 - [x] 受入: **Windows で `cargo check --workspace --all-targets` がエラー 0・警告 0**
 
 **W2 の範囲を超えて green にしたもの**（`cargo test --workspace` を Windows で通すため）:
@@ -721,13 +735,24 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
 
 ### W8 — WSL（設計: §D11）
 
-- [ ] `host` の Remote 輸送路を cfg(unix) の外へ（ssh / wsl.exe を差し替えられる形）
+- [x] `host` の Remote 輸送路を cfg(unix) の外へ（ssh / wsl.exe を差し替えられる形）— 2026-10-21。W9 で
+      `host::Connector` の上に端末・LSP・ACP・TCP まで載ったので、`wsl.exe` で bootstrap を起こす connector を足せば済む
 - [ ] 「WSL のフォルダを開く」（ディストリを選ぶ → `necoder-remote-server` を WSL に置いて繋ぐ）
 - [ ] エージェントを WSL の中で起こす（Codex など Linux 前提の道具を使う人向け）
 
+### W9 — Remote SSH（§D6・正は REMOTE-CHANNEL.md・2026-10-21・#79）
+
+- [x] ssh 1 本の通り道（ControlMaster を使わない）・bootstrap が同じ接続の中で配備・ストリームで端末 / LSP / ACP / TCP
+- [x] 手元で `/tmp` / `/dev/urandom` / Unix socket を使わない（#79 の直接の原因）
+- [x] askpass を Windows でも（`control_ipc`・token の発行）・パスフレーズの一言は ssh-agent サービスの起こし方から
+- [x] Ports パネル: Windows でも接続先の一覧と転送を出す（手元の一覧だけ未対応のまま）
+- [x] インストーラと zip に Linux 用 remote-server を同梱（`bundle-windows.ps1`・`release.yml`）
+- [x] 実 SSH の試験を Windows の client から回す（`scripts/test-remote-ssh-wsl.ps1`・10 本すべて緑）・GUI で端末を目視
+- [ ] **実機確認**: パスワード認証・パスフレーズ付きの鍵・初めてのホスト鍵の確認が GUI の入力欄に出て通る
+- [ ] **実機確認**: インストーラ版から Linux のサーバへ初めて繋いで、同梱の remote-server が配備される
+
 ### やらないこと（当面・意図的に）
 
-- Remote SSH の Windows クライアント（§D6）
 - ARM64 Windows ビルド（x64 が安定してから）
 - MSIX / Microsoft Store（§D7）
 - Windows 固有の外観追随（Mica / アクリル）— **`UI-SPEC.md` の色の許可リストが正**であり、OS の流儀に寄せない

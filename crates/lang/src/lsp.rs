@@ -170,7 +170,7 @@ impl LspClient {
         Self::new_on(LocalHost::shared(), server, args, root)
     }
 
-    /// 指定 host 上で LSP を起動する。remote host は ControlMaster の別 session を使う。
+    /// 指定 host 上で LSP を起動する。remote host は接続先の daemon が起こし、stdio は RPC のストリームで通る。
     pub fn new_on(
         host: Arc<dyn Host>,
         server: &Path,
