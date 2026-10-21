@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-10-22
+
+This release brings Remote SSH to Windows and keeps remote terminals and processes running through connection drops. It is delivered through auto-update.
+
 ### Added
 
 - **Remote SSH on Windows** (#79): opening an `ssh://` project from Windows now works, including the file tree, search, terminals, language servers, agents, port forwarding and `ne`. Before, it failed right away with "SSH control directory を作れない: /tmp/…". The Windows installer and zip now include the Linux server that necoder places on the host.
@@ -18,8 +22,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 ### Fixed
 
 - **Reopening a remote project waited on the network**: when necoder restored a remote project, it asked Git on the host for the branch and HEAD while the window was busy. This now happens in the background.
+- **Docker Remote SSH verification**: the test script can build the Linux server with its current dependencies when no cached server is available.
+- **Windows download link**: the website's Windows download button now points to the installer.
 
 ### 日本語
+
+Windows から Remote SSH を使えるようにし、接続が切れても接続先のターミナルやプロセスが動き続けるようにした版です。自動更新で配信します。
 
 #### 追加
 
@@ -34,6 +42,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 #### 修正
 
 - **リモートのプロジェクトを開き直す時に、ネットワークを待っていた**：前回の続きでリモートのプロジェクトを開く時、接続先の Git にブランチと HEAD を訊くあいだ窓が止まっていました。裏で訊くようにしました。
+- **Docker での Remote SSH 検証**：サーバーのキャッシュが無い時も、現在の依存を含む Linux 用サーバーを検証スクリプトからビルドできるようにしました。
+- **Windows のダウンロードリンク**：Web サイトの Windows ダウンロードボタンからインストーラを取得できるようにしました。
 
 ## [0.1.31] - 2026-10-20
 

@@ -13,7 +13,9 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Context as _, Result};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;

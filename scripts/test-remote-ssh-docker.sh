@@ -100,7 +100,7 @@ fi
 # No artifact yet: build one in Docker. The Mac usually has no Linux cross toolchain,
 # and the full workspace cannot be reused here because it depends on gpui from the zed git
 # repository - a large clone that necoder-remote-server does not need. So assemble a tiny
-# standalone workspace with just the two crates the server is made of.
+# standalone workspace with just the three crates the server is made of.
 if [ ! -f "$server_binary" ]; then
     echo "==> No $target artifact found; building necoder-remote-server in Docker"
     rust_channel=$(grep -m1 '^channel' "$repo_root/rust-toolchain.toml" | sed 's/.*"\(.*\)".*/\1/')
@@ -111,13 +111,15 @@ if [ ! -f "$server_binary" ]; then
     mkdir -p "$build_dir/crates"
     cp -R "$repo_root/crates/host" "$build_dir/crates/host"
     cp -R "$repo_root/crates/paths" "$build_dir/crates/paths"
+    cp -R "$repo_root/crates/child_process" "$build_dir/crates/child_process"
+    cp "$repo_root/Cargo.lock" "$build_dir/Cargo.lock"
     rm -rf "$build_dir/crates/host/tests"
-    # Version requirements are deliberately loose (semver-compatible with the workspace) so
-    # they cannot drift. Adding a dependency to crates/host means adding it here too.
+    # Keep the workspace's locked dependency versions in the smaller build too.
+    # Adding a dependency to crates/host means adding it here too.
     cat > "$build_dir/Cargo.toml" <<EOF
 [workspace]
 resolver = "2"
-members = ["crates/host", "crates/paths"]
+members = ["crates/host", "crates/paths", "crates/child_process"]
 
 [workspace.package]
 version = "$workspace_version"
@@ -126,12 +128,18 @@ license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 paths = { path = "crates/paths" }
+child_process = { path = "crates/child_process" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ignore = "0.4"
 regex = "1"
 url = "2"
+sha2 = "0.10"
+flate2 = "1"
+getrandom = "0.3"
+libc = "0.2"
+windows-sys = "0.61"
 
 [profile.release]
 strip = true
