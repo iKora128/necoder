@@ -1196,6 +1196,11 @@ impl Workspace {
         // 使用量（O11）: エージェントのレート制限が届いたら statusbar とポップオーバーを描き直す（全窓）。
         cx.observe_global::<agent_panel::usage::UsageLimits>(|_workspace, cx| cx.notify())
             .detach();
+        cx.on_app_quit(|workspace, _cx| {
+            workspace.stop_language_servers();
+            async {}
+        })
+        .detach();
         workspace.hydrate_restored_projects(restored_indexes, cx);
         workspace.save_state(cx); // 起動時点で状態を書く（再起動復元のため）
         workspace

@@ -2,7 +2,7 @@ name: CI
 
 # push/PR ごとの検証（M13）:
 #  - mac: cargo test 全 crate + 編集コアの性能予算ガード（examples/bench_editor）
-#  - linux: ビルドのみ（GPUI Linux の依存を入れて `cargo check`。安定するまで best-effort）
+#  - linux: 型検査・リンク・ヘッドレステスト（Ubuntu Desktop の操作確認は別。安定するまで best-effort）
 # 起動時間（scripts/startup-time.sh）と入力レイテンシ（key→frame）は GUI 実機が要るため
 # CI では回さない（ROADMAP M13 残件参照・ローカル計測用スクリプトはある）。
 on:
@@ -87,19 +87,23 @@ jobs:
           command: check
 
   check-linux:
-    runs-on: ubuntu-latest
-    # GPUI Linux（Wayland/X11）の追従は M13 残件 — 落ちても mac の検証は止めない。
+    runs-on: ubuntu-24.04
+    # Linux Desktop 対応の受入は docs/LINUX-PORT.md。AMD64 の検証が通るまで best-effort。
+    # ローカルの ARM64 Docker と同じ依存を使い、Wayland/X11 は Cargo の target 依存で有効化。
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: GPUI Linux の依存
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
-            libxcb1-dev libzstd-dev libasound2-dev libfontconfig1-dev libssl-dev
-      - name: Check（ビルド可否のみ）
-        run: cargo check -p necoder
+        run: sudo bash scripts/linux/install-deps.sh
+      - name: Check（全ターゲット）
+        run: cargo check --locked --workspace --all-targets
+      - name: Build（Desktop 本体のリンク）
+        run: cargo build --locked -p necoder --bin necoder
+      - name: Test（ヘッドレス）
+        run: cargo test --locked --workspace
+        env:
+          RUST_TEST_THREADS: 2
 
   build-remote-server:
     runs-on: ubuntu-latest

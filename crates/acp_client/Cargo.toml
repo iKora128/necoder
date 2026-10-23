@@ -21,3 +21,6 @@ futures.workspace = true
 host.workspace = true
 async-io.workspace = true
 sha2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

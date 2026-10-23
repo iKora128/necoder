@@ -5,7 +5,8 @@ import { random } from '../public/crypto.mjs';
 import { createHash } from 'node:crypto';
 import webpush from 'web-push';
 
-const device = () => ({ room: random(), tasks: ['project-a'] });
+const device = () => ({ room: random(), tasks: ['project-a'], securityVersion: 2, approved: true, passkey: {} });
+const authenticated = () => ({ channel: {}, unlockedAt: Date.now(), activityAt: Date.now() });
 const command = () => ({ type: 'request', id: random(), method: 'send_message', expires_at: Date.now() + 25000,
   params: { instance_id: 'instance-a', task_id: 'project-a', thread_id: 'thread-a', message: 'test' } });
 test('公開 API の範囲・共有対象・期限・GUI 世代を検証', () => {
@@ -23,8 +24,8 @@ test('IPC 前に受付記録、同じ命令は一度だけ実行', async () => {
   } });
   bridge.snapshot = { instance_id: 'instance-a' };
   const d = device(), m = command();
-  assert.deepEqual(await bridge.execute(d, {}, m), { accepted: true });
-  assert.deepEqual(await bridge.execute(d, {}, m), { accepted: true });
+  assert.deepEqual(await bridge.execute(d, authenticated(), m), { accepted: true });
+  assert.deepEqual(await bridge.execute(d, authenticated(), m), { accepted: true });
   assert.equal(calls, 1);
 });
 test('結果不明・永続化失敗・失効では再実行しない', async () => {
@@ -32,21 +33,21 @@ test('結果不明・永続化失敗・失効では再実行しない', async ()
   const bridge = new Bridge({}, [], { persistReceipts: async () => {}, ipc: async () => { calls++; throw new Error('timeout'); } });
   bridge.snapshot = { instance_id: 'instance-a' };
   const d = device(), m = command();
-  await assert.rejects(bridge.execute(d, {}, m), /timeout/);
-  await assert.rejects(bridge.execute(d, {}, m), /outcome_unknown/);
+  await assert.rejects(bridge.execute(d, authenticated(), m), /timeout/);
+  await assert.rejects(bridge.execute(d, authenticated(), m), /outcome_unknown/);
   assert.equal(calls, 1);
   bridge.persistReceipts = async () => { throw new Error('disk_full'); };
-  await assert.rejects(bridge.execute(d, {}, command()), /disk_full/);
+  await assert.rejects(bridge.execute(d, authenticated(), command()), /disk_full/);
   assert.equal(calls, 1);
   d.revoked = true;
-  await assert.rejects(bridge.execute(d, {}, command()), /revoked/);
+  await assert.rejects(bridge.execute(d, authenticated(), command()), /revoked/);
   await assert.rejects(bridge.receive(d, {}, { type: 'hello' }), /revoked/);
 });
 test('受付記録中に失効しても IPC へ送らない', async () => {
   const d = device(); let calls = 0;
   const bridge = new Bridge({}, [], { persistReceipts: async () => { d.revoked = true; }, ipc: async () => calls++ });
   bridge.snapshot = { instance_id: 'instance-a' };
-  await assert.rejects(bridge.execute(d, {}, command()), /revoked/);
+  await assert.rejects(bridge.execute(d, authenticated(), command()), /revoked/);
   assert.equal(calls, 0);
 });
 test('Push 送信先を限定し SSRF を拒否', () => {
@@ -82,7 +83,7 @@ test('leadingZeroBits は Worker と同じ数え方をする', () => {
   assert.equal(leadingZeroBits(Buffer.from([0x00, 0x00])), 16);
 });
 test('ペアリング済み端末がある間だけ Mac を眠らせない', { skip: process.platform !== 'darwin' }, () => {
-  const paired = () => ({ room: random(), tasks: [], paired: true });
+  const paired = () => ({ room: random(), tasks: [], paired: true, approved: true });
   // 未ペア（QR を出しただけ）では掴まない — 使われないまま Mac が起き続けるのを避ける。
   const idle = new Bridge({}, [{ room: random(), tasks: [], paired: false }], {});
   idle.updateWakeLock();
@@ -107,7 +108,7 @@ test('ペアリング済み端末がある間だけ Mac を眠らせない', { s
 test('電池駆動の間は掴まず、電源に挿し直すと掴み直す', async () => {
   if (process.platform !== 'darwin') return;
   let onAc = false;
-  const bridge = new Bridge({}, [{ room: random(), tasks: [], paired: true }], { readPower: async () => onAc });
+  const bridge = new Bridge({}, [{ room: random(), tasks: [], paired: true, approved: true }], { readPower: async () => onAc });
   // 電池のうちはペアリング済みでも掴まない（鞄の中でノートの電池を溶かさない）。
   await bridge.refreshPower();
   assert.equal(bridge.caffeinate, null);

@@ -738,73 +738,73 @@ settings:
   mcp_claude_connectors_sub: Connectors linked to your account (Figma, Google Calendar, …). Turning this off makes the first reply faster (measured 4.2 s → 1.8 s). Chat mode never loads them
   title: Settings
   agents_heading: AI Agents
-  agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
+  agents_sub: Choose the agents you want to use. Install them or log in as needed.
   permission_default: Default permissions
-  permission_default_sub: The mode new threads start in. Choosing resets the modes remembered from the pill for every agent. "Don't ask" applies only to agents that offer such a mode (such as Claude Code's bypassPermissions). Chat is not affected
+  permission_default_sub: Changing this resets each agent's permission mode. "Run without asking" applies only to supported agents. Chat is not affected
   permission_default_agent: Agent default
-  permission_default_bypass: Don't ask (Yolo)
-  permission_remembered: Modes chosen in the pill (click to forget)
+  permission_default_bypass: Run without asking
+  permission_remembered: Individual permission modes (click to reset)
   installed: Installed
   available_npx: Fetch on first use (npx)
   not_installed: Not installed
   agent_checking: Checking…
   agent_available: Available
-  agent_configured: Configured · unverified
+  agent_configured: Login unverified
   agent_signed_out: Signed out
-  agent_disabled: Off (hidden from choices)
-  agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
+  agent_disabled: Disabled
+  agent_disable_locked: Change the default or Captain setting before disabling this agent
   agent_remove: Remove
   agent_remove_binary_failed: "Couldn't delete the binary downloaded for %{agent}: %{reason}"
   custom_command_ready: "Starts with your command (%{command})"
   custom_command_missing: "Command not found (%{command}). Write a name on the PATH or an absolute path"
-  custom_registry_npx: "Registry %{version} · npx (fetched on first start)"
-  custom_not_in_registry: "Not found in the registry (%{id}). Refresh it from Add agent"
+  custom_registry_npx: "%{version} · Download on first start (npx)"
+  custom_not_in_registry: "No launch information for %{id}. Refresh the list in Add agent"
   custom_no_distribution: "No build for this machine (%{platform})"
-  custom_needs_node: Needs node (this build starts with npx)
-  custom_needs_uv: Needs uv (this build starts with uvx). Install uv to use it (necoder doesn't install it)
-  custom_registry_uvx: "Registry %{version} · uvx (fetched on first start)"
-  custom_binary_ready: "Registry %{version} · binary (in place, checked against sha256)"
-  custom_binary_ready_unverified: "Registry %{version} · binary (in place, no checksum to check)"
-  custom_binary_download: "Registry %{version} · binary (downloaded and checked against sha256 on first start)"
-  custom_binary_download_unverified: "Registry %{version} · binary (downloaded on first start, no checksum to check)"
+  custom_needs_node: Install Node.js to use this agent
+  custom_needs_uv: Install uv to use this agent
+  custom_registry_uvx: "%{version} · Download on first start (uvx)"
+  custom_binary_ready: "%{version} · Downloaded (verified)"
+  custom_binary_ready_unverified: "%{version} · Downloaded (no verification information)"
+  custom_binary_download: "%{version} · Download and verify on first start"
+  custom_binary_download_unverified: "%{version} · Download on first start (no verification information)"
   custom_binary_on_remote: This agent only ships a binary, so it can't start over SSH
   custom_not_deployed: Not downloaded yet (downloaded on first start)
   custom_deploy_failed: "Couldn't put the binary in place: %{reason}"
-  add_agent_sha256: The binary is checked against the registry's sha256 after download
-  add_agent_no_sha256: No checksum in the registry (no sha256). The downloaded binary is used unchecked
+  add_agent_sha256: Files are verified after download (SHA-256)
+  add_agent_no_sha256: No verification information is available. Files will be used without verification
   agents_add: + Add agent
-  agents_add_hint: Pick from every agent in the ACP registry. For one that isn't listed, write your command in agent_servers in settings.json
+  agents_add_hint: Add more agents from the list
   add_agent_title: Add agent
-  add_agent_sub: "%{count} agents in the ACP registry. Added agents join the AI agents list, where you turn them on or off, make them the default, and change how they start, just like the built-in ones"
-  add_agent_search: Search by name, description, build (npx / binary / uvx), or OS
+  add_agent_sub: "Choose from %{count} agents to add"
+  add_agent_search: Search agents
   add_agent_add: Add
   add_agent_added: Added
-  add_agent_builtin: "Built in (%{agent})"
+  add_agent_builtin: "Added (%{agent})"
   add_agent_unusable: Not available on this machine
   add_agent_os_any: Runs on any OS
   add_agent_os: "Runs on %{os}"
   add_agent_license: "License: %{license}"
   add_agent_empty: No agents match
-  add_agent_no_registry: The ACP registry hasn't been fetched yet
-  add_agent_fetch: Fetch
-  add_agent_fetching: Fetching…
-  add_agent_refresh: Refresh
-  add_agent_fetch_failed: "Couldn't fetch: %{reason}"
+  add_agent_no_registry: Fetch the agent list to get started
+  add_agent_fetch: Fetch list
+  add_agent_fetching: Fetching list…
+  add_agent_refresh: Refresh list
+  add_agent_fetch_failed: "Couldn't fetch the list: %{reason}"
   add_agent_custom_hint: For an agent that isn't listed, write your command in agent_servers in settings.json
   add_agent_open_settings_json: Open settings.json
   add_agent_close: Close
-  launch_default: Launch as usual (registry version and command)
-  launch_env: "Launch: default + environment (%{names})"
-  launch_custom: "Launch: own command (%{command})"
+  launch_default: "Launch method: Standard"
+  launch_env: "Launch method: Standard + environment (%{names})"
+  launch_custom: "Launch method: Custom command (%{command})"
   launch_edit: Change…
   launch_reset: Use default
-  launch_title: "Launching %{agent}"
-  launch_mode_registry: Add environment variables to the default launch
-  launch_mode_custom: Launch with my own command
+  launch_title: "%{agent} launch settings"
+  launch_mode_registry: Standard launch
+  launch_mode_custom: Custom command
   launch_command: Command (absolute path or a name on PATH)
   launch_args: Arguments (one per line)
   launch_env_field: Environment variables (one KEY=VALUE per line)
-  launch_note: Applies to agents started from now on. Values stay in settings.json as written, so don't put API keys or other secrets here (use variables that point to a location, like CLAUDE_CONFIG_DIR)
+  launch_note: Applies on the next start. Values are saved in plain text in settings.json. Do not enter API keys or other secrets
   launch_command_missing: Enter a command
   launch_cancel: Cancel
   launch_save: Save
@@ -932,7 +932,7 @@ settings:
   font_ui: UI font
   font_code: Code font
   font_terminal: Terminal font
-  font_default: Default (bundled font)
+  font_default: Default font
   font_terminal_default: Default (same as the code font)
   density_label: Row spacing
   density_sub: Row height in the explorer, pickers, search results and the Fleet's Task list
@@ -946,6 +946,25 @@ settings:
   open_json_button: Open
   cli_heading: Command line
   remote_heading: Phone connection
+  remote_hint: Check AI progress and approve actions from your phone.
+  remote_hint_connect: Connect
+  remote_hint_close: Dismiss
+  remote_devices: Devices and connection approval
+  remote_devices_hint: Approve new phones here. Revoke a connection if a phone is lost or replaced.
+  remote_no_devices: No phones registered yet.
+  remote_pending: Awaiting PC approval
+  remote_device_online: Verified and connected
+  remote_device_registered: Registered
+  remote_device_legacy: Pair again to upgrade security
+  remote_device_pairing: Scan the QR and create a passkey on your phone
+  remote_shared_count: "%{count} projects shared"
+  remote_approve_question: Allow this phone to connect?
+  remote_compare_hint: Compare the code with your phone before approving. Do not rely on the device name alone.
+  remote_approve: Codes match — approve
+  remote_deny: Deny
+  remote_revoke: Revoke connection
+  remote_status_error: Could not read device status. Check that the connection host is running.
+  remote_action_error: Device state changed or the action failed. Check the updated device list.
   remote_label: Control from your phone
   remote_sub: Shares all projects open when the QR is issued. Switch projects on your phone to control each independently.
   remote_issue: Generate pairing QR
@@ -959,7 +978,7 @@ settings:
   remote_err_relay_busy: The relay is busy. Wait about a minute, then generate the QR again.
   remote_err_device_limit: The device limit (8) is reached. Revoke a device you no longer use, then try again.
   remote_err_node: Node.js 22+ was not found. Install it, then try again.
-  remote_err_host_missing: The Remote host is not bundled. Reinstall necoder.
+  remote_err_host_missing: Files required for mobile access are missing. Reinstall necoder.
   remote_err_host_start: The Remote host failed to start. See `~/.necoder/remote/host.log` for the reason.
   remote_err_relay: Could not reach the relay server. Check your network connection and try again.
   remote_err_timeout: Generating the QR timed out. Try again.
@@ -1147,7 +1166,7 @@ breadcrumb:
   html_preview_tip: Open in the system WebView  ⌘⇧V
   html_reload_tip: Reload HTML preview
   html_open_web_tab: Open in Web tab
-  html_open_web_tab_tip: Open in a Web tab through the built-in server (Design mode works there)
+  html_open_web_tab_tip: Open in a Web tab (Design mode)
 webview:
   outside_sandbox: This file is outside the folder that may be shown
   failed: Unable to open HTML preview
@@ -1175,10 +1194,10 @@ webtab:
   picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"
   picker_action: Open localhost
   invalid_url: "Only localhost URLs can be opened: %{input}"
-  static_tip: "Built-in server: %{path}"
-  static_failed: "Couldn't start the built-in server: %{error}"
+  static_tip: "HTML file: %{path}"
+  static_failed: "Couldn't open the HTML file: %{error}"
   static_needs_html: Open a local HTML file first
-  static_remote: HTML in SSH projects can't be opened in a Web tab yet (the built-in server serves local files only)
+  static_remote: HTML files on SSH hosts can't be opened in a Web tab
   static_chat: Chat HTML is written by the agent and stays sandboxed, so it can't be opened in a Web tab
   ctx_open_browser: Open in default browser
   ctx_copy_url: Copy URL
@@ -1264,8 +1283,8 @@ terminal:
   menu_clear: Clear
   menu_find: Find
 theme:
-  builtin: Built-in
-  user: User
+  builtin: Default themes
+  user: Added themes
   picker_placeholder: Select theme
 link:
   open_failed: "Could not open %{target}"

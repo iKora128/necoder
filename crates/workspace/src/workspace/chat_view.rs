@@ -513,8 +513,12 @@ impl Workspace {
             .when(self.chrome.show_left, |row| {
                 row.child(self.render_chat_sidebar(cx))
             })
-            .child(self.render_chat_center(artifact_open, cx))
-            .when(artifact_open, |row| {
+            .child(if self.chrome.show_settings {
+                self.render_center(cx).into_any_element()
+            } else {
+                self.render_chat_center(artifact_open, cx).into_any_element()
+            })
+            .when(artifact_open && !self.chrome.show_settings, |row| {
                 row.child(self.render_chat_artifacts(cx))
             })
     }

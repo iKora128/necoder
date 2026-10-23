@@ -134,6 +134,9 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: HashMap<String, String>,
+    /// 子を新しいプロセスグループの長にする（unix のみ）。終了時に**孫ごと**止めるため。
+    /// 端末や LSP には付けない（端末の job control を変えない）。
+    pub new_process_group: bool,
 }
 
 /// POSIX シェルで 1 行スクリプトを流す spec。**リモートホストは常にこれ**（相手は Linux）。
@@ -153,7 +156,15 @@ impl CommandSpec {
             args: Vec::new(),
             cwd: cwd.into(),
             env: HashMap::new(),
+            new_process_group: false,
         }
+    }
+
+    /// 子を新しいプロセスグループの長にする（unix）。ACP の子は孫（app-server / MCP）を
+    /// 連れているので、終了時にグループごと止められるようにする。
+    pub fn in_own_process_group(mut self) -> Self {
+        self.new_process_group = true;
+        self
     }
 
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -181,7 +192,8 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
-/// LSP/ACP など長寿命 stdio process。Drop 時に child と SSH session を確実に畳む。
+/// LSP/ACP など長寿命 stdio process。**Drop では子は死なない** — ACP は
+/// `acp_client::children` がセッション終了・アプリ終了で道連れにする。
 pub struct HostProcess {
     child: Child,
     stdin: Option<Box<dyn Write + Send>>,
@@ -197,6 +209,16 @@ impl HostProcess {
 
     pub fn take_stdout(&mut self) -> Result<Box<dyn Read + Send>> {
         self.stdout.take().context("process stdout は既に取得済み")
+    }
+
+    /// 子プロセスの PID（remote では手元の `ssh` の PID）。終了時に道連れにするのに使う。
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// stdout を読み終えてから終了を待つ。短い補助処理の終了コードを取りこぼさない。
+    pub fn wait(&mut self) -> Result<std::process::ExitStatus> {
+        self.child.wait().context("process の終了を待てない")
     }
 
     /// プロセスがまだ生きているか。再接続後の handle 再同期で「死んでいたら再 spawn」の判定に使う
@@ -1770,14 +1792,22 @@ fn spawn_process_local(
     spec: &CommandSpec,
     transport: Option<Arc<SshTransport>>,
 ) -> Result<HostProcess> {
-    let mut child = Command::new(&spec.program)
+    let mut command = Command::new(&spec.program);
+    command
         .args(&spec.args)
         .current_dir(&spec.cwd)
         .envs(&spec.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // 末尾だけを持つ（すぐ落ちた子の理由を見せる・[`StderrTail`]）。読む側は最後まで読み続ける。
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // 新しいグループの長にする＝終了時に負の PID でグループごと（孫も）止められる。
+    #[cfg(unix)]
+    if spec.new_process_group {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("process を起動できない: {}", spec.program))?;
     let stdin = child.stdin.take().context("process stdin が無い")?;
@@ -3020,12 +3050,43 @@ impl SshProject {
         } else {
             path
         };
-        Ok(Self {
+        let project = Self {
             host,
             username,
             port: parsed.port(),
             path,
-        })
+        };
+        project.validate_destination()?;
+        Ok(project)
+    }
+
+    /// URI から来る宛先も ssh_config の登録と同じく検める。ProxyCommand の展開に
+    /// 宛先が使われることもあるため、ホスト名にシェルの構文を持ち込ませない。
+    fn validate_destination(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.host.is_empty()
+                && !self.host.starts_with('-')
+                && self.host.chars().all(|c| c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '-' | '_' | ':' | '[' | ']' | '%')),
+            "SSH ホスト名に使えない文字があります"
+        );
+        if let Some(username) = &self.username {
+            anyhow::ensure!(
+                !username.is_empty()
+                    && !username.starts_with('-')
+                    && username
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '$')),
+                "SSH ユーザー名に使えない文字があります"
+            );
+        }
+        anyhow::ensure!(self.port != Some(0), "SSH ポートは 1〜65535");
+        Ok(())
+    }
+
+    /// オプションの終端も宛先と一緒に渡し、呼び出し経路による検査漏れを防ぐ。
+    fn destination_args(&self) -> [String; 2] {
+        ["--".to_string(), self.destination()]
     }
 
     pub fn destination(&self) -> String {
@@ -3464,6 +3525,7 @@ fn master_result(success: bool, status: &str, log: &str) -> Result<()> {
 /// 成功なら掛かった時間、失敗なら理由つきの [`SshConnectError`]（種類は [`SshFailure`]）。
 /// blocking なので背景で呼ぶ。
 pub fn test_ssh_connection(project: &SshProject) -> Result<Duration> {
+    project.validate_destination()?;
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
     let log = std::env::temp_dir().join(format!(
         "necoder-ssh-test-{}-{}.log",
@@ -3480,7 +3542,7 @@ pub fn test_ssh_connection(project: &SshProject) -> Result<Duration> {
         command.args(["-p", &port.to_string()]);
     }
     let status = command
-        .arg(project.destination())
+        .args(project.destination_args())
         .arg("true")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -3650,6 +3712,7 @@ impl SshTransport {
     /// 制御ソケットの置き場だけ用意する。**ここではネットワークに触らない**。
     /// master は最初に必要になった時点で [`Self::ensure_master`] が起こす。
     fn new(project: &SshProject) -> Result<Arc<Self>> {
+        project.validate_destination()?;
         static NEXT_CONTROL: AtomicU64 = AtomicU64::new(1);
         let serial = NEXT_CONTROL.fetch_add(1, Ordering::Relaxed);
         let identity_hash = content_hash(project.identity().as_bytes());
@@ -3734,7 +3797,7 @@ impl SshTransport {
         let status = master
             .arg("-E")
             .arg(&log)
-            .arg(self.project.destination())
+            .args(self.project.destination_args())
             .status()
             .context("OpenSSH ControlMaster を起動できない")?;
         // 何も書かれていなければファイルはできない（= 理由なし）。背景に回った master が後で書く分
@@ -3768,7 +3831,7 @@ impl SshTransport {
             request.args(["-p", &port.to_string()]);
         }
         let output = request
-            .arg(self.project.destination())
+            .args(self.project.destination_args())
             .stdin(Stdio::null())
             .output()
             .context("OpenSSH にポートの転送を頼めない")?;
@@ -3878,7 +3941,7 @@ impl SshTransport {
             request.args(["-p", &port.to_string()]);
         }
         let status = request
-            .arg(self.project.destination())
+            .args(self.project.destination_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -3900,7 +3963,7 @@ impl SshTransport {
         assert_off_main_thread("ensure_master");
         let status = ssh_command()
             .args(["-S", &self.control_path.to_string_lossy(), "-O", "check"])
-            .arg(self.project.destination())
+            .args(self.project.destination_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -3943,7 +4006,7 @@ impl SshTransport {
         if let Some(port) = self.project.port {
             args.extend(["-p".to_string(), port.to_string()]);
         }
-        args.push(self.project.destination());
+        args.extend(self.project.destination_args());
         args.push(remote_command.to_string());
         args
     }
@@ -4413,7 +4476,7 @@ impl SshTransport {
         let mut command = ssh_command();
         command
             .args(["-S", &self.control_path.to_string_lossy(), "-O", "exit"])
-            .arg(self.project.destination())
+            .args(self.project.destination_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -6606,6 +6669,39 @@ Host gpu
         );
         assert!(SshProject::parse("ssh://alice:secret@example.com/code").is_err());
         assert!(SshProject::parse("ssh://example.com/code?proxy=bad").is_err());
+    }
+
+    #[test]
+    fn ssh_destinations_cannot_supply_options_or_shell_syntax() {
+        for uri in [
+            "ssh://-oProxyCommand={touch,marker}/",
+            "ssh://-oProxyCommand=anything/",
+            "ssh://-option@example.com/",
+            "ssh://host;command/",
+            "ssh://user%20name@example.com/",
+            "ssh://example.com:0/",
+        ] {
+            assert!(SshProject::parse(uri).is_err(), "{uri}");
+        }
+        for uri in [
+            "ssh://build-box/",
+            "ssh://alice@host_name/",
+            "ssh://[::1]:2222/",
+        ] {
+            let project = SshProject::parse(uri).unwrap();
+            assert_eq!(
+                project.destination_args(),
+                ["--".to_string(), project.destination()]
+            );
+        }
+        // 型を直接構築する経路も、子プロセスを起動する前に拒否する。
+        let forged = SshProject {
+            host: "-oProxyCommand={touch,marker}".to_string(),
+            username: None,
+            port: None,
+            path: PathBuf::new(),
+        };
+        assert!(test_ssh_connection(&forged).is_err());
     }
 
     #[test]

@@ -62,6 +62,7 @@ mod new_task_dialog;
 mod image_view;
 mod pdf_view;
 mod remote_control;
+mod phone_connection;
 mod web_preview_view;
 mod web_tabs;
 pub(crate) use image_view::ImageView;
@@ -2701,6 +2702,7 @@ impl Render for Workspace {
                     .into_any_element()
             })
             .child(self.render_statusbar(cx))
+            .children(self.render_phone_hint(cx))
             // オーバーレイ（最前面）
             // どこからでも呼べる端末（O24・C13）。パレットやダイアログはこの上に出す。
             .children(self.render_floating_terminal(cx))
@@ -3506,10 +3508,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// PDF は OS のビューアを載せた表示専用タブとして開くこと。
+    /// PDF は表示専用タブとして開くこと（WebView 非対応 OS では案内を出す）。
     /// 以前はテキスト経路へ落ちて UTF-8 デコードに失敗し、**タブが 1 枚も開かず無反応**だった。
     #[gpui::test]
-    fn opening_a_pdf_gives_a_native_viewer_tab_not_a_text_buffer(cx: &mut gpui::TestAppContext) {
+    fn opening_a_pdf_gives_a_viewer_or_fallback_not_a_text_buffer(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("necoder_pdf_tab_{}", std::process::id()));
         let project = root.join("papers");
         let _ = std::fs::remove_dir_all(&root);
@@ -3543,9 +3545,10 @@ mod tests {
                 .expect("PDF タブが 1 枚開く");
             assert_eq!(tab.path, pdf);
             let view = tab.pdf().expect("PDF タブは PdfView を持つ");
-            assert!(
+            assert_eq!(
                 view.read(cx).has_native_viewer(),
-                "ローカル PDF は OS のビューアに載せる（macOS / Windows）"
+                webview_view::is_supported(),
+                "対応 OS ではネイティブ表示、Linux では未対応の案内を出す"
             );
             assert!(
                 workspace.active_editor().is_none(),

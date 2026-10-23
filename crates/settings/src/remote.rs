@@ -11,6 +11,54 @@ pub(super) struct Pairing {
     modules: Vec<u8>,
     expires: u64,
     projects: usize,
+    room: Option<String>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+pub(super) struct RemoteDevice {
+    id: String,
+    name: String,
+    state: String,
+    code: Option<String>,
+    #[serde(default)]
+    online: bool,
+    #[serde(default)]
+    projects: Vec<String>,
+}
+
+fn read_devices(bytes: &[u8]) -> anyhow::Result<Vec<RemoteDevice>> {
+    #[derive(serde::Deserialize)]
+    struct Status {
+        devices: Vec<RemoteDevice>,
+    }
+    let status: Status = serde_json::from_slice(bytes)?;
+    anyhow::ensure!(status.devices.len() <= 8, "invalid_device_status");
+    for device in &status.devices {
+        anyhow::ensure!(
+            device.id.len() == 43
+                && device
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "invalid_device_status"
+        );
+        anyhow::ensure!(
+            device.name.len() <= 320
+                && matches!(
+                    device.state.as_str(),
+                    "pairing" | "pending" | "approved" | "legacy"
+                ),
+            "invalid_device_status"
+        );
+        anyhow::ensure!(
+            device.state != "pending"
+                || device.code.as_ref().is_some_and(
+                    |code| code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit())
+                ),
+            "invalid_device_status"
+        );
+    }
+    Ok(status.devices)
 }
 
 fn now_ms() -> u64 {
@@ -46,6 +94,11 @@ fn parse_pairing(bytes: &[u8]) -> anyhow::Result<Pairing> {
         modules: modules.to_vec(),
         expires,
         projects: value["tasks"].as_array().map_or(0, Vec::len),
+        room: url.split_once('#').and_then(|(_, fragment)| {
+            fragment
+                .split('&')
+                .find_map(|part| part.strip_prefix("room=").map(str::to_owned))
+        }),
     })
 }
 
@@ -107,9 +160,15 @@ fn issue_pairing() -> Result<Pairing, String> {
 }
 
 fn run_pairing() -> anyhow::Result<Pairing> {
+    parse_pairing(&run_remote(&["pair-json".into(), "Phone".into()])?)
+}
+
+/// shellを通さず固定のサブコマンドへ渡す。stdout/stderrと実行時間に上限を設ける。
+fn run_remote(arguments: &[String]) -> anyhow::Result<Vec<u8>> {
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(["remote", "pair-json", "Phone"])
+        .arg("remote")
+        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -163,14 +222,245 @@ fn run_pairing() -> anyhow::Result<Pairing> {
             known_failure(&String::from_utf8_lossy(&diagnostics)).unwrap_or("pairing_failed");
         anyhow::bail!("{code}");
     }
-    parse_pairing(&output)
+    Ok(output)
 }
 
 impl SettingsView {
+    pub fn show_remote_page(&mut self, cx: &mut Context<Self>) {
+        self.open_page(SettingsPage::Remote, cx);
+        self.remote_poll_due = true;
+        cx.notify();
+    }
+
+    pub(super) fn refresh_remote_devices(&mut self, cx: &mut Context<Self>) {
+        self.remote_status_busy = true;
+        self.remote_poll_due = false;
+        self.remote_device_generation += 1;
+        let generation = self.remote_device_generation;
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async {
+                    run_remote(&["devices".into()]).and_then(|bytes| read_devices(&bytes))
+                })
+                .await;
+            if view
+                .update(cx, |view, cx| {
+                    if view.remote_device_generation != generation {
+                        return;
+                    }
+                    view.remote_status_busy = false;
+                    match result {
+                        Ok(devices) => view.remote_devices = devices,
+                        Err(_) => {
+                            view.remote_error =
+                                Some(i18n::t!("settings.remote_status_error").into())
+                        }
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            if let Err(error) = view.update(cx, |view, cx| {
+                view.remote_poll_due = true;
+                cx.notify();
+            }) {
+                eprintln!("Remote device view closed: {error}");
+            }
+        })
+        .detach();
+    }
+
+    fn remote_device_action(
+        &mut self,
+        action: &'static str,
+        id: String,
+        code: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_device_busy {
+            return;
+        }
+        self.remote_device_busy = true;
+        self.remote_status_busy = false;
+        self.remote_error = None;
+        self.remote_device_generation += 1;
+        let generation = self.remote_device_generation;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut arguments = vec![action.to_string(), id];
+                    if let Some(code) = code {
+                        arguments.push(code);
+                    }
+                    run_remote(&arguments)?;
+                    read_devices(&run_remote(&["devices".into()])?)
+                })
+                .await;
+            if let Err(error) = view.update(cx, |view, cx| {
+                if view.remote_device_generation != generation {
+                    return;
+                }
+                view.remote_device_busy = false;
+                view.remote_poll_due = true;
+                match result {
+                    Ok(devices) => {
+                        // 読み取り・登録済みのQRを退けて、照合と承認の操作をすぐ見せる。
+                        if view.remote_pairing.as_ref().is_some_and(|pairing| {
+                            devices.iter().any(|device| {
+                                pairing.room.as_deref() == Some(device.id.as_str())
+                                    && matches!(device.state.as_str(), "pending" | "approved")
+                            })
+                        }) {
+                            view.remote_pairing = None;
+                            view.remote_generation += 1;
+                        }
+                        view.remote_devices = devices;
+                    }
+                    Err(_) => {
+                        view.remote_error = Some(i18n::t!("settings.remote_action_error").into())
+                    }
+                }
+                cx.notify();
+            }) {
+                eprintln!("Remote device action view closed: {error}");
+            }
+        })
+        .detach();
+    }
+
+    fn remote_devices_section(&self, cx: &mut Context<Self>) -> Div {
+        let theme = &self.theme;
+        let mut list = div()
+            .text_color(theme.fg0)
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .mt(px(16.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(SharedString::from(i18n::t!("settings.remote_devices"))),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.remote_devices_hint"))),
+            );
+        if self.remote_devices.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.remote_no_devices"))),
+            );
+        }
+        for (index, device) in self.remote_devices.iter().enumerate() {
+            let state_key = match device.state.as_str() {
+                "pending" => "settings.remote_pending",
+                "approved" if device.online => "settings.remote_device_online",
+                "approved" => "settings.remote_device_registered",
+                "legacy" => "settings.remote_device_legacy",
+                _ => "settings.remote_device_pairing",
+            };
+            let mut row = div().flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(6.))
+                .border_1().border_color(theme.border)
+                .child(div().flex().justify_between().gap(px(8.))
+                    .child(SharedString::from(device.name.clone()))
+                    .child(div().text_size(px(11.)).text_color(theme.fg2).child(SharedString::from(i18n::t!(state_key)))))
+                .child(div().text_size(px(11.)).text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.remote_shared_count", "count" => device.projects.len()))));
+            if device.state == "pending" {
+                row = row
+                    .child(div().child(SharedString::from(i18n::t!(
+                        "settings.remote_approve_question"
+                    ))))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_family("monospace")
+                            .child(SharedString::from(device.code.clone().unwrap_or_default())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.remote_compare_hint"))),
+                    );
+            }
+            let action_button = |id: &'static str, label: String| {
+                div()
+                    .id((id, index))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(12.))
+                    .text_color(theme.fg1)
+                    .when(!self.remote_device_busy, |element| {
+                        element.cursor_pointer().hover(|style| style.bg(theme.bg3))
+                    })
+                    .child(SharedString::from(label))
+            };
+            let mut actions = div().flex().flex_wrap().gap(px(8.));
+            if device.state == "pending" && !self.remote_device_busy {
+                let id = device.id.clone();
+                let code = device.code.clone();
+                actions = actions.child(
+                    action_button("remote-approve", i18n::t!("settings.remote_approve"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _, cx| {
+                                view.remote_device_action("approve", id.clone(), code.clone(), cx)
+                            }),
+                        ),
+                );
+            }
+            if !self.remote_device_busy {
+                let id = device.id.clone();
+                actions = actions.child(
+                    action_button(
+                        "remote-revoke",
+                        i18n::t!(if device.state == "pending" {
+                            "settings.remote_deny"
+                        } else {
+                            "settings.remote_revoke"
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _, cx| {
+                            view.remote_device_action("revoke", id.clone(), None, cx)
+                        }),
+                    ),
+                );
+            } else {
+                actions = actions.child(SharedString::from(i18n::t!("settings.cli_busy")));
+            }
+            list = list.child(row.child(actions));
+        }
+        list
+    }
     /// 隔離した UI 撮影用。公開鍵やユーザー設定を変更せず、ダミー QR だけを描画する。
     #[cfg(feature = "remote-preview")]
     pub fn remote_preview(&mut self, payload: &[u8]) {
         self.remote_pairing = parse_pairing(payload).ok();
+        self.remote_devices = read_devices(payload).unwrap_or_default();
+        if self
+            .remote_devices
+            .iter()
+            .any(|device| device.state == "pending")
+        {
+            self.remote_pairing = None;
+        }
         self.remote_preview_only = true;
     }
     fn issue_remote_qr(&mut self, cx: &mut Context<Self>) {
@@ -242,6 +532,7 @@ impl SettingsView {
                 .into_any_element()
         } else {
             button("remote-issue-qr", i18n::t!("settings.remote_issue"))
+                .debug_selector(|| "remote-issue-qr".to_string())
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _, _, cx| view.issue_remote_qr(cx)),
@@ -281,12 +572,23 @@ impl SettingsView {
                             view.remote_pairing = None; view.remote_generation += 1; cx.notify();
                         }))))
             })
+            .child(self.remote_devices_section(cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_status_rejects_unusable_ids_and_approval_codes() {
+        let mut value = serde_json::json!({"devices":[{"id":"a".repeat(43),"name":"Phone","state":"pending","code":"123456","projects":["a"]}]});
+        assert_eq!(read_devices(value.to_string().as_bytes()).unwrap().len(), 1);
+        value["devices"][0]["code"] = "bad".into();
+        assert!(read_devices(value.to_string().as_bytes()).is_err());
+        value["devices"][0]["code"] = "123456".into();
+        value["devices"][0]["id"] = "../invalid".into();
+        assert!(read_devices(value.to_string().as_bytes()).is_err());
+    }
     #[test]
     fn qr_payload_validation() {
         let mut value = serde_json::json!({"url":"https://control.necoder.com/#test", "size":21,

@@ -31,6 +31,21 @@
     <footer class="legal"><span data-t="footer"></span><a href="/source.tar.gz" data-t="source"></a></footer>
   </section>
 
+  <section id="security-screen" hidden>
+    <header class="bar"><div class="bar-title"><span class="brand">necoder <small>Remote</small></span></div>
+      <button id="security-settings" class="chip" type="button" data-t="settings"></button></header>
+    <main class="welcome security-content">
+      <p class="eyebrow" data-t="securityEyebrow"></p>
+      <h1 id="security-title"></h1><p id="security-description"></p>
+      <div id="security-code-wrap" hidden><p data-t="securityCompare"></p><p id="security-code" class="security-code"></p></div>
+      <label id="security-name-label" for="security-device-name" data-t="securityDeviceName"></label>
+      <input id="security-device-name" maxlength="80" autocomplete="off" value="Phone">
+      <button id="security-verify" class="primary" type="button"></button>
+      <p id="security-error" class="hint" role="alert"></p>
+      <button id="security-forget" class="chip" type="button" data-t="securityPairAgain"></button>
+    </main>
+  </section>
+
   <!-- ホーム: 共有中の全プロジェクトのスレッド一覧（要対応・実行中を先頭に） -->
   <section id="home" hidden>
     <header class="bar">

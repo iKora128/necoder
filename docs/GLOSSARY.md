@@ -67,10 +67,10 @@
 | ↳ **消えています**（Task の worktree が necoder の外で消された。片付け = レールから外す） | `vanished_worktree` / `forget_vanished_task` | 消えています / 片付け | Gone / Clean up |
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
-| ↳ **足したエージェント**（組み込みの 7 件の外から一覧に足したエージェント。settings.json の `agent_servers.<新しい id>` に自分のコマンドを書いた物・issue #38 H1。表示名は `name`・無ければ id） | `acp_client::CustomAgent` / `acp_client::AgentCatalog` / `acp_client::Agent`（組み込みと共通の入口）/ `settings::agent_catalog` | 足したエージェント / 外す | Added agent / Remove |
-| ↳ **エージェントを追加**（ACP の公開レジストリの全件から選んで足す画面。足すと `agent_servers.<レジストリの id>` に `type: registry` と `name` を書く・issue #38 H2） | `settings::add_agent`（`AddAgentDialog`）/ `acp_client::registry::Registry::search` / `acp_client::CustomLaunch::Registry` | エージェントを追加 / 追加 / 追加済み / 組み込み / 取り直す | Add agent / Add / Added / Built in / Refresh |
+| ↳ **足したエージェント**（組み込みの 7 件の外から一覧に足したエージェント。settings.json の `agent_servers.<新しい id>` に自分のコマンドを書いた物・issue #38 H1。表示名は `name`・無ければ id） | `acp_client::CustomAgent` / `acp_client::AgentCatalog` / `acp_client::Agent`（組み込みと共通の入口）/ `settings::agent_catalog` | 足したエージェント / 削除 | Added agent / Remove |
+| ↳ **エージェントを追加**（ACP の公開レジストリの全件から選んで足す画面。足すと `agent_servers.<レジストリの id>` に `type: registry` と `name` を書く・issue #38 H2） | `settings::add_agent`（`AddAgentDialog`）/ `acp_client::registry::Registry::search` / `acp_client::CustomLaunch::Registry` | エージェントを追加 / 追加 / 追加済み / 一覧を取得 / 一覧を更新 | Add agent / Add / Added / Fetch list / Refresh list |
 | ↳ **配布の形**（レジストリの項目の起動の仕方。このマシン向けの binary → npx → uvx の順で選ぶ） | `acp_client::registry::DistributionKind` / `RegistryAgent::launch_for` | binary / npx / uvx | binary / npx / uvx |
-| ↳ ↳ **binary の配備**（レジストリの URL から落とし、sha256 で照合して、版ごとの置き場に展開する。最初の起動の時に背景で） | `acp_client::deploy`（`BinaryTarget::deploy` / `binary_root`）/ `Agent::deploy_command` | 落としています / 検証の値がありません | Downloading / No checksum |
+| ↳ ↳ **binary の配備**（レジストリの URL から落とし、sha256 で照合して、版ごとの置き場に展開する。最初の起動の時に背景で） | `acp_client::deploy`（`BinaryTarget::deploy` / `binary_root`）/ `Agent::deploy_command` | ダウンロード中 / 検証情報なし | Downloading / No verification information |
 | ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |
@@ -112,6 +112,8 @@
 | **常駐**（Herdr sidecar 実行形態・P7） | `HerdrRuntime`（予定） | 常駐 | Resident (Herdr) |
 | **リモート管制**（スマホから見る/裁く・P9） | `serve --control` / `remote_control` | リモート管制 | Remote control |
 | ↳ **ペアリング**（QR で端末を繋ぐ・1 回きり） | `pairing` / `room_id` | ペアリング | Pairing |
+| ↳ **端末の接続承認**（スマホとPCの照合コードを比較し、PC上で登録を承認する。QRだけでは利用不可） | `Bridge.approve` / `approved` | 接続の承認 | Connection approval |
+| ↳ **パスキーによる本人確認**（端末の顔・指紋・PIN等。署名とUVをPCホストが検証する） | `passkey` / `authenticatePasskey` | 本人確認 | Verification |
 | ↳ **デバイス**（ペア済みの端末・失効の単位） | `PairedDevice` | デバイス | Device |
 | ↳ **リレー**（room id が一致する 2 本を繋ぐ交換機） | `relay`（`relay/`・DO） | リレー | Relay |
 | ↳ **封**（transport 非依存の暗号化フレーム） | `seal` / `open` / `SealedFrame` | — | — |
@@ -140,7 +142,7 @@
 | ↳ **Web タブ**（localhost の開発サーバを見るタブ。読み込めるのはループバックの http(s) だけ・汎用ブラウザではない。鍵は URL。入口はパレット「プレビュー: localhost を開く…」と transcript / Markdown のリンク） | `TabContent::Web` / `WebPreviewView` / `webview_view::localhost` / `Workspace::open_url` | Web タブ | Web tab |
 | ↳ **Design モード**（Web タブのページの要素を選び、切り抜きと説明を composer へ「要素のチップ」として添える。送信はしない。⌘⇧D） | `ToggleDesignMode` / `webview_view::design` / `ElementCapture` / `WebPreviewEvent::ElementPicked` | Design モード / 要素のチップ | Design Mode / element chip |
 | ↳ **Web Inspector**（Web タブのツールバーの `</>`・自分の localhost のアプリを調べる開発者向けの道具。Design モードは使わない。macOS は WebKit の物（窓の題名は OS が付ける「Webインスペクタ」）を necoder の窓の中に付けず**別の窓**で開く・Windows は WebView2 の DevTools。「DevTools」とは書かない） | `ToggleWebInspector` / `WebViewView::toggle_devtools` / `webview_view::inspector` | Web Inspector | Web Inspector |
-| ↳ **内蔵の配信**（HTML ファイルを Web タブで開くための、necoder の中の小さな静的配信。`127.0.0.1`・token 付きの URL・そのファイルのフォルダだけ・使う Web タブがある間だけ動く） | `webview_view::static_server` / `StaticHosting` / `StaticMount` / `Workspace::open_static_web_tab` / `OpenHtmlInWebTab` | 内蔵の配信 / Web タブで開く | Built-in server / Open in Web tab |
+| ↳ **内蔵の配信**（HTML ファイルを Web タブで開くための、necoder の中の小さな静的配信。`127.0.0.1`・token 付きの URL・そのファイルのフォルダだけ・使う Web タブがある間だけ動く） | `webview_view::static_server` / `StaticHosting` / `StaticMount` / `Workspace::open_static_web_tab` / `OpenHtmlInWebTab` | HTML ファイル / Web タブで開く | HTML file / Open in Web tab |
 | **ne コマンド**（ターミナルから開く CLI・`code`/`cursor` 相当） | `cli_shim`（シム生成）/ `necoder cli`（実体） | ne コマンド | ne command |
 | **ターミナル**（下ドックの統合ターミナル。Task カードの「ターミナル」サイドペインと同じ実体） | `terminal_view::TerminalView` / `TerminalDock` | ターミナル | Terminal |
 | ↳ **ターミナル内検索**（⌘F・scrollback を含む。エディタの「検索」= バッファ内検索とは別） | `terminal::Find` / `terminal_view::search` | ターミナル内を検索 | Find in terminal |

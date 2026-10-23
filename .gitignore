@@ -33,3 +33,6 @@ herdr/
 
 # wrangler のローカル状態（Pages デプロイ時に作られる）
 /.wrangler/
+
+# Cloudflare のローカルアカウントキャッシュ（アカウント ID を含む）
+/.cloudflare/

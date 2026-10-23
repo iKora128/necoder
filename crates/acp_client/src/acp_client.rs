@@ -6,6 +6,7 @@
 //!
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
+pub mod children;
 pub mod codex_limits;
 pub mod custom;
 pub mod deploy;
@@ -1348,11 +1349,14 @@ fn bounded_npm_spec(package: &str) -> String {
 async fn probe_session(command: &AgentCommand, timeout: Duration) -> bool {
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
-        .envs(command.env.clone());
+        .envs(command.env.clone())
+        .in_own_process_group();
     let mut process = match LocalHost::shared().spawn_process(&spec) {
         Ok(process) => process,
         Err(_) => return false,
     };
+    // 短い見張りでも、アプリ終了時に残さない（run_session_on と同じ番人）。
+    let _child = children::register(process.id());
     let stdin = match process.take_stdin() {
         Ok(stdin) => stdin,
         Err(_) => return false,
@@ -1828,13 +1832,17 @@ pub async fn run_session_on(
         .envs(host::task_environment(host.as_ref(), &command.cwd)?)
         .envs(command.env.clone())
         // プリセットの環境変数が最後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
-        .envs(preferences.preset.env.clone());
+        .envs(preferences.preset.env.clone())
+        // 孫（app-server / MCP）ごと止められるよう、ACP の子だけ新しいグループにする。
+        .in_own_process_group();
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
     // 渡しても意味がない。判定はここで取る（下の接続クロージャは `move` で `host` を持ち込まない）。
     let is_remote = host.is_remote();
     let mut process = host
         .spawn_process(&spec)
         .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
+    // セッションが終わったら SIGTERM、アプリ終了時は shutdown_all が道連れにする（children）。
+    let _child = children::register(process.id());
     let stdin = process.take_stdin()?;
     let stdout = process.take_stdout()?;
     let transport = acp::ByteStreams::new(

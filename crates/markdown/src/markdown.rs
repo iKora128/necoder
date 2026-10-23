@@ -200,10 +200,8 @@ pub fn parse(source: &str) -> Vec<Block> {
                     pending = Some(Pending::Paragraph);
                 }
             }
-            Event::End(TagEnd::Paragraph) => {
-                if !in_item(&pending) {
-                    flush(&mut blocks, &mut text, &mut spans, &mut pending);
-                }
+            Event::End(TagEnd::Paragraph) if !in_item(&pending) => {
+                flush(&mut blocks, &mut text, &mut spans, &mut pending);
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 flush(&mut blocks, &mut text, &mut spans, &mut pending);

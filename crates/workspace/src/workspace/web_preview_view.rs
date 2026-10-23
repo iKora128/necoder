@@ -292,7 +292,7 @@ impl WebPreviewView {
     }
 
     /// テスト用: 読み込み直しを頼まれた回数。
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
     pub(crate) fn reload_requests(&self) -> usize {
         self.reload_requests
     }

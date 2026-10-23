@@ -9,6 +9,9 @@ IPC の仕様は [Node.js](https://nodejs.org/api/net.html)、ACL は [Microsoft
 Mac の necoder をスマホの PWA から操作する独立した Cloudflare Worker。
 既存の necoder.com の LP は変更せず、control.necoder.com に配置します。
 
+> 2026-10-23 のスマホ連携強化はローカル作業中。ユーザー指示により、この文書を含む変更を **commit / push しない**。
+> 詳細と検証状況は [`docs/PHONE-PAIRING-SECURITY.md`](../docs/PHONE-PAIRING-SECURITY.md)。本番PWAには未反映です。
+
 ## 構成
 
 スマホ PWA → HTTPS / WebSocket → Cloudflare Durable Object ← outbound WebSocket ← Mac のホスト → Unix socket → necoder / ACP agent。
@@ -26,7 +29,10 @@ ne remote pair iPhone
 
 資格情報（room id・host/phone token・E2E の長期鍵）は**すべて Mac がローカルで生成**します。
 リレーは token の SHA-256 ハッシュしか持たず、E2E の鍵は QR のフラグメント（`#`）にしか載りません。
-サインアップ・OAuth・ユーザーレコードは存在しません（DECISIONS 2026-07-25「QR がそのまま資格情報＝アカウント不要」）。
+サインアップ・OAuth・ユーザーレコードは存在しません。QRは暗号化接続を始める資格情報ですが、
+利用にはパスキー登録・PCでのコード照合と承認・パスキーによる本人確認も必要です。
+初めてGUIからQRを発行するときは、未設定の場合だけホストのローカル設定と鍵を作成します。
+新版からのQR発行時に古いホストが動いている場合は、認証済みのローカル管理APIで停止して新版を起動します。
 
 ### リレーを自分で運用する場合
 
@@ -103,6 +109,13 @@ Mac のスリープ・電源断・回線断の間は操作できません。Mac 
 Mac が 30 日間 room を更新できないと relay room は期限切れになり、再ペアリングが必要です。
 
 ## セキュリティと運用
+
+WebAuthnは `@simplewebauthn/server` でPCホストが検証します。Origin / RP ID / UV / 署名 / 1回限りの
+チャレンジを検証し、暗号チャネルごとに認証状態を分離します。登録だけではアクセスできず、PCの明示承認が必要です。
+起動・再接続・復帰後にパスキーで本人確認し、5分の無操作または認証から15分でロックします。
+heartbeatやPCからの状態配信は無操作期限を延長しません。ロック中は会話や差分も送らず、スマホの表示と下書きも消します。
+旧端末は再ペアリングが必要です。未承認の登録はQRの5分の期限内に完了しなければ失効します。
+PCのスマホアイコンからコード照合・承認・拒否・解除できます。CLIでは `devices` / `approve <id> <code>` / `revoke <id>`。
 
 ペアリングの共有秘密で相互認証し、接続ごとの P-256 ECDH + HKDF + 方向別 AES-GCM を使用します。
 連番とセッション識別子で改ざん・再送・別接続からの流用を拒否します。ペアリング成功時に QR の秘密を別の長期鍵へ置換します。

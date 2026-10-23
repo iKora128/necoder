@@ -370,6 +370,7 @@ impl gpui::AssetSource for Assets {
             "icons/folder-plus.svg" => icon!("folder-plus.svg"),
             "icons/folder-tree.svg" => icon!("folder-tree.svg"),
             "icons/settings.svg" => icon!("settings.svg"),
+            "icons/smartphone-user-round.svg" => icon!("smartphone-user-round.svg"),
             "icons/square-check.svg" => icon!("square-check.svg"),
             "icons/server.svg" => icon!("server.svg"),
             "icons/list.svg" => icon!("list.svg"),
@@ -650,11 +651,42 @@ fn reopen_windows(cx: &mut App) {
     cx.activate(true);
 }
 
+/// Linux の描画調査用の stderr ロガー。`NECODER_WGPU_LOG=1` の時だけ gpui/wgpu の
+/// `log` レコードを拾う（GPUI は `log` を出すが、アプリ側にロガーが無いと全部捨てられる）。
+struct WgpuLogger;
+
+impl log::Log for WgpuLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Debug
+            && (metadata.target().starts_with("gpui") || metadata.target().starts_with("wgpu"))
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!(
+                "[{} {}] {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static WGPU_LOGGER: WgpuLogger = WgpuLogger;
+
 fn main() {
     // `ssh` が askpass として起こした自分自身なら、GUI にも log にも触れずに答えだけ返す
     // （stdout は答え専用。redirect_output_for_gui_launch より**前**でなければならない）。
     if askpass::run() {
         return;
+    }
+    // Linux の描画調査用。既定は無効（gpui/wgpu のログは普段は誰も拾わない）。
+    if std::env::var_os("NECODER_WGPU_LOG").is_some() {
+        log::set_logger(&WGPU_LOGGER).ok();
+        log::set_max_level(log::LevelFilter::Debug);
     }
     // 旧ブランド Shirushi の置き場からデータを引き取る（改名 2026-08-22・DECISIONS §8）。
     // logging が `…/necoder/logs/` を作る**前**に動かす必要があるので、ここが本当の先頭。
@@ -1872,6 +1904,12 @@ fn main() {
         cx.activate(true);
         maybe_capture_screenshot(window, cx);
     });
+    // イベントループが返った = 終了。⌘Q は quit_now を通るが、最後の窓を閉じただけの終了は
+    // 通らないことがあるので、ここでも道連れにする（registry は shutdown_all が空にする）。
+    let stopped = acp_client::children::shutdown_all(std::time::Duration::from_millis(400));
+    if stopped > 0 {
+        eprintln!("終了: ACP の子プロセス {stopped} 本を止めた");
+    }
 }
 
 /// 開発用ヘッドレススクショ: `NECODER_SCREENSHOT=<path>` で数フレーム後に render_to_image →

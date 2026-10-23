@@ -79,24 +79,31 @@ impl Workspace {
                 .iter()
                 .position(|slot| slot.task_space.id.as_str() == task)
                 .ok_or_else(|| anyhow::anyhow!("task_not_open"))?;
+            // 新規スレッドにも期限を適用する。読み取りだけの remote_thread は対象外。
+            if method != "remote_thread" {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis() as u64;
+                let expires = params["expires_at"].as_u64().unwrap_or(0);
+                anyhow::ensure!(expires > now && expires <= now + 60_000, "command_expired");
+            }
             let thread_id = params["thread_id"].as_str().unwrap_or("");
-            let panel = self.project_sessions.sessions[index]
-                .fleet_agents
-                .iter()
-                .find(|panel| panel.read(cx).contains_thread(thread_id))
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("thread_not_found"))?;
+            let session = &self.project_sessions.sessions[index];
+            let panel = if method == "remote_new_thread" && thread_id.is_empty() {
+                session.agent_panel.clone()
+            } else {
+                session
+                    .fleet_agents
+                    .iter()
+                    .find(|panel| panel.read(cx).contains_thread(thread_id))
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("thread_not_found"))?
+            };
             if method == "remote_thread" {
                 return panel
                     .read(cx)
                     .remote_thread(params["thread_id"].as_str().unwrap_or(""));
             }
-            // 承認/送信はネットワーク断を跨いで遅延実行しない。IPC キュー内の待ちも期限に含める。
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis() as u64;
-            let expires = params["expires_at"].as_u64().unwrap_or(0);
-            anyhow::ensure!(expires > now && expires <= now + 60_000, "command_expired");
             let command = method.strip_prefix("remote_").unwrap_or("");
             let result = panel.update(cx, |panel, cx| panel.remote_command(command, &params, cx));
             cx.notify();

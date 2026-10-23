@@ -603,6 +603,11 @@ pub struct SettingsView {
     remote_busy: bool,
     remote_error: Option<SharedString>,
     remote_generation: u64,
+    remote_devices: Vec<remote::RemoteDevice>,
+    remote_status_busy: bool,
+    remote_poll_due: bool,
+    remote_device_busy: bool,
+    remote_device_generation: u64,
     /// Skills 節の中身（skill 置き場の走査結果と necoder の skill の状態）。`None` = まだ読んでいない。
     /// 他人の置き場を数十個読むので背景で読み、描画はこのキャッシュだけを見る。
     skills: Option<SkillsSnapshot>,
@@ -723,6 +728,11 @@ impl SettingsView {
             remote_busy: false,
             remote_error: None,
             remote_generation: 0,
+            remote_devices: Vec::new(),
+            remote_status_busy: false,
+            remote_poll_due: true,
+            remote_device_busy: false,
+            remote_device_generation: 0,
             skills: None,
             skills_project: None,
             skills_busy: false,
@@ -4063,8 +4073,16 @@ impl EventEmitter<SettingsViewEvent> for SettingsView {}
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 次のpollは実際に描画されている時だけ開始する。設定を閉じれば連鎖は止まる。
+        if self.page == SettingsPage::Remote
+            && self.remote_poll_due
+            && !self.remote_status_busy
+            && !self.remote_device_busy
+        {
+            self.refresh_remote_devices(cx);
+        }
         // 開いた時に予約された vendor CLI 調査を、実際に描かれたこの瞬間に 1 回だけ蹴る。
-        if self.availability_pending {
+        if self.availability_pending && self.page != SettingsPage::Remote {
             self.probe_availability(cx);
         }
         #[cfg(feature = "remote-preview")]
@@ -4081,7 +4099,7 @@ impl Render for SettingsView {
         let theme = self.theme.clone();
         let accent = self.accent;
         let settings = get(cx);
-        let onboarding = !settings.onboarded;
+        let onboarding = !settings.onboarded && self.page != SettingsPage::Remote;
         // 初回は器（ナビ）を出さない — 上から順に読ませたいので 1 枚スクロールのまま（UI-SPEC §12）。
         if onboarding {
             let body = div()

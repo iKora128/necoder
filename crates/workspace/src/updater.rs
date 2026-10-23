@@ -260,7 +260,7 @@ fn parse_content_length(headers: &str) -> Option<u64> {
                 .then(|| value.trim().parse::<u64>().ok())
                 .flatten()
         })
-        .last()
+        .next_back()
 }
 
 /// ダウンロードの総バイト数を HEAD で聞く（進捗バーの分母）。取れなければ None＝不定表示。
@@ -282,9 +282,12 @@ fn remote_content_length(url: &str) -> Option<u64> {
 /// `report` は段階と進み（ダウンロードは ~120ms ごと）を UI へ知らせるコールバック。
 pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> Result<()> {
     let bundle = running_app_bundle().context(i18n::t!("update.err_no_bundle"))?;
+    // 現在の正規署名から Team ID を取り、Apple Developer ID と bundle ID も両方確認する。
+    let requirement = update_signing_requirement(&bundle)?;
     // 予測不能な 0700 の作業ディレクトリに落とす（旧: /tmp の固定名 = spctl 検証→マウントの間に
     // 差し替えられる理屈上の隙。sticky /tmp で他ユーザーの unlink は防げるが、名前も読めなくする）。
-    let staging_dir = unique_staging_dir()?;
+    let staging_guard = UpdateDirectory(unique_staging_dir()?);
+    let staging_dir = &staging_guard.0;
     let staging = staging_dir.join("necoder.dmg");
     // 1) ダウンロード。curl を子プロセスで走らせ、落ちてくるファイルの大きさを見て進みを報告する
     //    （curl の進捗出力を解析するより単純で、-o 先の metadata は常に取れる）。
@@ -347,21 +350,121 @@ pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> R
     let result = (|| -> Result<()> {
         let new_app = mount_point.join("necoder.app");
         anyhow::ensure!(new_app.exists(), i18n::t!("update.err_no_app"));
-        // ditto は bundle を安全に複製する（メタデータ/署名を保つ）。実行中でも置換可能。
-        let copy = Command::new("ditto")
-            .arg(&new_app)
-            .arg(&bundle)
-            .status()
-            .context(i18n::t!("update.err_ditto"))?;
-        anyhow::ensure!(copy.success(), i18n::t!("update.err_replace"));
-        Ok(())
+        verify_update_signature(&new_app, &requirement)?;
+        stage_and_replace_bundle(&bundle, &new_app, &|candidate| {
+            verify_update_signature(candidate, &requirement)
+        })
     })();
     let _detach = Command::new("hdiutil")
         .args(["detach"])
         .arg(&mount_point)
         .status();
-    let _cleanup = std::fs::remove_dir_all(&staging_dir);
     result
+}
+
+/// codesign の表示結果から Team ID だけを受ける。要件式へ文字列を挿すため形式も絞る。
+fn signing_requirement(signature_info: &str) -> Option<String> {
+    let team = signature_info
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))?;
+    if team.len() != 10
+        || !team
+            .bytes()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!(
+        "anchor apple generic and identifier \"dev.necoder.editor\" \
+         and certificate leaf[subject.OU] = \"{team}\" \
+         and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+         and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    ))
+}
+
+fn update_signing_requirement(bundle: &std::path::Path) -> Result<String> {
+    let signature = Command::new("/usr/bin/codesign")
+        .args(["--display", "--verbose=4"])
+        .arg(bundle)
+        .output()
+        .context(i18n::t!("update.err_spctl"))?;
+    anyhow::ensure!(
+        signature.status.success(),
+        i18n::t!("update.err_signature", "detail" => String::from_utf8_lossy(&signature.stderr))
+    );
+    let requirement = signing_requirement(&String::from_utf8_lossy(&signature.stderr)).context(
+        i18n::t!("update.err_signature", "detail" => String::from_utf8_lossy(&signature.stderr)),
+    )?;
+    verify_update_signature(bundle, &requirement)?;
+    Ok(requirement)
+}
+
+fn verify_update_signature(bundle: &std::path::Path, requirement: &str) -> Result<()> {
+    let verified = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(format!("-R={requirement}"))
+        .arg(bundle)
+        .output()
+        .context(i18n::t!("update.err_spctl"))?;
+    anyhow::ensure!(
+        verified.status.success(),
+        i18n::t!("update.err_signature", "detail" => String::from_utf8_lossy(&verified.stderr))
+    );
+    Ok(())
+}
+
+struct UpdateDirectory(PathBuf);
+
+impl Drop for UpdateDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            eprintln!(
+                "更新作業の置き場を消せない（{}）: {error}",
+                self.0.display()
+            );
+        }
+    }
+}
+
+/// 同じファイルシステムの空の置き場へ全体を複製し、検証が成功してから一括で交換する。
+/// 旧 bundle に重ね書きしないため、コピー失敗も削除された旧リソースも持ち込まない。
+fn stage_and_replace_bundle(
+    bundle: &std::path::Path,
+    source: &std::path::Path,
+    verify: &dyn Fn(&std::path::Path) -> Result<()>,
+) -> Result<()> {
+    let parent = bundle.parent().context(i18n::t!("update.err_no_bundle"))?;
+    let staging = UpdateDirectory(unique_staging_dir_in(parent)?);
+    let candidate = staging.0.join("necoder.app");
+    let copy = Command::new("/usr/bin/ditto")
+        .arg(source)
+        .arg(&candidate)
+        .status()
+        .context(i18n::t!("update.err_ditto"))?;
+    anyhow::ensure!(copy.success(), i18n::t!("update.err_replace"));
+    verify(&candidate)?;
+    swap_bundles(bundle, &candidate)
+}
+
+fn swap_bundles(bundle: &std::path::Path, candidate: &std::path::Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let bundle = std::ffi::CString::new(bundle.as_os_str().as_bytes())?;
+        let candidate = std::ffi::CString::new(candidate.as_os_str().as_bytes())?;
+        // SAFETY: NUL 終端した 2 つのパスを渡す。成功時だけ両方を原子的に交換する API。
+        let result =
+            unsafe { libc::renamex_np(bundle.as_ptr(), candidate.as_ptr(), libc::RENAME_SWAP) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).context(i18n::t!("update.err_replace"));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (bundle, candidate);
+        anyhow::bail!(i18n::t!("update.err_replace"))
+    }
 }
 
 /// 差し替え後の再起動: 自プロセスの終了を待ってから .app を開き直す子プロセスを切り離して起動する。
@@ -393,11 +496,15 @@ pub fn spawn_relauncher() -> Result<()> {
 
 /// 更新作業用の一意なディレクトリ（unix は 0700）を作る。既存衝突は fail-closed（作り直さない）。
 fn unique_staging_dir() -> Result<PathBuf> {
+    unique_staging_dir_in(&std::env::temp_dir())
+}
+
+fn unique_staging_dir_in(parent: &std::path::Path) -> Result<PathBuf> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("necoder-update-{}-{nanos}", std::process::id()));
+    let dir = parent.join(format!(".necoder-update-{}-{nanos}", std::process::id()));
     // `mode()` を呼ぶのは unix だけ＝Windows では `mut` が不要になる（W2 の受入条件は警告 0）。
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
@@ -422,6 +529,90 @@ fn running_app_bundle() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_requirements_pin_the_publisher_and_the_app() {
+        let requirement =
+            signing_requirement("Identifier=dev.necoder.editor\nTeamIdentifier=ABCDE12345\n")
+                .unwrap();
+        assert!(requirement.contains("anchor apple generic"));
+        assert!(requirement.contains("identifier \"dev.necoder.editor\""));
+        assert!(requirement.contains("certificate leaf[subject.OU] = \"ABCDE12345\""));
+        assert!(requirement.contains("1.2.840.113635.100.6.1.13"));
+        for invalid in [
+            "",
+            "TeamIdentifier=not set",
+            "TeamIdentifier=abcde12345",
+            "TeamIdentifier=ABCDE12345 or true",
+        ] {
+            assert!(signing_requirement(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_ad_hoc_signature_is_not_trusted_for_updates() {
+        let fixture = UpdateDirectory(unique_staging_dir().unwrap());
+        let executable = fixture.0.join("adhoc");
+        std::fs::copy("/usr/bin/true", &executable).unwrap();
+        assert!(Command::new("/usr/bin/codesign")
+            .args([
+                "--force",
+                "--sign",
+                "-",
+                "--identifier",
+                "dev.necoder.editor"
+            ])
+            .arg(&executable)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(update_signing_requirement(&executable).is_err());
+        let requirement = signing_requirement("TeamIdentifier=ABCDE12345").unwrap();
+        assert!(verify_update_signature(&executable, &requirement).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_replacement_preserves_the_original_until_copy_and_verification_succeed() {
+        let fixture = UpdateDirectory(unique_staging_dir().unwrap());
+        let old = fixture.0.join("installed.app");
+        let source = fixture.0.join("source.app");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(old.join("version"), "old").unwrap();
+        std::fs::write(old.join("removed-resource"), "old resource").unwrap();
+        std::fs::write(source.join("version"), "new").unwrap();
+
+        assert!(stage_and_replace_bundle(&old, &source, &|_| anyhow::bail!(
+            "synthetic signature failure"
+        ))
+        .is_err());
+        assert_eq!(std::fs::read_to_string(old.join("version")).unwrap(), "old");
+        assert!(old.join("removed-resource").exists());
+        assert!(swap_bundles(&old, &fixture.0.join("missing.app")).is_err());
+        assert_eq!(std::fs::read_to_string(old.join("version")).unwrap(), "old");
+
+        stage_and_replace_bundle(&old, &source, &|candidate| {
+            anyhow::ensure!(
+                std::fs::read_to_string(candidate.join("version"))? == "new",
+                "copy mismatch"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(old.join("version")).unwrap(), "new");
+        assert!(
+            !old.join("removed-resource").exists(),
+            "削除されたリソースが残らない"
+        );
+        assert_eq!(
+            std::fs::read_dir(&fixture.0).unwrap().count(),
+            2,
+            "作業ディレクトリを残さない"
+        );
+    }
 
     /// O45・H17: 更新の後の最初の起動だけ前の版を返す（初回・同じ版・下がった版は何も言わない）。
     #[test]

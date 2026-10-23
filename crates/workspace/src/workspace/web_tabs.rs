@@ -952,6 +952,7 @@ mod tests {
     }
 
     /// 生の HTTP/1.1 で GET して本文を返す（配信が本当に配っているかを見る）。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn http_get(url: &str) -> String {
         use std::io::{Read as _, Write as _};
         let rest = url.strip_prefix("http://").expect("http の URL");
@@ -965,6 +966,7 @@ mod tests {
 
     /// HTML ファイルは内蔵の配信で Web タブに開く: 鍵はファイルの `file://`、中身は 127.0.0.1 の
     /// token 付きの URL から配られ、同じファイルは同じタブへ戻る。タブを閉じたら配信も止まる。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[gpui::test]
     fn html_files_open_in_a_web_tab_through_the_built_in_server(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new("static_open", cx);
@@ -1021,6 +1023,7 @@ mod tests {
 
     /// 内蔵の配信のページで選んだ要素は、token 付きの URL ではなくファイルのパスで composer に入る
     /// （起動ごとに変わる URL は AI には意味が無い・直すのはそのファイル）。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[gpui::test]
     fn a_static_page_is_named_by_its_file_in_the_prompt(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new("static_prompt", cx);
@@ -1061,6 +1064,7 @@ mod tests {
     }
 
     /// 内蔵の配信の Web タブも再起動で同じ位置に戻る（鍵のファイルから配り直す）。消えたファイルは戻さない。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[gpui::test]
     fn static_web_tabs_come_back_after_a_restart(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new("static_restore", cx);
@@ -1091,6 +1095,7 @@ mod tests {
 
     /// 配っているフォルダの中のファイルが変わったら（既存のファイル監視）、その Web タブを読み込み直す。
     /// フォルダの外・`.git` の変化では読み込み直さない。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[gpui::test]
     fn changes_in_the_served_folder_reload_the_web_tab(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new("static_watch", cx);
@@ -1131,6 +1136,50 @@ mod tests {
         workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
     }
 
+    /// WebView 非対応 OS では、操作からもセッション復元からも配信を起こさない。
+    /// 対応 OS だけの成功系テストに加え、Linux で誤って配信だけ始めないことを検証する。
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[gpui::test]
+    fn unsupported_webviews_do_not_start_static_hosting(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("static_unsupported", cx);
+        let file = write_site(&fixture.project);
+        let text_file = fixture.project.join("a.txt");
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_static_web_tab(file.clone(), window, cx);
+            assert!(workspace.tabs.is_empty(), "表示できない配信タブは作らない");
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|toast| { toast.text.as_ref() == i18n::t!("webtab.unsupported") }),
+                "非対応である理由を知らせる"
+            );
+        });
+        assert!(!hosting_is_running(cx), "操作から配信は起きない");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let restored = RestoredTabs {
+                files: vec![text_file.clone(), static_tab_key(&file).expect("HTML の鍵")],
+                active: 1,
+                pinned: Vec::new(),
+            };
+            workspace.restore_open_file(&[restored], window, cx);
+            assert_eq!(workspace.tabs.len(), 1, "対応するテキストタブだけ戻る");
+            assert_eq!(workspace.tabs[0].path, text_file);
+            assert!(
+                workspace.active_editor().is_some(),
+                "残ったタブを編集できる"
+            );
+            stop_watchers(workspace);
+        });
+        assert!(!hosting_is_running(cx), "復元からも配信は起きない");
+    }
+
     /// SSH のプロジェクトの HTML は配らない（手元のファイルだけ）。配信も起こさない。
     #[gpui::test]
     fn html_in_an_ssh_project_is_not_served(cx: &mut gpui::TestAppContext) {
@@ -1149,11 +1198,14 @@ mod tests {
                 "Web タブは開かない"
             );
             assert!(
-                workspace
-                    .notifications
-                    .toasts
-                    .iter()
-                    .any(|toast| toast.text.as_ref() == i18n::t!("webtab.static_remote")),
+                workspace.notifications.toasts.iter().any(|toast| {
+                    let expected = if webview_view::is_supported() {
+                        i18n::t!("webtab.static_remote")
+                    } else {
+                        i18n::t!("webtab.unsupported")
+                    };
+                    toast.text.as_ref() == expected
+                }),
                 "配らない理由を知らせる"
             );
             stop_watchers(workspace);
@@ -1187,10 +1239,14 @@ mod tests {
             tab.web().cloned().expect("Web タブが開く")
         });
         cx.run_until_parked();
-        assert!(view.read_with(cx, |view, cx| view.is_surface_active(cx)));
-        assert!(
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.is_surface_active(cx)),
+            webview_view::is_supported()
+        );
+        assert_eq!(
             view.read_with(cx, |view, cx| view.wants_key_focus(cx)),
-            "開いた Web タブはキーを WebView へ渡す"
+            webview_view::is_supported(),
+            "ネイティブビューがある場合だけキーを渡す"
         );
 
         workspace.update_in(cx, |workspace, window, cx| {
@@ -1207,9 +1263,10 @@ mod tests {
             workspace.close_picker(window, cx);
         });
         cx.run_until_parked();
-        assert!(
+        assert_eq!(
             view.read_with(cx, |view, cx| view.is_surface_active(cx)),
-            "閉じたら戻る"
+            webview_view::is_supported(),
+            "閉じたら戻る（非対応 OS ではネイティブビューを作らない）"
         );
         workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
     }

@@ -142,6 +142,12 @@ pub fn quit_now(cx: &mut App) {
             eprintln!("窓セッションの整理に失敗: {error:#}");
         }
     }
+    // ACP の子プロセスは drop では死なない（閉じた後にターンが終わって鳴る・メモリが残る）。
+    // SIGTERM を送り、猶予の後に SIGKILL。終了時だけなので UI を少し止めてよい。
+    let stopped = acp_client::children::shutdown_all(std::time::Duration::from_millis(400));
+    if stopped > 0 {
+        eprintln!("終了: ACP の子プロセス {stopped} 本を止めた");
+    }
     cx.quit();
 }
 

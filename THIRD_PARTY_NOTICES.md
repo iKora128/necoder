@@ -35,6 +35,10 @@ This notice is a focused distribution notice, not a replacement for that complet
 - `wry` 0.56.1: Apache-2.0 OR MIT, Tauri Programme within The Commons Conservancy and contributors.
   It is used only as a thin child-view binding to WKWebView on macOS and WebView2 on Windows. necoder
   does not bundle WebKit, Chromium, or the WebView2 runtime.
+- Linux X11 input: `zed-xim` / `xim-parser` / `xim-ctext`, MIT.
+  Copyright (c) 2020 Riey. License text: `third_party/licenses/xim-rs-MIT.txt`.
+  GPUI pins the Zed fork of xim-rs at `16f35a2c881b815a2b6cdfd6687988e84f8447d8`.
+  Source and license: <https://github.com/zed-industries/xim-rs/tree/16f35a2c881b815a2b6cdfd6687988e84f8447d8>.
 
 ## External ACP agents
 

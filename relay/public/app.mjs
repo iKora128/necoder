@@ -3,6 +3,7 @@ import { saveDevice, devices, removeDevice } from './storage.mjs';
 import { t, language, setLanguage } from './i18n.mjs';
 import { markdown, plain } from './markdown.mjs';
 import { describeStep, KINDS } from './steps.mjs';
+import { startRegistration, startAuthentication, browserSupportsWebAuthn } from './passkeys.mjs';
 
 const $ = id => document.getElementById(id);
 const initialFragment = location.hash;
@@ -14,6 +15,9 @@ let outbound = Promise.resolve(), inbound = Promise.resolve(), vapid, pushEnable
 const pending = new Map();
 const drafts = new Map();
 let draftKey = '';
+let userVerified = false, verifiedAt = 0, lastInteraction = 0, lastActivitySent = 0;
+let security = { status: 'connecting' }, securityBusy = false, securityWaiter;
+const IDLE_TIMEOUT = 5 * 60_000, SESSION_TIMEOUT = 15 * 60_000;
 // 画面は 2 枚: view = 'home'（共有中の全スレッド一覧）| 'thread'（1 スレッドの会話）。
 let view = 'home', restoreLast = true, stickToLatest = true, homeScroll = 0;
 const expanded = new Set(); // 開いた折り畳み（`thread:key`）。更新で描き直しても開いたままにする。
@@ -60,7 +64,7 @@ function staticText() {
   document.querySelectorAll('[data-aria]').forEach(element => element.setAttribute('aria-label', t(element.dataset.aria)));
   $('language').value = language; $('language-settings').value = language;
 }
-function live() { return channel && snapshot && status === 'online' && Date.now() - authenticatedAt < 30_000 && !pendingMutation; }
+function live() { return userVerified && channel && snapshot && status === 'online' && Date.now() - authenticatedAt < 30_000 && !pendingMutation; }
 function currentProject() { return snapshot?.projects.find(project => project.id === selectedTask); }
 function currentThread() { return currentProject()?.threads.find(thread => thread.id === selectedThread); }
 function controls() {
@@ -76,7 +80,7 @@ function controls() {
   $('interrupt').disabled = !live();
   $('diff').disabled = !live();
   $('message').placeholder = t(thread?.running ? 'composerRunning' : blocked ? 'composerBlocked' : 'message');
-  $('notifications').disabled = !channel || status !== 'online';
+  $('notifications').disabled = !userVerified || !channel || status !== 'online';
   $('notifications').textContent = t(pushEnabled ? 'notificationsOff' : 'notifications');
   document.querySelectorAll('.project-head .add').forEach(button => { button.disabled = !live(); });
   document.querySelectorAll('[data-mutation]').forEach(button => {
@@ -86,9 +90,68 @@ function controls() {
 function changeStatus(value) { status = value; controls(); }
 function showView() {
   $('welcome').hidden = !!device;
-  $('home').hidden = !device || view !== 'home';
-  $('thread-view').hidden = !device || view !== 'thread';
+  $('security-screen').hidden = !device || userVerified;
+  $('home').hidden = !device || !userVerified || view !== 'home';
+  $('thread-view').hidden = !device || !userVerified || view !== 'thread';
   $('to-latest').hidden = true;
+}
+function clearSensitive() {
+  userVerified = false; verifiedAt = 0; snapshot = null; detail = null;
+  drafts.clear(); draftKey = ''; expanded.clear(); renderedPermission = ''; permissionReviewed = false;
+  for (const id of ['home-list', 'transcript', 'permission', 'question', 'diff-text']) $(id).replaceChildren();
+  for (const id of ['thread-name', 'thread-project', 'thread-meta', 'receipt', 'agent-project']) $(id).textContent = '';
+  $('agent-choices').replaceChildren(); $('message').value = '';
+  notice('');
+  for (const dialog of document.querySelectorAll('dialog.sheet[open]')) dialog.close();
+  themeColor(BASE);
+}
+function securityScreen(value = security) {
+  security = value;
+  const mode = security.status;
+  const supported = browserSupportsWebAuthn();
+  $('security-title').textContent = t(mode === 'pending' ? 'securityPending' : mode === 'register' ? 'securityRegister' : mode === 'legacy' ? 'securityUpgrade' : mode === 'locked' ? 'securityUnlock' : 'connecting');
+  $('security-description').textContent = t(mode === 'pending' ? 'securityPendingHint' : mode === 'legacy' ? 'securityUpgradeHint' : !supported ? 'securityUnsupported' : mode === 'register' ? 'securityRegisterHint' : 'securityUnlockHint');
+  $('security-code-wrap').hidden = mode !== 'pending';
+  $('security-code').textContent = mode === 'pending' ? String(value.code || '') : '';
+  $('security-name-label').hidden = mode !== 'register'; $('security-device-name').hidden = mode !== 'register';
+  $('security-verify').hidden = !['register', 'locked'].includes(mode);
+  $('security-verify').textContent = t(securityBusy ? 'securityVerifying' : mode === 'register' ? 'securityCreate' : 'securityVerify');
+  $('security-verify').disabled = securityBusy || !supported || !channel;
+  showView();
+}
+function lockScreen() {
+  clearSensitive(); securityBusy = false; securityScreen({ status: 'locked' }); changeStatus('locked');
+}
+async function refreshSecurity() {
+  if (securityWaiter) throw new Error('passkey_authentication_required');
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { securityWaiter = null; reject(new Error('passkey_authentication_required')); }, 12_000);
+    securityWaiter = { resolve: value => { clearTimeout(timer); securityWaiter = null; resolve(value); }, reject: error => { clearTimeout(timer); securityWaiter = null; reject(error); } };
+    send({ type: 'security_refresh' }).catch(error => securityWaiter?.reject(error));
+  });
+}
+async function verifyUser() {
+  if (securityBusy || !channel) return;
+  securityBusy = true; $('security-error').textContent = ''; securityScreen();
+  const ownGeneration = generation;
+  try {
+    let options = security;
+    if (!options.options || options.expires <= Date.now() + 1000) options = await refreshSecurity();
+    if (generation !== ownGeneration || !channel) return;
+    if (options.status === 'register') {
+      const response = await startRegistration({ optionsJSON: options.options });
+      if (generation !== ownGeneration) return;
+      await send({ type: 'register_response', response, name: $('security-device-name').value.trim() || 'Phone' });
+    } else if (options.status === 'locked') {
+      const response = await startAuthentication({ optionsJSON: options.options });
+      if (generation !== ownGeneration) return;
+      await send({ type: 'authenticate_response', response });
+    } else { securityBusy = false; securityScreen(options); }
+  } catch {
+    if (generation !== ownGeneration) return;
+    securityBusy = false; security.options = null;
+    $('security-error').textContent = t('securityCancelled'); securityScreen();
+  }
 }
 function refreshHosts() {
   $('hosts').replaceChildren(...known.map(host => {
@@ -102,6 +165,8 @@ function resetConnection() {
   generation++; clearTimeout(retry);
   if (socket) { socket.onclose = null; socket.close(); }
   channel = null; initiation = null; authenticatedAt = 0;
+  securityWaiter?.reject(new Error('offline'));
+  clearSensitive(); securityBusy = false; securityScreen({ status: 'connecting' });
   for (const { reject, timer } of pending.values()) { clearTimeout(timer); reject(new Error('outcome_unknown_check_history')); }
   pending.clear(); pendingMutation = false; renderedPermission = ''; permissionReviewed = false;
   changeStatus('offline');
@@ -111,7 +176,7 @@ async function connect() {
   if (!device || document.hidden) return;
   const ownGeneration = generation;
   const selectedDevice = device;
-  // 画面は消さない（読んでいた会話を残したまま、届いた最新で描き直す）。
+  // 接続し直すたびに、本人確認後の最新データだけを描画する。
   snapshot = null; detail = null;
   changeStatus('connecting');
   connectingAt = Date.now(); pushEnabled = false;
@@ -130,7 +195,10 @@ async function connect() {
       const message = JSON.parse(event.data);
       if (message.type === 'peer') {
         // リレーの online は信頼しない。Mac の証明が確認できるまで操作不可。
-        channel = null; initiation = null; changeStatus(message.online ? 'authenticating' : 'offline');
+        channel = null; initiation = null;
+        securityWaiter?.reject(new Error('offline'));
+        clearSensitive(); securityBusy = false; securityScreen({ status: 'connecting' });
+        changeStatus(message.online ? 'authenticating' : 'offline');
         if (message.online) {
           initiation = await initiate(selectedDevice.secret, selectedDevice.room);
           if (guard()) ownSocket.send(JSON.stringify(initiation.hello));
@@ -149,7 +217,7 @@ async function connect() {
       attempts = 0;
       if (value.type === 'paired') {
         if (!validSecret(value.secret) || value.room !== selectedDevice.room) throw new Error('invalid_pairing');
-        selectedDevice.secret = value.secret; selectedDevice.name = String(value.name || 'Mac').slice(0, 80); selectedDevice.paired = true;
+        selectedDevice.secret = value.secret; selectedDevice.name = String(value.name || 'Mac').slice(0, 80); selectedDevice.paired = true; selectedDevice.securityVersion = value.securityVersion;
         try { await saveDevice(selectedDevice); } catch { throw new Error('storage_failed'); }
         known = await devices(); device = selectedDevice; refreshHosts();
         await send({ type: 'confirm' });
@@ -157,12 +225,26 @@ async function connect() {
         if (!selectedDevice.paired) throw new Error('pairing_not_saved');
         // 保存後 confirm 前に切断しても、新しい接続で確認を完了できる。
         await send({ type: 'confirm' });
+      } else if (value.type === 'security') {
+        clearSensitive(); securityBusy = !!securityWaiter; securityScreen(value); changeStatus('locked');
+        securityWaiter?.resolve(value);
+      } else if (value.type === 'security_error') {
+        clearSensitive(); securityBusy = false;
+        securityScreen({ status: value.error === 'pair_again_security_upgrade' ? 'legacy' : 'locked' });
+        changeStatus('locked');
+        $('security-error').textContent = t(value.error);
+        securityWaiter?.reject(new Error(value.error));
+      } else if (value.type === 'unlocked') {
+        userVerified = true; verifiedAt = Date.now(); lastInteraction = verifiedAt; lastActivitySent = verifiedAt;
+        securityBusy = false; $('security-error').textContent = ''; showView();
       } else if (value.type === 'snapshot') {
+        if (!userVerified) throw new Error('passkey_authentication_required');
         snapshot = value.snapshot; vapid = value.vapid; pushEnabled = value.push_subscribed;
         changeStatus(value.online && snapshot ? 'online' : 'guiOffline');
         $('last-seen').textContent = `${t('lastSeen')}: ${new Date().toLocaleTimeString()}`;
         render();
       } else if (value.type === 'thread') {
+        if (!userVerified) throw new Error('passkey_authentication_required');
         // ホストが押してくる更新は、選択時と同じ instance の時だけ届く。
         if (value.task_id === selectedTask && value.detail.id === selectedThread) { detail = value.detail; detailInstance = snapshot?.instance_id; renderDetail(); }
       } else if (value.type === 'response') {
@@ -833,10 +915,30 @@ function changeLanguage(value) {
     $('permission').replaceChildren(); $('question').replaceChildren(); renderDetail();
   }
   controls();
+  if (!userVerified) securityScreen();
 }
 $('language').onchange = () => changeLanguage($('language').value);
 $('language-settings').onchange = () => changeLanguage($('language-settings').value);
 document.addEventListener('visibilitychange', () => { document.hidden ? resetConnection() : connect().catch(showError); });
+window.addEventListener('pagehide', () => resetConnection());
+window.addEventListener('pageshow', event => { if (event.persisted) connect().catch(showError); });
+for (const kind of ['pointerdown', 'keydown', 'touchstart', 'scroll']) document.addEventListener(kind, event => {
+  if (!event.isTrusted || !userVerified) return;
+  lastInteraction = Date.now();
+  if (channel && lastInteraction - lastActivitySent > 15_000) {
+    lastActivitySent = lastInteraction; send({ type: 'activity' }).catch(showError);
+  }
+}, { passive: true, capture: true });
+setInterval(() => {
+  if (!userVerified || document.hidden) return;
+  if (Date.now() - lastInteraction >= IDLE_TIMEOUT || Date.now() - verifiedAt >= SESSION_TIMEOUT) {
+    lockScreen(); send({ type: 'lock' }).catch(showError);
+  }
+}, 1000);
+$('security-verify').onclick = () => verifyUser();
+$('security-settings').onclick = () => $('settings-dialog').showModal();
+$('security-forget').onclick = () => $('forget').click();
+$('security-device-name').value = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone / iPad' : /Android/.test(navigator.userAgent) ? 'Android' : 'Phone';
 window.addEventListener('online', () => connect().catch(showError));
 window.addEventListener('offline', () => resetConnection());
 setInterval(() => {

@@ -3866,6 +3866,20 @@
 - リリース: 本人「いったん新しいの本リリースしていいですよ」で、v0.1.20 以来の正式版（Pre-release にしない＝自動更新で届く）として v0.1.24 を出した。テスト版 v0.1.21〜v0.1.23 の中身を全部含むので、CHANGELOG の冒頭に「v0.1.20 からの主な変更」をまとめた（自動更新で来た人が最初に開くのは、この版の Release ページ＝更新後の最初の起動のトースト）。relay は v0.1.23 から変えていないので Worker のデプロイは不要。
 - 次: 本人の実機で見え方（棒の太さ・今いる枠との見分け）を確かめる。v0.1.20 から自動更新で上がる道（チップ → 差し替え → 再起動）も実機で見る。
 
+## 2026-10-02 — テストが起こした rust-analyzer が居残る・終了時に言語サーバを止める
+
+- 発端: ディスクの空きが 5GB まで減ったので片付けをした。そのとき、親のいない rust-analyzer が 123 個見つかった（5〜13 日前のもの・RSS 合計 1GB）。cwd はどれもテストの一時ディレクトリ（`$TMPDIR/necoder_chat_mode_slot_*/project` と `necoder_conflicts_*`）。PID を指定して止めた。本人「直してクレイ！」。
+- 原因:
+  - **rust-analyzer（1.95.0 のツールチェインのもの）は、initialize の握手が済む前に stdin が閉じると終わらない**。`initialize` だけ送って閉じても、何も送らずに閉じても残る。`sample` で見ると、main が `lsp_server::IoThreads::join` で書き手のスレッドを待ち続けていた。`initialized` まで送ってから閉じれば数秒で終わる。initialize の `processId` に渡した親が死んでも終わらない。
+  - `.rs` を開いたテストでは `ensure_lsp` が本物の rust-analyzer を起こし、`initialize` を送ったところでテストが終わる。gpui のテストは Workspace を drop しないので（後始末の `App::quit` はテストのプラットフォームでは何もしない）、`HostProcess` の Drop（kill + wait）も走らない。テストのプロセスが終わったときの EOF を、rust-analyzer は握手の途中で受けて固まっていた。
+  - テストで言語サーバを起こさない除外（`ensure_lsp` の `cfg!(test)`・bacc89b）は 09-27 に parity/integration で入った。main に届いたのは #21 の merge（09-30 15:58）で、それより古い main から切った worktree のテストが起こし続けていた（10-01 に起きた分もあった）。
+- やったこと: Workspace が終了時（`on_app_quit`）に、全 session（レールの各プロジェクトと Chat）の言語サーバを止める（`stop_language_servers`）。アプリでも、`.rs` を開いてから initialize の応答が来るまでの間に終了すると同じように残りうるので、止めるのを EOF 任せにしない。macOS では `applicationWillTerminate` → `App::shutdown` で走る。
+- 検証: 新テスト `quitting_stops_language_servers`。自分の pid を書いて居座る `sh` を言語サーバの代わりとして `LspClient` で起こし、`cx.cx.quit()` で止まるのを見る。フックを外すと落ちることを確かめた。`cargo test --workspace`（使い捨て HOME）は 1161 件通過・失敗 0。流す前も後も rust-analyzer は 0 個（今の main のテストは本物の言語サーバを起こさない）。
+- 次: テストは `$TMPDIR` に `necoder_*` を残す（全テスト 1 回で 37 個・16.5MB。多くは storage のテストの `.db`）。10-02 には 2,791 個・914MB たまっていた。片付けるテストにするかは本人と相談する。
+- 学び/罠:
+  - **gpui::test の後始末は `App::quit` で、テストのプラットフォームでは何もしない**。`on_app_quit` を走らせたいテストは `TestAppContext::quit` を自分で呼ぶ（`VisualTestContext` なら `cx.cx.quit()`）。
+  - 一時ディレクトリで rust-analyzer を手で試すと、既定のツールチェイン（stable・rust-analyzer なし）に解決されてすぐ終わる。`RUSTUP_TOOLCHAIN=1.95.0-aarch64-apple-darwin` を付ける。cargo test の子は rustup が付けた値を継ぐので、テストでは 1.95.0 のものが起きる。
+
 ## 2026-10-05 — エクスプローラの余白の右クリック（空のフォルダの入口）
 
 - 発端: 本人「始めてのフォルダで何もないときに、ファイルブラウザーで右クリックして新しいフォルダ作成とかFinderで表示とかの右クリックできるようにしてほしいな」。
@@ -3881,3 +3895,58 @@
   - **gpui の重ね物は occlude しないと、押下を下の要素にも配る**（hit test は `BlockMouse` で止まるまで重なった全部を hovered にする）。下に `track_focus` の要素（エクスプローラのドック）があると、その要素の自動フォーカス移動（mouse down の bubble・`prevent_default` されていなければ）が、項目のハンドラが入力欄へ渡したフォーカスを同じ押下のうちに取り返す。新テストは最初これで落ちた。**行のメニューの「名前を変更…」「新規ファイル」も 2026-07-16 から同じだった**（修正を外した使い捨てのテストで再現・ROADMAP M10 の「マウスだけの一巡は人の手番」のまま見つかっていなかった）。重ね物の面には `.occlude()`（＋ Task ダイアログと同じ）。
   - `FocusHandle::is_focused` は id を比べるだけで、その handle を持つ要素が描かれているかは見ない。入力が本当に届くかは、打った結果（フォルダができる）で確かめる。
 - 次: 本人の実機のマウスで一巡（余白 → 新規フォルダ → 打つ → ⏎・アイコン/カラムでも・行のメニューの「名前を変更…」）。タブ・レールなどほかの右クリックメニューも occlude していない（同じ取り返しが起きうる・未確認）。
+
+
+## 2026-10-23 — スマホ連携の入口と本人確認（ローカル作業・commit / push しない）
+- やったこと: 左レールに smartphone-user-round、初回案内、端末一覧と承認・解除。QR読取後のパスキー登録とPCでのコード照合、利用時の本人確認、放置・再接続時のロックを追加。詳細は PHONE-PAIRING-SECURITY.md。ユーザー指示により文書も含め commit / push しない。本番未デプロイ。
+- 学び/罠: スマホの画面ロックだけでは認可にならない。PCでUV・署名・Origin・RP ID・チャレンジを検証し、pollや配信も制限する。PC承認は永続化後に有効化。暗号化中に失効した配信は送らず、そのチャネルも閉じて連番欠落を引き継がない。RemoteページではエージェントのCLI調査を起動しない。
+- 検証: Rust 376件、Node 35件、ブラウザ12件が成功。既存Rust 1件ignoreとWebKitでChromium専用2件skip。隔離した合成データでPC/PWA画面を目視。
+- 次: 実機スマホとWindowsの確認、新版ホストとPWAの反映。実機未確認を完了扱いにしない。
+- 継続検証: ロック中の認証完了・解錠通知の競合、PCホスト切断時のスマホへの会話残留を再現して修正。Node 38件、Chromium/WebKit 20件成功（専用機能2件skip）。ページ退避・復帰イベント、スマホ側の5分無操作・15分上限も確認し、PHONE-PAIRING-SECURITY.mdへ実機の受け入れ手順を追記。引き続き文書を含めcommit / push・本番デプロイなし。
+
+
+## 2026-10-23 — Ubuntu Desktop 対応開始（L0〜L2: ARM64 Docker）
+
+- 発端: 本人「Ubuntu Desktop でも動かしたい」「Docker から始め、docs に計画と進捗を残す」。
+- 正: [`LINUX-PORT.md`](LINUX-PORT.md)。Docker → Desktop VM → 実機・AMD64 → 配布 → 内蔵 WebView の受入と、未確認事項を管理する。ROADMAP の Linux GUI 受入にはチェックを付けない。
+- やったこと:
+  - `scripts/linux/Dockerfile` / `install-deps.sh` / `scripts/test-linux-docker.sh` を追加。Ubuntu 24.04、Rust は既存の 1.95.0、ソースは read-only、Linux target と Cargo cache は CPU 別 Docker volume、ログは `target/linux-port/`。
+  - `necoder` の Linux target 依存で GPUI の Wayland / X11 を有効化。既定 feature が空だと型検査だけ通って GUI 起動時に失敗する。GPUI revision は据え置き。
+  - Cargo.lock に描画・入力の推移依存を追加（既存 package のバージョン更新なし）。MIT の xim-rs 固定 rev を deny.toml に許可し、NOTICE とライセンス原文を追加。ARM64 GNU Linux を監査対象へ追加。
+  - Linux CI は Ubuntu 24.04 に固定し、ローカルと依存導入を共有、型検査・本体リンク・workspace テストへ拡張。AMD64 上の Actions は未実行なので best-effort を保持。
+  - 初回の Linux テストは Web / PDF の期待値 7 件で失敗。対応 OS の成功系 4 件を OS 限定にし、Linux では操作・セッション復元から配信を起こさず、未対応の理由を表示し、テキストを編集できる回帰テストを追加。PDF・localhost タブの非対応時の状態も検証。アプリの WebView を Linux で有効にした変更ではない。
+- 検証: Ubuntu ARM64 の `cargo check --locked --workspace --all-targets`（最終は警告 0）、本体 build、workspace test 成功（1,178 passed / 0 failed / 12 ignored、実 PTY 入出力を含む）。macOS の本体 check・24 テスト、workspace の 302 テスト成功。cargo-deny・copyleft boundary・actionlint・bash 構文・diff whitespace も成功。詳細なコマンドとログ名は LINUX-PORT §5。
+- 学び/罠: Rust の passed には実 SSH 環境なしで早期 return するテストも含まれる。実エージェント認証・LSP・GUI・IME・GPU は別途確認が必要。既存の作業ツリー差分を保持して検証した。コンテナは終了時に削除、専用イメージとビルドキャッシュは次回用に残す。
+- 次: Ubuntu Desktop ARM64 VM を用意し、ウィンドウ表示 → 編集・保存 → IME → clipboard → terminal → AI の順で L3 の受入を埋める。AMD64 の CI 結果が得られたら必須化を判断。配布・内蔵 WebView はまだ未着手。
+
+
+## 2026-10-23 — 終了時に ACP の子プロセスを道連れにする
+
+- 発端: necoder を閉じても `codex-acp` / `dsh` の ACP 子が残り、閉じた後にターンが終わって通知音が鳴る・メモリが残る・同じスレッドが二重に走りうる。
+- やったこと:
+  - `acp_client::children` を追加。起動時に PID を登録し、セッション終了（`ChildGuard` の drop）で SIGTERM。アプリ終了では `shutdown_all` が SIGTERM → 400ms → SIGKILL（registry は 1 回で空にする＝`quit_now` と `app.run` の後で二重に待たない）。
+  - ACP の子だけ `CommandSpec::in_own_process_group()` で新しいプロセスグループの長にする。`signal` はグループの長なら負の PID へ送り、app-server / MCP などの**孫も**道連れにする（端末・LSP には付けない）。
+  - `quit_now`（⌘Q・Dock・確認後）と `app.run` が返った後の両方で `shutdown_all`。最後の窓を閉じただけの終了も拾う。
+- 検証: `cargo test -p acp_client` 110 passed / 7 ignored（children 4 件: 直の子・グループの長・仕様のグループ化・複数）。`cargo test -p host`、`cargo check -p necoder`。`cargo test -p workspace` は 300 passed / 2 failed（`ps` がサンドボックスで `Operation not permitted`・今回と無関係）。
+- 次: 実機で ⌘Q の後に `pgrep -fl codex-acp` が空になることを確認。remote は手元の `ssh` を落とすところまで（リモート側の孫は ssh の切断任せ）。
+
+
+## 2026-10-23 — Linux VM の黒画面: Virtio-GPU Venus と GPUI の X11 visual
+
+- 発端: Ubuntu ARM64 VM（UTM / virtio-gpu Venus）で necoder の窓が黒い。Codex が使用上限で停止したため引き継いだ。
+- やったこと:
+  - VM を Xorg に切り替え（`WaylandEnable=false`）、`gnome-screenshot` で実画面を確認。窓は出るがクライアント領域が透明/黒。
+  - `NECODER_WGPU_LOG=1` の stderr ロガーを入れた（`log` 依存。既定では無効）。
+  - `glxgears` / `vkcube` は正常。`Workspace::render` は呼ばれている。surface は 1280×731 / Bgra8Unorm / alpha Inherit、X11 visual は depth 32。
+  - GPUI の Docker checkout を一時パッチし、24-bit opaque visual に変更。**llvmpipe + Vulkan で UI が完全に描画**された。Venus は同じ visual でも黒、GL は 24-bit でも surface 構成不可。
+  - 上流 GPUI `main` の `window.rs` を確認 → 同じ `visual_set.transparent` 優先で未修正。
+- 学び/罠:
+  - ARGB 窓の `xwd` は壁紙/黒を写すことがある。GNOME のスクショか実 Xorg で撮る。`LockedHint=yes` のロック画面だと全画面が黒いので先に `loginctl unlock-session 6`。
+  - この GPUI rev の `WindowParams` に `background_appearance` は無い。窓作成後に `set_background_appearance` で決まるので、visual 選択時には見えない。
+  - 32-bit visual のままだと llvmpipe は surface を構成できない。24-bit にすると通る。GL は 24-bit でも不可。
+  - Venus は surface を構成できるが描画が黒。llvmpipe で同じ UI が出るので、necoder の UI コード・フォント・テーマ・レイアウトではない。
+  - GPUI の visual 選択は「opaque な窓でも transparent visual」という upstream の設計。実機の GPU では `alpha_mode: Opaque` になり隠れるが、llvmpipe/GL では表に出る。
+- 追加（Wayland）: GDM を Wayland に戻して確認。Venus では窓が不可視、llvmpipe では UI が完全に描画（`docs/images/linux-vm-wayland-llvmpipe-2026-10-23.png`）。**素の `~/necoder`（一時パッチなし）でも同じ**で、Wayland は visual パッチ不要。Venus が X11 / Wayland 共通の原因。
+- L3 部分確認（Wayland + llvmpipe・素の `~/necoder`）: README の編集・保存、`Ctrl+J` のターミナル起動、`/bin/echo`、`wl-copy` の日本語を `Ctrl+V` で貼り付け。`echo` は command-not-found になった（`/bin/echo` は動く）のでシェル / PATH は要確認。IME・検索・監視・Git・リサイズ・AI・通知・CLI・hot exit は未確認。
+- 検証: llvmpipe + 24-bit opaque visual（X11）と llvmpipe（Wayland）で Welcome / AI Agents / README / Thread 1 / チャットを目視。画像 `docs/images/linux-vm-llvmpipe-2026-10-23.png` / `docs/images/linux-vm-wayland-llvmpipe-2026-10-23.png`。詳細は `docs/LINUX-PORT.md` §4。
+- 次: 実機1台（Intel/AMD/NVIDIA）で Wayland を確認、上流 GPUI へ issue/PR（X11 の visual 選択）。L3 の描画受入は未完了のまま（チェックを付けない）。

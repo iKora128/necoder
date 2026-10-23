@@ -15,7 +15,7 @@
 //! 隔離ではないので、裁定は necoder 側（ここ）が持ち、エージェントの設定には頼らない。
 
 use acp_client::ToolCallKind;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// 裁定に使う、このチャットの持ち物。
 #[derive(Debug, Clone, Copy)]
@@ -125,42 +125,30 @@ fn absolute(path: &Path, base: &Path) -> PathBuf {
 /// `..` を畳むだけでは足りない — フォルダの中に置いたシンボリックリンク（`artifacts/x -> ~/.ssh`）で
 /// 外へ出られる。存在する一番深い祖先を実体のパスへ解決してから比べる。
 fn contains(base: &Path, path: &Path) -> bool {
-    resolve(path).starts_with(resolve(base))
-}
-
-fn resolve(path: &Path) -> PathBuf {
-    let normalized = normalize(path);
-    let mut existing = normalized.as_path();
-    let mut remainder: Vec<&std::ffi::OsStr> = Vec::new();
-    loop {
-        if let Ok(real) = paths::canonicalize(existing) {
-            let mut resolved = real;
-            resolved.extend(remainder.iter().rev());
-            return resolved;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                remainder.push(name);
-                existing = parent;
-            }
-            _ => return normalized,
-        }
+    match (resolve(base), resolve(path)) {
+        (Some(base), Some(path)) => path.starts_with(base),
+        _ => false,
     }
 }
 
-/// `.` と `..` を字面で畳む（まだ存在しないパスにも効く）。
-fn normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other),
-        }
+fn resolve(path: &Path) -> Option<PathBuf> {
+    // `link/..` はリンク先の親を指す。字面で先に `..` を消すと OS と別の場所を
+    // 許可してしまうため、元のパスをそのまま OS に解決させる。
+    match paths::canonicalize(path) {
+        Ok(real) => return Some(real),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
     }
-    normalized
+    // dangling symlink は「これから作る普通のファイル」として扱わない。
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return None,
+    }
+    // 新規ファイルだけ、実体を解決できる祖先へ通常の名前を足す。未解決の `..` や
+    // 権限エラーは許可しない（file_name は `..` に対して None）。
+    let name = path.file_name()?;
+    let parent = resolve(path.parent()?)?;
+    Some(parent.join(name))
 }
 
 #[cfg(test)]
@@ -343,6 +331,67 @@ mod tests {
         // まだ無いファイルでも、リンクの先として裁く。
         assert!(matches!(
             judge(Some(ToolCallKind::Edit), &[link.join("new.md")], scope),
+            Verdict::Deny(DenyReason::WriteOutsideScope(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_dot_dot_is_judged_by_the_os_target_including_new_files() {
+        let fixture = Fixture::new("symlink_dotdot");
+        let outside = fixture.root.join("work/subdir");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.chat_dir.join("link")).unwrap();
+        for path in ["link/../note.md", "link/../new/deep/file.md"] {
+            let target = fixture.chat_dir.join(path);
+            assert!(matches!(
+                judge(
+                    Some(ToolCallKind::Edit),
+                    std::slice::from_ref(&target),
+                    scope(&fixture, &[], &[])
+                ),
+                Verdict::Deny(DenyReason::WriteOutsideScope(_))
+            ));
+            assert_eq!(
+                judge(
+                    Some(ToolCallKind::Read),
+                    &[target],
+                    scope(&fixture, &[], &[])
+                ),
+                Verdict::Ask
+            );
+        }
+        // 添付フォルダへの書き込み許可も symlink/.. では広がらない。
+        std::os::unix::fs::symlink(&fixture.chat_dir, fixture.blog.join("link")).unwrap();
+        let attachments = [fixture.blog.clone()];
+        let target = fixture.blog.join("link/../outside.md");
+        assert!(matches!(
+            judge(
+                Some(ToolCallKind::Edit),
+                &[target],
+                scope(&fixture, &attachments, &attachments)
+            ),
+            Verdict::Deny(DenyReason::WriteOutsideScope(_))
+        ));
+        // 正常な .. と、新規ファイルの作成は維持する。
+        assert_eq!(
+            judge(
+                Some(ToolCallKind::Edit),
+                &[fixture.chat_dir.join("artifacts/../new/deep/file.md")],
+                scope(&fixture, &[], &[])
+            ),
+            Verdict::Allow
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_links_are_not_treated_as_new_files_inside_the_scope() {
+        let fixture = Fixture::new("dangling");
+        let link = fixture.chat_dir.join("dangling");
+        std::os::unix::fs::symlink(fixture.root.join("missing/secret.txt"), &link).unwrap();
+        assert!(matches!(
+            judge(Some(ToolCallKind::Edit), &[link], scope(&fixture, &[], &[])),
             Verdict::Deny(DenyReason::WriteOutsideScope(_))
         ));
     }

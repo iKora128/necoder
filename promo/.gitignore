@@ -1,0 +1,6 @@
+node_modules/
+out/
+.remotion/
+soundtrack/target/
+# npm run soundtrack で作り直せる
+public/soundtrack-*.wav

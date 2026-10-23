@@ -13,7 +13,9 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 | **何をどう呼ぶか（用語の正）** | `docs/GLOSSARY.md` — 機能・場所の正規名（code/日/英）と廃止語。UI 文字列/識別子はここに寄せる |
 | **Fleet（多エージェント）の UI・Captain** | `docs/FLEET-V2.md` — Task を主語にした 1 画面と Captain の設計・実装計画（F0〜F7）。ドメイン不変条件は `docs/FLEET-ARCHITECTURE.md` |
 | **Chat モード（会話と artifact）** | `docs/CHAT.md` — 保存場所（書類フォルダ）・ファイルの扱いと権限・機能一覧（P0〜P2）・プリセットの中身。受入条件は ROADMAP M16 |
+| **推論ルーター・課金（necoder-router）** | `docs/necoder-router.md` — ACP プロバイダとしての立ち位置・リージョン込みモデル・定額プラン・Cloudflare 構成・金に関わる罠。実装未着手 |
 | **Windows 対応（W フェーズ）** | `docs/WINDOWS-PORT.md` — 環境・設計決定・受入条件・罠・該当箇所インベントリ。`/goal-win` はこれを消化する |
+| **Ubuntu Desktop 対応（L フェーズ）** | `docs/LINUX-PORT.md` — Docker ビルド → ヘッドレステスト → Desktop VM → 実機・配布の計画・手順・検証記録 |
 | 直近の文脈・罠 | `docs/JOURNAL.md` — セッションごとの実装日誌 |
 | 経緯・ビジョン | `docs/BACKGROUND.md` |
 | 設計判断と根拠 | `docs/DECISIONS.md`（AGPL-3.0・ウィンドウモデル・i18n などの決定ログ含む） |

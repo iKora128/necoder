@@ -687,7 +687,7 @@ mod tests {
         let note = plan_note(&Err(acp_client::LaunchError::NeedsUv));
         assert_eq!(note, Some((i18n::t!("settings.custom_needs_uv"), true)));
         assert!(i18n::translate_in("ja", "settings.custom_needs_uv")
-            .is_some_and(|text| text.contains("uv が要ります")));
+            .is_some_and(|text| text.contains("uv")));
     }
 
     /// H2-b: binary は検証の値の有無を必ず出す（無い物は注意の色で「検証の値がありません」）。

@@ -1577,27 +1577,14 @@ pub fn inline_rewrite_on(
     // 指示は 1 行に正規化（ペイロードの構造を単純に保つ）。
     let instruction = instruction.replace(['\n', '\r'], " ");
     let payload = format!("指示: {instruction}\n--- 対象コード ---\n{code}");
-    let unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/necoder-inline-{unix_ms}.txt"));
-    host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
-        .context("インライン編集の一時ファイル作成に失敗")?;
-    let prompt = INLINE_REWRITE_PROMPT;
-    let script = format!(
-        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
-        temp = temp.display()
-    );
-    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
-    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
-    anyhow::ensure!(
-        host.has_posix_shell(),
-        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
-    );
-    let output = host
-        .run_command(&host.shell_script(script.as_str(), dir))
-        .context("インライン編集の実行に失敗（claude CLI 未導入？）")?;
+    let output = run_helper_on(
+        host,
+        dir,
+        &payload,
+        r#"claude -p "{prompt}" < {excerpt}"#,
+        INLINE_REWRITE_PROMPT,
+    )
+    .context("インライン編集の実行に失敗（claude CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
         "生成に失敗: {}",
@@ -1620,27 +1607,14 @@ pub fn inline_rewrite_on(
 pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Result<String> {
     let instruction = instruction.replace(['\n', '\r'], " ");
     let payload = format!("やりたいこと: {instruction}");
-    let unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/necoder-inline-cmd-{unix_ms}.txt"));
-    host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
-        .context("コマンド生成の一時ファイル作成に失敗")?;
-    let prompt = INLINE_COMMAND_PROMPT;
-    let script = format!(
-        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
-        temp = temp.display()
-    );
-    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
-    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
-    anyhow::ensure!(
-        host.has_posix_shell(),
-        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
-    );
-    let output = host
-        .run_command(&host.shell_script(script.as_str(), dir))
-        .context("コマンド生成の実行に失敗（claude CLI 未導入？）")?;
+    let output = run_helper_on(
+        host,
+        dir,
+        &payload,
+        r#"claude -p "{prompt}" < {excerpt}"#,
+        INLINE_COMMAND_PROMPT,
+    )
+    .context("コマンド生成の実行に失敗（claude CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
         "生成に失敗: {}",
@@ -1672,7 +1646,7 @@ pub fn name_thread_on(
 }
 
 // necoder が自分の用事で `claude -p` / `codex exec` に渡す決まった指示。
-// 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+// 指示と入力は run_helper_on でシェルの構文から分離する。
 
 /// インライン編集（[`inline_rewrite_on`]）の指示。
 const INLINE_REWRITE_PROMPT: &str =
@@ -1711,7 +1685,7 @@ pub fn helper_prompts() -> [&'static str; 5] {
 /// `template` = 既定 Agent ごとの shell テンプレート（{prompt}=指示・{excerpt}=入力ファイル・
 /// {out}=最終メッセージ出力先）。stdout にクリーンな 1 行が載るよう各 CLI 差を吸収する
 /// （claude -p は素で stdout・codex exec は agent 実行で stdout が汚いため --output-last-message + cat）。
-/// `prompt` に引用符 / $ / バッククォートを含めないこと（sh -c の二重引用符に素で埋める）。
+/// `prompt` は run_helper_on で変数へ格納し、シェルの構文として評価しない。
 pub fn oneshot_line_on(
     host: &dyn Host,
     dir: &Path,
@@ -1720,31 +1694,7 @@ pub fn oneshot_line_on(
     prompt: &str,
     max_chars: usize,
 ) -> Result<String> {
-    let unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/necoder-oneshot-{unix_ms}.txt"));
-    let out = PathBuf::from(format!("/tmp/necoder-oneshot-{unix_ms}.out"));
-    host.write_file(&temp, input.as_bytes(), host::WriteCondition::Any)
-        .context("oneshot の一時ファイル作成に失敗")?;
-    let body = template
-        .replace("{prompt}", prompt)
-        .replace("{excerpt}", &temp.display().to_string())
-        .replace("{out}", &out.display().to_string());
-    let script = format!(
-        "{body}; status=$?; rm -f {temp} {out}; exit $status",
-        temp = temp.display(),
-        out = out.display()
-    );
-    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
-    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
-    anyhow::ensure!(
-        host.has_posix_shell(),
-        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
-    );
-    let output = host
-        .run_command(&host.shell_script(script.as_str(), dir))
+    let output = run_helper_on(host, dir, input, template, prompt)
         .context("oneshot の実行に失敗（既定 Agent の CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
@@ -1765,6 +1715,56 @@ pub fn oneshot_line_on(
         .collect();
     anyhow::ensure!(!line.trim().is_empty(), "oneshot の結果が空");
     Ok(line.trim().to_string())
+}
+
+/// 補助 CLI の入力は stdin で対象ホストへ送る。公開 /tmp に会話やコードを置かない。
+/// 置き場は対象ホストで排他的に作り、0700 の中の 0600 の入出力を終了時に回収する。
+fn run_helper_on(
+    host: &dyn Host,
+    dir: &Path,
+    input: &str,
+    template: &str,
+    prompt: &str,
+) -> Result<CommandOutput> {
+    use std::io::{Read as _, Write as _};
+    anyhow::ensure!(
+        host.has_posix_shell(),
+        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
+    );
+    let body = template
+        .replace("{prompt}", "${helper_prompt}")
+        .replace("{excerpt}", r#""$helper_dir/input""#)
+        .replace("{out}", r#""$helper_dir/output""#);
+    // prompt もシェルの構文として評価しない。テンプレートの二重引用符内では変数を展開する。
+    let quoted_prompt = format!("'{}'", prompt.replace('\'', "'\"'\"'"));
+    let script = format!(
+        r#"umask 077
+helper_dir=$(mktemp -d "${{TMPDIR:-/tmp}}/necoder-helper.XXXXXXXXXX") || exit 1
+trap 'rm -rf -- "$helper_dir"' 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cat > "$helper_dir/input" || exit 1
+: > "$helper_dir/output" || exit 1
+helper_prompt={quoted_prompt}
+{body}
+"#
+    );
+    let mut process = host.spawn_process(&host.shell_script(&script, dir))?;
+    // cat は本文の実行前に入力を読み切るので、出力とのパイプ詰まりは起きない。
+    let mut stdin = process.take_stdin()?;
+    stdin.write_all(input.as_bytes())?;
+    drop(stdin);
+    let mut stdout = Vec::new();
+    process.take_stdout()?.read_to_end(&mut stdout)?;
+    let status = process.wait()?;
+    let stderr = process.stderr_tail();
+    stderr.wait_closed(std::time::Duration::from_secs(1));
+    Ok(CommandOutput {
+        status_code: status.code(),
+        stdout,
+        stderr: stderr.lines().join("\n").into_bytes(),
+    })
 }
 
 /// 出力が ``` フェンスで包まれていたら中身だけ取り出す（そのままなら素通し）。
@@ -4788,6 +4788,70 @@ mod tests {
             .unwrap_or(0)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn helper_inputs_are_private_unique_and_cleaned() {
+        let root = scratch("helper_private");
+        std::fs::create_dir_all(&root).unwrap();
+        let input = "synthetic code and conversation\n".repeat(5000);
+        let prompt = "literal $(touch helper-injection-marker) `id` \" '";
+        let template = r#"
+case $(uname -s) in
+  Darwin) mode() { stat -f '%Lp' "$1"; } ;;
+  *) mode() { stat -c '%a' "$1"; } ;;
+esac
+test "$(mode "$helper_dir")" = 700 || exit 10
+test "$(mode {excerpt})" = 600 || exit 11
+test "$(mode {out})" = 600 || exit 12
+printf '%s\n' "$helper_dir"
+cat {excerpt}
+printf '%s' "{prompt}"
+"#;
+        let outputs = std::thread::scope(|scope| {
+            let first =
+                scope.spawn(|| run_helper_on(&LocalHost, &root, &input, template, prompt).unwrap());
+            let second =
+                scope.spawn(|| run_helper_on(&LocalHost, &root, &input, template, prompt).unwrap());
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        let mut directories = Vec::new();
+        for output in outputs {
+            assert!(
+                output.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8(output.stdout).unwrap();
+            let (directory, received) = text.split_once('\n').unwrap();
+            assert_eq!(received, format!("{input}{prompt}"));
+            assert!(!Path::new(directory).exists(), "終わった入力を残さない");
+            directories.push(directory.to_string());
+        }
+        assert_ne!(directories[0], directories[1]);
+        assert!(!root.join("helper-injection-marker").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_helper_preserves_its_status_and_cleans_private_files() {
+        let root = scratch("helper_failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let output = run_helper_on(
+            &LocalHost,
+            &root,
+            "synthetic secret",
+            "printf '%s' \"$helper_dir\"; exit 7",
+            "fixed",
+        )
+        .unwrap();
+        assert_eq!(output.status_code, Some(7));
+        let directory = String::from_utf8(output.stdout).unwrap();
+        assert!(!directory.is_empty());
+        assert!(!Path::new(&directory).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn unified_diff_body_has_one_line_per_diff_line() {
         let body = unified_diff_body("a\n\nb\n", "a\n\nc\n").unwrap();
@@ -5245,7 +5309,7 @@ pub fn name_branch_on(
     excerpt: &str,
     template: &str,
 ) -> Result<String> {
-    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    // 指示と入力は run_helper_on でシェルの構文から分離する。
     let prompt = "入力はエージェントに頼んだ作業の説明です。この作業の git ブランチ名を付けて。\
         英語の小文字の単語を 2〜5 個ハイフンでつなぐ・記号やスラッシュや引用符は付けない・\
         ブランチ名だけを1行で出力して。";

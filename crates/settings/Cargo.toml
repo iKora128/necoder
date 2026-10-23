@@ -39,4 +39,5 @@ i18n.workspace = true
 paths.workspace = true
 settings_core.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 theme_core.workspace = true

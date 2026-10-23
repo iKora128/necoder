@@ -72,20 +72,20 @@ agent:
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
   err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
-  err_launch_not_in_registry: "%{id} が ACP レジストリに見つかりません（設定 → AI エージェント → エージェントを追加 で取り直してください）"
-  err_launch_no_distribution: "このマシン（%{platform}）向けの配布がありません"
-  err_launch_needs_node: node（npx）が要ります。node を入れてから再開してください
-  err_launch_needs_uv: uv（uvx）が要ります。uv を入れてから再開してください（necoder は入れません）
-  err_launch_binary_on_remote: このエージェントは binary の配布しか無いので、リモート（SSH）では起動できません
-  err_launch_not_deployed: まだ落としていません（最初の送信で落として検証します）
-  err_deploy_download: "%{url} を落とせませんでした: %{reason}"
-  err_deploy_checksum: "落とした物の sha256 がレジストリの値と合わないので、使いませんでした（レジストリ %{expected} / 落とした物 %{actual}）"
-  err_deploy_unsafe: "書庫の中に置き場の外を指す名前（%{entry}）があるので、展開しませんでした"
-  err_deploy_other: "binary を置けませんでした: %{reason}"
-  deploying: "%{agent} %{version} を落としています（binary・最初の 1 回だけ）…"
-  deploy_verified: レジストリの sha256 と照合しました
-  deploy_unverified: レジストリに sha256 の値が無いので、照合せずに使います
-  deploy_fallback: "新しい版（%{new}）を落とせなかったので、手元の版（%{version}）で起動します"
+  err_launch_not_in_registry: "%{id} の起動情報が見つかりません。設定 → AI エージェント → エージェントを追加 で一覧を更新してください"
+  err_launch_no_distribution: "この環境（%{platform}）には対応していません"
+  err_launch_needs_node: Node.js が必要です。インストールしてから再開してください
+  err_launch_needs_uv: uv が必要です。インストールしてから再開してください
+  err_launch_binary_on_remote: このエージェントはリモート（SSH）では起動できません
+  err_launch_not_deployed: 未ダウンロード（最初の送信時にダウンロードします）
+  err_deploy_download: "%{url} をダウンロードできませんでした: %{reason}"
+  err_deploy_checksum: "ファイルの検証に失敗したため、使用を中止しました（SHA-256: 期待値 %{expected} / 実際 %{actual}）"
+  err_deploy_unsafe: "保存先の外を指すパス（%{entry}）が含まれているため、ファイルを展開できません"
+  err_deploy_other: "エージェントをインストールできませんでした: %{reason}"
+  deploying: "%{agent} %{version} をダウンロード中…"
+  deploy_verified: ダウンロードしたファイルを検証しました
+  deploy_unverified: 検証情報がないため、ファイルを検証せずに使用します
+  deploy_fallback: "更新版（%{new}）をダウンロードできなかったため、インストール済みの版（%{version}）で起動します"
   err_session_lost: セッションが切れました。もう一度送信してください
   err_session_ended: エージェントのセッションが終了しました（中断扱い）
   err_cancel_session_lost: セッションが応答しないため中断しました
@@ -409,7 +409,7 @@ captain:
   tab_tip: "Captain（main に住む采配役）へ · ⌘0"
   appoint_title: "Captain を任命する"
   appoint_body: "Captain は main に住む采配役です。目標を渡すと Task（worktree）に分けて起動し、終わり・失敗・承認待ちを見張って報告します。自分ではコードを書きません。どのエージェントでも務まり、あとで設定から交代・解任できます。"
-  appoint_no_agent: "使えるエージェントがありません。設定 → エージェント でサインインしてください。"
+  appoint_no_agent: "利用可能なエージェントがありません。設定 → AI エージェント でログインしてください。"
   log_empty: "まだ采配はありません。Captain に目標を渡すと、ここに判断の履歴が並びます。"
   role: |
     あなたは necoder 編隊の Captain（采配役）です。
@@ -722,164 +722,164 @@ titlebar:
   fleet: Fleet
   chat: Chat
 settings:
-  pref_agent_idle_stop: 使っていないエージェントを止めるまで（分）
-  pref_agent_idle_stop_sub: エージェントは 1 本で数百 MB を握ります。止めても会話は残り、次の送信で引き継ぎます。0 = 止めない
+  pref_agent_idle_stop: エージェントの自動停止（分）
+  pref_agent_idle_stop_sub: 指定した時間使わなければ停止し、メモリを解放します。会話は残り、次の送信で再開します。0 = 自動停止しない
   pref_allow_terminal_send: CLI から端末へ入力を送る
-  pref_allow_terminal_send_sub: "`ne terminal send` で、エージェントやスクリプトが necoder の端末に文字を打てるようにします。送った文字はその端末でそのまま実行されます（一覧・読み取り・待機は off でも使えます）"
+  pref_allow_terminal_send_sub: "エージェントやスクリプトが `ne terminal send` でターミナルに入力できます。送信したコマンドはそのまま実行されます。オフでも一覧の表示や読み取りはできます"
   chat_heading: CHAT
-  chat_directory: チャットのフォルダの置き場
+  chat_directory: チャットの保存先
   chat_directory_default: 書類フォルダの necoder（既定）
   chat_directory_pick: フォルダを選ぶ…
   chat_directory_reset: 既定に戻す
-  chat_idle_stop: 使っていないチャットのエージェントを止めるまで（分）
-  chat_idle_stop_sub: 0 = 止めない
-  chat_instructions: カスタム指示（どのチャットにも効かせる）
-  chat_instructions_none: なし（settings.json の chat.instructions に書きます）
+  chat_idle_stop: チャットのエージェントの自動停止（分）
+  chat_idle_stop_sub: 指定した時間使わなければ停止します。0 = 自動停止しない
+  chat_instructions: すべてのチャットへの指示
+  chat_instructions_none: 未設定。settings.json の chat.instructions で編集できます
   mcp_claude_connectors: claude.ai のコネクタを Claude のスレッドへ読み込む
-  mcp_claude_connectors_sub: アカウントに繋いだコネクタ（Figma・Google Calendar など）。切ると初回応答が速くなります（実測 4.2 秒 → 1.8 秒）。Chat モードは常に読み込みません
+  mcp_claude_connectors_sub: Figma や Google Calendar など、アカウントに接続したサービスを利用します。オフにすると初回応答が速くなります。Chat モードには適用されません
   title: 設定
   agents_heading: AI エージェント
-  agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を necoder は保存しません。
-  permission_default: 権限の既定
-  permission_default_sub: 新しいスレッドを始めるモード。選ぶとピルで選んだモードの記憶を全エージェントで消して揃える。「聞かずに進める」はそのモードを持つエージェントだけに効く（Claude Code の bypassPermissions など）。Chat には効かない
-  permission_default_agent: エージェントの既定
-  permission_default_bypass: 聞かずに進める（Yolo）
-  permission_remembered: ピルで選んだモード（押すと忘れる）
-  installed: 導入済み
-  available_npx: 初回に取得（npx）
-  not_installed: 未導入
+  agents_sub: 使用するエージェントを選びます。必要に応じてインストール・ログインしてください。
+  permission_default: 新しいスレッドの権限
+  permission_default_sub: 変更すると、エージェントごとの権限設定をリセットします。「確認なしで実行」は対応するエージェントのみ。Chat には適用されません
+  permission_default_agent: エージェントの標準設定
+  permission_default_bypass: 確認なしで実行
+  permission_remembered: 個別の権限設定（クリックでリセット）
+  installed: インストール済み
+  available_npx: 初回起動時にダウンロード（npx）
+  not_installed: 未インストール
   agent_checking: 確認中…
   agent_available: 利用可能
-  agent_configured: 設定あり・未確認
+  agent_configured: ログイン未確認
   agent_signed_out: 未ログイン
-  agent_disabled: 使わない（選択肢に出さない）
-  agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
-  agent_remove: 外す
-  agent_remove_binary_failed: "%{agent} の落とした binary を消せませんでした: %{reason}"
-  custom_command_ready: "自分のコマンドで起動（%{command}）"
-  custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
-  custom_registry_npx: "レジストリ %{version} · npx（初回に取得）"
-  custom_not_in_registry: "レジストリに見つかりません（%{id}）。エージェントを追加 で取り直してください"
-  custom_no_distribution: "このマシン（%{platform}）向けの配布がありません"
-  custom_needs_node: node が要ります（npx で起動する配布）
-  custom_needs_uv: uv が要ります（uvx で起動する配布）。uv を入れると使えます（necoder は入れません）
-  custom_registry_uvx: "レジストリ %{version} · uvx（初回に取得）"
-  custom_binary_ready: "レジストリ %{version} · binary（置いてあります・sha256 で照合済み）"
-  custom_binary_ready_unverified: "レジストリ %{version} · binary（置いてあります・検証の値がありません）"
-  custom_binary_download: "レジストリ %{version} · binary（最初の起動で落として sha256 で照合します）"
-  custom_binary_download_unverified: "レジストリ %{version} · binary（最初の起動で落とします・検証の値がありません）"
-  custom_binary_on_remote: binary の配布しか無いので、リモート（SSH）では起動できません
-  custom_not_deployed: まだ落としていません（最初の起動で落とします）
-  custom_deploy_failed: "binary を置けませんでした: %{reason}"
-  add_agent_sha256: binary は落とした後にレジストリの sha256 で照合します
-  add_agent_no_sha256: 検証の値がありません（sha256 なし）。落とした binary を照合せずに使います
+  agent_disabled: 無効
+  agent_disable_locked: 既定または Captain のエージェントは無効にできません。先に既定または Captain の設定を変更してください
+  agent_remove: 削除
+  agent_remove_binary_failed: "%{agent} のダウンロード済みファイルを削除できませんでした: %{reason}"
+  custom_command_ready: "コマンドで起動（%{command}）"
+  custom_command_missing: "コマンドが見つかりません（%{command}）。コマンド名または絶対パスを確認してください"
+  custom_registry_npx: "%{version} · 初回起動時にダウンロード（npx）"
+  custom_not_in_registry: "%{id} の起動情報がありません。「エージェントを追加」で一覧を更新してください"
+  custom_no_distribution: "この環境（%{platform}）には対応していません"
+  custom_needs_node: Node.js をインストールしてください
+  custom_needs_uv: uv をインストールしてください
+  custom_registry_uvx: "%{version} · 初回起動時にダウンロード（uvx）"
+  custom_binary_ready: "%{version} · ダウンロード済み（検証済み）"
+  custom_binary_ready_unverified: "%{version} · ダウンロード済み（検証情報なし）"
+  custom_binary_download: "%{version} · 初回起動時にダウンロード・検証"
+  custom_binary_download_unverified: "%{version} · 初回起動時にダウンロード（検証情報なし）"
+  custom_binary_on_remote: リモート（SSH）では起動できません
+  custom_not_deployed: 未ダウンロード（初回起動時にダウンロードします）
+  custom_deploy_failed: "エージェントをインストールできませんでした: %{reason}"
+  add_agent_sha256: ダウンロード後にファイルを検証します（SHA-256）
+  add_agent_no_sha256: 検証情報がないため、ファイルを検証せずに使用します
   agents_add: ＋ エージェントを追加
-  agents_add_hint: ACP レジストリの全件から選んで足す。一覧に無い物は settings.json の agent_servers に自分のコマンドを書いて足せます
+  agents_add_hint: ほかのエージェントを一覧から追加できます
   add_agent_title: エージェントを追加
-  add_agent_sub: "ACP レジストリの %{count} 件。足すと AI エージェントの一覧に並び、使う / 使わない・既定・起動の変更は組み込みと同じ行でできます"
-  add_agent_search: 名前・説明・配布の形（npx / binary / uvx）・OS で探す
+  add_agent_sub: "%{count} 件のエージェントから選んで追加できます"
+  add_agent_search: エージェントを検索
   add_agent_add: 追加
   add_agent_added: 追加済み
-  add_agent_builtin: "組み込み（%{agent}）"
-  add_agent_unusable: このマシンでは使えません
-  add_agent_os_any: "対応: どの OS でも"
+  add_agent_builtin: "追加済み（%{agent}）"
+  add_agent_unusable: この環境には対応していません
+  add_agent_os_any: "対応: すべての OS"
   add_agent_os: "対応: %{os}"
   add_agent_license: "ライセンス: %{license}"
   add_agent_empty: 一致するエージェントはありません
-  add_agent_no_registry: ACP レジストリをまだ取得していません
-  add_agent_fetch: 取得する
-  add_agent_fetching: 取得しています…
-  add_agent_refresh: 取り直す
-  add_agent_fetch_failed: "取得できませんでした: %{reason}"
-  add_agent_custom_hint: 一覧に無いエージェントは settings.json の agent_servers に自分のコマンドを書いて足せます
+  add_agent_no_registry: エージェントの一覧を取得してください
+  add_agent_fetch: 一覧を取得
+  add_agent_fetching: 一覧を取得中…
+  add_agent_refresh: 一覧を更新
+  add_agent_fetch_failed: "一覧を取得できませんでした: %{reason}"
+  add_agent_custom_hint: 一覧にないエージェントは settings.json の agent_servers に起動コマンドを設定して追加できます
   add_agent_open_settings_json: settings.json を開く
   add_agent_close: 閉じる
-  launch_default: 起動は既定のまま（レジストリの版とコマンド）
-  launch_env: "起動: 既定 + 環境変数（%{names}）"
-  launch_custom: "起動: 自分のコマンド（%{command}）"
-  launch_edit: 変える…
-  launch_reset: 既定に戻す
-  launch_title: "%{agent} の起動"
-  launch_mode_registry: 既定の起動に環境変数を足す
-  launch_mode_custom: 自分のコマンドで起動
-  launch_command: コマンド（絶対パスか PATH にある名前）
+  launch_default: "起動方法: 標準"
+  launch_env: "起動方法: 標準 + 環境変数（%{names}）"
+  launch_custom: "起動方法: コマンド指定（%{command}）"
+  launch_edit: 変更…
+  launch_reset: 標準に戻す
+  launch_title: "%{agent} の起動設定"
+  launch_mode_registry: 標準の起動方法
+  launch_mode_custom: コマンドを指定
+  launch_command: 起動コマンド（コマンド名または絶対パス）
   launch_args: 引数（1 行に 1 つ）
   launch_env_field: 環境変数（1 行に 1 つ KEY=VALUE）
-  launch_note: 効くのは次に起動するエージェントから。値は settings.json にそのまま残るので、API キーなどの秘密は書かないでください（CLAUDE_CONFIG_DIR のように置き場を指す変数にする）
-  launch_command_missing: コマンドを入れてください
+  launch_note: 次回の起動から適用します。入力した値は settings.json に平文で保存されます。API キーなどの秘密情報は入力しないでください
+  launch_command_missing: 起動コマンドを入力してください
   launch_cancel: キャンセル
   launch_save: 保存
   logged_in: ログイン済み
   login_required: ログインが必要
-  login_status_unknown: ログイン状態は CLI で確認
+  login_status_unknown: ターミナルでログイン状態を確認してください
   make_default: 既定にする
   is_default: ★ 既定
   make_captain: Captain にする
   is_captain: ⚑ Captain
   login: ログイン
   open_cli: CLI を開く
-  install: 導入
+  install: インストール
   welcome_title: ようこそ 🎨
-  welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
+  welcome_sub: 使用するエージェントを選びましょう。あとから設定で変更できます。
   get_started: これで始める →
   mcp_heading: MCP サーバ
-  mcp_sub: エージェントに持たせる道具。有効にしたものだけが新しいスレッドから見えます。
+  mcp_sub: エージェントが使う外部ツールを選びます。有効にしたツールは、新しいスレッドから利用できます。
   mcp_empty: MCP サーバがありません。settings.json の mcp_servers に書くか、Codex CLI・Claude Code・Cursor に登録すると、ここに並びます。
-  mcp_note: 変更は次に開くスレッドから効きます（実行中のセッションは繋ぎ直しません）。
+  mcp_note: 変更は新しいスレッドから適用されます。
   mcp_source_necoder: necoder の設定
-  mcp_source_codex: Codex CLI で発見
-  mcp_source_claude: Claude Code で発見
-  mcp_source_cursor: Cursor で発見
+  mcp_source_codex: Codex CLI の設定
+  mcp_source_claude: Claude Code の設定
+  mcp_source_cursor: Cursor の設定
   mcp_count: "%{total} 件中 %{enabled} 件有効"
   mcp_filter_all: すべて
   mcp_filter_enabled: 有効のみ
   mcp_filtered_empty: この条件に合う MCP サーバはありません。
   prefs_heading: 動作とエディタ
-  prefs_sub: 真実は settings.json。ここはそれを操作するだけです。
+  prefs_sub: エディタやエージェントの動作を変更できます。
   search_placeholder: 設定を検索
   search_count: "%{count} 件"
   search_none: 一致する設定はありません
   pref_submit_on_enter: Enter で送信
-  pref_submit_on_enter_sub: オフ=⌘Enter 送信（日本語 IME で誤送信しない安全側）
-  pref_soft_wrap: ソフトラップ（折り返し）
-  pref_soft_wrap_sub: ⌥Z で一時トグルもできます
+  pref_submit_on_enter_sub: オフの場合は ⌘Enter で送信します
+  pref_soft_wrap: 行の折り返し
+  pref_soft_wrap_sub: ⌥Z でも切り替えられます
   pref_format_on_save: 保存時にフォーマット
   pref_format_on_save_sub: 対応言語のみ・⌘S で整形→保存
   pref_preview_tabs: プレビュータブ
-  pref_preview_tabs_sub: エクスプローラで 1 回クリックしたファイルは、次にクリックしたファイルで置き換わるタブ（名前が斜体）で開きます。編集するか、ダブルクリックで普通のタブになります
+  pref_preview_tabs_sub: 1 回クリックで開いたタブは、次のファイルに置き換わります。編集するかダブルクリックすると、タブを保持します
   pref_auto_save: 自動保存
-  pref_auto_save_sub: 他のタブ・パネル・アプリへ移った時に保存します。「手を止めた時」は打つのを 1 秒止めた時にも保存します（自動保存ではフォーマットしません）
+  pref_auto_save_sub: タブ・パネル・アプリを切り替えると保存します。「手を止めた時」は入力を 1 秒止めると保存します。自動保存ではフォーマットしません
   auto_save_off: しない
   auto_save_focus_change: 他へ移った時
   auto_save_after_delay: 手を止めた時
   pref_agent_auto_name: スレッドの自動命名
   pref_agent_auto_name_sub: 最初のやり取りから AI が題名を付けます
   pref_agent_prewarm: エージェントを先に起動
-  pref_agent_prewarm_sub: 送信を待たずに接続し、モデル一覧をすぐ選べるようにします
+  pref_agent_prewarm_sub: 送信前に接続して、モデルをすぐ選べるようにします
   pref_sound_done: 完了音
   pref_sound_waiting: 入力待ちの音
   pref_sound_volume: 通知音の大きさ（%）
-  pref_sound_volume_sub: 0 で鳴らしません（選んだ声はそのまま）。100 が音源そのまま
+  pref_sound_volume_sub: 0 = 消音、100 = 元の音量
   sound_nya: にゃっ
   sound_nyaan: にゃー
   sound_mew: みゃっ
   sound_system: システム音
   sound_off: オフ
   pref_reduce_motion: 動きを減らす
-  pref_reduce_motion_sub: 点字スピナーや猫などの装飾アニメーションを静止します
+  pref_reduce_motion_sub: 読み込み表示や猫のアニメーションを停止します
   pref_font_size: フォントサイズ
   pref_tab_size: タブ幅
   pref_terminal_font_size: ターミナルの文字の大きさ
-  pref_terminal_scrollback: ターミナルで遡れる行数
-  pref_terminal_scrollback_sub: "減らすと古い行から捨てます。フォントは settings.json の terminal_font_family で変えられます"
+  pref_terminal_scrollback: ターミナルの履歴行数
+  pref_terminal_scrollback_sub: 指定した行数を超えると、古い出力から削除されます
   terminal_scrollback_lines: "%{n} 行"
   pref_terminal_cursor: ターミナルのカーソル
   pref_terminal_color_scheme: ターミナルの配色
   pref_ghostty_import: Ghostty から取り込む
-  pref_ghostty_import_sub: Ghostty の設定の書体・大きさ・カーソル・配色を、ターミナルの設定にする（キーやスクロールバックは持ってこない）
+  pref_ghostty_import_sub: フォント・文字サイズ・カーソル・配色を取り込みます
   ghostty_import: 取り込む
   ghostty_not_found: Ghostty の設定（~/.config/ghostty/config など）が見つかりません
-  ghostty_nothing: Ghostty の設定に、取り込める物がありませんでした
+  ghostty_nothing: 取り込める設定がありませんでした
   ghostty_imported: "Ghostty から取り込みました: %{items}"
   ghostty_item_font: 書体
   ghostty_item_size: 大きさ
@@ -889,7 +889,7 @@ settings:
   terminal_color_scheme_pick: ファイルを選ぶ…
   terminal_color_scheme_reset: 既定に戻す
   pref_terminal_shell: ターミナルのシェル
-  terminal_shell_default: 既定（OS のシェル）。新しく開く手元の端末から効きます
+  terminal_shell_default: OS の標準シェル。新しく開くローカルのターミナルに適用します
   terminal_shell_pick: 選ぶ…
   terminal_shell_reset: 既定に戻す
   shell_picker_placeholder: シェルを探す…
@@ -902,38 +902,38 @@ settings:
   tabs_view_bar: 横タブ
   tabs_view_list: 縦リスト
   pref_system_notifications: OS の通知
-  pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
+  pref_system_notifications_sub: 見ていないウィンドウでのエージェントの完了・エラー・入力待ちを通知します
   account_label: "アカウント:"
   account_default: 既定
-  account_elsewhere: （ほかの場所）
+  account_elsewhere: （保存先を指定）
   account_add: ＋ 新しいアカウント
   account_login: ログイン
-  account_hint: 切り替えは次に起動するエージェントから（動いているスレッドは今のアカウントのまま）。アカウントの資格情報は necoder が読まず、公式 CLI が扱います
+  account_hint: 次回の起動から切り替わります。ログイン情報は各エージェントの公式 CLI が管理します
   pref_confirm_quit: 終了時の確認
-  pref_confirm_quit_sub: ⌘Q・窓を閉じる時、エージェントや端末が動いていれば「隠して動かし続ける」を選べます
+  pref_confirm_quit_sub: エージェントやターミナルが実行中の場合、終了前に確認します
   confirm_quit_running: 動いている時だけ
   confirm_quit_never: しない
   pref_keep_awake: 作業中はスリープさせない
-  pref_keep_awake_sub: エージェントが作業している間は、放っておいてもスリープしません。画面は消えます。自分で選んだスリープと、ノートの蓋を閉じた時のスリープは止めません
+  pref_keep_awake_sub: エージェントの作業中は自動スリープを防ぎます。画面の消灯や、手動・ふたを閉じた時のスリープは有効です
   keep_awake_working: 作業中の間
   keep_awake_off: しない
   pref_tabs_position: タブの既定位置
   tabs_position_top: 上
   tabs_position_left: 左
   appearance_heading: 外観
-  appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
+  appearance_sub: テーマ・フォント・表示言語を変更できます。
   locale_label: 表示言語
-  locale_sub: 押した瞬間に切り替わります（macOS のメニューバーは次の起動から）
+  locale_sub: すぐに切り替わります。macOS のメニューバーは再起動後に反映されます
   locale_follow_os: OS に合わせる
   locale_ja: 日本語
   locale_en: English
   theme_label: テーマ
-  theme_sub: ⌘K ⌘T のセレクタでも切り替えられます
+  theme_sub: ⌘K ⌘T でも切り替えられます
   open_json: settings.json を開く
   font_ui: UI の書体
   font_code: コードの書体
   font_terminal: ターミナルの書体
-  font_default: 既定（同梱の書体）
+  font_default: 標準フォント
   font_terminal_default: 既定（コードの書体に揃える）
   density_label: 行の間隔
   density_sub: エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さ
@@ -943,10 +943,29 @@ settings:
   font_reset: 既定に戻す
   font_picker_placeholder: 書体を探す…
   font_picker_default: 既定に戻す
-  open_json_sub: すべての設定の真実。保存すると約1秒で全体へ反映されます
+  open_json_sub: 設定ファイルを直接編集します。保存すると自動で反映されます
   open_json_button: 開く
   cli_heading: コマンドライン
   remote_heading: スマホ連携
+  remote_hint: スマホからAIの進捗確認・承認ができます
+  remote_hint_connect: 接続する
+  remote_hint_close: 閉じる
+  remote_devices: 登録端末と接続の承認
+  remote_devices_hint: 接続する端末を承認できます。紛失・買い替え時は、ここから接続を解除してください。
+  remote_no_devices: 登録端末はまだありません。
+  remote_pending: PCでの承認待ち
+  remote_device_online: 本人確認済み・接続中
+  remote_device_registered: 登録済み
+  remote_device_legacy: 再ペアリングが必要
+  remote_device_pairing: スマホでQR読取・パスキー登録待ち
+  remote_shared_count: "%{count} プロジェクトを共有"
+  remote_approve_question: この端末を接続しますか？
+  remote_compare_hint: スマホと同じコードであることを確認してから承認してください。端末名だけでは判断しないでください。
+  remote_approve: コードを確認して承認
+  remote_deny: 拒否
+  remote_revoke: 接続解除
+  remote_status_error: 端末の状態を取得できませんでした。接続ホストの起動状態を確認してください。
+  remote_action_error: 端末の状態が変わったか、処理を完了できませんでした。最新の一覧を確認してください。
   remote_label: スマホから操作
   remote_sub: QR発行時に開いている全プロジェクトを共有します。スマホで切り替えて個別に操作できます。
   remote_issue: 接続用QRを発行
@@ -960,7 +979,7 @@ settings:
   remote_err_relay_busy: 中継サーバが混み合っています。1分ほど置いてからもう一度発行してください。
   remote_err_device_limit: 登録済みの端末が上限（8台）です。使っていない端末を失効させてから発行してください。
   remote_err_node: Node.js 22以降が見つかりません。インストールしてから発行してください。
-  remote_err_host_missing: Remoteホストが同梱されていません。necoder を入れ直してください。
+  remote_err_host_missing: スマホ連携に必要なファイルがありません。necoder を再インストールしてください。
   remote_err_host_start: Remoteホストを起動できませんでした。`~/.necoder/remote/host.log` に理由が残ります。
   remote_err_relay: 中継サーバに接続できませんでした。ネット接続を確認してもう一度お試しください。
   remote_err_timeout: 発行が時間内に終わりませんでした。もう一度お試しください。
@@ -980,19 +999,19 @@ settings:
   save_unreadable: "%{file} を読めないので保存しませんでした（%{reason}）"
   save_failed: "設定を保存できませんでした（%{reason}）"
   skills_heading: Skills
-  skills_sub: エージェント（Claude Code / Codex）が読む手順書（SKILL.md）。necoder の skill を入れると、エージェントが necoder の CLI の使い方をこの版に合わせて読めます。
+  skills_sub: エージェントが読む手順書です。necoder の skill をインストールすると、エージェントが necoder の操作方法を学べます。
   skills_necoder_label: necoder の skill
   skills_checking: 確認中…
   skills_busy: 実行中…
-  skills_install_button: 入れる
+  skills_install_button: インストール
   skills_update_button: 更新する
   skills_update_available: 更新があります
   skills_installed_chip: インストール済み
   skills_foreign: "%{path} は necoder が書いたものではないので上書きしません（上書きするなら `ne skills install --force`）"
   skills_read_error: "%{path} を読めません（%{error}）"
-  skills_found: "見つかった skill（%{count} 件）"
-  skills_empty: skill は見つかりませんでした（~/.claude/skills・~/.codex/skills・~/.agents/skills と、プロジェクトの .claude/skills・.agents/skills を探しました）
-  skills_skipped: "%{count} 件は front matter が読めないので一覧から外しました（理由は `ne skills list` で出ます）"
+  skills_found: "skill 一覧（%{count} 件）"
+  skills_empty: skill は見つかりませんでした。ユーザーとプロジェクトの skills フォルダを確認してください
+  skills_skipped: "%{count} 件の skill の設定を読み取れませんでした。詳細は `ne skills list` で確認できます"
   skills_scope_shared: 共通（~/.agents）
   skills_scope_claude_project: Claude Code・プロジェクト
   skills_scope_shared_project: 共通・プロジェクト
@@ -1148,7 +1167,7 @@ breadcrumb:
   html_preview_tip: OS 標準 WebView で表示  ⌘⇧V
   html_reload_tip: HTML プレビューを再読み込み
   html_open_web_tab: Web タブで開く
-  html_open_web_tab_tip: 内蔵の配信で Web タブに開く（Design モードが使える）
+  html_open_web_tab_tip: Web タブで開く（Design モード）
 webview:
   outside_sandbox: このファイルは表示できる範囲の外にあります
   failed: HTML プレビューを開けませんでした
@@ -1176,10 +1195,10 @@ webtab:
   picker_placeholder: "ポート番号か localhost の URL（例: 3000 / localhost:5173/app）"
   picker_action: localhost を開く
   invalid_url: "localhost の URL だけ開けます: %{input}"
-  static_tip: "内蔵の配信: %{path}"
-  static_failed: "内蔵の配信を始められません: %{error}"
+  static_tip: "HTML ファイル: %{path}"
+  static_failed: "HTML ファイルを開けませんでした: %{error}"
   static_needs_html: 手元の HTML ファイルを開いてから使ってください
-  static_remote: SSH のプロジェクトの HTML は、まだ Web タブで開けません（内蔵の配信は手元のファイルだけ）
+  static_remote: SSH 接続先の HTML ファイルは Web タブで開けません
   static_chat: Chat の HTML はエージェントが書いた物として閉じ込めて見せるので、Web タブでは開けません
   ctx_open_browser: 既定のブラウザで開く
   ctx_copy_url: URL をコピー
@@ -1265,8 +1284,8 @@ terminal:
   menu_clear: クリア
   menu_find: 検索
 theme:
-  builtin: 組み込み
-  user: ユーザー
+  builtin: 標準テーマ
+  user: 追加したテーマ
   picker_placeholder: テーマを選択
 link:
   open_failed: "開けませんでした: %{target}"
@@ -1465,7 +1484,7 @@ menu:
   agent_full_screen: AI を全画面  ⌘⇧⏎
   diagnostics: 診断一覧
   split_right: 右に分割
-  soft_wrap: ソフトラップを切替
+  soft_wrap: 行の折り返しを切り替え
   theme: テーマを切り替え…
   project_color: プロジェクトの色…
   go: 移動

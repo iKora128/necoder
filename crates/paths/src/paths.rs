@@ -368,7 +368,7 @@ fn xdg_user_dir(text: &str, key: &str, home: &Path) -> Option<PathBuf> {
                 None
             }
         })
-        .last()
+        .next_back()
 }
 
 fn config_dir_on(platform: Platform, var: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {

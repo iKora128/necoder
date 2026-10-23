@@ -20,6 +20,9 @@ serde_json.workspace = true
 theme_core.workspace = true
 url.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 # WebView エンジンは同梱しない。macOS は WKWebView、Windows は WebView2 を使う。
 # Linux で wry を有効にすると WebKitGTK/GTK が必要になるため、軽量性を守って対象外にする。
 # `devtools`: release ビルドでもプレビューの右クリック →「要素の詳細を表示」と Web タブの `</>`（Web Inspector の

@@ -1,0 +1,208 @@
+<div id="necoder-first-use" aria-label="necoder 初回体験の画面案">
+  <style>
+    #necoder-first-use { color-scheme: light dark; --nc-bg: light-dark(#ffffff,#202126); --nc-pane: light-dark(#f5f5f7,#27282e); --nc-inset: light-dark(#ececf0,#303139); --nc-line: light-dark(#dcdce3,#41424b); --nc-text: light-dark(#24252c,#e7e7ed); --nc-sub: light-dark(#636572,#b0b1c0); --nc-blue: light-dark(#355ec5,#a3bbff); --nc-blue-bg: light-dark(#eaf0ff,#303c58); --nc-orange: light-dark(#9b520e,#f2b879); --nc-orange-bg: light-dark(#fff1df,#493a2c); --nc-green: light-dark(#176641,#8dd5ac); font: 13px/1.6 -apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif; color:var(--nc-text); }
+    #necoder-first-use * { box-sizing:border-box; }
+    #necoder-first-use [hidden] { display:none !important; }
+    #necoder-first-use button, #necoder-first-use textarea { font:inherit; }
+    #necoder-first-use button { color:inherit; cursor:pointer; }
+    #necoder-first-use button:focus-visible, #necoder-first-use textarea:focus-visible { outline:2px solid var(--nc-blue); outline-offset:3px; }
+    #necoder-first-use .nc-window { background:var(--nc-bg); border:1px solid var(--nc-line); border-radius:12px; overflow:hidden; }
+    #necoder-first-use .nc-top { background:var(--nc-pane); display:flex; align-items:center; gap:16px; padding:11px 15px; border-bottom:1px solid var(--nc-line); flex-wrap:wrap; }
+    #necoder-first-use .nc-brand { font-weight:600; letter-spacing:-.3px; }
+    #necoder-first-use .nc-top nav { display:flex; gap:5px; flex-wrap:wrap; }
+    #necoder-first-use .nc-nav { border:0; background:transparent; padding:5px 9px; border-radius:5px; color:var(--nc-sub); }
+    #necoder-first-use .nc-nav[aria-pressed="true"] { background:var(--nc-inset); color:var(--nc-text); }
+    #necoder-first-use .nc-demo { margin-left:auto; font-size:11px; color:var(--nc-sub); }
+    #necoder-first-use .nc-main { display:flex; min-height:485px; }
+    #necoder-first-use .nc-rail { width:53px; flex-shrink:0; background:var(--nc-pane); border-right:1px solid var(--nc-line); display:flex; flex-direction:column; align-items:center; padding:15px 5px; gap:19px; }
+    #necoder-first-use .nc-project-mark { width:29px; height:29px; display:grid; place-items:center; background:var(--nc-blue-bg); color:var(--nc-blue); border:1px solid var(--nc-blue); border-radius:7px; font-weight:600; }
+    #necoder-first-use .nc-tool { display:flex; align-items:center; flex-direction:column; gap:3px; color:var(--nc-sub); font-size:10px; }
+    #necoder-first-use .nc-tool svg { width:17px; height:17px; }
+    #necoder-first-use .nc-welcome { flex:1; padding:48px 32px 35px; max-width:680px; margin:auto; }
+    #necoder-first-use .nc-eyebrow { color:var(--nc-sub); font-size:12px; margin:0 0 10px; }
+    #necoder-first-use h2 { font-size:25px; font-weight:600; line-height:1.45; letter-spacing:-.6px; margin:0 0 13px; }
+    #necoder-first-use .nc-lead { color:var(--nc-sub); margin:0 0 24px; max-width:470px; }
+    #necoder-first-use .nc-actions { display:flex; flex-wrap:wrap; gap:9px; align-items:center; }
+    #necoder-first-use .nc-button { border:1px solid var(--nc-line); background:var(--nc-bg); padding:7px 12px; border-radius:6px; display:inline-flex; gap:6px; align-items:center; justify-content:center; }
+    #necoder-first-use .nc-primary { border-color:var(--nc-blue); background:var(--nc-blue-bg); color:var(--nc-blue); font-weight:600; }
+    #necoder-first-use .nc-link { background:transparent; color:var(--nc-blue); border:0; padding:4px 0; text-align:left; }
+    #necoder-first-use .nc-features { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; margin:37px 0 0; padding-top:23px; border-top:1px solid var(--nc-line); }
+    #necoder-first-use .nc-features strong { display:block; font-weight:500; margin-bottom:5px; }
+    #necoder-first-use .nc-features p { margin:0; color:var(--nc-sub); font-size:12px; }
+    #necoder-first-use .nc-workspace { display:grid; grid-template-columns:160px minmax(0,1fr) 285px; flex:1; min-width:0; }
+    #necoder-first-use .nc-files { background:var(--nc-pane); border-right:1px solid var(--nc-line); padding:15px 11px; }
+    #necoder-first-use .nc-small { font-size:11px; color:var(--nc-sub); }
+    #necoder-first-use .nc-repo { display:flex; align-items:center; gap:6px; font-weight:500; margin-bottom:12px; overflow-wrap:anywhere; }
+    #necoder-first-use .nc-dot { width:7px; height:7px; flex-shrink:0; background:var(--nc-blue); border-radius:50%; display:inline-block; }
+    #necoder-first-use .nc-file { padding:5px 8px; color:var(--nc-sub); overflow-wrap:anywhere; }
+    #necoder-first-use .nc-file.nc-selected { background:var(--nc-inset); color:var(--nc-text); border-radius:4px; }
+    #necoder-first-use .nc-editor { min-width:0; }
+    #necoder-first-use .nc-tabline { border-bottom:1px solid var(--nc-line); padding:10px 14px; font-size:12px; color:var(--nc-sub); }
+    #necoder-first-use .nc-code { margin:0; padding:23px 18px; font:12px/2 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
+    #necoder-first-use .nc-comment { color:var(--nc-sub); }
+    #necoder-first-use .nc-code-blue { color:var(--nc-blue); }
+    #necoder-first-use .nc-agent { border-left:1px solid var(--nc-line); display:flex; flex-direction:column; min-width:0; }
+    #necoder-first-use .nc-agent-head { padding:11px 14px; border-bottom:1px solid var(--nc-line); }
+    #necoder-first-use .nc-chip { display:inline-flex; align-items:center; gap:5px; background:var(--nc-blue-bg); color:var(--nc-blue); padding:2px 7px; border-radius:4px; font-size:11px; }
+    #necoder-first-use .nc-agent-body { padding:23px 16px; flex:1; }
+    #necoder-first-use h3 { font-size:16px; font-weight:500; margin:0 0 8px; }
+    #necoder-first-use p { margin:0 0 12px; }
+    #necoder-first-use .nc-sub { color:var(--nc-sub); }
+    #necoder-first-use .nc-prompt { display:block; width:100%; text-align:left; background:var(--nc-pane); border:1px solid var(--nc-line); padding:10px; border-radius:6px; margin-top:10px; }
+    #necoder-first-use .nc-compose { margin:0 12px 12px; padding:10px; border:1px solid var(--nc-line); border-radius:6px; display:flex; align-items:center; gap:8px; }
+    #necoder-first-use .nc-compose textarea { width:100%; min-width:0; resize:vertical; min-height:38px; padding:0; border:0; background:transparent; color:var(--nc-text); }
+    #necoder-first-use .nc-compose button { border:0; background:var(--nc-blue-bg); color:var(--nc-blue); border-radius:4px; padding:5px 8px; }
+    #necoder-first-use .nc-user { background:var(--nc-pane); padding:9px 11px; border-radius:6px; margin-bottom:16px; }
+    #necoder-first-use .nc-discovery { border-top:1px solid var(--nc-line); margin-top:20px; padding-top:15px; }
+    #necoder-first-use .nc-discovery p { font-size:12px; color:var(--nc-sub); margin-bottom:6px; }
+    #necoder-first-use .nc-fleet { flex:1; min-width:0; padding:23px; }
+    #necoder-first-use .nc-fleet-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+    #necoder-first-use .nc-fleet-heading h3 { margin:0; }
+    #necoder-first-use .nc-captain { display:flex; gap:14px; align-items:center; flex-wrap:wrap; padding:13px 0; border-top:1px solid var(--nc-line); border-bottom:1px solid var(--nc-line); margin:20px 0; }
+    #necoder-first-use .nc-captain p { margin:0; font-size:12px; color:var(--nc-sub); }
+    #necoder-first-use .nc-captain button { margin-left:auto; }
+    #necoder-first-use .nc-task-grid { display:grid; grid-template-columns:1fr 1fr; gap:13px; }
+    #necoder-first-use .nc-task { min-width:0; border:1px solid var(--nc-line); background:var(--nc-bg); border-radius:7px; }
+    #necoder-first-use .nc-task-head { padding:12px 14px; border-bottom:1px solid var(--nc-line); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    #necoder-first-use .nc-task-body { padding:17px 14px; }
+    #necoder-first-use .nc-task-body p { color:var(--nc-sub); font-size:12px; }
+    #necoder-first-use .nc-status { margin-left:auto; font-size:11px; color:var(--nc-sub); }
+    #necoder-first-use .nc-orange { color:var(--nc-orange); background:var(--nc-orange-bg); }
+    #necoder-first-use .nc-orange-dot { background:var(--nc-orange); }
+    #necoder-first-use .nc-result { margin-top:18px; border-top:1px solid var(--nc-line); padding-top:14px; }
+    #necoder-first-use .nc-diff { margin:10px 0; padding:11px; background:var(--nc-pane); font:12px/1.9 ui-monospace,monospace; overflow-wrap:anywhere; white-space:pre-wrap; }
+    #necoder-first-use .nc-added { color:var(--nc-green); }
+    #necoder-first-use .nc-bottom { border-top:1px solid var(--nc-line); padding:6px 14px; background:var(--nc-pane); color:var(--nc-sub); font-size:11px; display:flex; flex-wrap:wrap; gap:15px; }
+    #necoder-first-use .nc-bottom span:last-child { margin-left:auto; }
+    @media(max-width:850px) { #necoder-first-use .nc-workspace { grid-template-columns:120px minmax(0,1fr); } #necoder-first-use .nc-editor { display:none; } #necoder-first-use .nc-agent { border-left:0; } }
+    @media(max-width:520px) { #necoder-first-use .nc-main { min-height:0; } #necoder-first-use .nc-rail { display:none; } #necoder-first-use .nc-welcome { padding:30px 20px; } #necoder-first-use h2 { font-size:22px; } #necoder-first-use .nc-features { grid-template-columns:1fr; gap:15px; } #necoder-first-use .nc-workspace { grid-template-columns:minmax(0,1fr); } #necoder-first-use .nc-files { display:none; } #necoder-first-use .nc-task-grid { grid-template-columns:1fr; } #necoder-first-use .nc-fleet { padding:20px 15px; } #necoder-first-use .nc-demo { width:100%; margin-left:0; } #necoder-first-use .nc-top { gap:8px; } }
+  </style>
+  <div class="nc-window">
+    <header class="nc-top">
+      <span class="nc-brand">necoder</span>
+      <nav aria-label="画面を切り替え">
+        <button type="button" class="nc-nav" data-view="welcome" aria-pressed="true">スタート</button>
+        <button type="button" class="nc-nav" data-view="editor" aria-pressed="false">Editor</button>
+        <button type="button" class="nc-nav" data-view="fleet" aria-pressed="false" id="nc-fleet-label">Fleet · 並行作業</button>
+      </nav>
+      <span class="nc-demo">画面案 · 接続不要のサンプル体験</span>
+    </header>
+    <div class="nc-main">
+      <aside class="nc-rail" aria-label="基本機能">
+        <span class="nc-project-mark">n</span>
+        <span class="nc-tool"><i data-lucide="files" aria-hidden="true"></i>ファイル</span>
+        <span class="nc-tool"><i data-lucide="search" aria-hidden="true"></i>検索</span>
+        <span class="nc-tool"><i data-lucide="git-branch" aria-hidden="true"></i>Git</span>
+        <span class="nc-tool"><i data-lucide="terminal" aria-hidden="true"></i>端末</span>
+      </aside>
+      <section class="nc-welcome" data-screen="welcome">
+        <p class="nc-eyebrow">necoder へようこそ</p>
+        <h2>AIに任せた作業を、<br>迷わず進める。</h2>
+        <p class="nc-lead">依頼する。別の作業を並行する。変更を確かめる。<br>コードとAIの作業を、同じ場所で見渡せます。</p>
+        <div class="nc-actions">
+          <button type="button" class="nc-button nc-primary" data-go="editor">プロジェクトを開く <span aria-hidden="true">↗</span></button>
+          <button type="button" class="nc-button" data-go="editor">サンプルで体験する</button>
+        </div>
+        <div class="nc-features nc-explain">
+          <div><strong>AIに依頼する</strong><p>コードの説明や修正を、その場で依頼。</p></div>
+          <div><strong>作業を並行する</strong><p>作業ごとに環境を分け、複数のAIを動かす。</p></div>
+          <div><strong>変更を確かめる</strong><p>AIが変更した差分を、取り込む前に確認。</p></div>
+        </div>
+      </section>
+      <section class="nc-workspace" data-screen="editor" hidden>
+        <aside class="nc-files">
+          <div class="nc-repo"><span class="nc-dot"></span>sample-web</div>
+          <div class="nc-small">⎇ main</div>
+          <div class="nc-file" style="margin-top:15px">⌄ src</div>
+          <div class="nc-file">　 app.tsx</div>
+          <div class="nc-file">　 styles.css</div>
+          <div class="nc-file">package.json</div>
+          <div class="nc-file nc-selected">README.md</div>
+        </aside>
+        <div class="nc-editor">
+          <div class="nc-tabline">README.md</div>
+          <pre class="nc-code"><span class="nc-comment"># sample-web</span>
+
+小さなWebアプリのサンプル。
+
+<span class="nc-code-blue">## 開発を始める</span>
+
+npm install
+npm run dev
+
+<span class="nc-code-blue">## 構成</span>
+
+src/app.tsx     アプリの画面
+src/styles.css  見た目の設定</pre>
+        </div>
+        <aside class="nc-agent">
+          <div class="nc-agent-head">AIエージェント <span class="nc-small">· サンプル</span><br><span class="nc-chip"><span class="nc-dot"></span>sample-web ⎇ main</span></div>
+          <div class="nc-agent-body" aria-live="polite">
+            <div id="nc-agent-empty">
+              <h3>このプロジェクトで、何をしますか？</h3>
+              <p class="nc-sub nc-explain">AIは、上に表示されたプロジェクトを対象に作業します。</p>
+              <button type="button" class="nc-prompt" data-prompt="このプロジェクトの構成を説明して">このプロジェクトの構成を説明して <span aria-hidden="true">↗</span></button>
+              <button type="button" class="nc-prompt" data-prompt="起動方法を教えて">起動方法を教えて <span aria-hidden="true">↗</span></button>
+            </div>
+            <div id="nc-agent-answer" hidden>
+              <div class="nc-user" id="nc-user-text">このプロジェクトの構成を説明して</div>
+              <p id="nc-answer-text">画面は src/app.tsx、見た目は src/styles.css にまとまっています。npm run dev で開発サーバーを起動できます。</p>
+              <span class="nc-small">✓ 完了 · サンプルの応答</span>
+              <div class="nc-discovery nc-explain">
+                <strong>待ち時間に、別の作業も。</strong>
+                <p>Fleetなら、別々の作業環境でAIを並行して動かせます。</p>
+                <button type="button" class="nc-link" data-go="fleet">Fleetで並行作業を試す →</button>
+              </div>
+            </div>
+          </div>
+          <form class="nc-compose" id="nc-prompt-form"><textarea aria-label="サンプルへの依頼" placeholder="AIに依頼する…" id="nc-input" rows="2"></textarea><button type="submit" aria-label="サンプルの応答を見る">↑</button></form>
+        </aside>
+      </section>
+      <section class="nc-fleet" data-screen="fleet" hidden>
+        <div class="nc-fleet-heading"><div><p class="nc-eyebrow">● sample-web / Fleet</p><h3>別々の作業を、同時に進める。</h3></div><button type="button" class="nc-button nc-primary" id="nc-add-task">＋ 作業を追加</button></div>
+        <p class="nc-sub nc-explain" style="margin-top:9px">作業ごとにブランチと環境を分けるので、変更が混ざりません。</p>
+        <div class="nc-captain"><div><strong>Captain <span class="nc-small">· 作業の分担役</span></strong><p class="nc-explain">大きな依頼を、複数のTaskに分ける案を作ります。</p></div><button type="button" class="nc-button" id="nc-captain-button">分担の例を見る</button></div>
+        <div id="nc-captain-example" class="nc-user" hidden>「ログイン画面を作る」→「画面を作る」「入力チェックを追加する」の2つに分けて提案。実行する作業は、あなたが選びます。</div>
+        <div class="nc-task-grid">
+          <article class="nc-task"><div class="nc-task-head"><span class="nc-dot"></span><strong>ログイン画面を作る</strong><span class="nc-status">◌ 作業中</span></div><div class="nc-task-body"><span class="nc-chip">⎇ task/login</span><p style="margin-top:13px">フォームの配置とスタイルを調整しています。</p><span class="nc-small">このTaskの変更は、ほかのTaskと分かれています。</span></div></article>
+          <article class="nc-task"><div class="nc-task-head"><span class="nc-dot nc-orange-dot"></span><strong>READMEを整える</strong><span class="nc-status">✓ 確認待ち</span></div><div class="nc-task-body"><span class="nc-chip nc-orange">⎇ task/readme</span><p style="margin-top:13px">起動手順に、必要なNode.jsのバージョンを追記しました。</p><button type="button" class="nc-button" id="nc-review-button">変更を確認する</button></div></article>
+        </div>
+        <div class="nc-user" id="nc-task-added" style="margin-top:13px" hidden>新しい作業：ログインフォームの入力チェックを追加する<br><span class="nc-small">⎇ task/validation · 別の作業環境で開始する例</span></div>
+        <div class="nc-result" id="nc-review" hidden aria-live="polite"><strong>README.md の変更</strong><pre class="nc-diff">  ## 開発を始める
+<span class="nc-added">+ Node.js 22 以降を使用してください。</span>
+  npm install
+  npm run dev</pre><span class="nc-small">サンプルの差分 · 実際のファイル変更はありません</span></div>
+      </section>
+    </div>
+    <footer class="nc-bottom"><span id="nc-location">はじめに</span><span>検索 · Git · ターミナルも使えます</span><span id="nc-footnote">エージェントの設定は、使い始めるときに。</span></footer>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById('necoder-first-use');
+      const state = { explanations: true, fleetLabel: 'Fleet · 並行作業' };
+      function showView(view) {
+        root.querySelectorAll('[data-screen]').forEach(el => { el.hidden = el.dataset.screen !== view; });
+        root.querySelectorAll('[data-view]').forEach(el => { el.setAttribute('aria-pressed', String(el.dataset.view === view)); });
+        root.querySelector('#nc-location').textContent = view === 'welcome' ? 'はじめに' : '● sample-web ⎇ main';
+        root.querySelector('#nc-footnote').textContent = view === 'welcome' ? 'エージェントの設定は、使い始めるときに。' : 'サンプル体験 · AIへの送信なし';
+      }
+      function answer(prompt) {
+        root.querySelector('#nc-agent-empty').hidden = true;
+        root.querySelector('#nc-agent-answer').hidden = false;
+        root.querySelector('#nc-user-text').textContent = prompt;
+        root.querySelector('#nc-answer-text').textContent = prompt.includes('起動') ? 'このサンプルは npm install の後に npm run dev で起動します。起動手順は、開いているREADMEにも記載されています。' : 'サンプルの応答です。画面は src/app.tsx、見た目は src/styles.css にまとまっています。npm run dev で開発サーバーを起動できます。';
+        root.querySelector('#nc-input').value = '';
+      }
+      root.querySelectorAll('[data-view]').forEach(el => el.addEventListener('click', () => showView(el.dataset.view)));
+      root.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => showView(el.dataset.go)));
+      root.querySelectorAll('[data-prompt]').forEach(el => el.addEventListener('click', () => answer(el.dataset.prompt)));
+      root.querySelector('#nc-prompt-form').addEventListener('submit', event => { event.preventDefault(); const prompt = root.querySelector('#nc-input').value.trim(); if (prompt) answer(prompt); });
+      root.querySelector('#nc-review-button').addEventListener('click', () => { root.querySelector('#nc-review').hidden = !root.querySelector('#nc-review').hidden; });
+      root.querySelector('#nc-captain-button').addEventListener('click', () => { root.querySelector('#nc-captain-example').hidden = !root.querySelector('#nc-captain-example').hidden; });
+      root.querySelector('#nc-add-task').addEventListener('click', () => { root.querySelector('#nc-task-added').hidden = false; root.querySelector('#nc-add-task').disabled = true; root.querySelector('#nc-add-task').textContent = '✓ 作業を追加しました'; });
+      function renderDesign() { root.querySelectorAll('.nc-explain').forEach(el => { el.hidden = !state.explanations; }); root.querySelector('#nc-fleet-label').textContent = state.fleetLabel; }
+      renderDesign();
+      if (globalThis.Tweak) { const tweak = new Tweak({ container: root, onChange: renderDesign }); tweak.addToggle(state, 'explanations', { label: '用途の説明を表示' }); tweak.addSelect(state, 'fleetLabel', { label: 'Fleetの入口', options: ['Fleet · 並行作業', 'Fleet'] }); }
+    })();
+  </script>
+</div>

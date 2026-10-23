@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { locations } from '../host/platform.mjs';
 import { ipc } from '../host/ipc.mjs';
+import net from 'node:net';
 
 test('ホスト起動・ローカル認証・停止（Windows は実際の名前付きパイプ）', { timeout: 30000 }, async () => {
   const directory = await mkdtemp(path.join(process.platform === 'win32' ? tmpdir() : '/tmp', 'ncr-host-'));
@@ -30,4 +31,34 @@ test('ホスト起動・ローカル認証・停止（Windows は実際の名前
       assert.equal((await stat(path.join(directory, 'config.json'))).mode & 0o777, 0o600);
     }
   } finally { await run('stop').catch(() => {}); }
+});
+
+test('旧ホストを再利用せず、ローカル認証して新版へ交代する', { timeout: 30000 }, async () => {
+  const directory = await mkdtemp(path.join(process.platform === 'win32' ? tmpdir() : '/tmp', 'ncr-upgrade-'));
+  const env = { ...process.env, NECODER_REMOTE_HOME: directory,
+    NECODER_GUI_SOCK: process.platform === 'win32' ? `\\\\.\\pipe\\necoder-upgrade-absent-${process.pid}` : path.join(directory, 'absent.sock') };
+  const { adminSocket } = locations(process.platform, env, directory);
+  const cli = fileURLToPath(new URL('../host/cli.mjs', import.meta.url));
+  const run = (...args) => promisify(execFile)(process.execPath, [cli, ...args], { env, timeout: 20000, windowsHide: true });
+  await run('init');
+  const config = JSON.parse(await readFile(path.join(directory, 'config.json'), 'utf8'));
+  let stopped = false;
+  const old = net.createServer(socket => {
+    let input = '';
+    socket.on('data', chunk => {
+      input += chunk;
+      if (!input.includes('\n')) return;
+      const request = JSON.parse(input);
+      assert.equal(request.auth, config.adminToken);
+      socket.end(JSON.stringify({ ok: true, result: { pid: 0, devices: [] } }) + '\n');
+      if (request.method === 'stop') { stopped = true; old.close(); }
+    });
+  });
+  await new Promise((resolve, reject) => { old.once('error', reject); old.listen(adminSocket, resolve); });
+  try {
+    await run('start');
+    assert.equal(stopped, true);
+    assert.equal(JSON.parse((await run('status')).stdout).security_version, 2);
+    assert.equal(JSON.parse(await readFile(path.join(directory, 'config.json'), 'utf8')).adminToken, config.adminToken);
+  } finally { old.close(); await run('stop').catch(() => {}); }
 });

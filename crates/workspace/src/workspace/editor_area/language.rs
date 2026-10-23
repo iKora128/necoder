@@ -182,6 +182,21 @@ impl Workspace {
         }));
     }
 
+    /// 全 session の言語サーバを止める（`LspClient` の Drop が kill + wait する）。終了時に呼ぶ。
+    /// 止めるのを stdin の EOF 任せにしない: rust-analyzer は initialize の握手が済む前に stdin が
+    /// 閉じると、終わらずに残り続ける（2026-10-02 に確認）。
+    pub(crate) fn stop_language_servers(&mut self) {
+        let project_sessions = &mut self.project_sessions;
+        for session in project_sessions
+            .sessions
+            .iter_mut()
+            .chain(project_sessions.chat.as_mut())
+        {
+            session.editor_area._lsp_pump = None;
+            session.editor_area.lsp = None;
+        }
+    }
+
     /// initialize 応答後: initialized 通知 + 現在の rust ファイルを didOpen。
     pub(crate) fn on_lsp_initialized(&mut self, cx: &mut Context<Self>) {
         self.lsp_initialized = true;
@@ -1218,6 +1233,58 @@ mod tests {
         workspace.update_in(cx, |workspace, _window, _cx| {
             assert!(workspace.completion.is_none(), "Markdown だけ");
         });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 終了するときは言語サーバを止める（`stop_language_servers`）。本物の rust-analyzer はテストで
+    /// 起こさない（`ensure_lsp`）ので、自分の pid を書いて居座る `sh` を言語サーバの代わりにする。
+    #[cfg(unix)]
+    #[gpui::test]
+    fn quitting_stops_language_servers(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_quit_lsp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        let pid_file = root.join("server.pid");
+        let script = format!("echo $$ > '{}'; exec sleep 60", pid_file.display());
+        let (client, _notifications) =
+            lang::lsp::LspClient::new(Path::new("sh"), &["-c", &script], &root).unwrap();
+        workspace.update(cx, |workspace, _cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.lsp = Some(client);
+        });
+        let mut pid = None;
+        for _ in 0..500 {
+            pid = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<libc::pid_t>().ok());
+            if pid.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let pid = pid.expect("言語サーバの代わりが起動する");
+        // SAFETY: シグナル 0 は送らずに存在だけを確かめる。
+        let alive = |pid: libc::pid_t| unsafe { libc::kill(pid, 0) == 0 };
+        assert!(alive(pid), "言語サーバの代わりが動いている");
+
+        cx.cx.quit();
+
+        let released = workspace.read_with(cx, |workspace, _cx| workspace.lsp.is_none());
+        assert!(released, "終了で LspClient を手放していない");
+        assert!(!alive(pid), "終了しても言語サーバ（pid {pid}）が残っている");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

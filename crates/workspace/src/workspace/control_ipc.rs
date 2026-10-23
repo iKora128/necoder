@@ -1463,6 +1463,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn remote_new_threads_need_a_live_task_and_deadline_but_not_an_existing_thread(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = scratch("remote_new_thread");
+        std::fs::write(
+            directory.join("settings.json"),
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        let (workspace, cx) = open_workspace(&directory, cx);
+        let snapshot = request(&workspace, cx, "remote_snapshot", serde_json::json!({}));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let params = serde_json::json!({
+            "instance_id": snapshot["result"]["instance_id"],
+            "task_id": snapshot["result"]["projects"][0]["id"],
+            "expires_at": now + 25_000,
+            "agent": "Claude Code",
+        });
+        let mut expired = params.clone();
+        expired["expires_at"] = serde_json::json!(0);
+        let rejected = request(&workspace, cx, "remote_new_thread", expired);
+        assert_eq!(rejected["error"], "command_expired", "{rejected}");
+        let mut stale = params.clone();
+        stale["instance_id"] = serde_json::json!("stale");
+        assert_eq!(
+            request(&workspace, cx, "remote_new_thread", stale)["error"],
+            "stale_instance"
+        );
+        let mut missing = params.clone();
+        missing["thread_id"] = serde_json::json!("missing");
+        assert_eq!(
+            request(&workspace, cx, "remote_new_thread", missing)["error"],
+            "thread_not_found"
+        );
+        let created = request(&workspace, cx, "remote_new_thread", params.clone());
+        assert_eq!(created["ok"], true, "{created}");
+        let mut detail = params;
+        detail["thread_id"] = created["result"]["thread_id"].clone();
+        let loaded = request(&workspace, cx, "remote_thread", detail);
+        assert_eq!(loaded["ok"], true, "{loaded}");
+        assert_eq!(loaded["result"]["id"], created["result"]["thread_id"]);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[gpui::test]
     fn terminals_lists_dock_tabs_and_task_card_terminals(cx: &mut gpui::TestAppContext) {
         let directory = scratch("list");
         let (workspace, cx) = open_workspace(&directory, cx);

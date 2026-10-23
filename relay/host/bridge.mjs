@@ -1,10 +1,11 @@
 import WebSocket from 'ws';
 import webpush from 'web-push';
-import { createHash } from 'node:crypto';
+import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { accept, random, validSecret } from '../public/crypto.mjs';
 import { ipc } from './ipc.mjs';
 import { guiSocket, readState, writeState } from './storage.mjs';
+import { SECURITY_VERSION, authorized, lock, securityOptions, registerPasskey, authenticatePasskey } from './passkeys.mjs';
 
 /// ダイジェスト先頭の連続するゼロ bit 数（PoW の判定・Worker 側と同じ規則）。
 export function leadingZeroBits(digest) {
@@ -41,7 +42,7 @@ export class Bridge {
     this.config = config; this.devices = devices;
     this.connections = new Map(); this.snapshot = null; this.stopped = false;
     this.ipc = options.ipc || ((method, params) => ipc(guiSocket, method, params));
-    this.persist = options.persist || (() => writeState('devices', this.devices));
+    this.persist = options.persist || ((devices = this.devices) => writeState('devices', devices));
     this.persistReceipts = options.persistReceipts || (receipts => writeState('receipts', receipts));
     this.receipts = {}; this.polling = false; this.caffeinate = null;
     // 端末ごと（room）の「前の poll で走っていたスレッド」。完了の push を決めるだけなので保存しない。
@@ -62,7 +63,7 @@ export class Bridge {
     await this.renew();
   }
   async renew() {
-    for (const device of this.devices) if (device.paired && !device.revoked) {
+    for (const device of this.devices) if (device.approved && !device.revoked) {
       const response = await fetch(`${this.config.origin}/api/rooms/${device.room}`, { method: 'PATCH',
         headers: { Authorization: `Bearer ${device.hostToken}` }, signal: AbortSignal.timeout(10_000) }).catch(() => null);
       if (response?.status === 410) console.error('Room expired; pair this device again:', device.name);
@@ -75,6 +76,7 @@ export class Bridge {
     const url = new URL(`/api/rooms/${device.room}/ws`, this.config.origin);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(url, ['necoder-v1', `auth.${device.hostToken}`], { maxPayload: 2_800_000, handshakeTimeout: 10_000, perMessageDeflate: false });
+    lock(state);
     Object.assign(state, { socket, channel: null, pairedChannel: false, outbound: Promise.resolve(), inbound: Promise.resolve(), lastPong: Date.now(), lastThread: '', selection: null });
     this.connections.set(device.room, state);
     socket.on('open', () => {
@@ -94,7 +96,7 @@ export class Bridge {
     });
     socket.on('error', () => {}); // close が再接続と状態表示を担当する。
     socket.on('close', () => {
-      clearInterval(state.heartbeat); state.channel = null; state.pairedChannel = false;
+      clearInterval(state.heartbeat); lock(state); state.channel = null; state.pairedChannel = false;
       if (!this.stopped && !device.revoked) state.retry = setTimeout(() => this.connect(device),
         Math.min(30_000, 1000 * 2 ** Math.min(5, state.attempt++)) + Math.random() * 700);
     });
@@ -103,10 +105,11 @@ export class Bridge {
     if (device.revoked) throw new Error('device_revoked');
     if (message.type === 'peer') {
       // この通知はリレー生成なので認証済み online とはみなさない。
-      state.channel = null; state.pairedChannel = false; state.selection = null;
+      lock(state); state.channel = null; state.pairedChannel = false;
       return;
     }
     if (message.type === 'hello') {
+      lock(state);
       if (!device.paired && device.expires <= Date.now()) throw new Error('pairing_expired');
       const result = await accept(device.secret, device.room, message);
       state.channel = result.channel; state.pairedChannel = false;
@@ -116,7 +119,7 @@ export class Bridge {
         device.secret = random(); device.paired = true; device.confirmed = false;
         await this.persist();
         this.updateWakeLock();
-        await this.send(state, { type: 'paired', secret: device.secret, name: this.config.name, room: device.room });
+        await this.send(state, { type: 'paired', secret: device.secret, name: this.config.name, room: device.room, securityVersion: SECURITY_VERSION });
         await this.renew();
       } else {
         await this.send(state, { type: 'ready', name: this.config.name });
@@ -126,9 +129,42 @@ export class Bridge {
     if (!state.channel) throw new Error('authentication_required');
     const value = await state.channel.open(message);
     if (value.type === 'confirm') {
-      device.confirmed = true; state.pairedChannel = true; await this.persist();
-      await this.sendSnapshot(device, state); return;
+      if (device.securityVersion !== SECURITY_VERSION) { await this.send(state, { type: 'security', status: 'legacy' }); return; }
+      device.keyConfirmed = true; await this.persist();
+      await this.sendSecurity(device, state); return;
     }
+    if (['register_response', 'authenticate_response', 'security_refresh'].includes(value.type)) {
+      try {
+        if (!device.keyConfirmed) throw new Error('pairing_confirmation_required');
+        if (value.type === 'register_response') {
+          await registerPasskey(this.config, device, state, value.response, this.persist);
+          device.name = String(value.name || device.name).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80);
+          await this.persist();
+        } else if (value.type === 'authenticate_response') {
+          await authenticatePasskey(this.config, device, state, value.response, this.persist);
+          await this.send(state, { type: 'unlocked' });
+          await this.sendSnapshot(device, state); return;
+        } else lock(state);
+        await this.sendSecurity(device, state);
+      } catch (error) {
+        lock(state);
+        // WebAuthnライブラリの例外には資格情報が含まれ得る。画面へは固定コードだけ。
+        const code = ['pairing_expired', 'pair_again_security_upgrade', 'pc_approval_required', 'passkey_challenge_expired'].includes(error.message)
+          ? error.message : 'passkey_verification_failed';
+        await this.send(state, { type: 'security_error', error: code });
+      }
+      return;
+    }
+    if (value.type === 'lock') { lock(state); await this.sendSecurity(device, state); return; }
+    if (value.type === 'heartbeat') {
+      if (state.unlockedAt && !authorized(device, state)) { lock(state); await this.sendSecurity(device, state); }
+      else await this.send(state, { type: 'heartbeat', now: Date.now() });
+      return;
+    }
+    if (!authorized(device, state)) {
+      lock(state); await this.sendSecurity(device, state); return;
+    }
+    if (value.type === 'activity') { state.activityAt = Date.now(); return; }
     if (value.type === 'subscribe') {
       if (!device.confirmed || !validSubscription(value.subscription)) throw new Error('invalid_push_subscription');
       device.subscription = value.subscription; await this.persist();
@@ -138,8 +174,6 @@ export class Bridge {
       delete device.subscription; await this.persist();
       await this.send(state, { type: 'push_removed' }); return;
     }
-    if (value.type === 'heartbeat') { await this.send(state, { type: 'heartbeat', now: Date.now() }); return; }
-    if (!device.confirmed) throw new Error('pairing_confirmation_required');
     state.pairedChannel = true;
     let response;
     try { response = { type: 'response', id: value.id, ok: true, result: await this.execute(device, state, value) }; }
@@ -148,7 +182,9 @@ export class Bridge {
   }
   async execute(device, state, message) {
     if (device.revoked) throw new Error('device_revoked');
+    if (!authorized(device, state)) throw new Error('passkey_authentication_required');
     validateCommand(message, device, this.snapshot);
+    if (message.method !== 'snapshot') state.activityAt = Date.now();
     if (message.method === 'snapshot') {
       await this.sendSnapshot(device, state); return { online: !!this.snapshot };
     }
@@ -166,6 +202,7 @@ export class Bridge {
       await this.persistReceipts(this.receipts);
     }
     if (device.revoked) throw new Error('device_revoked');
+    if (!authorized(device, state)) throw new Error('passkey_authentication_required');
     const result = await this.ipc(`remote_${message.method}`, parameters);
     if (message.method === 'thread') {
       state.selection = parameters;
@@ -182,14 +219,22 @@ export class Bridge {
     if (!channel || state.socket.readyState !== WebSocket.OPEN) return Promise.resolve();
     const send = state.outbound.then(async () => {
       if (state.channel !== channel) return;
+      const device = this.devices.find(device => this.connections.get(device.room) === state);
+      const sensitive = ['unlocked', 'snapshot', 'thread', 'response', 'push_saved'].includes(value.type);
+      const permitted = () => !device?.revoked && (!sensitive || (!!device && authorized(device, state)));
+      if (!permitted()) return;
       if (state.socket.bufferedAmount > 3_000_000) { state.socket.close(1008, 'slow_reader'); return; }
       const frame = await channel.seal(value);
-      if (state.channel === channel && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify(frame));
+      if (state.channel !== channel) return;
+      // 暗号化した後に送信を取り消すと連番が欠けるため、同じチャネルを使い続けない。
+      if (!permitted()) { state.socket.close(1008, 'locked_session'); return; }
+      if (state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify(frame));
     });
     state.outbound = send.catch(() => state.socket.close(1011, 'send_failed'));
     return send;
   }
   async sendSnapshot(device, state) {
+    if (!authorized(device, state)) return;
     const snapshot = this.snapshot ? { ...this.snapshot, projects: this.snapshot.projects.filter(project => device.tasks.includes(project.id)) } : null;
     await this.send(state, { type: 'snapshot', online: !!snapshot, snapshot, name: this.config.name,
       vapid: this.config.vapid.publicKey, push_subscribed: !!device.subscription, now: Date.now() });
@@ -207,7 +252,14 @@ export class Bridge {
       for (const device of this.devices) {
         if (device.revoked) continue;
         const state = this.connections.get(device.room);
-        if (state?.channel && device.confirmed) {
+        if (!device.approved && device.expires <= Date.now() && device.securityVersion === SECURITY_VERSION) {
+          if (state?.channel) await this.send(state, { type: 'security_error', error: 'pairing_expired' });
+          device.revoked = true; delete device.secret; delete device.passkey; await this.persist();
+          if (state) { lock(state); state.socket?.close(4003, 'pairing_expired'); }
+          continue;
+        }
+        if (state?.unlockedAt && !authorized(device, state)) { lock(state); await this.sendSecurity(device, state); }
+        if (state?.channel && authorized(device, state)) {
           if (changed) await this.sendSnapshot(device, state);
           if (state.selection && next?.instance_id === state.selection.instance_id) {
             try {
@@ -220,7 +272,7 @@ export class Bridge {
             } catch { state.selection = null; }
           }
         }
-        if (next && device.subscription) await this.maybeNotify(device, next);
+        if (next && device.approved && device.subscription) await this.maybeNotify(device, next);
       }
     } finally { this.polling = false; }
   }
@@ -263,7 +315,8 @@ export class Bridge {
     if (!selected.length || selected.some(id => !this.snapshot.projects.some(project => project.id === id))) throw new Error('open_a_project_first');
     if (this.devices.filter(device => !device.revoked && (device.paired || device.expires > Date.now())).length >= 8) throw new Error('device_limit_revoke_unused_devices');
     const device = { room: random(), hostToken: random(), phoneToken: random(), secret: random(),
-      name: String(name || 'Phone').slice(0, 80), tasks: selected, paired: false, expires: Date.now() + 300_000 };
+      name: String(name || 'Phone').slice(0, 80), tasks: selected, paired: false, expires: Date.now() + 300_000,
+      securityVersion: SECURITY_VERSION, approved: false, approvalCode: String(randomInt(1_000_000)).padStart(6, '0') };
     // 資格情報は全部ここでローカル生成する（リレーはハッシュしか持たない＝アカウント不要）。
     // リレーへ示すのは「身元」ではなく、要求されていれば部屋あたりの PoW だけ。
     const pow = await this.proveWork(device.room);
@@ -294,15 +347,48 @@ export class Bridge {
   async revoke(room) {
     const device = this.devices.find(device => device.room === room);
     if (!device) throw new Error('device_not_found');
-    device.revoked = true; delete device.secret; delete device.subscription;
+    device.revoked = true; device.approved = false; delete device.secret; delete device.subscription; delete device.passkey; delete device.approvalCode;
     await this.persist();
     this.updateWakeLock();
     const state = this.connections.get(room);
-    if (state) { state.channel = null; state.pairedChannel = false; clearTimeout(state.retry); state.socket.close(4003, 'revoked'); }
+    if (state) { lock(state); state.channel = null; state.pairedChannel = false; clearTimeout(state.retry); state.socket?.close(4003, 'revoked'); }
     const result = await fetch(`${this.config.origin}/api/rooms/${room}`, { method: 'DELETE',
       headers: { Authorization: `Bearer ${device.hostToken}` }, signal: AbortSignal.timeout(10_000) }).catch(() => null);
     // ローカル失効はネット不通でも完了する。再起動してもこの端末は認証されない。
     return { revoked: true, relay_deleted: !!result?.ok };
+  }
+  async sendSecurity(device, state) {
+    if (device.revoked) return;
+    if (device.securityVersion !== SECURITY_VERSION) {
+      await this.send(state, { type: 'security', status: 'legacy' }); return;
+    }
+    try { await this.send(state, await securityOptions(this.config, device, state)); }
+    catch { await this.send(state, { type: 'security_error', error: 'pairing_expired' }); }
+  }
+  deviceStatus() {
+    return this.devices.filter(device => !device.revoked && (device.securityVersion === SECURITY_VERSION
+      ? device.approved || device.expires > Date.now() : device.paired || device.expires > Date.now()))
+      .map(device => ({ id: device.room, name: device.name, projects: device.tasks,
+        state: device.securityVersion !== SECURITY_VERSION ? 'legacy' : device.approved ? 'approved' : device.passkey ? 'pending' : 'pairing',
+        code: !device.approved && device.passkey ? device.approvalCode : undefined,
+        paired: !!device.approved, online: authorized(device, this.connections.get(device.room) || {}),
+        expires: device.approved ? undefined : device.expires }));
+  }
+  async approve(room, code) {
+    const device = this.devices.find(device => device.room === room);
+    if (!device || device.revoked || device.approved || device.securityVersion !== SECURITY_VERSION
+      || !device.passkey || !device.keyConfirmed || device.expires <= Date.now()) throw new Error('pairing_not_pending');
+    if (typeof code !== 'string' || !/^\d{6}$/.test(code)
+      || !timingSafeEqual(Buffer.from(code), Buffer.from(device.approvalCode))) throw new Error('pairing_code_changed');
+    // 永続化が終わる前に認証可能にしない。登録配列を複製して保存し、成功後にメモリへ反映する。
+    await this.persist(this.devices.map(entry => entry === device ? { ...entry, approved: true, confirmed: true } : entry));
+    if (device.revoked) throw new Error('device_revoked');
+    device.approved = true; device.confirmed = true;
+    this.updateWakeLock();
+    await this.renew();
+    const state = this.connections.get(room);
+    if (state?.channel && !device.revoked) { lock(state); await this.sendSecurity(device, state); }
+    return { approved: true };
   }
   /// **ペアリング済みの端末が 1 台でもある間、Mac を idle sleep させない。**
   ///
@@ -321,7 +407,7 @@ export class Bridge {
   /// mac 専用（Windows は `SetThreadExecutionState`・Linux は `systemd-inhibit` が要る＝別途）。
   updateWakeLock() {
     if (process.platform !== 'darwin' || this.config.keepAwake === false) return;
-    const wanted = !this.stopped && this.onAcPower && this.devices.some(device => device.paired && !device.revoked);
+    const wanted = !this.stopped && this.onAcPower && this.devices.some(device => device.approved && !device.revoked);
     if (wanted === !!this.caffeinate) return;
     if (!wanted) { this.caffeinate.kill(); this.caffeinate = null; return; }
     const child = spawn('/usr/bin/caffeinate', ['-i', '-s', '-w', String(process.pid)], { stdio: 'ignore' });

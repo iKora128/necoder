@@ -9,6 +9,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { webkit, devices } from '@playwright/test';
 import webpush from 'web-push';
 import { Bridge } from '../host/bridge.mjs';
+import { installPasskeyAuthenticator } from './browser/passkeys.mjs';
 
 // `--名前 値` / 値の無い `--名前` は true（例: `--sheets` = 設定と新規スレッドのシートも撮る）。
 const options = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, index, all) => value.startsWith('--')
@@ -49,6 +50,7 @@ const browser = await webkit.launch();
 try {
   const context = await browser.newContext({ ...devices['iPhone 13'], locale: options.locale || 'ja-JP', colorScheme: 'dark' });
   const page = await context.newPage();
+  await installPasskeyAuthenticator(page);
   page.on('pageerror', error => console.error('pageerror:', error.message));
   const shot = async name => { await page.screenshot({ path: `${out}/${name}.png` }); console.log(`${out}/${name}.png`); };
   await page.goto('http://localhost:8791/');
@@ -57,6 +59,16 @@ try {
   // 同じ文書への fragment 遷移は再読込されない（ペアリングが走らない）ので一度離れる。
   await page.goto('about:blank');
   await page.goto(pairing.url);
+  await page.locator('#security-device-name').waitFor({ state: 'visible' });
+  await shot('0-passkey-register');
+  await page.locator('#security-verify').click();
+  await page.locator('#security-code-wrap').waitFor({ state: 'visible' });
+  await shot('0-pc-approval');
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await bridge.approve(room, await page.locator('#security-code').textContent());
+  await page.locator('#security-verify').waitFor({ state: 'visible' });
+  await shot('0-passkey-unlock');
+  await page.locator('#security-verify').click();
   await page.waitForFunction(() => document.body.dataset.status === 'online', null, { timeout: 20_000 }).catch(async error => {
     await shot('x-timeout');
     console.error('status:', await page.locator('#status').textContent(), 'notice:', await page.locator('#notice').textContent());

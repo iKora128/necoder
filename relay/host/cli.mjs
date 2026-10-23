@@ -13,6 +13,7 @@ import { ipc } from './ipc.mjs';
 import { stateDir, adminSocket, readState, writeState, secureDirectory } from './storage.mjs';
 import { hasLid } from './platform.mjs';
 import { random, validSecret } from '../public/crypto.mjs';
+import { SECURITY_VERSION } from './passkeys.mjs';
 
 const [command = 'help', ...args] = process.argv.slice(2);
 async function admin(method, params = {}) {
@@ -46,11 +47,12 @@ async function serve() {
           const { method, params = {}, auth } = JSON.parse(body.slice(0, body.indexOf('\n')));
           if (!validSecret(auth) || !timingSafeEqual(Buffer.from(auth), Buffer.from(config.adminToken))) throw new Error('local_auth_required');
           let result;
-          if (method === 'status') result = { pid: process.pid, online: !!bridge.snapshot, origin: config.origin,
+          if (method === 'status') result = { pid: process.pid, security_version: SECURITY_VERSION, online: !!bridge.snapshot, origin: config.origin,
             keeps_awake: bridge.keepsAwake(), on_ac_power: bridge.onAcPower, sleeps_on_lid_close: hasLid(),
-            devices: bridge.devices.filter(d => !d.revoked).map(d => ({ id: d.room, name: d.name, paired: d.confirmed, projects: d.tasks })) };
+            devices: bridge.deviceStatus() };
           else if (method === 'pair') { await bridge.poll(); result = await bridge.pair(params.name, params.tasks); }
           else if (method === 'revoke') result = await bridge.revoke(params.id);
+          else if (method === 'approve') result = await bridge.approve(params.id, params.code);
           else if (method === 'stop') { result = { stopped: true }; setTimeout(shutdown, 100); }
           else throw new Error('unknown_command');
           socket.end(JSON.stringify({ ok: true, result }) + '\n');
@@ -71,7 +73,20 @@ async function serve() {
   console.log('necoder Remote host started:', config.origin);
 }
 async function ensureStarted() {
-  try { return await admin('status'); } catch (error) {
+  try {
+    const status = await admin('status');
+    if (status.security_version === SECURITY_VERSION) return status;
+    // 新しいQRを発行する操作では、旧ホストを再利用しない。認証済みのローカル管理APIだけで停止する。
+    await admin('stop');
+    for (let tries = 0; tries < 40; tries++) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      try { await admin('status'); } catch (error) {
+        if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error;
+        break;
+      }
+      if (tries === 39) throw new Error('host_startup_failed');
+    }
+  } catch (error) {
     if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error;
   }
   if (!await readState('config')) throw new Error('run_init_first: init を実行してください');
@@ -101,6 +116,8 @@ try {
     console.log(`Initialized (${origin}). Run: ne remote pair`);
   } else if (command === 'start') console.log(await ensureStarted());
   else if (command === 'pair' || command === 'pair-json') {
+    // GUIの「QRを発行」が初期設定の入口になる。既存の鍵や接続先は上書きしない。
+    if (!await readState('config')) await writeState('config', { origin: 'https://control.necoder.com', name: hostname(), adminToken: random(), vapid: webpush.generateVAPIDKeys() });
     await ensureStarted();
     const result = await admin('pair', { name: args[0] || 'Phone', tasks: args.slice(1) });
     if (command === 'pair-json') {
@@ -113,10 +130,16 @@ try {
       if (hasLid()) console.log('注意: この Mac は蓋を閉じるとスリープします（power assertion では止まりません）。'
         + '\n  外部ディスプレイ + 電源で clamshell にするか、蓋を開けたままにしてください。');
     }
-  } else if (['status', 'stop', 'revoke'].includes(command)) {
-    console.log(JSON.stringify(await admin(command, { id: args[0] }), null, 2));
+  } else if (command === 'devices') {
+    try { console.log(JSON.stringify({ devices: (await admin('status')).devices })); }
+    catch (error) {
+      if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error;
+      console.log(JSON.stringify({ devices: [] }));
+    }
+  } else if (['status', 'stop', 'revoke', 'approve'].includes(command)) {
+    console.log(JSON.stringify(await admin(command, { id: args[0], code: args[1] }), null, 2));
   } else {
-    console.log('necoder Remote: init [https://origin] | start | serve | pair [device-name] [task-id...] | status | revoke <device-id> | stop');
+    console.log('necoder Remote: init [https://origin] | start | serve | pair [device-name] [task-id...] | status | devices | approve <device-id> <code> | revoke <device-id> | stop');
     console.log('Mac / Windows の Node.js 22+ が必要です。pair は現在開いているプロジェクトだけを共有します。');
   }
 } catch (error) { console.error(error.message); process.exitCode = 1; }

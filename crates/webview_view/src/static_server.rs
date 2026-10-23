@@ -518,8 +518,10 @@ fn resolve(root: &Path, encoded: &str) -> Resolved {
     }
     if real.is_dir() {
         Resolved::Directory
-    } else {
+    } else if real.is_file() {
         Resolved::File(real)
+    } else {
+        Resolved::Forbidden
     }
 }
 
@@ -623,8 +625,11 @@ fn write_redirect(stream: &mut TcpStream, location: &str) -> io::Result<()> {
 }
 
 fn write_file(stream: &mut TcpStream, path: &Path, head_only: bool) -> io::Result<()> {
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match open_regular_file(path) {
         Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            return write_status(stream, 403, "Forbidden", head_only);
+        }
         Err(_) => return write_status(stream, 404, "Not Found", head_only),
     };
     let length = file.metadata()?.len();
@@ -640,6 +645,26 @@ fn write_file(stream: &mut TcpStream, path: &Path, head_only: bool) -> io::Resul
         io::copy(&mut Read::by_ref(&mut file).take(length), stream)?;
     }
     stream.flush()
+}
+
+/// resolve 後に普通のファイルが FIFO へ置き換わっても、open 自体を待たせない。
+/// 検査はパスだけでなく実際に開いた FD にも掛ける。
+fn open_regular_file(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -890,6 +915,38 @@ mod tests {
             get(port, &format!("/{token}/home.html")).2,
             b"<h1>index</h1>"
         );
+    }
+
+    /// FIFO は参照されても待たずに拒否し、最後のプレビューも終了できる。
+    #[cfg(unix)]
+    #[test]
+    fn special_files_do_not_block_serving_or_shutdown() {
+        let fixture = Fixture::new("fifo");
+        let fifo = fixture.site.join("blocked.txt");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let server = StaticServer::start().unwrap();
+        let mount = server.mount(&fixture.site).unwrap();
+        let port = server.port();
+        let target = format!("/{}/blocked.txt", token_of(&mount));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let status = get(port, &target).0;
+            // パス検査との競合を想定し、FD を開く層も直接検証する。
+            let error = open_regular_file(&fifo).unwrap_err().kind();
+            drop(mount);
+            drop(server);
+            sender.send((status, error)).unwrap();
+        });
+        let (status, error) = receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("FIFO でも止まらない");
+        assert_eq!(status, 403);
+        assert_eq!(error, io::ErrorKind::PermissionDenied);
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     }
 
     /// Host が `127.0.0.1:<port>` と完全一致しなければ断る（DNS rebinding）。

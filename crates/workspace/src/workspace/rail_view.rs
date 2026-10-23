@@ -590,6 +590,22 @@ impl Workspace {
                     ),
                 )
             })
+            // スマホ連携は全プロジェクトの端末管理。設定の直上へ常設。
+            .child(
+                self.rail_icon(
+                    "rail-phone",
+                    "icons/smartphone-user-round.svg",
+                    i18n::t!("settings.remote_heading"),
+                    theme.fg2,
+                )
+                .debug_selector(|| "rail-phone".to_string())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.open_phone_connection(cx);
+                    }),
+                ),
+            )
             // ⚙ 設定ホーム（中央に開く。Agents セットアップの入口・常時表示）。
             .child(
                 self.rail_icon(

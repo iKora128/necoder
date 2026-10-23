@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { Bridge } from '../host/bridge.mjs';
+import { authenticator } from './support/authenticator.mjs';
 import { readState } from '../host/storage.mjs';
 import { initiate, finish, random } from '../public/crypto.mjs';
 const config = await readState('config');
@@ -18,6 +19,7 @@ try {
   const url = new URL(`/api/rooms/${device.room}/ws`, config.origin); url.protocol = 'wss:';
   socket = new WebSocket(url, ['necoder-v1', `auth.${params.get('token')}`], { origin: config.origin });
   let initial, channel, chain = Promise.resolve();
+  const key = authenticator(config.origin);
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('production handshake timed out')), 25000);
     socket.once('error', reject);
@@ -33,7 +35,13 @@ try {
         if (value.type === 'paired') {
           assert.notEqual(value.secret, params.get('secret'));
           socket.send(JSON.stringify(await channel.seal({ type: 'confirm' })));
-        } else if (value.type === 'snapshot') {
+        } else if (value.type === 'security') {
+          if (value.status === 'register') socket.send(JSON.stringify(await channel.seal({ type: 'register_response', response: key.registration(value.options), name: 'Temporary deployment check' })));
+          else if (value.status === 'pending') await bridge.approve(device.room, value.code);
+          else if (value.status === 'locked') socket.send(JSON.stringify(await channel.seal({ type: 'authenticate_response', response: key.authentication(value.options) })));
+          else throw new Error('unexpected_security_state');
+        } else if (value.type === 'security_error') throw new Error(value.error);
+        else if (value.type === 'snapshot') {
           assert.equal(value.snapshot.instance_id, 'smoke-only');
           socket.send(JSON.stringify(await channel.seal({ type: 'request', id: random(), method: 'shell', expires_at: Date.now() + 25000 })));
         } else if (value.type === 'response') {

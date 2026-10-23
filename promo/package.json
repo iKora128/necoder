@@ -1,0 +1,23 @@
+{
+  "name": "necoder-promo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "necoder の紹介ムービー（Remotion で描画・音は Rust で合成）",
+  "scripts": {
+    "studio": "remotion studio",
+    "soundtrack": "cd soundtrack && cargo run --release -- ja && cargo run --release -- en",
+    "render:ja": "remotion render NecoderPromo out/necoder-promo-ja.mp4 --props='{\"language\":\"ja\"}'",
+    "render:en": "remotion render NecoderPromo out/necoder-promo-en.mp4 --props='{\"language\":\"en\"}'",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "@remotion/cli": "^4.0.531",
+    "@remotion/fonts": "^4.0.531",
+    "@types/react": "^19.3.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "remotion": "^4.0.531",
+    "typescript": "^7.0.2"
+  }
+}

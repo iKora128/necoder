@@ -481,6 +481,8 @@ pub struct Settings {
     /// Fleet の初回導線（2 本目の Task を切った時の 1 回だけのトースト・FLEET-V2 §3.0）を出したか。
     /// 出したら `true` を書き込み、以後は**何も案内しない**（案内は 1 回・DECISIONS の静かさの原則）。
     pub fleet_hint_seen: bool,
+    /// スマホ連携のレール横の初回案内を閉じたか。
+    pub phone_hint_seen: bool,
     /// 初回オンボーディングを済ませたか（`false`＝初回で設定ホームが自動オープン・M12）。
     /// 「これで始める」で `true` に。以後は自動では開かない（レール ⚙ からいつでも開ける）。
     pub onboarded: bool,
@@ -538,6 +540,7 @@ impl Default for Settings {
             rail: RailSettings::default(),
             chat: ChatSettings::default(),
             fleet_hint_seen: false,
+            phone_hint_seen: false,
             onboarded: false,
         }
     }

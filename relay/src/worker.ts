@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { readRoomCredentials } from './room_request';
 
 /// IP あたりの部屋作成回数を絞る Workers 標準のレート制限 binding。
 interface RateLimiter { limit(options: { key: string }): Promise<{ success: boolean }> }
@@ -61,6 +62,14 @@ export default {
       const address = request.headers.get('CF-Connecting-IP');
       if (address && !(await env.ROOM_LIMITER.limit({ key: address })).success)
         return response(429, 'rate_limited');
+      // DO が早期応答しても元のストリーム転送を残さない。公開入口で上限を掛け、
+      // 読み切った小さい JSON だけを DO へ渡す。
+      const credentials = await readRoomCredentials(request);
+      if (credentials instanceof Response) return credentials;
+      const headers = new Headers(request.headers);
+      headers.delete('Content-Length'); // 正規化前の本文の長さを引き継がない。
+      headers.set('Content-Type', 'application/json');
+      request = new Request(request, { headers, body: JSON.stringify(credentials) });
     }
     return env.ROOMS.getByName(match[1]).fetch(request);
   },
@@ -75,13 +84,11 @@ export class ControlRoom extends DurableObject<Env> {
     const url = new URL(request.url);
     let room = await this.ctx.storage.get<Room>('room');
     if (request.method === 'POST' && !url.pathname.endsWith('/ws')) {
+      // 既存 room でも本文を上限内で読み切る。転送元が本文を送っている途中で
+      // 409 を返すと、ローカル実行環境では応答後のストリーム読み込みが例外になる。
+      const credentials = await readRoomCredentials(request);
+      if (credentials instanceof Response) return credentials;
       if (room) return response(409, 'room_exists');
-      if (Number(request.headers.get('Content-Length')) > 2048) return response(413, 'too_large');
-      const body = await request.text();
-      if (body.length > 2048) return response(413, 'too_large');
-      let credentials: { host: string; phone: string };
-      try { credentials = JSON.parse(body); } catch { return response(400, 'invalid_json'); }
-      if (!valid(credentials.host) || !valid(credentials.phone) || credentials.host === credentials.phone) return response(400, 'invalid_credentials');
       room = { hostHash: await hash(credentials.host), phoneHash: await hash(credentials.phone), created: Date.now(), expires: Date.now() + 300_000 };
       await this.ctx.storage.put('room', room);
       await this.ctx.storage.setAlarm(room.expires);

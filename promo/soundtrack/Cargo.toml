@@ -1,0 +1,18 @@
+[package]
+name = "necoder-soundtrack"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "necoder 紹介ムービーのサウンドトラック（録音素材なし・全部コードで合成）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+debug = false
+
+# ルートの cargo workspace に入れない（promo は製品のビルドと独立させる）
+[workspace]

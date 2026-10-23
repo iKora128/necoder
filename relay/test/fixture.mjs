@@ -2,6 +2,7 @@
 import http from 'node:http';
 import { Bridge } from '../host/bridge.mjs';
 import webpush from 'web-push';
+import WebSocket from 'ws';
 let online = true, counter = 0;
 const detail = { id: 'thread-a', turn_id: 'turn-a', entries: [{ kind: 'agent', text: 'リモート接続のテストです。' }], permission: null, question: null };
 const snapshot = { instance_id: 'fixture-a', projects: [{ id: 'project-a', name: 'necoder-test', branch: 'remote-pwa', threads: [
@@ -30,9 +31,26 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1:8792');
     let result = { ok: true };
     if (url.pathname === '/pair') result = await bridge.pair('Browser test', ['project-a']);
+    else if (url.pathname === '/approve') result = await bridge.approve(url.searchParams.get('room'), url.searchParams.get('code'));
+    else if (url.pathname === '/devices') result = bridge.deviceStatus();
+    else if (url.pathname === '/reset') { for (const device of bridge.devices.filter(device => !device.revoked)) await bridge.revoke(device.room); }
+    else if (url.pathname === '/lock') {
+      for (const state of bridge.connections.values()) { state.activityAt = Date.now() - 300_001; }
+      await bridge.poll();
+    }
     else if (url.pathname === '/offline') { online = false; await bridge.poll(); }
     else if (url.pathname === '/online') { online = true; await bridge.poll(); }
-    else if (url.pathname === '/disconnect') { for (const state of bridge.connections.values()) state.socket.terminate(); }
+    else if (url.pathname === '/disconnect') {
+      for (const state of bridge.connections.values()) {
+        if (state.socket.readyState === WebSocket.CLOSED) continue;
+        const closed = new Promise(resolve => state.socket.once('close', resolve));
+        state.socket.terminate(); await closed;
+        if (url.searchParams.has('hold')) { clearTimeout(state.retry); state.retry = null; }
+      }
+    }
+    else if (url.pathname === '/reconnect') {
+      for (const device of bridge.devices.filter(device => !device.revoked)) bridge.connect(device);
+    }
     else if (url.pathname === '/permission') {
       detail.permission = { id: 'permission-a', title: 'Bash: echo test', complete: true, raw_input: '{"command":"echo test"}', diffs: [],
         options: [{ id: 'permission-a:0', kind: 'allow' }, { id: 'permission-a:1', kind: 'reject' }] };

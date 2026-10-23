@@ -28,6 +28,8 @@ gpui.workspace = true
 # （gpui の example も font-kit 付きで動いている）。
 gpui_platform = { workspace = true, features = ["font-kit"] }
 workspace.workspace = true
+# 終了時に ACP の子プロセスを道連れにする（app.run の後の保険）。
+acp_client.workspace = true
 editor_view.workspace = true
 theme_core.workspace = true
 i18n.workspace = true
@@ -37,12 +39,20 @@ settings.workspace = true
 project.workspace = true
 futures.workspace = true
 host.workspace = true
+# 調査用: NECODER_WGPU_LOG=1 で gpui/wgpu のログを stderr へ出す（既定は無効）。
+log = "0.4"
 search.workspace = true
 storage.workspace = true
 serde_json.workspace = true
 # Finder/Dock から届く file:// URL の解釈（on_open_urls → パス化。percent-decode 込み）
 url.workspace = true
 image = { workspace = true, optional = true }
+
+# Linux の表示バックエンドは既定で両方含める。gpui_platform の既定 feature は空で、
+# 有効化しないと cargo check が通っても Desktop 上の起動時に panic する。
+# target を限定し、macOS / Windows の描画 feature は変えない。
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 
 # Dock / AppleScript の「終了」を ⌘Q と同じ確認へ回すフック（quit_hook.rs・O4）。
 [target.'cfg(target_os = "macos")'.dependencies]

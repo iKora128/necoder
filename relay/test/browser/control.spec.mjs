@@ -1,5 +1,11 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, chromium } from '@playwright/test';
 import QRCode from 'qrcode';
+import { installPasskeyAuthenticator, approveAndUnlock, unlock } from './passkeys.mjs';
+
+test.beforeEach(async ({ page }, testInfo) => {
+  if (!testInfo.title.startsWith('実際のWebAuthn')) await installPasskeyAuthenticator(page);
+});
+test.afterEach(async ({ request }) => { await request.get('http://127.0.0.1:8792/reset'); });
 
 test('PWA: ペアリング・限定共有・送信・承認・再接続・失効', async ({ page, request }, testInfo) => {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -7,7 +13,7 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
   const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
   await page.goto(pairing.url);
-  await expect(page.locator('#status')).toHaveText('接続済み');
+  await approveAndUnlock(page, request, room);
   expect(new URL(page.url()).hash).toBe('');
   // 一覧には共有したプロジェクトだけが並ぶ。
   await expect(page.locator('#home-list .project-head')).toHaveCount(1);
@@ -33,15 +39,14 @@ test('PWA: ペアリング・限定共有・送信・承認・再接続・失効
   await page.getByRole('button', { name: '今回だけ許可' }).click();
   await expect(page.locator('#permission')).toBeEmpty();
   await page.reload();
-  await expect(page.locator('#status')).toHaveText('接続済み');
+  await unlock(page);
   await request.get('http://127.0.0.1:8792/offline');
   await expect(page.locator('#status')).toHaveText('necoderが起動していません');
   await expect(page.locator('#send')).toBeDisabled();
   await request.get('http://127.0.0.1:8792/online');
   await expect(page.locator('#status')).toHaveText('接続済み');
   await request.get('http://127.0.0.1:8792/disconnect');
-  await expect(page.locator('#status')).toHaveText('PCに接続できません');
-  await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 15000 });
+  await unlock(page);
   await expect(page.locator('#transcript')).toContainText(message);
   await page.screenshot({ path: `test-results/pwa-mobile-${testInfo.project.name}.png`, fullPage: true });
   await request.get(`http://127.0.0.1:8792/revoke?room=${room}`);
@@ -53,10 +58,15 @@ test('部屋作成はアカウント不要・壊れた資格情報と異なる O
   const room = 'a'.repeat(43);
   // アカウント不要の公開リレー: 秘密を持たない相手でも部屋は作れる（濫用対策はレート制限と PoW）。
   expect((await request.post(`/api/rooms/${room}`, { data: {} })).status()).toBe(400);
+  for (const body of ['null', '[]', '"text"']) {
+    expect((await request.post(`/api/rooms/${room}`, { data: body })).status()).toBe(400);
+  }
+  expect((await request.post(`/api/rooms/${room}`, { data: ' '.repeat(2049) })).status()).toBe(413);
   const credentials = { host: 'h'.repeat(43), phone: 'p'.repeat(43) };
   // DO の状態は project（chromium/webkit）を跨いで残るので、部屋は毎回別の id で作る。
   const fresh = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
-  expect((await request.post(`/api/rooms/${fresh}`, { data: credentials })).status()).toBe(201);
+  // 正規化後の JSON と Content-Length が異なる要求も、DO へ正常に届く。
+  expect((await request.post(`/api/rooms/${fresh}`, { data: JSON.stringify(credentials).padEnd(2048) })).status()).toBe(201);
   // 同じ部屋の二重作成は拒否（room id は 256bit 乱数なので実運用では起きない）。
   expect((await request.post(`/api/rooms/${fresh}`, { data: credentials })).status()).toBe(409);
   expect((await request.get('/api/health')).ok()).toBe(true);
@@ -64,8 +74,30 @@ test('部屋作成はアカウント不要・壊れた資格情報と異なる O
   expect((await request.get('/api/health', { headers: { Origin: 'https://evil.example' } })).status()).toBe(403);
   const response = await page.goto('/');
   expect(response.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
+  expect(response.headers()['permissions-policy']).toContain('camera=(self)');
+  // 偽の getUserMedia は Permissions-Policy を迂回するため、許可範囲も別途検証する。
+  if (page.context().browser().browserType().name() === 'chromium') {
+    expect(await page.evaluate(() => document.featurePolicy.allowsFeature('camera'))).toBe(true);
+  }
   await expect(page.getByRole('heading', { name: 'PCの作業を、手元から。' })).toBeVisible();
   await page.screenshot({ path: 'test-results/pwa-welcome.png', fullPage: true });
+});
+
+// getUserMedia を差し替えず、実際の配信ヘッダーと仮想カメラを使う。
+test('配信された PWA でカメラの権限を与えると getUserMedia が動く', async ({ browserName, baseURL }) => {
+  test.skip(browserName !== 'chromium', 'Chromium の仮想カメラで検証する');
+  const browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+  try {
+    const context = await browser.newContext({ permissions: ['camera'] });
+    const page = await context.newPage();
+    await page.goto(baseURL);
+    expect(await page.evaluate(async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      const count = stream.getVideoTracks().length;
+      stream.getTracks().forEach(track => track.stop());
+      return count;
+    })).toBe(1);
+  } finally { await browser.close(); }
 });
 
 /// 偽カメラを `getUserMedia` に差し込む（`qr` = QR を写す / `denied` = 拒否）。
@@ -147,7 +179,8 @@ test('PWA 内で QR を読み取ってペアリングする', async ({ page, req
   await installFakeCamera(page, 'qr', image);
   await expectFakeCamera(page);
   await page.locator('#scan').click();
-  await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 20000 });
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await approveAndUnlock(page, request, room);
   await page.locator('[data-thread-name="PWA integration"]').first().click();
   await expect(page.locator('#destination')).toContainText('PWA integration');
   // 読み取り後はカメラを必ず離す（ダイアログが閉じ、トラックが止まっている）。
@@ -179,4 +212,115 @@ test('カメラが使えなければ行き止まりにせず貼り付けへ倒�
   await expect(page.locator('#scan-error'), why).toContainText('カメラ');
   await expect(page.locator('#pair-manual')).toHaveAttribute('open', '');
   await expect(page.locator('#pair-url')).toBeVisible();
+});
+
+test('無操作ロック後は会話を消去し、認証キャンセル・再読込でもロックを保つ', async ({ page, request }, testInfo) => {
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await page.goto(pairing.url); await approveAndUnlock(page, request, room);
+  await page.locator('[data-thread-name="PWA integration"]').first().click();
+  await expect(page.locator('#transcript')).not.toBeEmpty();
+  await request.get('http://127.0.0.1:8792/lock');
+  await expect(page.locator('#security-screen')).toBeVisible();
+  await expect(page.locator('#transcript')).toBeEmpty();
+  await expect(page.locator('#home-list')).toBeEmpty();
+  await expect(page.locator('#send')).toBeDisabled();
+  await page.evaluate(() => { window.__cancelPasskey = true; });
+  await page.locator('#security-verify').click();
+  await expect(page.locator('#security-error')).toContainText('本人確認を完了できませんでした');
+  await expect(page.locator('#home-list')).toBeEmpty();
+  await page.screenshot({ path: `test-results/pwa-locked-${testInfo.project.name}.png`, fullPage: true });
+  await page.evaluate(() => { window.__cancelPasskey = false; });
+  await unlock(page);
+  await page.reload();
+  await expect(page.locator('#security-screen')).toBeVisible();
+  await expect(page.locator('#home-list')).toBeEmpty();
+  await unlock(page);
+});
+
+test('実際のWebAuthn APIとChromium仮想認証器で登録・PC承認・再認証する', async ({ page, request, browserName }) => {
+  test.skip(browserName !== 'chromium', 'ChromiumのCDP仮想認証器で検証');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('WebAuthn.enable', { enableUI: false });
+  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
+    protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true,
+    isUserVerified: true, automaticPresenceSimulation: true,
+  } });
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await page.goto(pairing.url);
+  await approveAndUnlock(page, request, room);
+  await page.reload(); await unlock(page);
+});
+
+test('PCホストが切断された時点で会話と下書きを消し、復帰後は再認証する', async ({ page, request }) => {
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await page.goto(pairing.url); await approveAndUnlock(page, request, room);
+  await page.locator('[data-thread-name="PWA integration"]').first().click();
+  await expect(page.locator('#transcript')).not.toBeEmpty();
+  await page.locator('#message').fill('切断時には残さない下書き');
+  await request.get('http://127.0.0.1:8792/disconnect?hold=1');
+  await expect(page.locator('#security-screen')).toBeVisible();
+  await expect(page.locator('#transcript')).toBeEmpty();
+  await expect(page.locator('#home-list')).toBeEmpty();
+  await expect(page.locator('#message')).toHaveValue('');
+  await request.get('http://127.0.0.1:8792/reconnect');
+  await unlock(page);
+});
+
+test('PWAのページ退避・復帰イベントで表示を消し、復帰後は再認証する', async ({ page, request }) => {
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await page.goto(pairing.url); await approveAndUnlock(page, request, room);
+  await page.locator('[data-thread-name="PWA integration"]').first().click();
+  await expect(page.locator('#transcript')).not.toBeEmpty();
+  await page.locator('#message').fill('退避時には残さない下書き');
+  // OS自体の検証ではない。BFCache/PWAが通知するイベントをブラウザ内で再現する。
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })));
+  await expect(page.locator('#transcript')).toBeEmpty();
+  await expect(page.locator('#message')).toHaveValue('');
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
+  await expect(page.locator('#home-list')).toBeEmpty();
+  await unlock(page);
+});
+
+test('スマホ側の5分無操作タイマーでも会話と下書きを消す', async ({ page, request }) => {
+  await page.clock.install();
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await page.goto(pairing.url); await approveAndUnlock(page, request, room);
+  await page.locator('[data-thread-name="PWA integration"]').first().click();
+  await expect(page.locator('#transcript')).not.toBeEmpty();
+  await page.locator('#message').fill('放置時には残さない下書き');
+  // 壁時計だけを進めて1秒タイマーを動かす。heartbeatの30秒切断での消去を成功と誤認しない。
+  const now = await page.evaluate(() => Date.now());
+  await page.clock.setSystemTime(now + 5 * 60_000 + 1500);
+  await page.clock.runFor(1000);
+  await expect(page.locator('#security-screen')).toBeVisible();
+  await expect(page.locator('#security-title')).toHaveText('本人確認して接続する');
+  await expect(page.locator('#transcript')).toBeEmpty();
+  await expect(page.locator('#message')).toHaveValue('');
+  await expect(page.locator('#send')).toBeDisabled();
+});
+
+test('操作を続けても認証から15分でロックする', async ({ page, request }) => {
+  await page.clock.install();
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await page.goto(pairing.url); await approveAndUnlock(page, request, room);
+  await page.locator('[data-thread-name="PWA integration"]').first().click();
+  await expect(page.locator('#transcript')).not.toBeEmpty();
+  const started = await page.evaluate(() => Date.now());
+  for (const minute of [4, 8, 12]) {
+    await page.clock.setSystemTime(started + minute * 60_000);
+    await page.locator('#message').press('a');
+    await page.clock.runFor(1000);
+    await expect(page.locator('#status')).toHaveText('接続済み');
+  }
+  await page.clock.setSystemTime(started + 15 * 60_000 + 1500);
+  await page.clock.runFor(1000);
+  await expect(page.locator('#security-title')).toHaveText('本人確認して接続する');
+  await expect(page.locator('#transcript')).toBeEmpty();
+  await expect(page.locator('#message')).toHaveValue('');
 });

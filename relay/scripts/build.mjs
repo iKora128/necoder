@@ -13,6 +13,9 @@ await build({ absWorkingDir: root, entryPoints: ['host/cli.mjs'], outfile: 'dist
 // 動的 import されるので、通常の起動では読み込まれない。
 await build({ absWorkingDir: root, stdin: { contents: "export { default } from 'jsqr';", resolveDir: root, loader: 'js' },
   outfile: 'public/jsqr.mjs', bundle: true, platform: 'browser', format: 'esm', target: 'safari16', minify: true });
+// パスキーのブラウザ側の変換処理も自己配信し、外部CDNのスクリプトを読まない。
+await build({ absWorkingDir: root, stdin: { contents: "export { startRegistration, startAuthentication, browserSupportsWebAuthn } from '@simplewebauthn/browser';", resolveDir: root, loader: 'js' },
+  outfile: 'public/passkeys.mjs', bundle: true, platform: 'browser', format: 'esm', target: 'safari16', minify: true });
 for (const size of [192, 512]) await sharp(path.join(root, 'public/icon.svg')).resize(size, size).png().toFile(path.join(root, `public/icon-${size}.png`));
 const lock = JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8'));
 const packages = Object.entries(lock.packages).filter(([name, metadata]) => name && !metadata.dev).map(([name]) => path.join(root, name));

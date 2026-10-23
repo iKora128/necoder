@@ -15,6 +15,7 @@ copyright notice and this permission notice appear in all copies.
 ```
 
 使用: panel-left / search / git-branch / sparkles / square-terminal / folder-plus / folder-tree / settings / list / columns-3 / layout-grid
+スマホ連携の入口: smartphone-user-round（Lucide / ISC）。
 
 エクスプローラのファイル/フォルダアイコンのうち汎用分（`folder` / `folder-open` /
 `file-generic` / `file-text` / `file-image`）も Lucide。
