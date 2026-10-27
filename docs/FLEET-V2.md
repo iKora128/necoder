@@ -1,5 +1,7 @@
 # Fleet v2 — Captain と Task の 1 画面（設計と実装計画の正）
 
+> 今後の方向性（2026-10-27）: [DIRECTION.md](./DIRECTION.md) で、Agent を入口とし、Fleet の並走・Captain を必要に応じて使う方針を記録した。移行は未実装であり、本文は現行仕様として有効。Task のドメイン不変条件は維持する。
+
 更新: 2026-09-12（本人承認）。**Fleet の UI / 概念 / Captain の正はこの文書**。
 UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY の Fleet 系用語は本文書に従って書き換える
 （乖離したら文書を先に直す）。ドメインの不変条件（1 Task = 1 branch = 1 worktree・台帳・Git gate）は
