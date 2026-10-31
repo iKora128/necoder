@@ -1418,14 +1418,18 @@ impl Workspace {
     /// 応答先は捨てるので、Enter / Escape どちらでも送り先は消えているだけ。
     #[cfg(all(debug_assertions, unix))]
     /// `attempt` は 1 = 初回・2 以上 = 再入力の表示（`NECODER_ASKPASS_PROBE` の値をそのまま渡す）。
-    pub fn debug_open_askpass(&mut self, attempt: u32, cx: &mut Context<Self>) {
+    /// `host_key` なら初めてのホストの確認（`NECODER_ASKPASS_PROBE=hostkey`・原文は OpenSSH 10 の形）。
+    pub fn debug_open_askpass(&mut self, attempt: u32, host_key: bool, cx: &mut Context<Self>) {
         let (respond, _discard) = std::sync::mpsc::channel();
-        self.open_askpass(
-            "user@example.internal's password:".to_string(),
-            attempt,
-            respond,
-            cx,
-        );
+        let prompt = if host_key {
+            "The authenticity of host 'devbox.example.internal (192.0.2.10)' can't be established.\n\
+             ED25519 key fingerprint is: SHA256:uPOpbkbSOY8NyQTEh1ze1i8GO/9bEaYjc6adu7q7k28\n\
+             This key is not known by any other names.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        } else {
+            "user@example.internal's password:"
+        };
+        self.open_askpass(prompt.to_string(), attempt, respond, cx);
     }
 
     /// 開発用: SSH ホストピッカーを開く（NECODER_SSH_HOST_PROBE の描画検証・M13）。

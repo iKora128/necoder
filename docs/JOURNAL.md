@@ -4290,3 +4290,25 @@
   - ユーザー権限の sshd はパスワード認証ができない（shadow を読めない）→ askpass の実機確認は別に要る
 - 次: mac の実機で Remote SSH 一通り（REMOTE-CHANNEL R9）・askpass の実機確認（R10）・WSL のフォルダを開く（W8）・
   issue #79 への返信（文面は本人の確認の後）
+
+## 2026-10-30 — 初めてのホストの確認をボタンにした（「config に書いたのに新しいホストへ繋がらない」）
+
+- きっかけ: 「~/.ssh/config に書いたのに、新しいホストへ SSH できない」という話の確認
+- 調べたこと:
+  - config の読み取りは正常。手元の 68 ホスト（大文字・`_` 入りを含む）は全部 `SshProject::parse` を素通りし、ssh の解決も
+    config どおり。ピッカーは開くたびに config を読み直す。Docker の実 SSH 11 本も緑
+  - **初めてのホストだけが落ちる**: known_hosts が空のホストを `test_ssh_connection` で試すと、askpass が無ければ
+    「Host key verification failed」（`HostKeyUnknown`）、askpass が `yes` を返せば通って known_hosts に 1 行増える
+  - GUI は OpenSSH の「continue connecting (yes/no/[fingerprint])?」を**パスワードと同じ伏せ字の欄**に出していた。
+    確かめる場面だと気づけず Escape で閉じる＝取り消し＝失敗、が原因の本命（比較: VSCode は Continue ボタン、Zed は
+    yes/no の問いだけ伏せ字を外した欄）
+- やったこと:
+  - UI-SPEC「初めてのホストの確認」を先に書いた
+  - workspace: `AskpassQuestion::from_prompt`（`yes/no` を含めば確認・`authenticity of host` なら接続先と鍵の種類・指紋を
+    読む）。確認は `render_askpass_confirm`（見出し・接続先・指紋 mono・説明・`やめる` / `接続する`）で、Enter = yes・
+    Escape = no を OpenSSH へ返す（取り消しにしない）。失敗の案内 `hint_host_key_unknown` を新しい表示に合わせた
+  - 開発用: `NECODER_ASKPASS_PROBE=hostkey` で確認の表示を出せる
+- 検証: workspace 317 / necoder / i18n 緑（新しい試験 3 本: 原文の読み分け 2・yes / no を返して閉じる 1）・
+  offscreen 撮影で日本語 / 英語の表示を目視
+- 罠: OpenSSH 10 は `key fingerprint is:` とコロンが付く（9 までは付かない）。両方読む
+- 次: R10 の実機確認（GUI で「接続する」を押して初めてのホストへ繋がる）

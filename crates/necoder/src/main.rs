@@ -1059,11 +1059,17 @@ fn main() {
                     }
                 }
                 // 開発用: NECODER_ASKPASS_PROBE=1 で askpass 入力欄を開く（2s 後・描画検証）。
+                // `hostkey` なら初めてのホストの確認。
                 #[cfg(unix)]
-                if let Some(attempt) = std::env::var("NECODER_ASKPASS_PROBE")
+                if let Some((attempt, host_key)) = std::env::var("NECODER_ASKPASS_PROBE")
                     .ok()
-                    .and_then(|value| value.parse::<u32>().ok())
-                    .filter(|attempt| *attempt >= 1)
+                    .and_then(|value| {
+                        if value == "hostkey" {
+                            return Some((1, true));
+                        }
+                        value.parse::<u32>().ok().map(|attempt| (attempt, false))
+                    })
+                    .filter(|(attempt, _)| *attempt >= 1)
                 {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
@@ -1071,7 +1077,7 @@ fn main() {
                                 .timer(std::time::Duration::from_millis(2000))
                                 .await;
                             let _ = handle.update(cx, |workspace, _window, cx| {
-                                workspace.debug_open_askpass(attempt, cx);
+                                workspace.debug_open_askpass(attempt, host_key, cx);
                             });
                         })
                         .detach();

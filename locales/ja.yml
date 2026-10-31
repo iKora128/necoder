@@ -1757,7 +1757,7 @@ ssh:
   test_ok: "%{host} に接続できました（%{ms} ms）"
   connect_failed: "%{host} に接続できません"
   failure_details: SSH の接続ログ
-  hint_host_key_unknown: "ホストのフィンガープリントを確認できませんでした。初めて接続するホストなら、表示される確認でフィンガープリントを確かめて yes と入力してください（ターミナルで一度 ssh %{host} を実行しても同じです）"
+  hint_host_key_unknown: "初めて接続するホストの確認で「接続する」が選ばれませんでした。もう一度開いて、表示される鍵の指紋を確かめてから「接続する」を押してください（ターミナルで一度 ssh %{host} を実行して yes と答えても同じです）"
   hint_host_key_changed: "%{host} のホスト鍵が以前と異なります（再生成されたか、なりすましの可能性があります）。再生成したと分かっている場合のみ、ターミナルで ssh-keygen -R %{host} を実行してから開き直してください"
   hint_authentication: "鍵またはパスワードで認証できませんでした。鍵を ssh-agent に登録する（macOS では ssh-add --apple-use-keychain ~/.ssh/id_ed25519 でパスフレーズを Keychain に保存）か、~/.ssh/config の IdentityFile とサーバの authorized_keys を確認してください"
   hint_too_many_keys: "試した鍵が多すぎて拒否されました。~/.ssh/config の Host %{host} に IdentityFile と IdentitiesOnly yes を書き、使う鍵を 1 つに絞ってください"
@@ -1767,6 +1767,17 @@ ssh:
   hint_bad_permissions: "~/.ssh の権限が緩すぎるため OpenSSH が読み込みません。chmod 700 ~/.ssh と chmod 600 ~/.ssh/config（鍵も 600）で権限を直してください"
   hint_negotiation: "サーバと暗号方式が一致しません（古い sshd）。~/.ssh/config の Host %{host} に、サーバが提示した方式（KexAlgorithms / HostKeyAlgorithms）を追加してください"
 askpass:
+  host_key_title: 初めて接続するホストです
+  host_key_host: 接続先
+  host_key_fingerprint: 鍵の指紋
+  host_key_body: "相手が本物かを確かめる最初の 1 回です。指紋を、サーバの管理者や管理画面が示す値と見比べてから接続してください。接続すると known_hosts に記録され、次からは訊かれません。"
+  host_key_accept: 接続する
+  host_key_reject: やめる
+  host_key_hint: "Enter で接続・Escape でやめる"
+  confirm_title: SSH の確認
+  confirm_yes: はい
+  confirm_no: いいえ
+  confirm_hint: "Enter で「はい」・Escape で「いいえ」"
   hint: Enter で送信・Escape で取り消し（入力内容は保存されません）
   hint_click: 入力欄をクリックしてから入力してください
   passphrase_tip: "毎回入力を求められないようにするには、ターミナルで %{command} を一度実行してください（鍵を ssh-agent に登録します）"

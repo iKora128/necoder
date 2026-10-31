@@ -438,6 +438,71 @@ pub(crate) fn passphrase_tip(prompt: &str) -> Option<String> {
     Some(i18n::t!("askpass.passphrase_tip", "command" => command))
 }
 
+/// askpass で OpenSSH が訊いてきた問いの種類。見せ方と返す答えが変わる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AskpassQuestion {
+    /// パスワード・鍵のパスフレーズなど、伏せ字で打つ秘密。
+    Secret,
+    /// yes / no で答える確認。初めてのホストなら `host_key` に接続先と指紋が入る。
+    Confirm { host_key: Option<HostKeyFacts> },
+}
+
+/// 初めてのホストの確認（`The authenticity of host '…' can't be established.`）から読んだ事実。
+/// 読めなかった欄は `None`（原文の書き方が版で変わっても、確認そのものは出せるようにする）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostKeyFacts {
+    /// `host '…'` の中身（`example.com (192.0.2.1)` / `[127.0.0.1]:2222 (…)` のまま）。
+    pub(crate) host: Option<String>,
+    /// 鍵の種類（`ED25519` など）。
+    pub(crate) key_type: Option<String>,
+    /// 指紋（`SHA256:…`）。
+    pub(crate) fingerprint: Option<String>,
+}
+
+impl AskpassQuestion {
+    /// OpenSSH の原文から種類を決める。yes / no の問いは必ず `(yes/no` を含む
+    /// （初めてのホスト・IP と鍵の食い違いの警告・`UpdateHostKeys` の確認）。
+    /// これをパスワード欄に出していたため、初めてのホストで確認と気づかれず取り消されていた。
+    pub(crate) fn from_prompt(prompt: &str) -> Self {
+        if !prompt.contains("yes/no") {
+            return Self::Secret;
+        }
+        let host_key = prompt
+            .contains("authenticity of host")
+            .then(|| HostKeyFacts::parse(prompt));
+        Self::Confirm { host_key }
+    }
+}
+
+impl HostKeyFacts {
+    fn parse(prompt: &str) -> Self {
+        let host = prompt
+            .split("authenticity of host '")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_string);
+        // 「ED25519 key fingerprint is SHA256:…」（OpenSSH 10 は `is:` とコロンが付く）。
+        let fingerprint_line = prompt
+            .lines()
+            .find_map(|line| line.split_once(" key fingerprint is"));
+        let key_type = fingerprint_line
+            .map(|(key_type, _)| key_type.trim())
+            .filter(|key_type| !key_type.is_empty())
+            .map(str::to_string);
+        let fingerprint = fingerprint_line
+            .map(|(_, rest)| rest.trim_start_matches(':').trim().trim_end_matches('.'))
+            .filter(|fingerprint| !fingerprint.is_empty())
+            .map(str::to_string);
+        Self {
+            host,
+            key_type,
+            fingerprint,
+        }
+    }
+}
+
 // ── GUI askpass（ROADMAP「残: GUI askpass」） ──
 // GUI から起こす ssh には TTY が無い。OpenSSH は `SSH_ASKPASS` があればそちらに訊くので、
 // necoder 自身を askpass に指して（host::install_askpass）ここへ中継する。鍵・agent・
@@ -452,6 +517,8 @@ pub(crate) fn passphrase_tip(prompt: &str) -> Option<String> {
 pub(crate) struct AskpassPrompt {
     /// OpenSSH が渡してきた原文（"user@host's password:" など）。そのまま見せる。
     pub(crate) prompt: SharedString,
+    /// 秘密を打つ問いか、yes / no の確認か（[`AskpassQuestion::from_prompt`]）。
+    pub(crate) question: AskpassQuestion,
     /// 同じ問いの何回目か（1 = 初回）。2 以上なら直前の入力が拒否されている。
     pub(crate) attempt: u32,
     /// 入力中の秘密。画面には伏せ字でしか出さない。
@@ -503,7 +570,9 @@ impl Workspace {
             return;
         }
         let focus = cx.focus_handle();
+        let question = AskpassQuestion::from_prompt(&prompt);
         self.overlays.askpass = Some(AskpassPrompt {
+            question,
             prompt: SharedString::from(prompt),
             attempt,
             value: String::new(),
@@ -563,6 +632,21 @@ impl Workspace {
         }
     }
 
+    /// yes / no の確認に答えて閉じる。取り消し（askpass の失敗終了）ではなく `no` を返す
+    /// ＝ OpenSSH はその場で「Host key verification failed」で終わり、失敗の知らせが出る。
+    pub(crate) fn answer_askpass_confirm(
+        &mut self,
+        accept: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(prompt) = self.overlays.askpass.as_mut() {
+            let answer = if accept { "yes" } else { "no" };
+            prompt.answer(control_ipc::ok(serde_json::json!({ "secret": answer })));
+        }
+        self.close_askpass(window, cx);
+    }
+
     pub(crate) fn on_askpass_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -571,6 +655,20 @@ impl Workspace {
     ) {
         // パスワード欄の文字や Enter を背後のキー処理へ流さない。
         cx.stop_propagation();
+        let confirming = self
+            .overlays
+            .askpass
+            .as_ref()
+            .is_some_and(|prompt| matches!(prompt.question, AskpassQuestion::Confirm { .. }));
+        if confirming {
+            // 確認は打たせない。Enter = はい（接続する）・Escape = いいえ（やめる）だけ。
+            match event.keystroke.key.as_str() {
+                "enter" => self.answer_askpass_confirm(true, window, cx),
+                "escape" => self.answer_askpass_confirm(false, window, cx),
+                _ => {}
+            }
+            return;
+        }
         match event.keystroke.key.as_str() {
             "escape" => self.close_askpass(window, cx),
             "enter" => {
@@ -616,6 +714,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let prompt = self.overlays.askpass.as_ref()?;
+        if let AskpassQuestion::Confirm { host_key } = &prompt.question {
+            return Some(self.render_askpass_confirm(prompt, host_key.as_ref(), window, cx));
+        }
         let theme = self.theme.clone();
         let accent = self.accent();
         let masked: SharedString = SharedString::from("•".repeat(prompt.value.chars().count()));
@@ -729,6 +830,173 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// yes / no の確認（UI-SPEC「初めてのホストの確認」）。伏せ字の欄は出さず、初めてのホストなら
+    /// 接続先と指紋を見せてボタンで答えさせる。パスワード欄に紛れていると、確かめる場面だと
+    /// 気づかれずに取り消され、config が正しくても新しいホストへ繋がらなかった。
+    fn render_askpass_confirm(
+        &self,
+        prompt: &AskpassPrompt,
+        host_key: Option<&HostKeyFacts>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let focused = prompt.focus.is_focused(window);
+        let (title, accept_label, reject_label, hint) = match host_key {
+            Some(_) => (
+                i18n::t!("askpass.host_key_title"),
+                i18n::t!("askpass.host_key_accept"),
+                i18n::t!("askpass.host_key_reject"),
+                i18n::t!("askpass.host_key_hint"),
+            ),
+            None => (
+                i18n::t!("askpass.confirm_title"),
+                i18n::t!("askpass.confirm_yes"),
+                i18n::t!("askpass.confirm_no"),
+                i18n::t!("askpass.confirm_hint"),
+            ),
+        };
+        let code_font = ui::code_font(cx);
+        // ラベル + 値の 1 行（値は選べる・長い指紋は折り返す）。
+        let fact = |label: String, value: String, mono: bool| {
+            let mut value_element = div()
+                .flex_1()
+                .min_w_0()
+                .text_color(theme.fg0)
+                .child(SharedString::from(value));
+            if mono {
+                value_element = value_element.font_family(code_font.clone());
+            }
+            div()
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(64.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(label)),
+                )
+                .child(value_element)
+        };
+        let button = |id: &'static str, label: String, primary: bool| {
+            div()
+                .id(id)
+                .px(px(13.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(if primary { accent } else { theme.border })
+                .bg(if primary {
+                    accent.alpha(0.16)
+                } else {
+                    theme.bg1
+                })
+                .text_size(px(12.))
+                .text_color(if primary { accent } else { theme.fg1 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3))
+                .child(SharedString::from(label))
+        };
+        let mut body = div().flex().flex_col().gap(px(6.)).text_size(px(11.5));
+        match host_key {
+            Some(facts) => {
+                if let Some(host) = &facts.host {
+                    body = body.child(fact(i18n::t!("askpass.host_key_host"), host.clone(), false));
+                }
+                if let Some(fingerprint) = &facts.fingerprint {
+                    let value = match &facts.key_type {
+                        Some(key_type) => format!("{key_type}  {fingerprint}"),
+                        None => fingerprint.clone(),
+                    };
+                    body = body.child(fact(i18n::t!("askpass.host_key_fingerprint"), value, true));
+                }
+                body = body.child(
+                    div()
+                        .pt(px(2.))
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("askpass.host_key_body"))),
+                );
+            }
+            // 初めてのホスト以外の確認は、OpenSSH の原文をそのまま読ませる。
+            None => {
+                body = body.child(div().text_color(theme.fg1).child(prompt.prompt.clone()));
+            }
+        }
+        div()
+            .absolute()
+            .top(px(96.))
+            .left_0()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(520.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .p(px(14.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(if focused { accent } else { theme.border })
+                    .rounded(px(8.))
+                    .shadow(vec![gpui::BoxShadow::new(
+                        px(0.),
+                        px(6.),
+                        gpui::hsla(0., 0., 0., 0.4),
+                    )
+                    .blur_radius(px(16.))])
+                    .track_focus(&prompt.focus)
+                    .on_key_down(cx.listener(Self::on_askpass_key_down))
+                    // 裏のエディタへクリックを通さない（通すとフォーカスを奪われ、Enter が届かない）。
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|workspace, _event, window, cx| {
+                            if let Some(prompt) = workspace.overlays.askpass.as_ref() {
+                                let focus = prompt.focus.clone();
+                                window.focus(&focus, cx);
+                            }
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(theme.fg0)
+                            .child(SharedString::from(title)),
+                    )
+                    .child(body)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg2)
+                                    .child(SharedString::from(hint)),
+                            )
+                            .child(button("askpass-confirm-no", reject_label, false).on_click(
+                                cx.listener(|workspace, _event, window, cx| {
+                                    workspace.answer_askpass_confirm(false, window, cx)
+                                }),
+                            ))
+                            .child(button("askpass-confirm-yes", accept_label, true).on_click(
+                                cx.listener(|workspace, _event, window, cx| {
+                                    workspace.answer_askpass_confirm(true, window, cx)
+                                }),
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
@@ -900,6 +1168,97 @@ mod tests {
                 session._watch_pump = None;
             }
         });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// OpenSSH 10 の原文（2026-10-30 に Docker の sshd へ初めて繋いだ時に askpass へ来た文そのまま）。
+    const FIRST_CONTACT: &str =
+        "The authenticity of host '[127.0.0.1]:32769 ([127.0.0.1]:32769)' can't be established.\n\
+        ED25519 key fingerprint is: SHA256:uPOpbkbSOY8NyQTEh1ze1i8GO/9bEaYjc6adu7q7k28\n\
+        This key is not known by any other names.\n\
+        Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
+
+    #[test]
+    fn a_first_contact_is_a_confirmation_with_the_host_and_fingerprint() {
+        assert_eq!(
+            AskpassQuestion::from_prompt(FIRST_CONTACT),
+            AskpassQuestion::Confirm {
+                host_key: Some(HostKeyFacts {
+                    host: Some("[127.0.0.1]:32769 ([127.0.0.1]:32769)".to_string()),
+                    key_type: Some("ED25519".to_string()),
+                    fingerprint: Some(
+                        "SHA256:uPOpbkbSOY8NyQTEh1ze1i8GO/9bEaYjc6adu7q7k28".to_string()
+                    ),
+                }),
+            }
+        );
+        // OpenSSH 9 までは `is` の後にコロンが無い。
+        let older = "The authenticity of host 'devbox (192.0.2.1)' can't be established.\n\
+            ECDSA key fingerprint is SHA256:abc.\n\
+            Are you sure you want to continue connecting (yes/no)? ";
+        let AskpassQuestion::Confirm {
+            host_key: Some(facts),
+        } = AskpassQuestion::from_prompt(older)
+        else {
+            panic!("初めてのホストの確認になる");
+        };
+        assert_eq!(facts.host.as_deref(), Some("devbox (192.0.2.1)"));
+        assert_eq!(facts.key_type.as_deref(), Some("ECDSA"));
+        assert_eq!(facts.fingerprint.as_deref(), Some("SHA256:abc"));
+    }
+
+    #[test]
+    fn secrets_stay_masked_and_other_questions_are_plain_confirmations() {
+        for secret in [
+            "dev@devbox's password: ",
+            "Enter passphrase for key '/Users/me/.ssh/id_ed25519': ",
+        ] {
+            assert_eq!(
+                AskpassQuestion::from_prompt(secret),
+                AskpassQuestion::Secret
+            );
+        }
+        let warning = "Warning: the ED25519 host key for 'devbox' differs from the key for the IP address '192.0.2.1'\n\
+            Are you sure you want to continue connecting (yes/no)? ";
+        assert_eq!(
+            AskpassQuestion::from_prompt(warning),
+            AskpassQuestion::Confirm { host_key: None }
+        );
+    }
+
+    /// 確認はボタン（Enter / Escape）で答え、OpenSSH へは `yes` / `no` を返す（取り消しにしない）。
+    #[gpui::test]
+    fn a_host_key_confirmation_answers_yes_or_no(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_ssh_host_key_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(Vec::new(), Theme::dark(), None, cx));
+        for (accept, expected) in [(true, "yes"), (false, "no")] {
+            let (respond, reply) = std::sync::mpsc::channel();
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.open_askpass(FIRST_CONTACT.to_string(), 1, respond, cx);
+                let prompt = workspace.overlays.askpass.as_ref().expect("開く");
+                assert!(matches!(
+                    prompt.question,
+                    AskpassQuestion::Confirm { host_key: Some(_) }
+                ));
+                workspace.answer_askpass_confirm(accept, window, cx);
+                assert!(workspace.overlays.askpass.is_none(), "答えたら閉じる");
+            });
+            let answer = reply.try_recv().expect("答えが返る");
+            assert_eq!(answer["ok"], true, "取り消しではなく答え");
+            assert_eq!(answer["result"]["secret"], expected);
+            assert!(reply.try_recv().is_err(), "二重に返さない");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

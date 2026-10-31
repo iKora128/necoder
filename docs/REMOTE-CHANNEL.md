@@ -161,3 +161,5 @@ mac の `.app/Contents/Resources/remote/<triple>/` → **Windows / Linux の `<e
       mac の実機では試していない
 - [ ] **R10 askpass の実機確認（ユーザー）**: Windows / mac でパスワード認証・パスフレーズ付きの鍵・初めてのホスト鍵の確認が
       GUI の入力欄に出て、通る
+      （2026-10-30: 初めてのホスト鍵の確認は伏せ字の欄をやめ、接続先・指紋と「接続する / やめる」の確認にした＝UI-SPEC
+      「初めてのホストの確認」。ssh が askpass に回した問いへ `yes` で通ることは Docker の sshd で確認済み。GUI で押して通るのは未確認）
