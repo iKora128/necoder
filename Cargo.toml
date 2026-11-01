@@ -119,7 +119,9 @@ libc = "0.2"
 # M10 ファイル監視（macOS は FSEvents バックエンド）。remote watch は M13 で Host 経由に
 notify = "8"
 # ローカル永続化 DB（hot exit / スレッド / 台帳。DECISIONS 決定ログ 2026-07-16・pure-Rust SQLite）
-turso = "0.7"
+# 既定の `fts`（全文検索・tantivy）は使っていない（検索は LIKE・storage.rs の該当箇所）。tantivy が引く
+# zstd 0.13 系に RUSTSEC-2026-0391 / 0398 / 0403 が出たので外す（2026-11-01）。既定の mimalloc は残す。
+turso = { version = "0.7", default-features = false, features = ["mimalloc"] }
 # macOS のアプリ本体への薄い糸（GPUI に API が無いところだけ・MIT）。Dock / AppleScript の「終了」を
 # ⌘Q と同じ確認へ回すフック（O4）。GPUI / wry が既に引いている版を共有してビルドを重複させない。
 objc2 = "0.6"

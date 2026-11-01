@@ -13,6 +13,10 @@ This release fixes Remote SSH to hosts you have never connected to before. It is
 
 - **Remote SSH to a new host**: connecting to a host listed in `~/.ssh/config` could fail with "Host key verification failed" when it had never been connected before. On a first connection OpenSSH asks whether to trust the host, and necoder showed that question in the same masked box as a password, so it was easy to close without noticing what it was. necoder now shows a separate dialog with the host, the key type and fingerprint, and **Cancel** / **Connect** buttons (Enter connects, Escape cancels). After you connect, the host is saved to `known_hosts` and you are not asked again. Other yes/no questions from OpenSSH show its own text with **Yes** / **No**.
 
+### Security
+
+- **Dependency advisories**: updated `pulldown-cmark` to 0.13.6 (RUSTSEC-2026-0414) and `spin` to 0.10.1 (the previous version was yanked). The local database no longer builds its unused full-text search component, which brought in `zstd` versions with RUSTSEC-2026-0391, -0398, -0403 and -0410. necoder searches its database without it, so nothing changes in use.
+
 ### 日本語
 
 一度も繋いだことのないホストへの Remote SSH を直した版です。自動更新で配信します。
@@ -20,6 +24,10 @@ This release fixes Remote SSH to hosts you have never connected to before. It is
 #### 修正
 
 - **新しいホストへの Remote SSH**：`~/.ssh/config` に書いたホストでも、初めて繋ぐ時に「Host key verification failed」で失敗することがありました。OpenSSH は初回にこのホストを信用するかを訊きます。necoder はその問いをパスワードと同じ伏せ字の入力欄に出していたため、何を訊かれているか分からないまま閉じてしまいがちでした。この問いを専用の確認画面に分け、接続先・鍵の種類・フィンガープリントと「やめる」「接続する」のボタンを出すようにしました（Enter で接続、Escape でやめる）。接続すると `known_hosts` に記録され、次からは訊かれません。ほかの yes/no の問いは、OpenSSH の文をそのまま出して「はい」「いいえ」で答えられます。
+
+#### セキュリティ
+
+- **依存ライブラリの勧告**：`pulldown-cmark` を 0.13.6 に（RUSTSEC-2026-0414）、`spin` を 0.10.1 に上げました（前の版は取り下げられていました）。手元のデータベースの全文検索の部品は使っていないので、組み込むのをやめました。この部品が引いていた `zstd` に RUSTSEC-2026-0391・0398・0403・0410 が出ていました。necoder の検索はこの部品を使っていないため、使い勝手は変わりません。
 
 ## [0.1.32] - 2026-10-22
 
