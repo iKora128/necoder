@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.33] - 2026-11-01
+
+This release fixes Remote SSH to hosts you have never connected to before. It is delivered through auto-update.
+
+### Fixed
+
+- **Remote SSH to a new host**: connecting to a host listed in `~/.ssh/config` could fail with "Host key verification failed" when it had never been connected before. On a first connection OpenSSH asks whether to trust the host, and necoder showed that question in the same masked box as a password, so it was easy to close without noticing what it was. necoder now shows a separate dialog with the host, the key type and fingerprint, and **Cancel** / **Connect** buttons (Enter connects, Escape cancels). After you connect, the host is saved to `known_hosts` and you are not asked again. Other yes/no questions from OpenSSH show its own text with **Yes** / **No**.
+
+### 日本語
+
+一度も繋いだことのないホストへの Remote SSH を直した版です。自動更新で配信します。
+
+#### 修正
+
+- **新しいホストへの Remote SSH**：`~/.ssh/config` に書いたホストでも、初めて繋ぐ時に「Host key verification failed」で失敗することがありました。OpenSSH は初回にこのホストを信用するかを訊きます。necoder はその問いをパスワードと同じ伏せ字の入力欄に出していたため、何を訊かれているか分からないまま閉じてしまいがちでした。この問いを専用の確認画面に分け、接続先・鍵の種類・フィンガープリントと「やめる」「接続する」のボタンを出すようにしました（Enter で接続、Escape でやめる）。接続すると `known_hosts` に記録され、次からは訊かれません。ほかの yes/no の問いは、OpenSSH の文をそのまま出して「はい」「いいえ」で答えられます。
+
 ## [0.1.32] - 2026-10-22
 
 This release brings Remote SSH to Windows and keeps remote terminals and processes running through connection drops. It is delivered through auto-update.

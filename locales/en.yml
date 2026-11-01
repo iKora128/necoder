@@ -1768,7 +1768,7 @@ ssh:
 askpass:
   host_key_title: You haven't connected to this host before
   host_key_host: Host
-  host_key_fingerprint: Key
+  host_key_fingerprint: Fingerprint
   host_key_body: "This is the one-time check that the server is the one you expect. Compare the fingerprint with the value from the server's admin or console before connecting. Once you connect, it is saved to known_hosts and you won't be asked again."
   host_key_accept: Connect
   host_key_reject: Cancel

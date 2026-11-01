@@ -860,10 +860,10 @@ impl Workspace {
             ),
         };
         let code_font = ui::code_font(cx);
-        // ラベル + 値の 1 行（値は選べる・長い指紋は折り返す）。
+        // ラベルを上・値を下に積む（ラベルの長さが言語で違う＝「フィンガープリント」は横に並べると
+        // 欄に収まらない。長いフィンガープリントは値の行で折り返す）。
         let fact = |label: String, value: String, mono: bool| {
             let mut value_element = div()
-                .flex_1()
                 .min_w_0()
                 .text_color(theme.fg0)
                 .child(SharedString::from(value));
@@ -872,12 +872,11 @@ impl Workspace {
             }
             div()
                 .flex()
-                .items_start()
-                .gap(px(10.))
+                .flex_col()
+                .gap(px(2.))
                 .child(
                     div()
-                        .flex_none()
-                        .w(px(64.))
+                        .text_size(px(10.5))
                         .text_color(theme.fg2)
                         .child(SharedString::from(label)),
                 )

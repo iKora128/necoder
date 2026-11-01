@@ -1757,7 +1757,7 @@ ssh:
   test_ok: "%{host} に接続できました（%{ms} ms）"
   connect_failed: "%{host} に接続できません"
   failure_details: SSH の接続ログ
-  hint_host_key_unknown: "初めて接続するホストの確認で「接続する」が選ばれませんでした。もう一度開いて、表示される鍵の指紋を確かめてから「接続する」を押してください（ターミナルで一度 ssh %{host} を実行して yes と答えても同じです）"
+  hint_host_key_unknown: "初めて接続するホストの確認で「接続する」が選ばれませんでした。もう一度開いて、表示されるフィンガープリントを確かめてから「接続する」を押してください（ターミナルで一度 ssh %{host} を実行して yes と答えても同じです）"
   hint_host_key_changed: "%{host} のホスト鍵が以前と異なります（再生成されたか、なりすましの可能性があります）。再生成したと分かっている場合のみ、ターミナルで ssh-keygen -R %{host} を実行してから開き直してください"
   hint_authentication: "鍵またはパスワードで認証できませんでした。鍵を ssh-agent に登録する（macOS では ssh-add --apple-use-keychain ~/.ssh/id_ed25519 でパスフレーズを Keychain に保存）か、~/.ssh/config の IdentityFile とサーバの authorized_keys を確認してください"
   hint_too_many_keys: "試した鍵が多すぎて拒否されました。~/.ssh/config の Host %{host} に IdentityFile と IdentitiesOnly yes を書き、使う鍵を 1 つに絞ってください"
@@ -1769,8 +1769,8 @@ ssh:
 askpass:
   host_key_title: 初めて接続するホストです
   host_key_host: 接続先
-  host_key_fingerprint: 鍵の指紋
-  host_key_body: "相手が本物かを確かめる最初の 1 回です。指紋を、サーバの管理者や管理画面が示す値と見比べてから接続してください。接続すると known_hosts に記録され、次からは訊かれません。"
+  host_key_fingerprint: フィンガープリント
+  host_key_body: "相手が本物かを確かめる最初の 1 回です。フィンガープリントを、サーバの管理者や管理画面が示す値と見比べてから接続してください。接続すると known_hosts に記録され、次からは訊かれません。"
   host_key_accept: 接続する
   host_key_reject: やめる
   host_key_hint: "Enter で接続・Escape でやめる"
