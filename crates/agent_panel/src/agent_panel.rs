@@ -2697,6 +2697,9 @@ impl AgentPanel {
             }
             // 接続・認証の環境を替えたら、まだ使っていない先張りを今の設定で張り直す（issue #38 H3）。
             panel.retire_stale_prewarms(cx);
+            // エージェントをオンにした・入れた直後も、見ているタブを先に繋いでピルの一覧を出す。もう
+            // 繋がっている・試行済みなら対象にならないので、関係ない設定の変更では何も起きない。
+            panel.schedule_prewarm(cx);
         })
         .detach();
         // 開発用: NECODER_AGENT_START_PROBE=<エージェントの名前> で、いまのスレッドをそのエージェントにして
@@ -2718,6 +2721,35 @@ impl AgentPanel {
                             .update(cx, |panel, cx| panel.debug_start_session(agent.trim(), cx));
                         if let Err(error) = started {
                             eprintln!("NECODER_AGENT_START_PROBE: パネルが無い: {error:#}");
+                        }
+                    })
+                    .detach();
+                }
+            }
+        }
+        // 開発用: NECODER_AGENT_SELECT_PROBE=<エージェントの名前> で、下のエージェントのピルで選んだのと
+        // 同じ道（`select_option`）でいまのスレッドのエージェントを替え、モデルのメニューを開いておく。
+        // **送信はしない**。選んだ直後の先張りでモデルの一覧が埋まるかを offscreen の撮影で確かめる。
+        #[cfg(debug_assertions)]
+        {
+            static SELECT_PROBE_CLAIMED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if let Ok(agent) = std::env::var("NECODER_AGENT_SELECT_PROBE") {
+                if !agent.trim().is_empty()
+                    && !SELECT_PROBE_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    cx.spawn(async move |panel, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(800))
+                            .await;
+                        let selected = panel.update(cx, |panel, cx| {
+                            let agent = SharedString::from(agent.trim().to_string());
+                            panel.select_option(Selector::Agent, agent, cx);
+                            panel.open_menu = Some(Selector::Model);
+                            cx.notify();
+                        });
+                        if let Err(error) = selected {
+                            eprintln!("NECODER_AGENT_SELECT_PROBE: パネルが無い: {error:#}");
                         }
                     })
                     .detach();
@@ -4908,7 +4940,11 @@ PYEOF"#;
 
     /// 予約された先張りを実行する。**静かに**失敗するのが規律 — ユーザーは何も頼んでいないので、
     /// エージェント未導入や起動失敗を transcript のエラーにしない（送信すれば同じ経路で必ず出る）。
-    /// 1 スレッド 1 回だけ試す（失敗しても連打しない・落ちたら composer 直上の「再開」が担当）。
+    /// 立ったセッションは 1 スレッド 1 回だけ（立った後に落ちても連打しない・composer 直上の「再開」が担当）。
+    /// **起こす前に断られた**（使わないにしている・導入されていない等）時は試行の印を残さない — 印が残ると、
+    /// 設定でオンにした・入れた後もこのタブは張り直されず、最初に送るまでピル（モデル等）が空のまま
+    /// （2026-10-21・更新でエージェントが全部オフに戻り、オンにし直しても一覧が出なかった）。断りは PATH の
+    /// 探索までで返る同期の失敗なので、次の契機（設定の変更・タブの切替）で試し直しても重くない。
     fn prewarm_thread(&mut self, thread_id: &str, cx: &mut Context<Self>) {
         let Some(index) = self.thread_index_by_id(thread_id) else {
             return; // 予約から実行までの間に閉じられた
@@ -4932,7 +4968,9 @@ PYEOF"#;
             return;
         }
         let Ok((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) else {
-            return; // エージェントが導入されていない。ここでは黙る
+            // 使わないにしている・導入されていない。ここでは黙り、オンにした後に張り直せるよう印を外す。
+            self.prewarmed.remove(thread_id);
+            return;
         };
         if let Some(thread) = self.threads.get_mut(index) {
             thread.command_tx = Some(command_tx);
@@ -6412,6 +6450,9 @@ PYEOF"#;
                     // `run_session` が抜けてプロセスも落ちる。広告とセッション id も前の agent の
                     // 物なので一緒に捨て、下で新しい agent に張り直す。
                     thread.command_tx = None;
+                    // 通し番号も外す: 前のプロセスが落ちるまでに送ってくる知らせ（広告・開始）を捨て、
+                    // 終わった時に切断のバナーも出さない（意図して替えた）。
+                    thread.session_serial = 0;
                     thread.acp_session_id = None;
                     thread.available_modes.clear();
                     thread.configs.clear();
@@ -7916,10 +7957,12 @@ PYEOF"#;
             while let Some(event) = event_rx.next().await {
                 // 生成時の index ではなく、id で**現在位置**を引き直して配送する（並べ替え/クローズ耐性）。
                 // スレッドが閉じられていればイベントは捨てる（誤ったタブへ書かない）。
+                // **今のセッションの物だけ**届ける（`session_serial` の照合）。エージェントを選び替えた・
+                // 畳んだ後も、前のプロセスは落ちるまでの間に広告や開始の知らせを送ってくる。届けると
+                // Codex に替えたピルへ Claude のモデル一覧が上書きされ、前の id のせいで「引き継げません
+                // でした」が出る（2026-10-21・選んだ直後の先張りを撮って見つけた）。
                 let delivered = panel.update(cx, |panel, cx| {
-                    if let Some(index) = panel.thread_index_by_id(&thread_id) {
-                        panel.on_event(index, event, cx);
-                    }
+                    panel.deliver_session_event(&thread_id, serial, event, cx);
                 });
                 if delivered.is_err() {
                     return; // パネル破棄済み（ウィンドウを閉じた等）＝後始末も不要
@@ -7936,6 +7979,31 @@ PYEOF"#;
         .detach();
 
         Ok((command_tx, serial, usage_key))
+    }
+
+    /// セッション `serial` の知らせを、そのスレッドが**今も同じセッションを使っている時だけ**届ける。
+    ///
+    /// エージェントを選び替えた・先張りを畳んだ後も、前のプロセスは落ちるまでの間に知らせを送ってくる。
+    /// 届けると前のエージェントの広告（モデル一覧）と会話 ID が今のスレッドを上書きし、前のプロセスの
+    /// 「起動直後に終了」が今のターンを失敗で閉じる（2026-11-02・Claude から Codex へ替えたスレッドに
+    /// Claude の ID とモデル「opus」が残り、送信が「終了コード 0」で失敗した）。閉じたスレッドの分は捨てる。
+    fn deliver_session_event(
+        &mut self,
+        thread_id: &str,
+        serial: u64,
+        event: AgentEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.thread_index_by_id(thread_id) else {
+            return;
+        };
+        if self
+            .threads
+            .get(index)
+            .is_some_and(|thread| thread.session_serial == serial)
+        {
+            self.on_event(index, event, cx);
+        }
     }
 
     /// `run_session` の [`AgentEvent`] を transcript へ逐次反映する（ストリーミングの心臓部）。
@@ -18122,6 +18190,70 @@ PYEOF"#;
         let _ = std::fs::remove_file(path);
     }
 
+    /// 使わないにしているエージェントの先張りは起こす前に断られる。その時に試行の印を残すと、設定で
+    /// オンにしても見ているタブは張り直されず、最初に送るまでピル（モデル等）が空のままになる
+    /// （2026-10-21・更新で全部オフに戻り、オンにし直しても一覧が出なかった）。断られたら印を残さず、
+    /// 設定が変わったら張り直しを予約する。
+    #[gpui::test]
+    fn turning_an_agent_on_prewarms_the_visible_thread(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_prewarm_after_enable_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"onboarded":true,"default_agent":"DeepSeek Harness","enabled_agents":[],
+                "agent_servers":{"dsh":{"name":"DeepSeek Harness",
+                                        "command":"definitely-not-dsh-acp","args":["--stdio"]}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let active_id = panel.update(cx, |panel, cx| {
+            panel.set_destination(
+                "necoder".into(),
+                None,
+                LocalHost::shared(),
+                Some(std::env::temp_dir()),
+                cx,
+            );
+            let active_id = panel.threads[panel.active].id.clone();
+            panel.threads[panel.active].agent = "DeepSeek Harness".into();
+            // オフのまま先張りを試す（再起動直後・更新で全部オフに戻った直後と同じ）。
+            panel.prewarm_thread(&active_id, cx);
+            assert!(panel.threads[panel.active].command_tx.is_none());
+            assert!(
+                !panel.prewarmed.contains(&active_id),
+                "断られた先張りは試行の印を残さない"
+            );
+            assert_eq!(
+                panel.prewarm_target(cx).as_deref(),
+                Some(active_id.as_str()),
+                "オンにすれば張り直せる"
+            );
+            active_id
+        });
+        let generation = panel.update(cx, |panel, _cx| panel.prewarm_gen);
+        // 設定 › エージェントでオンにする。設定の observer が張り直しを予約する。
+        cx.update(|_window, cx| {
+            settings::set_user_value(cx, "enabled_agents", serde_json::json!(["dsh"]))
+                .expect("書ける")
+        });
+        panel.update(cx, |panel, cx| {
+            assert_ne!(
+                panel.prewarm_gen, generation,
+                "オンにしたら見ているタブの先張りを予約する"
+            );
+            // オンにした後の先張りは本当にセッションを立てる。立ったら 1 回きりの印が付く（立った後の
+            // 失敗＝コマンドが見つからない等は背景で起き、連打しない側の規律に入る）。
+            panel.prewarm_thread(&active_id, cx);
+            assert!(panel.threads[panel.active].command_tx.is_some());
+            assert!(panel.prewarmed.contains(&active_id));
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
     /// 先張りしたまま **1 度も使っていない** セッションは 2 本までしか抱えない（見ただけのタブの
     /// 分までエージェントを常駐させない。未送信のセッションでも実測 ~16MB ある）。使ったもの・
     /// 実行中・承認待ちは畳まない。畳んだ跡は `session_serial = 0` で、切断バナーを出さない。
@@ -18232,6 +18364,81 @@ PYEOF"#;
                 .entries
                 .push(Entry::User("こんにちは".into()));
             assert!(panel.agent_selector_locked());
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// エージェントを替えた後に前のセッションが送ってくる知らせは、今のスレッドに届けない。
+    /// 2026-11-02: Claude の先張りが立ち上がる途中で Codex へ替えたスレッドに、Claude の会話 ID と
+    /// モデル「opus」が残り、送ったターンが「起動直後に終了しました（終了コード 0）」で閉じた。
+    #[gpui::test]
+    fn a_replaced_session_cannot_touch_the_thread(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "replaced-session");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let thread_id = panel.threads[active].id.clone();
+            // Claude の先張り（通し番号 7）が立ち上がる途中で Codex へ替える。
+            let (claude_tx, _claude_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[active].command_tx = Some(claude_tx);
+            panel.threads[active].session_serial = 7;
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            assert_eq!(
+                panel.threads[active].session_serial, 0,
+                "前のセッションの番号を外す"
+            );
+            // Codex のセッション（通し番号 8）で送ったターンが走っている。
+            let (codex_tx, _codex_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[active].command_tx = Some(codex_tx);
+            panel.threads[active].session_serial = 8;
+            panel.threads[active]
+                .entries
+                .push(Entry::User("カルテに要る前提は？".into()));
+            panel.threads[active].running = true;
+            let entries_before = panel.threads[active].entries.len();
+
+            // 前の Claude のプロセスが、落ちるまでの間に送ってくる知らせ。
+            for event in [
+                AgentEvent::SessionStarted {
+                    session_id: "claude-session".into(),
+                    resumed: false,
+                    resumable: true,
+                    steerable: true,
+                },
+                AgentEvent::Configs(vec![config(
+                    ConfigCategory::Model,
+                    "opus",
+                    &[("opus", "Opus")],
+                )]),
+                AgentEvent::Failed("エージェントが起動直後に終了しました（終了コード 0）".into()),
+            ] {
+                panel.deliver_session_event(&thread_id, 7, event, cx);
+            }
+            let thread = &panel.threads[active];
+            assert!(
+                thread.acp_session_id.is_none(),
+                "Claude の会話 ID を持たない"
+            );
+            assert!(thread.configs.is_empty(), "Claude のモデル一覧を持たない");
+            assert!(thread.running, "前のプロセスの失敗で今のターンを閉じない");
+            assert_eq!(
+                thread.entries.len(),
+                entries_before,
+                "transcript に何も足さない"
+            );
+
+            // 今のセッション（Codex）の知らせは届く。
+            panel.deliver_session_event(
+                &thread_id,
+                8,
+                AgentEvent::Configs(vec![config(
+                    ConfigCategory::Model,
+                    "gpt-6.1-sol",
+                    &[("gpt-6.1-sol", "6.1 Sol")],
+                )]),
+                cx,
+            );
+            assert_eq!(panel.threads[active].configs.len(), 1);
         });
         let _ = std::fs::remove_file(path);
     }

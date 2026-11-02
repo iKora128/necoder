@@ -840,6 +840,9 @@ impl Steering {
 /// ACP エージェント（claude-agent-acp）の起動設定。
 pub struct AgentCommand {
     managed_npm: Option<(String, String)>,
+    /// necoder の置き場の版から起こす時の「使用中」の印。このコマンドが生きている間（＝起こした
+    /// プロセスが動いている間）、古い版の掃除はその版を消さない（[`install::VersionLease`]）。
+    lease: Option<install::VersionLease>,
     pub path: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
@@ -857,6 +860,7 @@ impl AgentCommand {
     pub fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
         Self {
             managed_npm: None,
+            lease: None,
             path,
             args,
             cwd,
@@ -1042,6 +1046,30 @@ pub const AGENTS: &[AgentKind] = &[
         monogram: "G",
     },
 ];
+
+/// necoder の置き場（`external_agents/npm`）から、今の解決が使わない ACP アダプタの版を消す
+/// （**blocking**・起動時に背景で呼ぶ）。使うのはレジストリのキャッシュにある npm の版と、組み込みの
+/// 既定の版。動いているセッションの版は消さない（[`install::VersionLease`]）。レジストリのキャッシュが
+/// 読めない時は何もしない（どの版が今の物か分からないので）。
+pub fn sweep_stale_adapters() {
+    let Some(registry) = registry::load_cached() else {
+        return;
+    };
+    let keep: Vec<String> = registry
+        .agents
+        .iter()
+        .filter_map(|entry| match entry.launch() {
+            Some(registry::Launch::Npx(npx)) => Some(npx.package),
+            _ => None,
+        })
+        .chain(
+            AGENTS
+                .iter()
+                .filter_map(|agent| agent.package.map(str::to_string)),
+        )
+        .collect();
+    install::sweep_stale_versions(&keep);
+}
 
 /// UI のエージェントセレクタに出すラベル一覧（[`AGENTS`] と 1:1 対応・Zed の registry 表示名準拠）。
 pub const AGENT_LABELS: &[&str] = &[

@@ -4544,6 +4544,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Agent タブの入力欄で ⌘T = 新しいスレッド（⌘W で閉じるのと対）。入力欄は Editor なので、
+    /// エディタの ⌘T（ワークスペースのシンボル検索）に取られないことを実際のキー配送で確かめる。
+    #[gpui::test]
+    fn cmd_t_in_the_agent_composer_opens_a_new_thread(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_agent_cmd_t_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.show_right = true;
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .agent_panel
+                .update(cx, |panel, cx| panel.focus_composer(window, cx));
+        });
+        cx.run_until_parked();
+        let threads = |workspace: &Entity<Workspace>, cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.agent_panel.read(cx).statuses().len()
+            })
+        };
+        let before = threads(&workspace, cx);
+
+        cx.simulate_keystrokes("cmd-t");
+        assert_eq!(
+            threads(&workspace, cx),
+            before + 1,
+            "入力欄の ⌘T で新しいスレッドが開く"
+        );
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.overlays.picker.is_none()),
+            "シンボル検索のピッカーは開かない"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// 端末のキー配送の検証用: 既定 keymap（`platform` 版）を張り、下ドックの端末 1 枚に
     /// フォーカスした窓。端末は PTY を起動しない（書いたバイト列を記録する）。
     fn terminal_key_fixture(

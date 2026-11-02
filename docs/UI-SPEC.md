@@ -358,6 +358,7 @@ Worktree は既存ブランチ・既存 worktree または新しいブランチ�
 | ⌘C / ⌘V / ⌘A（ターミナル内） | 選択をコピー / 貼り付け / すべて選択（⌘F バーの入力欄の中では入力欄の物・⌘C は欄に選択が無ければ端末の選択）。**Windows / Linux は Ctrl+Shift+C / V / A / F / K**（⌃ + 文字はシェル / TUI へ届ける＝全域の Ctrl+F / W / P / J / K チョードなどはターミナルの中でだけ外れる） |
 | ⇧⏎（ターミナル内） | 改行（Claude Code / Codex の複数行入力） |
 | ⌘⇧A | 新規スレッド |
+| ⌘T / ⌘W（Agent タブ内） | **新しいスレッド** / **いまのスレッドを閉じる**（ターミナルの ⌘T / ⌘W と同じ対・2026-11-02）。入力欄の中でも効く（入力欄はエディタの部品なので、keymap の `AgentPanel > Editor` でエディタの ⌘T = ワークスペースのシンボル検索より優先する。Agent タブの中ではシンボル検索は ⌘T で呼ばない） |
 | ⌘⇧D | **Design モード**の切替（Web タブ・§5。Esc でも終わる）。⌘⇧C は WebKit / Chromium の DevTools の要素選択と同じなので避けた |
 | esc（Web タブ） | Design 中なら Design を終える。そうでなく **Web Inspector** が開いていれば閉じる（GPUI 側にキーがある時。ページがキーを持っている時の Esc はページの物・§5）。Web Inspector の開閉に既定のキーは無い（パレット「プレビュー: Web Inspector を開く / 閉じる」・keymap.json で `workspace::ToggleWebInspector`） |
 | ⌘⇧J | **Chat モード**の切替（§13。⌘⇧M = Fleet と対）。Chat 中の ⌘N = 新しいチャット（Fleet 中は ＋ Task） |

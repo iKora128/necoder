@@ -5,6 +5,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-11-02
+
+This release fixes Codex threads that failed when necoder updated the Codex adapter, and adds ⌘T for a new thread in the Agent tab. It is delivered through auto-update.
+
+### Fixed
+
+- **Codex stopping with "The agent exited right after starting (Exit code 0)"**: necoder keeps its own copy of each agent's adapter and replaces it when a new version comes out. After installing a new version it deleted the old one, even when a thread was still starting or running from it. The Codex adapter keeps using files in its own folder after it starts (it launches Codex and tools such as `rg` from there), so a Codex thread that was starting at that moment exited at once. necoder now marks the adapter version a running thread uses and deletes only versions that no thread is using. Versions left behind are removed about 12 seconds after the next launch. This applies to every adapter necoder installs, including Claude Code.
+- **Switching a new thread to another agent**: when you picked Codex for a thread that had already started connecting to Claude Code, late messages from the Claude Code process could still reach the thread. They replaced the Codex model list with Claude's (the model showed "opus"), saved Claude's conversation ID on the thread, and could end the turn you had just sent with an error from that process. A thread now receives messages only from the agent session it is currently using.
+- **Turning an agent on**: after you turned an agent on under Settings › AI Agents, the model and mode pills of the thread you were looking at stayed empty until you sent a message. The thread now connects right away and fills them in.
+
+### Added
+
+- **⌘T for a new thread in the Agent tab** (Ctrl+T on Windows and Linux): it pairs with ⌘W, which closes the current thread, as in the terminal. It also works while you are typing in the message box, where ⌘T used to open workspace symbol search.
+
+### Changed
+
+- **Shortcuts shown in the command palette**: the palette now shows the shortcut that works anywhere. "New thread" shows ⌘⇧A instead of ⌘T, which only works in the Agent tab, and "Control: next item" shows ⌘⇧U instead of ⏎, which only works in the Fleet list.
+
+### 日本語
+
+necoder が Codex の adapter を更新した時に Codex のスレッドが失敗していた問題を直し、Agent タブに ⌘T（新しいスレッド）を足した版です。自動更新で配信します。
+
+#### 修正
+
+- **Codex が「エージェントが起動直後に終了しました（終了コード 0）」で止まる**：necoder は各エージェントの adapter を自分で持ち、新しい版が出ると入れ替えます。入れ替えた後、前の版をすぐ消していました。その版でスレッドが起動途中や会話中でも消していました。Codex の adapter は起動後も自分のフォルダのファイルを使います（Codex 本体や `rg` などの道具をそこから起こします）。そのため、ちょうど起動中だった Codex のスレッドがすぐ終了していました。いまは、動いているスレッドが使う版に印を付け、どのスレッドも使っていない版だけを消します。残った版は、次の起動から 12 秒ほどで消します。Claude Code を含め、necoder が入れる adapter すべてに効きます。
+- **新しいスレッドのエージェントを替えた時**：Claude Code に繋ぎ始めていたスレッドで Codex を選ぶと、Claude Code のプロセスが遅れて送る知らせがそのスレッドに届くことがありました。Codex のモデル一覧が Claude のものに置き換わり（モデルが「opus」になる）、Claude の会話 ID がスレッドに保存されました。送ったばかりのターンが、そのプロセスのエラーで終わることもありました。いまは、スレッドが今使っているセッションの知らせだけを受け取ります。
+- **エージェントをオンにした時**：設定 › AI エージェント でエージェントをオンにしても、見ているスレッドのモデルやモードのピルは、送信するまで空のままでした。いまはすぐに繋ぎ、ピルを埋めます。
+
+#### 追加
+
+- **Agent タブで ⌘T = 新しいスレッド**（Windows と Linux は Ctrl+T）：ターミナルと同じく、いまのスレッドを閉じる ⌘W と対になります。入力欄で書いている途中でも効きます。これまで入力欄の ⌘T はワークスペースのシンボル検索を開いていました。
+
+#### 変更
+
+- **コマンドパレットに出すショートカット**：どこでも効くショートカットを出すようにしました。「新しいスレッド」は Agent タブの中でしか効かない ⌘T ではなく ⌘⇧A を出します。「管制: 次の要対応へ」は Fleet の一覧の中でしか効かない ⏎ ではなく ⌘⇧U を出します。
+
 ## [0.1.33] - 2026-11-01
 
 This release fixes Remote SSH to hosts you have never connected to before. It is delivered through auto-update.

@@ -85,16 +85,21 @@ pub fn load_bindings(json: &str, cx: &App) -> Result<Vec<KeyBinding>> {
 }
 
 /// アクション名からキーストローク表記を逆引きする（コマンドパレットのキー併記・M13）。
-/// 複数バインドがあれば最初のセクション順で 1 つ。
+/// **どこでも効く束縛（context 無し）を先に**探し、無ければ context 付きをセクション順で 1 つ。
+/// パレットはどこからでも開くので、Agent タブの中だけの ⌘T（新しいスレッド）や Fleet の一覧の中だけの
+/// ⏎ を見せると、その場で押しても効かないキーを案内してしまう（2026-11-02）。
 pub fn key_for_action(sections: &[KeymapSection], action: &str) -> Option<String> {
-    for section in sections {
-        for (keystrokes, bound_action) in &section.bindings {
-            if bound_action == action {
-                return Some(keystrokes.clone());
-            }
-        }
-    }
-    None
+    let global = sections
+        .iter()
+        .filter(|section| section.context.trim().is_empty());
+    let contextual = sections
+        .iter()
+        .filter(|section| !section.context.trim().is_empty());
+    global
+        .chain(contextual)
+        .flat_map(|section| section.bindings.iter())
+        .find(|(_, bound_action)| bound_action.as_str() == action)
+        .map(|(keystrokes, _)| keystrokes.clone())
 }
 
 /// **mac 表記のキーストローク 1 つ**を、このプラットフォームの表示用ラベルにする。
@@ -329,10 +334,17 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "context": "AgentPanel",
     "bindings": {
+      "cmd-t": "workspace::NewThread",
       "cmd-w": "agent::CloseActiveThread",
       "cmd-f": "agent::FindInTranscript",
       "cmd-a": "editor::SelectAll",
       "cmd-c": "editor::Copy"
+    }
+  },
+  {
+    "context": "AgentPanel > Editor",
+    "bindings": {
+      "cmd-t": "workspace::NewThread"
     }
   },
   {
@@ -993,6 +1005,20 @@ mod tests {
         let key = key_for_action(&sections, "workspace::FileFinder").expect("⌘P がある");
         assert_eq!(key, "cmd-p");
         assert!(key_for_action(&sections, "workspace::存在しない").is_none());
+        // どこでも効くキーを優先する（⌘T は Agent タブの中だけ・⏎ は Fleet の一覧の中だけ）。
+        assert_eq!(
+            key_for_action(&sections, "workspace::NewThread").as_deref(),
+            Some("cmd-shift-a")
+        );
+        assert_eq!(
+            key_for_action(&sections, "workspace::ControlNext").as_deref(),
+            Some("cmd-shift-u")
+        );
+        // context 付きにしか無ければそれを返す。
+        assert_eq!(
+            key_for_action(&sections, "workspace::WorkspaceSymbols").as_deref(),
+            Some("cmd-t")
+        );
         // 記号表記。
         assert_eq!(pretty_keystroke("cmd-shift-p"), "⌘⇧P");
         assert_eq!(pretty_keystroke("cmd-k cmd-t"), "⌘K ⌘T");
@@ -1005,7 +1031,7 @@ mod tests {
     #[test]
     fn parses_sections_and_bindings() {
         let sections = parse(DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
-        assert_eq!(sections.len(), 6);
+        assert_eq!(sections.len(), 7);
         assert_eq!(sections[0].context, "Editor");
         // ⌘S は保存時フォーマットのフックのため workspace 側（M11）。
         assert_eq!(
@@ -1027,28 +1053,39 @@ mod tests {
             sections[1].bindings.get("cmd-c").map(String::as_str),
             Some("editor::Copy")
         );
-        // 3 セクション目は管制（⏎ = 要対応キューの先頭へ・P3）
-        assert_eq!(sections[2].context, "FleetControl");
+        // ⌘T = 新しいスレッド（⌘W で閉じるのと対・ターミナルの ⌘T / ⌘W と同じ）。入力欄は Editor なので、
+        // 3 セクション目「AgentPanel > Editor」でエディタの ⌘T（シンボル検索）より後ろに置いて勝たせる。
         assert_eq!(
-            sections[2].bindings.get("enter").map(String::as_str),
+            sections[1].bindings.get("cmd-t").map(String::as_str),
+            Some("workspace::NewThread")
+        );
+        assert_eq!(sections[2].context, "AgentPanel > Editor");
+        assert_eq!(
+            sections[2].bindings.get("cmd-t").map(String::as_str),
+            Some("workspace::NewThread")
+        );
+        // 4 セクション目は管制（⏎ = 要対応キューの先頭へ・P3）
+        assert_eq!(sections[3].context, "FleetControl");
+        assert_eq!(
+            sections[3].bindings.get("enter").map(String::as_str),
             Some("workspace::ControlNext")
         );
-        // 4 セクション目はエクスプローラ（⌘Z = ファイル操作の取り消し・H30。エディタの ⌘Z とは別）
-        assert_eq!(sections[3].context, "Explorer");
+        // 5 セクション目はエクスプローラ（⌘Z = ファイル操作の取り消し・H30。エディタの ⌘Z とは別）
+        assert_eq!(sections[4].context, "Explorer");
         assert_eq!(
-            sections[3].bindings.get("cmd-z").map(String::as_str),
+            sections[4].bindings.get("cmd-z").map(String::as_str),
             Some("workspace::UndoFileOperation")
         );
-        // 5 セクション目は全域（context 空）+ Quit
-        assert!(sections[4].context.is_empty());
+        // 6 セクション目は全域（context 空）+ Quit
+        assert!(sections[5].context.is_empty());
         assert_eq!(
-            sections[4].bindings.get("cmd-q").map(String::as_str),
+            sections[5].bindings.get("cmd-q").map(String::as_str),
             Some("necoder::Quit")
         );
         // 末尾は端末（全域より後ろに置かないと ⌘F などが全域に負ける）
-        assert_eq!(sections[5].context, TERMINAL_CONTEXT);
+        assert_eq!(sections[6].context, TERMINAL_CONTEXT);
         assert_eq!(
-            sections[5].bindings.get("cmd-f").map(String::as_str),
+            sections[6].bindings.get("cmd-f").map(String::as_str),
             Some("terminal::Find")
         );
     }

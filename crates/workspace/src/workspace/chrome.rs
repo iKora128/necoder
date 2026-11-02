@@ -2878,6 +2878,10 @@ impl Workspace {
     /// 起動時はキャッシュだけを読んで即動き（`registry::load_cached`）、ネットワークはここで後追い。
     /// **走行中のスレッドには触らない** — 取り直した結果は次に起動するセッションから効く。
     /// アップデート確認と同じ抑止スイッチ（スクショ/プローブ/`NECODER_NO_UPDATE_CHECK`）に従う。
+    ///
+    /// 続けて、置き場に残った**使われていない**古いアダプタの版を消す（`sweep_stale_adapters`）。
+    /// 版を上げた時に動いていたセッションの版は導入の後始末では消さずに残すので、ここで片付く。
+    /// 掃除はネットワークを使わないので、アップデート確認を切っていても回す。
     pub(crate) fn schedule_agent_registry_refresh(&self, cx: &mut Context<Self>) {
         if cfg!(test)
             || std::env::var_os("NECODER_NO_UPDATE_CHECK").is_some()
@@ -2890,13 +2894,14 @@ impl Workspace {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(12))
                 .await;
-            if !cx.update(|cx| settings::get(cx).update_check) {
-                return;
-            }
+            let update_check = cx.update(|cx| settings::get(cx).update_check);
             cx.background_executor()
                 .spawn(async move {
-                    // 1 時間以内に取っていれば何もしない（`refresh_if_stale` が判断する）。
-                    acp_client::registry::refresh_if_stale();
+                    if update_check {
+                        // 1 時間以内に取っていれば何もしない（`refresh_if_stale` が判断する）。
+                        acp_client::registry::refresh_if_stale();
+                    }
+                    acp_client::sweep_stale_adapters();
                 })
                 .await;
         })
