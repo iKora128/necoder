@@ -11,7 +11,7 @@ This release makes it clear which threads still need you when several agents run
 
 ### Added
 
-- **Know what still needs you**: threads now have four clear states: waiting for you, unread, working, and read. Tabs and thread rows show them with a tinted surface, a colored line, and motion, so you no longer have to remember dot shapes. A thread that finishes while you are not looking stays unread, even when it is the open tab of a background project, and it stays unread after a restart.
+- **Know what still needs you**: threads now have four clear states: waiting for you, unread, working, and read. Tabs and thread rows show them with a tinted surface and a colored line, so you no longer have to remember dot shapes. A thread that finishes while you are not looking stays unread, even when it is the open tab of a background project, and it stays unread after a restart.
 - **Counts that work in Editor and Fleet**: a red badge counts threads waiting for you on the rail and in the status bar. A white dot means something is unread. ⌘⇧U or a click on the status bar goes to the next thread to check.
 
 ### Changed
@@ -26,7 +26,7 @@ This release makes it clear which threads still need you when several agents run
 
 #### 追加
 
-- **自分を待っているものが分かるように**: スレッドの状態を、あなた待ち、未確認、生成中、確認済みの 4 つに揃えました。タブと行の面、線、動きで見せるので、ドットの形を覚える必要はありません。見ていない間に終わったスレッドは、裏のプロジェクトで開いたままのタブでも未確認になり、再起動しても残ります。
+- **自分を待っているものが分かるように**: スレッドの状態を、あなた待ち、未確認、生成中、確認済みの 4 つに揃えました。タブと行の面と線で見せるので、ドットの形を覚える必要はありません。見ていない間に終わったスレッドは、裏のプロジェクトで開いたままのタブでも未確認になり、再起動しても残ります。
 - **Editor でも Fleet でも同じ件数**: レールと下部バーの赤い丸であなた待ちを数え、白い点で未確認を知らせます。⌘⇧U か下部バーを押すと、次の確認待ちへ移動します。
 
 #### 変更

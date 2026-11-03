@@ -5,6 +5,11 @@
 //! あなた待ちにだけ、スレッド色の淡い面は未確認のタブにだけ使う（UI-SPEC §1.3）。
 //!
 //! タブ・スレッド一覧・Fleet の Task 行が同じものを使う。親は `.relative().overflow_hidden()`。
+//!
+//! **常に動かす物をここに置かない。** `with_animation` は親の View に再描画を要求し、親は AgentPanel
+//! （スレッド本体）や Workspace なので、繰り返す動きは止まっている間ずっと CPU と GPU を使う。
+//! 別の Entity に分けても祖先は dirty になる（`Window::mark_view_dirty`）ので避けられない。
+//! 動かすのは完了の瞬間の 1 回だけで、終われば再描画を要求しない。
 
 use std::ops::AddAssign;
 use std::time::Duration;
@@ -18,14 +23,8 @@ use crate::{Theme, ThreadActivity};
 
 /// 完了の瞬間に 1 回だけ流す光の長さ。
 pub(crate) const FINISH_FLASH: Duration = Duration::from_millis(1100);
-/// あなた待ちの面の明滅の周期。
-const WAIT_PULSE: Duration = Duration::from_millis(1800);
-/// 生成中の線が流れる周期。
-const WORK_RUN: Duration = Duration::from_millis(1600);
-/// 動かし続ける物のフレームレート（生成中のスピナーと同じ上限で、窓の再描画を増やさない）。
-const ANIMATION_MAX_FPS: f32 = 10.0;
-/// 生成中の線の幅（親に対する割合）。
-const WORK_LINE_WIDTH: f32 = 0.35;
+/// 完了の光のフレームレートの上限（親の再描画の回数を抑える）。
+const FLASH_MAX_FPS: f32 = 15.0;
 
 /// 人が次に見るべきものの件数。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,8 +77,8 @@ pub fn wants_attention(activity: ThreadActivity) -> bool {
     )
 }
 
-/// タブや行の下に敷く、状態の面・線・動き。`animate` が偽なら動かさず同じ位置に止める
-/// （窓が前面でない時と reduce motion）。`id` はタブや行ごとに一意にする。
+/// タブや行の下に敷く、状態の面と線。`animate` が真なら完了の瞬間に 1 回だけ光を流す（窓が前面でない
+/// 時と reduce motion では流さない）。`id` はタブや行ごとに一意にする。
 pub fn thread_state_layers(
     id: impl Into<SharedString>,
     theme: &Theme,
@@ -93,23 +92,14 @@ pub fn thread_state_layers(
     let mut layers = Vec::new();
     match activity {
         ThreadActivity::Blocked => {
-            let err = theme.err;
-            let surface = div().absolute().inset_0();
-            layers.push(if animate {
-                surface
-                    .with_animation(
-                        element_id(&id, "wait"),
-                        Animation::new(WAIT_PULSE)
-                            .repeat()
-                            .with_max_fps(ANIMATION_MAX_FPS)
-                            .with_easing(gpui::pulsating_between(0.4, 1.0)),
-                        move |element, delta| element.bg(err.alpha(0.17 * delta)),
-                    )
-                    .into_any_element()
-            } else {
-                surface.bg(err.alpha(0.17)).into_any_element()
-            });
-            layers.push(edge_line(edge, err));
+            layers.push(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(theme.err.alpha(0.17))
+                    .into_any_element(),
+            );
+            layers.push(edge_line(edge, theme.err));
         }
         ThreadActivity::Done { .. } => {
             layers.push(
@@ -128,30 +118,8 @@ pub fn thread_state_layers(
                 layers.push(finish_flash(&id, color));
             }
         }
-        ThreadActivity::Working => {
-            let line = div()
-                .absolute()
-                .bottom_0()
-                .h(px(2.))
-                .w(relative(WORK_LINE_WIDTH))
-                .bg(color.alpha(0.75));
-            layers.push(if animate {
-                line.with_animation(
-                    element_id(&id, "work"),
-                    Animation::new(WORK_RUN)
-                        .repeat()
-                        .with_max_fps(ANIMATION_MAX_FPS),
-                    |element, delta| {
-                        let travel = 1.0 + WORK_LINE_WIDTH;
-                        element.left(relative(delta * travel - WORK_LINE_WIDTH))
-                    },
-                )
-                .into_any_element()
-            } else {
-                line.left_0().into_any_element()
-            });
-        }
-        ThreadActivity::Idle => {}
+        // 生成中は状態ドットのスピナーが示す。面も線も足さない。
+        ThreadActivity::Working | ThreadActivity::Idle => {}
     }
     layers
 }
@@ -179,7 +147,7 @@ fn finish_flash(id: &SharedString, color: Hsla) -> AnyElement {
         .bg(color.alpha(0.32))
         .with_animation(
             element_id(id, "flash"),
-            Animation::new(FINISH_FLASH),
+            Animation::new(FINISH_FLASH).with_max_fps(FLASH_MAX_FPS),
             |element, delta| {
                 element
                     .left(relative(delta * (1.0 + WIDTH) - WIDTH))
@@ -187,4 +155,112 @@ fn finish_flash(id: &SharedString, color: Hsla) -> AnyElement {
             },
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{prelude::*, Context, Window};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// 親の View（実物では AgentPanel や Workspace）に見立てて、描画の回数を数える。
+    struct CountingParent {
+        renders: Rc<Cell<usize>>,
+        activity: ThreadActivity,
+        just_finished: bool,
+    }
+
+    impl Render for CountingParent {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
+            div()
+                .relative()
+                .size_full()
+                .children(thread_state_layers(
+                    "probe",
+                    &Theme::dark(),
+                    gpui::hsla(0.5, 0.5, 0.5, 1.0),
+                    self.activity,
+                    self.just_finished,
+                    StateEdge::Top,
+                    true,
+                ))
+        }
+    }
+
+    fn renders_while_idle(
+        cx: &mut gpui::TestAppContext,
+        activity: ThreadActivity,
+        just_finished: bool,
+    ) -> usize {
+        let renders = Rc::new(Cell::new(0));
+        let counter = renders.clone();
+        let (_view, vcx) = cx.add_window_view(move |_window, _cx| CountingParent {
+            renders: counter,
+            activity,
+            just_finished,
+        });
+        vcx.run_until_parked();
+        let before = renders.get();
+        for _ in 0..50 {
+            vcx.executor().advance_clock(Duration::from_millis(100));
+            vcx.run_until_parked();
+        }
+        renders.get() - before
+    }
+
+    /// 状態の表示で親を描き直し続けない。親はスレッド本体を含むので、ここで再描画を要求すると
+    /// 承認待ちで止まっている間ずっと CPU と GPU を使う（UI-SPEC §8）。
+    #[gpui::test]
+    fn waiting_and_working_never_redraw_the_parent(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            renders_while_idle(cx, ThreadActivity::Blocked, false),
+            0,
+            "あなた待ちが親を描き直している"
+        );
+    }
+
+    #[gpui::test]
+    fn working_never_redraws_the_parent(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            renders_while_idle(cx, ThreadActivity::Working, false),
+            0,
+            "生成中の線が親を描き直している"
+        );
+    }
+
+    #[gpui::test]
+    fn unread_does_not_redraw_the_parent(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            renders_while_idle(cx, ThreadActivity::Done { interrupted: false }, false),
+            0
+        );
+    }
+
+    /// 完了の光は 1 回で終わり、その後は親を描き直さない。光の長さは GPUI が実時間で測るので、
+    /// ここだけ実際に待つ。
+    #[gpui::test]
+    fn the_finish_flash_stops_redrawing_when_it_ends(cx: &mut gpui::TestAppContext) {
+        let renders = Rc::new(Cell::new(0));
+        let counter = renders.clone();
+        let (_view, vcx) = cx.add_window_view(move |_window, _cx| CountingParent {
+            renders: counter,
+            activity: ThreadActivity::Done { interrupted: false },
+            just_finished: true,
+        });
+        let tick = |vcx: &mut gpui::VisualTestContext| {
+            vcx.executor().advance_clock(Duration::from_millis(100));
+            vcx.run_until_parked();
+        };
+        vcx.run_until_parked();
+        std::thread::sleep(FINISH_FLASH + Duration::from_millis(100));
+        tick(vcx);
+        tick(vcx);
+        let after_flash = renders.get();
+        for _ in 0..30 {
+            tick(vcx);
+        }
+        assert_eq!(renders.get(), after_flash, "光が終わったら描き直さない");
+    }
 }

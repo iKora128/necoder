@@ -116,7 +116,7 @@
   .slot { width:14px; height:14px; flex:none; display:grid; place-items:center; }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--c); }
   .dim { opacity:.35; }
-  .half { width:8px; height:4px; overflow:hidden; animation:breathe 1.8s ease-in-out infinite; }
+  .half { width:8px; height:4px; overflow:hidden; }
   .half::before { content:""; display:block; width:8px; height:8px; border-radius:50%; background:var(--c); }
   @keyframes breathe { 50% { opacity:.35; } }
   .spin::after { content:"⠋"; color:var(--c); font-size:13px; line-height:1; animation:braille 1s steps(1) infinite; }
@@ -133,27 +133,21 @@
   [data-tab] .tab,[data-tab] .row { isolation:isolate; }
   /* A: 面 + 線 */
   [data-tab=a] .tab.st-wait,[data-tab=a] .row.st-wait { background:color-mix(in srgb,var(--err) 17%,var(--bg0)); }
-  [data-tab=a] .tab.st-wait { box-shadow:inset 0 2px 0 var(--err); animation:wait-glow 1.8s ease-in-out infinite; }
-  [data-tab=a] .row.st-wait { box-shadow:inset 3px 0 0 var(--err); animation:wait-glow 1.8s ease-in-out infinite; }
+  [data-tab=a] .tab.st-wait { box-shadow:inset 0 2px 0 var(--err); }
+  [data-tab=a] .row.st-wait { box-shadow:inset 3px 0 0 var(--err); }
   [data-tab=a] .tab.st-unread { background:color-mix(in srgb,var(--c) 15%,var(--bg0)); }
   /* 一覧の行は枠のプロジェクト色と競わないよう、面は無彩色にしてスレッド色は左の線だけに置く。 */
   [data-tab=a] .row.st-unread { background:color-mix(in srgb,var(--fg0) 8%,var(--bg1)); }
   [data-tab=a] .tab.st-unread { box-shadow:inset 0 2px 0 var(--c); }
   [data-tab=a] .row.st-unread { box-shadow:inset 3px 0 0 var(--c); }
   /* B: 線だけ（面は塗らない） */
-  [data-tab=b] .tab.st-wait { box-shadow:inset 0 3px 0 var(--err); animation:wait-line 1.8s ease-in-out infinite; }
-  [data-tab=b] .row.st-wait { box-shadow:inset 3px 0 0 var(--err); animation:wait-line 1.8s ease-in-out infinite; }
+  [data-tab=b] .tab.st-wait { box-shadow:inset 0 3px 0 var(--err); }
+  [data-tab=b] .row.st-wait { box-shadow:inset 3px 0 0 var(--err); }
   [data-tab=b] .tab.st-unread { box-shadow:inset 0 3px 0 var(--c); }
   [data-tab=b] .row.st-unread { box-shadow:inset 3px 0 0 var(--c); }
   @keyframes wait-glow { 50% { background:color-mix(in srgb,var(--err) 7%,var(--bg0)); } }
   @keyframes wait-line { 50% { box-shadow:inset 0 3px 0 color-mix(in srgb,var(--err) 35%,transparent); } }
-  [data-tab=b] .row.st-wait { animation-name:wait-line-row; }
   @keyframes wait-line-row { 50% { box-shadow:inset 3px 0 0 color-mix(in srgb,var(--err) 35%,transparent); } }
-  /* A・B 共通: 生成中は下端を細い光が流れる（一番控えめ） */
-  [data-tab=a] .st-work::after,[data-tab=b] .st-work::after { content:""; position:absolute; left:0; right:0; bottom:0; height:2px;
-    pointer-events:none; background:linear-gradient(90deg,transparent,var(--c),transparent); background-size:45% 100%;
-    background-repeat:no-repeat; animation:run-line 1.6s linear infinite; opacity:.75; }
-  @keyframes run-line { 0% { background-position:-60% 0; } 100% { background-position:160% 0; } }
   /* 確認済みは文字を一段下げるだけ */
   [data-tab=a] .tab.st-seen:not(.active),[data-tab=b] .tab.st-seen:not(.active) { color:var(--fg2); }
   @media (prefers-reduced-motion:reduce) { [data-tab] .st-wait,[data-tab] .st-work::after { animation:none; } }
