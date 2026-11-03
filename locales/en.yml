@@ -148,9 +148,6 @@ agent:
   state_done: Done
   state_done_interrupted: Interrupted
   state_idle: Idle
-  rollup_working: "%{n} working"
-  rollup_blocked: "%{n} waiting"
-  rollup_done: "%{n} done"
   empty: No threads (＋ / %{key} to start)
   checkpoint_row: checkpoint — %{label} (click to restore this point)
   context_filter: Filter by file name…
@@ -383,9 +380,17 @@ cmd:
   show_inbox: "Notifications: Show history"
   show_resources: "Resources: Memory and processes"
   show_cleanup: "Tasks: Clean up…"
+attention:
+  waiting: Waiting for you
+  unread: "Unread %{n}"
+  working: "Working %{n}"
+  next_tip: Next thread to check
 herd:
-  empty: No agents running
-  files_of: "Files · %{name}'s worktree"
+  title: Threads
+  filter_all: All
+  filter_to_check: "To check %{n}"
+  none_to_check: Nothing to check
+  empty: No threads yet
   mute: Mute this agent (no toasts / no completion sound)
   unmute: Unmute
 control:
@@ -727,7 +732,7 @@ rail:
   fleet: Fleet mode
   git: Source control  %{key}
   todos: Todo board
-  threads: AI threads (all projects)
+  threads: Threads (all workspaces)
   fleet_sidebar: Fleet sidebar (Tasks)
   agent: Toggle AI agent panel
   terminal: Terminal  %{key}
@@ -737,7 +742,6 @@ titlebar:
   chat: Chat
   editor: Editor
   mode_tip: Switch between Editor and Fleet
-  attention_tip: "%{n} need you"
   fleet: Fleet
 settings:
   pref_agent_idle_stop: Stop unused agents after (minutes)

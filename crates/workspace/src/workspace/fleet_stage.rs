@@ -173,14 +173,20 @@ impl Workspace {
     }
 
     /// スレッドタブ 1 枚（色付きの ● + 名前・選択は上線 2px）。
-    pub(super) fn thread_tab(&self, id: impl Into<gpui::ElementId>, label: SharedString, color: gpui::Hsla, selected: bool) -> gpui::Stateful<gpui::Div> {
-        div().id(id).flex_none().flex().items_center().gap(px(6.)).px(px(10.)).h_full().border_t_2()
+    /// 状態の面・線・動きと太字は Editor のタブと同じ（UI-SPEC §8「確認待ち」）。
+    pub(super) fn thread_tab(&self, id: impl Into<gpui::ElementId>, state_id: String, status: &agent_panel::AgentStatus, selected: bool, animate: bool) -> gpui::Stateful<gpui::Div> {
+        let (color, activity) = (status.color, status.activity);
+        let attention = agent_panel::wants_attention(activity);
+        div().id(id).relative().overflow_hidden().flex_none().flex().items_center().gap(px(6.)).px(px(10.)).h_full().border_t_2()
             .border_color(if selected { color } else { gpui::transparent_black() })
             .when(selected, |element| element.bg(self.theme.bg1))
-            .text_size(px(11.)).text_color(if selected { self.theme.fg0 } else { self.theme.fg1 })
+            .text_size(px(11.))
+            .text_color(if selected || attention { self.theme.fg0 } else if activity == agent_panel::ThreadActivity::Idle { self.theme.fg2 } else { self.theme.fg1 })
+            .when(attention, |element| element.font_weight(FontWeight::BOLD))
             .cursor_pointer()
+            .children(agent_panel::thread_state_layers(state_id, &self.theme, color, activity, status.just_finished, agent_panel::StateEdge::Top, animate))
             .child(div().flex_none().size(px(7.)).rounded_full().bg(color))
-            .child(label)
+            .child(status.name.clone())
     }
 
     /// サイドペインのトグル（タブではなくセグメント。押すと会話の横に開き、もう一度で閉じる）。
@@ -265,7 +271,7 @@ impl Workspace {
                             this.close_task_thread(session_index, &panel, thread, cx);
                         }))
                 });
-                bar = bar.child(self.thread_tab(("task-tab", session_index * 10000 + tab_index), status.name, status.color, selected)
+                bar = bar.child(self.thread_tab(("task-tab", session_index * 10000 + tab_index), format!("task-tab-state-{}", status.thread_id), &status, selected, self.window_active && !cx.reduce_motion())
                     .children(close)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                         this.switch_project(session_index, window, cx);

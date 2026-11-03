@@ -78,6 +78,7 @@ mod git_controller;
 mod git_view;
 mod herd_view;
 mod history_view;
+mod attention;
 mod inbox;
 mod keep_awake;
 mod keymap_editing;
@@ -1527,6 +1528,8 @@ struct ChromeState {
     /// 編隊モードの herd で solo（Integration リポジトリ）のスレッド群を展開しているか。
     /// **既定 false = 畳む**（編隊では Task が主役・2026-07-24 ユーザー指摘）。見出しクリックで切替。
     herd_solo_expanded: bool,
+    /// スレッド一覧を確認待ち（あなた待ち + 未確認）だけに絞っているか。
+    herd_to_check: bool,
     /// Task の表示名をダブルクリックで改名中（herd 見出し / セルヘッダ）。スレッドタブの改名と同型。
     task_renaming: Option<TaskRenaming>,
     /// 端末のタブの改名（O24・ダブルクリック）。
@@ -1580,11 +1583,6 @@ struct ChromeState {
     /// 相対時刻（開始/最終入力の「N分前」）を編隊・herd 表示中だけ更新する 30 秒時計が稼働中か
     /// （多重起動防止。両方閉じたら次 tick で自停止＝idle 予算を守る・M14）。
     fleet_clock: bool,
-    /// フッターのニュース欄（稼働ロールアップ）で今見せているシグナルの番号。2件以上ある間だけ
-    /// タイマーで進めて順に切り替える（複数の実行中がちゃんと全部見えるように・2026-08-04）。
-    rollup_index: usize,
-    /// ニュース欄の回転タイマーが稼働中か（多重起動防止。2件未満で次 tick 自停止＝idle 予算を守る）。
-    rollup_ticker: bool,
     settings_view: Entity<settings::SettingsView>,
     pending_settings_command: Option<(String, String)>,
     /// 設定画面の「settings.json を開く」。subscription は Window を持たないため effect cycle 末尾で処理。
@@ -2477,7 +2475,6 @@ impl Render for Workspace {
         if self.window_active && (self.chrome.fleet_mode || self.chrome.show_herd) {
             self.ensure_fleet_clock(cx);
         }
-        self.ensure_rollup_ticker(cx); // フッターのニュース欄を複数稼働時に順送りする（自停止）
         self.sync_native_view_visibility(window, cx);
         // 作業面の出入りで Agent パネルの chrome を合わせる（面を切り替える入口が複数あるので、
         // 呼び出し側に配らず毎 render で 1 箇所に集める＝上の native view と同じ流儀）。

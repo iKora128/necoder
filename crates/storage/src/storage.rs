@@ -1922,6 +1922,59 @@ impl Storage {
         })
     }
 
+    /// 未確認（ターンが終わった後、まだ見ていない）の印を書く。`None` で消す。
+    /// `Some(true)` は中断・失敗で終わった印（見た目を分ける）。再起動を越えて残すため。
+    pub fn set_thread_unseen(&self, thread_id: &str, interrupted: Option<bool>) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                match interrupted {
+                    Some(interrupted) => {
+                        conn.execute(
+                            "INSERT INTO thread_unseen (thread_id, interrupted, updated_at)
+                             VALUES (?1, ?2, ?3)
+                             ON CONFLICT(thread_id)
+                             DO UPDATE SET interrupted = ?2, updated_at = ?3",
+                            (thread_id.as_str(), i64::from(interrupted), now),
+                        )
+                        .await
+                        .context("thread_unseen の記録に失敗")?;
+                    }
+                    None => {
+                        conn.execute(
+                            "DELETE FROM thread_unseen WHERE thread_id = ?1",
+                            (thread_id.as_str(),),
+                        )
+                        .await
+                        .context("thread_unseen の解除に失敗")?;
+                    }
+                }
+                Ok(())
+            })
+        })
+    }
+
+    /// 未確認のスレッド id と、中断・失敗で終わったか（起動時の復元で一括で読む）。
+    pub fn load_unseen_threads(&self) -> Result<Vec<(String, bool)>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT thread_id, interrupted FROM thread_unseen", ())
+                    .await
+                    .context("thread_unseen の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("thread_unseen 行の取得に失敗")?
+                {
+                    let thread_id = row.get_value(0)?.as_text().context("thread_id")?.clone();
+                    let interrupted = *row.get_value(1)?.as_integer().context("interrupted")? != 0;
+                    result.push((thread_id, interrupted));
+                }
+                Ok(result)
+            })
+        })
+    }
+
     /// Chat モードのスレッドの付帯情報を 1 件ぶん書く（`docs/CHAT.md` §2.3 / §3.2）。
     ///
     /// フォルダの場所は**作成後に変えない**（エージェントはセッションを cwd のパス文字列で引く）ので、
@@ -2223,6 +2276,12 @@ impl Storage {
                 )
                 .await
                 .context("thread_mutes の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_unseen WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_unseen の削除に失敗")?;
                 conn.execute(
                     "DELETE FROM thread_chat_paths WHERE thread_id = ?1",
                     (id.as_str(),),
@@ -3307,6 +3366,16 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("thread_mutes 作成に失敗")?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_unseen (
+            thread_id TEXT PRIMARY KEY,
+            interrupted INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_unseen 作成に失敗")?;
     // Chat モードのスレッドの付帯情報（`docs/CHAT.md`）。threads 表を広げない理由は
     // thread_sessions と同じ。パスは改行を含みうるので 1 行 1 パスの別表にする。
     conn.execute(
@@ -4099,6 +4168,36 @@ mod tests {
     }
 
     /// ACP セッション id はスレッド単位で往復し、上書きでき、スレッド削除で消える（2026-09-08）。
+    #[test]
+    fn thread_unseen_marks_survive_reopening_and_follow_thread_deletion() {
+        let path = temp_db("thread_unseen");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("t1", "設計", 0, "necoder", None, None, None, 0, 0)
+            .unwrap();
+        assert!(storage.load_unseen_threads().unwrap().is_empty());
+        storage.set_thread_unseen("t1", Some(false)).unwrap();
+        storage.set_thread_unseen("t1", Some(true)).unwrap(); // 書き直すと終わり方が変わる
+        storage.set_thread_unseen("t2", Some(false)).unwrap();
+        storage.set_thread_unseen("t2", None).unwrap(); // 見たら行ごと消す
+        drop(storage);
+
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(
+            storage.load_unseen_threads().unwrap(),
+            vec![("t1".to_string(), true)],
+            "再起動を越えて残る"
+        );
+        storage.delete_thread("t1").unwrap();
+        assert!(
+            storage.load_unseen_threads().unwrap().is_empty(),
+            "スレッドを消したら印も消える"
+        );
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn thread_mutes_survive_reopening_and_follow_thread_deletion() {
         let path = temp_db("thread_mutes");

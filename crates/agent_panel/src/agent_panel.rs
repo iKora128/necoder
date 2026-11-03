@@ -25,6 +25,7 @@ use acp_client::{
     PermissionChoice, PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand,
     SteerOutcome, ToolCallInfo, TurnEnd,
 };
+mod attention;
 mod auto_prompt;
 mod chat;
 mod history;
@@ -36,6 +37,11 @@ mod seat;
 mod shell;
 pub mod sound;
 pub mod usage;
+
+pub use attention::{thread_state_layers, wants_attention, AttentionCounts, StateEdge};
+
+/// 画面に出ているスレッドを「見た」とするまでの時間（素通りでは未確認を消さない）。
+const VIEW_DWELL: std::time::Duration = std::time::Duration::from_millis(700);
 
 pub use chat::{snippet_around, ChatRow};
 pub use history::fresh_agent_sessions;
@@ -867,6 +873,12 @@ struct PendingPermission {
 /// workspace への通知イベント（トースト・色リンク・statusbar ドット・M12-4/5）。
 #[derive(Debug, Clone)]
 pub enum PanelEvent {
+    /// 人がそのスレッドを見た（画面に出ていて窓が前面）。通知の履歴を既読にし、OS の通知を
+    /// 取り下げる。`cleared` = 未確認の印が消えた（バッジと集計を描き直す）。
+    ThreadViewed {
+        thread_id: SharedString,
+        cleared: bool,
+    },
     HumanSend {
         thread: SharedString,
         text: String,
@@ -1100,6 +1112,10 @@ const MAX_IDLE_PREWARMED_SESSIONS: usize = 2;
 /// herd サイドバー（状態一覧・M14）の 1 スレッド行。`beacons()` のリッチ版で、エージェント種別と
 /// トークンも返す。**色相は識別（`color`）、状態は `activity`（形と動き）**で見せる（UI-SPEC §1.3/§11）。
 pub struct AgentStatus {
+    /// スレッドの永続 id（通知と同じ鍵）。
+    pub thread_id: SharedString,
+    /// ターンが終わった直後か（完了の瞬間に 1 回だけ光らせる）。
+    pub just_finished: bool,
     pub name: SharedString,
     pub color: Hsla,
     pub activity: ThreadActivity,
@@ -1196,6 +1212,10 @@ struct Thread {
     /// 直近ターンが完了して**まだ確認していない**時の終わり方（`Some`＝herdr の Done ラッチ）。
     /// `TurnEnded` で立て、そのスレッドを見た（`switch_thread`）か次のターンを始めた時にクリアする。
     done: Option<TurnEnd>,
+    /// `done` を立てた時刻（完了の瞬間に 1 回だけ光らせる。復元した印は `None`）。
+    done_at: Option<std::time::Instant>,
+    /// DB に書いてある `done`（変わった時だけ書く）。
+    persisted_unseen: Option<TurnEnd>,
     /// このターンの開始時刻（経過秒の表示に使う。`None`＝未実行）。
     turn_started_at: Option<std::time::Instant>,
     /// スレッドの開始時刻（unix ms・再起動を跨いで DB の created_at と往復する・M14）。
@@ -1383,6 +1403,8 @@ impl Thread {
             color: thread_color(index),
             running: false,
             done: None,
+            done_at: None,
+            persisted_unseen: None,
             turn_started_at: None,
             created_at_ms: now_unix_ms(),
             last_input_at_ms: None,
@@ -2483,6 +2505,10 @@ pub struct AgentPanel {
     celebrating: bool,
     celebrate_gen: u32,
     /// 最後に親パネルが View tree へ描画された時刻。非表示 TaskSpace の本文・1Hz時計を止める。
+    /// いま「見た」扱いのスレッド id（画面の外へ出たら消える）。
+    viewed_thread: Option<String>,
+    /// 「見た」にするのを待っているスレッド id。
+    view_pending: Option<String>,
     last_rendered_at: Option<std::time::Instant>,
     /// 経過秒・承認待ち段階だけを更新する1Hz時計。マスコット/本文の高頻度時計とは独立。
     second_ticker: bool,
@@ -3060,6 +3086,8 @@ PYEOF"#;
             token_ticker: false,
             celebrating: false,
             celebrate_gen: 0,
+            viewed_thread: None,
+            view_pending: None,
             last_rendered_at: None,
             second_ticker: false,
             expanded_thoughts: std::collections::HashSet::new(),
@@ -3250,12 +3278,14 @@ PYEOF"#;
             // 人が付けた名前の印（エージェントの会話名で上書きしない・O2）。
             let custom_names = storage.load_custom_named_threads().unwrap_or_default();
             let muted = muted_thread_ids(&storage);
+            let unseen = unseen_thread_marks(&storage);
             for thread in &mut threads {
                 if let Some((_, session_id)) = sessions.iter().find(|(id, _)| *id == thread.id) {
                     thread.acp_session_id = Some(session_id.clone());
                 }
                 thread.name_is_custom = custom_names.contains(&thread.id);
                 thread.muted = muted.contains(&thread.id);
+                restore_unseen_mark(thread, &unseen);
             }
             self.threads = threads;
             self.active = 0;
@@ -3666,6 +3696,9 @@ PYEOF"#;
             .iter()
             .map(|thread| {
                 let activity = thread.activity();
+                let just_finished = thread
+                    .done_at
+                    .is_some_and(|at| at.elapsed() < attention::FINISH_FLASH);
                 // Working 中はライブ素材を合成（保存しない）。それ以外は遷移時に確定した digest。
                 let digest = match activity {
                     ThreadActivity::Working => {
@@ -3675,6 +3708,8 @@ PYEOF"#;
                 };
                 let (plan_done, plan_total) = thread.plan_progress();
                 AgentStatus {
+                    thread_id: SharedString::from(thread.id.clone()),
+                    just_finished,
                     name: thread.name.clone(),
                     color: thread.color,
                     activity,
@@ -3960,17 +3995,111 @@ PYEOF"#;
     /// Done ラッチを**明示確認**で落とす（Done→Idle の確認済み遷移・P3。herdr の done/idle 区別）。
     /// スレッドを開かなくても管制のキューから「確認」で消せる。
     pub fn mark_done_seen(&mut self, thread_index: usize, cx: &mut Context<Self>) {
-        if let Some(thread) = self.threads.get_mut(thread_index) {
-            thread.done = None;
+        self.mark_thread_viewed(thread_index, cx);
+    }
+
+    /// 人がそのスレッドを見た: 未確認の印を消し、workspace へ知らせる（通知を既読にする）。
+    /// あなた待ちは答えるまで残る（`activity()` が承認・質問を先に見る）。
+    pub fn mark_thread_viewed(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let is_active = thread_index == self.active;
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        let cleared = thread.done.take().is_some();
+        thread.done_at = None;
+        let thread_id = SharedString::from(thread.id.clone());
+        if is_active {
+            self.viewed_thread = Some(thread_id.to_string());
         }
-        self.sync_running_registry(cx);
-        cx.notify();
+        if cleared {
+            self.persist_unseen_changes();
+            self.sync_running_registry(cx);
+            cx.notify();
+        }
+        cx.emit(PanelEvent::ThreadViewed { thread_id, cleared });
+    }
+
+    /// 変わった未確認の印を DB へ書く（再起動を越えて残す）。読めなくても動作は止めない。
+    fn persist_unseen_changes(&mut self) {
+        let Some(storage) = self.storage.clone() else {
+            return;
+        };
+        for thread in &mut self.threads {
+            if thread.persisted_unseen == thread.done {
+                continue;
+            }
+            thread.persisted_unseen = thread.done;
+            let interrupted = thread.done.map(|reason| reason == TurnEnd::Interrupted);
+            if let Err(error) = storage.set_thread_unseen(&thread.id, interrupted) {
+                eprintln!("未確認の印を保存できない（再起動で消えます）: {error:#}");
+            }
+        }
+    }
+
+    /// 描画のたびに呼ぶ: 画面に出ているスレッドを、少し留まったら「見た」にする。
+    /// 素通りでは消さない（⌃Tab で通り過ぎただけのタブは未確認のまま）。`was_visible` が偽なら
+    /// 画面の外から戻ってきたので、同じスレッドでも見直したものとして数える。
+    fn note_thread_on_screen(&mut self, was_visible: bool, cx: &mut Context<Self>) {
+        if !was_visible || !self.window_active {
+            self.viewed_thread = None;
+        }
+        if !self.window_active {
+            return;
+        }
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        let already_viewed = self.viewed_thread.as_deref() == Some(thread.id.as_str());
+        if (already_viewed && thread.done.is_none())
+            || self.view_pending.as_deref() == Some(thread.id.as_str())
+        {
+            return;
+        }
+        let thread_id = thread.id.clone();
+        self.view_pending = Some(thread_id.clone());
+        cx.spawn(async move |panel, cx| {
+            cx.background_executor().timer(VIEW_DWELL).await;
+            let _ = panel.update(cx, |panel, cx| {
+                if panel.view_pending.as_deref() == Some(thread_id.as_str()) {
+                    panel.view_pending = None;
+                }
+                let on_screen = panel.is_visibly_active()
+                    && panel
+                        .threads
+                        .get(panel.active)
+                        .is_some_and(|thread| thread.id == thread_id);
+                if on_screen {
+                    panel.mark_thread_viewed(panel.active, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// そのスレッドを今見ているか（今届いた通知を既読で積むかの判定）。
+    pub fn is_thread_on_screen(&self, thread_id: &str) -> bool {
+        self.is_visibly_active()
+            && self
+                .threads
+                .get(self.active)
+                .is_some_and(|thread| thread.id == thread_id)
+    }
+
+    /// このパネルの全スレッドの件数（確認待ちの印と集計の素）。
+    pub fn attention_counts(&self) -> AttentionCounts {
+        let mut counts = AttentionCounts::default();
+        for thread in &self.threads {
+            counts.add_activity(thread.activity());
+        }
+        counts
     }
 
     /// herd 行 / ⌘O から特定スレッドをアクティブにする（M14 focus-follows の入口）。index は
     /// `statuses()`/`beacons()` の並び（＝タブ順）に一致する。範囲外・現在アクティブは no-op。
     pub fn focus_thread(&mut self, index: usize, cx: &mut Context<Self>) {
         self.switch_thread(index, cx);
+        // 狙って開いた＝見た（⌃Tab の素通りと違って留まるのを待たない）。
+        self.mark_thread_viewed(index, cx);
     }
 
     /// スレッドの transcript 末尾 `max` 件を (bullet, text) で返す（編隊グリッドの Agent セル・M14 #3）。
@@ -5090,6 +5219,7 @@ PYEOF"#;
             thread.pending_permission = None;
             thread.command_tx = None; // 死んだ送信路は捨てる（次の prompt で再起動）
             thread.done = Some(TurnEnd::Interrupted);
+            thread.done_at = Some(std::time::Instant::now());
             thread.digest = digest_tail(message).or(thread.digest.take());
             thread
                 .entries
@@ -5184,9 +5314,6 @@ PYEOF"#;
         self.save_active_draft(cx);
         self.renaming = None; // 別タブへ切替えたら編集中の改名は破棄する
         self.active = index;
-        if let Some(thread) = self.threads.get_mut(index) {
-            thread.done = None; // 見た＝herdr の Done ラッチ（完了・未確認）を解除
-        }
         self.reset_transcript_list(true); // 切替先は最新（末尾）を見せる
         self.refresh_transcript_search(cx); // 別の会話を開いた＝一致も数え直す
         let color = self.active_color();
@@ -5195,8 +5322,7 @@ PYEOF"#;
             composer.set_plain_text(&draft, cx);
             composer.set_accent(color, cx);
         });
-        self.sync_running_registry(cx); // Done 解除をロールアップ（フッター/レール/⌘O）へ反映
-                                        // 切替先が idle で送信待ちを持っていれば流す（裏で完了したスレッドのキューをここで消化）。
+        // 切替先が idle で送信待ちを持っていれば流す（裏で完了したスレッドのキューをここで消化）。
         self.flush_queued_prompt(cx);
         // 見ているタブのセッションを先に張る（ピルを空で放置しない）。
         self.schedule_prewarm(cx);
@@ -8609,10 +8735,12 @@ PYEOF"#;
                 // （thread 借用中なので index 経由で後段に回す）
                 thread.running = false;
                 thread.pending_permission = None; // 念のため（通常は応答時に消える）
-                                                  // 裏のスレッドは「完了・未確認」を灯す（herdr の Done ラッチ＝見るまで残す）。
-                                                  // アクティブ（今見ている）スレッドは即 Idle に落とす。
-                if thread_index != active {
+                                                  // 見ていないスレッドは「未確認」を灯す（見るまで残す）。
+                                                  // 開いたままのタブでも、裏のプロジェクト・隠したパネル・
+                                                  // 別の窓なら見ていない。今見ているスレッドだけ即 Idle へ。
+                if thread_index != active || !panel_visibly_active {
                     thread.done = Some(reason);
+                    thread.done_at = Some(std::time::Instant::now());
                 }
                 // 遷移スナップショット（P1 素材②）: Done = 最後の発言の末尾 1〜2 文。
                 // 本文の無いターン（ツールのみ等）は直前の digest を保つ。
@@ -8667,11 +8795,13 @@ PYEOF"#;
                     thread.command_tx = None;
                 }
                 // 失敗も「注意を要する終わり方」＝裏のスレッドは Done(中断) として灯す。
-                if thread_index != active {
+                if thread_index != active || !panel_visibly_active {
                     thread.done = Some(TurnEnd::Interrupted);
+                    thread.done_at = Some(std::time::Instant::now());
                 }
             }
         }
+        self.persist_unseen_changes();
         // 引き継げた会話も書く: エージェント側の過去の会話を開いた時（O15）は、load が成功して初めて
         // この id が necoder の会話になる（失敗したら新しい id だけが残り、元の会話は一覧に残る）。
         if session_id_changed || resumed_session {
@@ -9271,8 +9401,22 @@ PYEOF"#;
                         let color = thread.color;
                         let drop_highlight = theme.bg2;
                         let tab_name = thread.name.clone();
+                        let activity = thread.activity();
+                        let state_layers = thread_state_layers(
+                            format!("thread-tab-state-{index}"),
+                            &theme,
+                            color,
+                            activity,
+                            thread
+                                .done_at
+                                .is_some_and(|at| at.elapsed() < attention::FINISH_FLASH),
+                            StateEdge::Top,
+                            self.window_active && !cx.reduce_motion(),
+                        );
                         div()
                             .id(("thread-tab", index))
+                            .relative()
+                            .overflow_hidden()
                             .flex()
                             .flex_col()
                             .flex_none() // スクロール領域では潰さず自然幅を保つ（数が増えたら溢れさせてスクロール）
@@ -9289,6 +9433,7 @@ PYEOF"#;
                             } else {
                                 theme.bg0
                             }))
+                            .children(state_layers)
                             .child(
                                 div()
                                     .flex_1()
@@ -9297,7 +9442,16 @@ PYEOF"#;
                                     .gap(px(7.))
                                     .px(px(12.))
                                     .text_size(px(12.))
-                                    .text_color(if is_active { theme.fg0 } else { theme.fg1 })
+                                    .text_color(if is_active || wants_attention(activity) {
+                                        theme.fg0
+                                    } else if activity == ThreadActivity::Idle {
+                                        theme.fg2
+                                    } else {
+                                        theme.fg1
+                                    })
+                                    .when(wants_attention(activity), |element| {
+                                        element.font_weight(FontWeight::BOLD)
+                                    })
                                     .child(activity_dot(
                                         ("thtab-dot", index),
                                         8.0,
@@ -9351,6 +9505,7 @@ PYEOF"#;
                                         return; // 改名開始時は composer へフォーカスを移さない
                                     }
                                     this.switch_thread(index, cx);
+                                    this.mark_thread_viewed(index, cx); // 狙って開いた＝見た
                                     this.focus_composer(window, cx); // ⌘W が Agent に効くようフォーカスを寄せる
                                 }),
                             )
@@ -9589,8 +9744,22 @@ PYEOF"#;
             let is_active = index == active;
             let color = thread.color;
             let group_name = SharedString::from(format!("thread-row-{index}"));
+            let activity = thread.activity();
+            let state_layers = thread_state_layers(
+                format!("thread-row-state-{index}"),
+                &theme,
+                color,
+                activity,
+                thread
+                    .done_at
+                    .is_some_and(|at| at.elapsed() < attention::FINISH_FLASH),
+                StateEdge::Left,
+                self.window_active && !cx.reduce_motion(),
+            );
             div()
                 .id(("thread-row", index))
+                .relative()
+                .overflow_hidden()
                 .group(group_name.clone())
                 .flex()
                 .items_center()
@@ -9598,6 +9767,7 @@ PYEOF"#;
                 .cursor_pointer()
                 .when(is_active, |element| element.bg(theme.bg1))
                 .hover(|style| style.bg(theme.bg1))
+                .children(state_layers)
                 // 左 2px 色バー（active のみ・UI-SPEC の選択左バー準拠）。
                 .child(div().w(px(2.)).h_full().flex_none().bg(if is_active {
                     color
@@ -9626,7 +9796,14 @@ PYEOF"#;
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_size(px(12.5))
-                                .text_color(if is_active { theme.fg0 } else { theme.fg1 })
+                                .text_color(if is_active || wants_attention(activity) {
+                                    theme.fg0
+                                } else {
+                                    theme.fg1
+                                })
+                                .when(wants_attention(activity), |element| {
+                                    element.font_weight(FontWeight::BOLD)
+                                })
                                 .child(thread.name.clone()),
                         )
                         .child(
@@ -9676,6 +9853,7 @@ PYEOF"#;
                             return;
                         }
                         this.switch_thread(index, cx);
+                        this.mark_thread_viewed(index, cx); // 狙って開いた＝見た
                         this.focus_composer(window, cx);
                     }),
                 )
@@ -10377,7 +10555,9 @@ PYEOF"#;
                 .justify_center()
                 .text_size(px(12.5))
                 .text_color(theme.fg2)
-                .child(SharedString::from(i18n::t!("agent.empty", "key" => keymap_core::keystroke_label("cmd-shift-a"))))
+                .child(SharedString::from(
+                    i18n::t!("agent.empty", "key" => keymap_core::keystroke_label("cmd-shift-a")),
+                ))
                 .into_any_element();
         };
         let entry_count = thread.entries.len();
@@ -13401,8 +13581,10 @@ impl Render for AgentPanel {
         // ウィンドウがアクティブ（このアプリを見ている）時だけマスコットをアニメさせる。
         // 非アクティブへ切替時は GPUI が on_active_status_change→refresh で再描画するので自動で静止に切替わる。
         let active = window.is_window_active();
+        let was_visible = self.is_visibly_active();
         self.window_active = active; // 完了音の「非アクティブ時のみ」判定が読む（P2）
         self.last_rendered_at = Some(std::time::Instant::now());
+        self.note_thread_on_screen(was_visible, cx);
         // 先頭項目が未確定（末尾へ飛んだ直後）の描画は直前値で組んでいる。この描画の prepaint で
         // 実値が決まるので、固定プロンプト・「前の指示へ」の出し分けを次フレームで確定させる。
         if self.transcript_top_item_pending() {
@@ -13936,7 +14118,6 @@ pub fn activity_dot(
     if matches!(activity, ThreadActivity::Working) {
         return working_spinner(id, diameter, color);
     }
-    let ringed = matches!(activity, ThreadActivity::Done { .. });
     let half = matches!(activity, ThreadActivity::Blocked); // 承認待ち = 半円（mock ◐）
     let dim = matches!(activity, ThreadActivity::Idle);
     let hollow = matches!(activity, ThreadActivity::Done { interrupted: true });
@@ -13975,9 +14156,6 @@ pub fn activity_dot(
         .items_center()
         .justify_center()
         .size(px(outer))
-        .rounded(px(outer / 2.0))
-        .border_1()
-        .border_color(if ringed { color } else { color.alpha(0.0) })
         .child(dot);
 
     if dim {
@@ -14661,7 +14839,34 @@ fn thread_from_storage(
         .iter()
         .any(|thread_id| thread_id == id);
     thread.muted = muted_thread_ids(storage).iter().any(|muted| muted == id);
+    restore_unseen_mark(&mut thread, &unseen_thread_marks(storage));
     thread
+}
+
+/// 未確認の印（スレッド id と、中断・失敗で終わったか）。読めなければ印なしで始める。
+fn unseen_thread_marks(storage: &storage::Storage) -> Vec<(String, bool)> {
+    match storage.load_unseen_threads() {
+        Ok(marks) => marks,
+        Err(error) => {
+            eprintln!("未確認の印を読めない（印なしで始めます）: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
+fn restore_unseen_mark(thread: &mut Thread, marks: &[(String, bool)]) {
+    let mark = marks
+        .iter()
+        .find(|(thread_id, _)| *thread_id == thread.id)
+        .map(|(_, interrupted)| {
+            if *interrupted {
+                TurnEnd::Interrupted
+            } else {
+                TurnEnd::Completed
+            }
+        });
+    thread.done = mark;
+    thread.persisted_unseen = mark;
 }
 
 /// ミュート中のスレッド id（O12）。読めなければ「全部鳴る」に倒す（黙って通知を消すよりまし）。
@@ -14703,6 +14908,8 @@ fn seed_threads() -> Vec<Thread> {
         color: thread_color(0),
         running: false,
         done: None,
+        done_at: None,
+        persisted_unseen: None,
         turn_started_at: None,
         // 種スレッドにも実感のある時刻を（offscreen 検証で「開始/入力」表示が写る）。
         created_at_ms: now_unix_ms() - 2 * 60 * 60 * 1000,
@@ -17996,6 +18203,181 @@ PYEOF"#;
 
     /// スレッドのミュートは再起動をまたいで残る（O12）。以前は DB に置き場が無く、起動のたびに
     /// 黙って解除されていた（鳴らしたくないスレッドが翌朝また鳴る）。
+    /// 開いたままのタブでも、見ていない間に終わったら未確認になる（UI-SPEC §8）。以前は「アクティブな
+    /// タブ＝見ている」と決めつけていて、裏のプロジェクトで開いたままのタブの完了が記録されなかった。
+    #[gpui::test]
+    fn a_turn_that_ends_off_screen_stays_unread_even_on_the_open_tab(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings_path = init_test_settings(cx, "unread-open-tab");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].muted = true; // 完了音を鳴らさない
+            let end_turn = |panel: &mut AgentPanel, cx: &mut Context<AgentPanel>| {
+                panel.threads[active].running = true;
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnEnded {
+                        reason: TurnEnd::Completed,
+                    },
+                    cx,
+                );
+            };
+
+            // 画面に出ていない（隠したパネル・裏のプロジェクト）。
+            panel.window_active = true;
+            panel.last_rendered_at = None;
+            end_turn(panel, cx);
+            assert_eq!(
+                panel.threads[active].activity(),
+                ThreadActivity::Done { interrupted: false }
+            );
+
+            // 別のアプリを見ている。
+            panel.threads[active].done = None;
+            panel.window_active = false;
+            panel.last_rendered_at = Some(std::time::Instant::now());
+            end_turn(panel, cx);
+            assert_eq!(
+                panel.threads[active].activity(),
+                ThreadActivity::Done { interrupted: false }
+            );
+
+            // 目の前で終わった。
+            panel.threads[active].done = None;
+            panel.window_active = true;
+            panel.last_rendered_at = Some(std::time::Instant::now());
+            end_turn(panel, cx);
+            assert_eq!(panel.threads[active].activity(), ThreadActivity::Idle);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 素通りでは未確認を消さず、留まったら消す。狙って開いたら即座に消す。
+    #[gpui::test]
+    fn passing_through_a_tab_keeps_it_unread_but_staying_or_opening_clears_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings_path = init_test_settings(cx, "unread-dwell");
+        let (panel, vcx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let done = ThreadActivity::Done { interrupted: false };
+        vcx.update(|window, _cx| window.activate_window());
+        vcx.run_until_parked();
+        panel.update(vcx, |panel, cx| {
+            panel.new_thread(cx);
+            panel.new_thread(cx);
+            panel.new_thread(cx);
+            panel.switch_thread(0, cx);
+            for index in 1..4 {
+                panel.threads[index].done = Some(TurnEnd::Completed);
+            }
+            panel.window_active = true;
+            panel.last_rendered_at = Some(std::time::Instant::now());
+
+            // ⌃Tab で 1 を通り過ぎて 2 へ。
+            panel.switch_thread(1, cx);
+            panel.note_thread_on_screen(true, cx);
+            assert_eq!(panel.threads[1].activity(), done, "切り替えただけでは消えない");
+            panel.switch_thread(2, cx);
+            panel.note_thread_on_screen(true, cx);
+        });
+        vcx.executor().advance_clock(VIEW_DWELL * 2);
+        vcx.run_until_parked();
+        panel.update(vcx, |panel, cx| {
+            assert_eq!(panel.threads[1].activity(), done, "素通りのタブは未確認のまま");
+            assert_eq!(panel.threads[2].activity(), ThreadActivity::Idle, "留まったら消える");
+
+            // 狙って開く = 待たずに消える。
+            panel.focus_thread(3, cx);
+            assert_eq!(panel.threads[3].activity(), ThreadActivity::Idle);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// あなた待ちは見ても消えない（答えるまで残る）。
+    #[gpui::test]
+    fn viewing_a_waiting_thread_does_not_clear_it(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "viewed-waiting");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.debug_ask_question(cx);
+            let active = panel.active;
+            panel.threads[active].done = Some(TurnEnd::Completed);
+            panel.mark_thread_viewed(active, cx);
+            assert_eq!(panel.threads[active].activity(), ThreadActivity::Blocked);
+            assert_eq!(
+                panel.attention_counts(),
+                AttentionCounts {
+                    waiting: 1,
+                    unread: 0,
+                    working: 0
+                }
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    #[gpui::test]
+    fn an_unread_mark_survives_a_restart_until_the_thread_is_viewed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings_path = init_test_settings(cx, "unread-restart");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_unread_restart_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        storage
+            .upsert_thread(
+                "unread-1",
+                "裏で終わったスレッド",
+                0,
+                "",
+                None,
+                Some("Claude Code"),
+                None,
+                0,
+                0,
+            )
+            .expect("スレッド行を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            panel.threads[active].muted = true;
+            panel.threads[active].running = true;
+            panel.last_rendered_at = None; // 見ていない
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Interrupted,
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            storage.load_unseen_threads().expect("読める"),
+            vec![("unread-1".to_string(), true)]
+        );
+
+        let restarted = cx.new(|cx| AgentPanel::new(Theme::dark(), cx));
+        restarted.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            assert_eq!(
+                panel.threads[active].activity(),
+                ThreadActivity::Done { interrupted: true },
+                "未確認が再起動で消えた"
+            );
+            panel.mark_thread_viewed(active, cx);
+        });
+        assert!(storage.load_unseen_threads().expect("読める").is_empty());
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[gpui::test]
     fn thread_mute_survives_a_restart(cx: &mut gpui::TestAppContext) {
         let settings_path = init_test_settings(cx, "mute-restart");

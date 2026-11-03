@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>スレッド一覧と確認待ち — necoder モック（提案・未決定）</title>
+<style>
+  /* UI-SPEC §1.1 のトークン。スレッド一覧のワークスペース枠にプロジェクト色を置くのは、
+     §1.3 の許可リストに足す提案。赤は「あなた待ちの件数」だけに使う。 */
+  :root {
+    --bg0:#16181e; --bg1:#1b1e25; --bg2:#232733; --bg3:#2b3040;
+    --fg0:#d7dae3; --fg1:#9aa1b2; --fg2:#646b7a; --border:#262b36;
+    --err:#e06c75; --on-err:#16181e; --pip:#d7dae3;
+    --p1:#7c8cf8; --p2:#34d3b6; --p3:#f0a24b; --p4:#ef7d9b;
+    --t1:#61afef; --t2:#e5c07b; --t3:#c678dd;
+  }
+  .light {
+    --bg0:#f0f1f4; --bg1:#ffffff; --bg2:#ffffff; --bg3:#e7eaf0;
+    --fg0:#333845; --fg1:#5c6370; --fg2:#9aa1b2; --border:#d8dce3;
+    --err:#e45649; --on-err:#16181e; --pip:#333845;
+  }
+  * { box-sizing:border-box; margin:0; }
+  html { background:#101217; }
+  body { color:#d7dae3; padding:20px 24px 40px; font:13px/1.5 "IBM Plex Sans JP","Hiragino Sans",sans-serif; }
+  h1 { font-size:16px; }
+  .note { color:#7d8494; font-size:11.5px; margin:2px 0 12px; }
+  svg.i { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; display:block; }
+
+  /* ── 操作パネル（モックの外側） ── */
+  .panel { display:flex; flex-wrap:wrap; gap:8px 22px; align-items:center; margin-bottom:14px; font-size:11px; color:#7d8494; max-width:1400px; }
+  .group { display:flex; align-items:center; gap:4px; }
+  .group > span { margin-right:4px; }
+  .opt { font:inherit; color:#9aa1b2; background:#1b1e25; border:1px solid #262b36; border-radius:5px;
+    padding:2px 9px; cursor:pointer; display:inline-flex; align-items:center; gap:5px; }
+  .opt:hover { color:#d7dae3; }
+  .opt.on { color:#d7dae3; background:#2b3040; border-color:#646b7a; }
+  .opt svg.i { width:14px; height:14px; }
+
+  /* ── 窓 ── */
+  .win { max-width:1400px; height:760px; display:flex; flex-direction:column; overflow:hidden; position:relative;
+    border:2px solid var(--frame); border-radius:10px; background:var(--bg1); color:var(--fg0); transition:border-color .15s; }
+  .tb { flex:none; display:flex; align-items:center; gap:10px; height:38px; padding:0 12px; background:var(--bg0);
+    border-bottom:1px solid var(--border); font-size:12px; }
+  .lights { display:flex; gap:6px; margin-right:4px; }
+  .lights i { width:11px; height:11px; border-radius:50%; background:var(--bg3); }
+  .pill { padding:1px 10px; border:1px solid var(--border); border-left:3px solid var(--frame); border-radius:5px; white-space:nowrap; }
+  .pill em { color:var(--fg2); font-style:normal; margin-left:6px; font-size:11px; }
+  .segs { display:inline-flex; gap:2px; align-items:center; height:24px; padding:2px; border:1px solid var(--border); border-radius:6px; }
+  .seg { display:flex; align-items:center; height:18px; padding:0 8px; border-radius:4px; font-size:11px; color:var(--fg2); cursor:pointer; }
+  .seg:hover { color:var(--fg1); }
+  .seg.on { background:color-mix(in srgb,var(--frame) 16%,transparent); color:var(--fg0); }
+  .spacer { flex:1; }
+  .iconbtn { position:relative; width:28px; height:28px; display:grid; place-items:center; border-radius:6px; color:var(--fg2); cursor:pointer; }
+  .iconbtn:hover { background:var(--bg2); }
+  .body { flex:1; min-height:0; display:flex; }
+
+  /* ── バッジ（案 B）と白い点 ── */
+  .badge { flex:none; min-width:16px; height:16px; padding:0 4px; border-radius:8px; background:var(--err); color:var(--on-err);
+    font-size:10px; font-weight:700; line-height:16px; text-align:center; font-variant-numeric:tabular-nums; }
+  .count { flex:none; min-width:16px; height:16px; padding:0 4px; border-radius:8px; background:var(--bg3); color:var(--fg1);
+    font-size:10px; font-weight:600; line-height:16px; text-align:center; font-variant-numeric:tabular-nums; }
+  .pip { width:8px; height:8px; border-radius:50%; background:var(--pip); }
+  .on-icon { position:absolute; top:-5px; right:-6px; box-shadow:0 0 0 2px var(--bg0); }
+  .pip.on-icon { top:-2px; right:-2px; }
+  .iconbtn .pip.on-icon { top:4px; right:4px; }
+
+  /* ── レール ── */
+  .rail { flex:none; width:50px; display:flex; flex-direction:column; align-items:center; gap:10px; padding:12px 0;
+    background:var(--bg0); border-right:1px solid var(--border); }
+  .tile { position:relative; width:30px; height:30px; flex:none; border-radius:8px; border:1px solid var(--border); background:var(--bg2);
+    display:grid; place-items:center; font-size:12px; font-weight:600; color:var(--pc); cursor:pointer; }
+  .tile:hover { border-color:var(--pc); }
+  .tile.active { border-color:var(--pc); box-shadow:inset 0 0 0 1px var(--pc); }
+  .add { width:30px; height:30px; display:grid; place-items:center; border:1px dashed var(--border); border-radius:8px; color:var(--fg2); }
+  .sep { width:22px; border-top:1px solid var(--border); margin:2px 0; }
+  .act { position:relative; width:30px; height:30px; flex:none; display:grid; place-items:center; border-radius:6px; color:var(--fg2); cursor:pointer; }
+  .act:hover { color:var(--fg1); }
+  .act.on { color:var(--frame); }
+  .railfill { flex:1; }
+
+  /* ── スレッド一覧 ── */
+  .col { flex:none; width:312px; display:flex; flex-direction:column; min-height:0; background:var(--bg0); border-right:1px solid var(--border); }
+  .colhead { flex:none; display:flex; align-items:center; gap:8px; height:36px; padding:0 8px 0 12px; font-size:12px; font-weight:600; }
+  .chips { margin-left:auto; display:flex; gap:2px; font-weight:400; }
+  .chip { font-size:10.5px; color:var(--fg2); padding:1px 7px; border-radius:4px; cursor:pointer; display:flex; align-items:center; gap:4px; }
+  .chip:hover { color:var(--fg1); }
+  .chip.on { background:var(--bg3); color:var(--fg0); }
+  .boxes { flex:1; min-height:0; overflow:auto; padding:2px 8px 10px; display:flex; flex-direction:column; gap:8px; }
+  .box { flex:none; border-radius:8px; overflow:hidden; background:var(--bg1); }
+  .boxhead { display:flex; align-items:center; gap:6px; height:28px; padding:0 8px 0 10px; font-size:11.5px; font-weight:600; color:var(--fg1); }
+  .boxhead .br { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--fg2);
+    font:10px ui-monospace,Menlo,monospace; }
+  .box.cur .boxhead { color:var(--fg0); }
+  /* 枠の 3 案。--wc = そのワークスペースのプロジェクト色 */
+  [data-frame=a] .box { border:1.5px solid var(--wc); }
+  [data-frame=b] .box { border:1px solid color-mix(in srgb,var(--wc) 45%,transparent); }
+  [data-frame=b] .box.cur { border:1.5px solid var(--wc); }
+  [data-frame=c] .box { border:1px solid color-mix(in srgb,var(--wc) 45%,transparent); }
+  [data-frame=c] .box.cur { border:1.5px solid var(--wc); }
+  [data-frame=c] .boxhead { background:color-mix(in srgb,var(--wc) 15%,transparent); }
+
+  .row { position:relative; padding:6px 10px 7px; cursor:pointer; border-top:1px solid var(--border); }
+  .row:hover { background:var(--bg2); }
+  .row.cur { background:var(--bg3); box-shadow:inset 2px 0 0 var(--c); }
+  .r1 { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--fg1); }
+  .r1 .nm { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .r1 .meta { margin-left:auto; flex:none; color:var(--fg2); font-size:10px; font-weight:400; font-variant-numeric:tabular-nums; }
+  .r2,.r3 { padding-left:21px; font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .r2 { color:var(--fg2); }
+  .r3 { color:var(--fg2); }
+  .row.st-unread .r1,.row.st-wait .r1 { color:var(--fg0); font-weight:700; }
+  .row.st-unread .r2,.row.st-wait .r2,.row.st-work .r2 { color:var(--fg1); }
+  .row.st-wait .r3 { color:var(--fg0); }
+  .empty { color:var(--fg2); font-size:11px; padding:22px 8px; text-align:center; }
+
+  /* ── 状態ドット ── */
+  .slot { width:14px; height:14px; flex:none; display:grid; place-items:center; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--c); }
+  .dim { opacity:.35; }
+  .half { width:8px; height:4px; overflow:hidden; animation:breathe 1.8s ease-in-out infinite; }
+  .half::before { content:""; display:block; width:8px; height:8px; border-radius:50%; background:var(--c); }
+  @keyframes breathe { 50% { opacity:.35; } }
+  .spin::after { content:"⠋"; color:var(--c); font-size:13px; line-height:1; animation:braille 1s steps(1) infinite; }
+  @keyframes braille { 0%{content:"⠋"} 10%{content:"⠙"} 20%{content:"⠹"} 30%{content:"⠸"} 40%{content:"⠼"}
+    50%{content:"⠴"} 60%{content:"⠦"} 70%{content:"⠧"} 80%{content:"⠇"} 90%{content:"⠏"} }
+  .flash::before { content:""; position:absolute; inset:0; pointer-events:none;
+    background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--c) 34%,transparent),transparent);
+    background-size:200% 100%; animation:sweep 1.1s ease-out 1 both; }
+  @keyframes sweep { 0%{background-position:120% 0;opacity:1} 100%{background-position:-60% 0;opacity:0} }
+  @media (prefers-reduced-motion:reduce) { .flash::before,.half { animation:none; } }
+
+  /* ── タブと行の強調 3 案。覚えなくても目に入るよう、ドットの形ではなく面・線・動きで見せる。
+     強さの順は あなた待ち > 未確認 > 生成中 > 確認済み（何も足さない）。 */
+  [data-tab] .tab,[data-tab] .row { isolation:isolate; }
+  /* A: 面 + 線 */
+  [data-tab=a] .tab.st-wait,[data-tab=a] .row.st-wait { background:color-mix(in srgb,var(--err) 17%,var(--bg0)); }
+  [data-tab=a] .tab.st-wait { box-shadow:inset 0 2px 0 var(--err); animation:wait-glow 1.8s ease-in-out infinite; }
+  [data-tab=a] .row.st-wait { box-shadow:inset 3px 0 0 var(--err); animation:wait-glow 1.8s ease-in-out infinite; }
+  [data-tab=a] .tab.st-unread { background:color-mix(in srgb,var(--c) 15%,var(--bg0)); }
+  /* 一覧の行は枠のプロジェクト色と競わないよう、面は無彩色にしてスレッド色は左の線だけに置く。 */
+  [data-tab=a] .row.st-unread { background:color-mix(in srgb,var(--fg0) 8%,var(--bg1)); }
+  [data-tab=a] .tab.st-unread { box-shadow:inset 0 2px 0 var(--c); }
+  [data-tab=a] .row.st-unread { box-shadow:inset 3px 0 0 var(--c); }
+  /* B: 線だけ（面は塗らない） */
+  [data-tab=b] .tab.st-wait { box-shadow:inset 0 3px 0 var(--err); animation:wait-line 1.8s ease-in-out infinite; }
+  [data-tab=b] .row.st-wait { box-shadow:inset 3px 0 0 var(--err); animation:wait-line 1.8s ease-in-out infinite; }
+  [data-tab=b] .tab.st-unread { box-shadow:inset 0 3px 0 var(--c); }
+  [data-tab=b] .row.st-unread { box-shadow:inset 3px 0 0 var(--c); }
+  @keyframes wait-glow { 50% { background:color-mix(in srgb,var(--err) 7%,var(--bg0)); } }
+  @keyframes wait-line { 50% { box-shadow:inset 0 3px 0 color-mix(in srgb,var(--err) 35%,transparent); } }
+  [data-tab=b] .row.st-wait { animation-name:wait-line-row; }
+  @keyframes wait-line-row { 50% { box-shadow:inset 3px 0 0 color-mix(in srgb,var(--err) 35%,transparent); } }
+  /* A・B 共通: 生成中は下端を細い光が流れる（一番控えめ） */
+  [data-tab=a] .st-work::after,[data-tab=b] .st-work::after { content:""; position:absolute; left:0; right:0; bottom:0; height:2px;
+    pointer-events:none; background:linear-gradient(90deg,transparent,var(--c),transparent); background-size:45% 100%;
+    background-repeat:no-repeat; animation:run-line 1.6s linear infinite; opacity:.75; }
+  @keyframes run-line { 0% { background-position:-60% 0; } 100% { background-position:160% 0; } }
+  /* 確認済みは文字を一段下げるだけ */
+  [data-tab=a] .tab.st-seen:not(.active),[data-tab=b] .tab.st-seen:not(.active) { color:var(--fg2); }
+  @media (prefers-reduced-motion:reduce) { [data-tab] .st-wait,[data-tab] .st-work::after { animation:none; } }
+  /* 比較の帯 */
+  .compare { max-width:1400px; margin-bottom:14px; display:grid; gap:6px; }
+  .cmp { display:flex; align-items:stretch; background:var(--bg0); border:1px solid var(--border); border-radius:6px; overflow:hidden; color:var(--fg0); }
+  .cmp > b { flex:none; width:150px; display:flex; align-items:center; padding:0 12px; font-size:11px; font-weight:600; color:var(--fg1); border-right:1px solid var(--border); }
+  .cmp .tabs { flex:1; border-bottom:0; }
+
+  /* ── 中央のエディタ ── */
+  .center { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .tabs { flex:none; display:flex; height:34px; background:var(--bg0); border-bottom:1px solid var(--border); }
+  .tab { position:relative; display:flex; align-items:center; gap:7px; padding:0 12px; font-size:12px; color:var(--fg1);
+    white-space:nowrap; cursor:pointer; border-right:1px solid var(--border); }
+  .tab.active { background:var(--bg1); color:var(--fg0); }
+  .tab.active::after { content:""; position:absolute; inset:0 0 auto 0; height:2px; background:var(--c); }
+  .tab.st-unread,.tab.st-wait { color:var(--fg0); font-weight:700; }
+  .code { flex:1; padding:14px 18px; font:12px/1.75 ui-monospace,Menlo,monospace; color:var(--fg1); white-space:pre; overflow:hidden; }
+  .code b { color:#c678dd; font-weight:400; } .code i { color:#61afef; font-style:normal; } .code u { color:var(--fg2); text-decoration:none; }
+  .stage { flex:1; display:grid; place-items:center; color:var(--fg2); font-size:13px; }
+
+  /* ── 右の Agent パネル ── */
+  .agent { flex:none; width:400px; display:flex; flex-direction:column; min-height:0; border-left:1px solid var(--border); }
+  .talk { flex:1; min-height:0; padding:16px 18px; font-size:12.5px; color:var(--fg1); overflow:auto; }
+  .you { color:var(--fg0); border-left:2px solid var(--c); padding-left:10px; margin-bottom:12px; }
+  .res::before { content:"⏺ "; color:#d97757; }
+  .card { margin-top:12px; padding:10px 12px; background:var(--bg2); border:1px solid var(--border); border-radius:8px; color:var(--fg0); }
+  .btns { display:flex; gap:6px; margin-top:8px; }
+  .btn { font:inherit; font-size:11px; color:var(--fg0); background:var(--bg3); border:1px solid var(--border); border-radius:5px; padding:2px 10px; cursor:pointer; }
+  .btn:hover { border-color:var(--fg2); }
+  .composer { flex:none; margin:0 12px 12px; padding:9px 12px; border:1px solid var(--c); border-radius:8px; color:var(--fg2); font-size:12px; }
+
+  /* ── 下部バー ── */
+  .sb { flex:none; display:flex; align-items:center; height:26px; padding:0 10px; background:var(--bg0);
+    border-top:1px solid var(--border); font-size:10.5px; color:var(--fg1); }
+  .sb .side { flex:1; color:var(--fg2); white-space:nowrap; }
+  .sb .side.right { text-align:right; }
+  .roll { display:flex; align-items:center; gap:6px; padding:0 8px; height:20px; border-radius:4px; cursor:pointer; white-space:nowrap; }
+  .roll:hover { background:var(--bg2); }
+  .roll b { color:var(--fg0); font-weight:600; }
+  .roll .sepdot { color:var(--fg2); margin:0 2px; }
+
+  /* ── 通知の履歴 ── */
+  .pop { position:absolute; top:42px; right:12px; width:360px; z-index:5; background:var(--bg2); border:1px solid var(--border);
+    border-radius:8px; box-shadow:0 12px 32px rgba(0,0,0,.35); overflow:hidden; }
+  .pop h4 { padding:9px 12px; font-size:12px; border-bottom:1px solid var(--border); }
+  .note-row { display:flex; gap:8px; align-items:flex-start; padding:8px 12px; cursor:pointer; font-size:11.5px; color:var(--fg1); }
+  .note-row:hover { background:var(--bg3); }
+  .note-row .tt { flex:1; min-width:0; }
+  .note-row small { display:block; color:var(--fg2); font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .note-row.new { color:var(--fg0); font-weight:700; }
+  .note-row.new small { font-weight:400; }
+  .note-row .dot { margin-top:5px; flex:none; }
+  .mark { flex:none; width:7px; height:7px; margin-top:5px; border-radius:50%; border:1px solid var(--fg2); }
+  .note-row.new .mark { background:var(--pip); border-color:var(--pip); }
+</style>
+</head>
+<body>
+<h1>スレッド一覧と確認待ち</h1>
+<p class="note">行やタブを押すと未確認と通知が同時に消えます。あなた待ちの赤は、開くだけでは消えず、答えると消えます。上のボタンで案を切り替えられます。</p>
+
+<div class="panel">
+  <div class="group"><span>枠</span>
+    <button class="opt" data-set="frame:b">B 今いる所だけ濃い（決定）</button>
+    <button class="opt" data-set="frame:a">A 全部くっきり</button>
+    <button class="opt" data-set="frame:c">C 見出しに色の帯</button>
+  </div>
+  <div class="group"><span>タブと行の強調</span>
+    <button class="opt" data-set="tab:a">A 面と線（決定）</button>
+    <button class="opt" data-set="tab:b">B 線だけ</button>
+    <button class="opt" data-set="tab:c">C 小さな印だけ</button>
+  </div>
+  <div class="group" id="iconOpts"><span>アイコン</span></div>
+  <div class="group"><span>テーマ</span>
+    <button class="opt" data-set="theme:dark">ダーク</button>
+    <button class="opt" data-set="theme:light">ライト</button>
+  </div>
+  <div class="group"><span>再現</span>
+    <button class="opt" id="finish">裏で 1 件完了</button>
+    <button class="opt" id="block">裏で承認待ち</button>
+    <button class="opt" id="reset">最初に戻す</button>
+  </div>
+</div>
+
+<div class="compare" id="compare"></div>
+<div class="win" id="win"></div>
+
+<script>
+const P = (s) => `<svg class="i" viewBox="0 0 24 24">${s}</svg>`;
+const ICON = {
+  search: '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>',
+  git: '<path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>',
+  todo: '<path d="M21 10.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.5"/><path d="m9 11 3 3L22 4"/>',
+  grid: '<rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>',
+  chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  ai: '<path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/>',
+  term: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>',
+  server: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  bell: '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  messages: '<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/>',
+  list: '<path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/>',
+  inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+};
+const ICON_OPTS = [
+  { key: 'inbox', label: '受信箱（決定）' },
+  { key: 'messages', label: '会話' },
+  { key: 'list', label: '一覧' },
+  { key: 'activity', label: '今の波形' },
+];
+document.getElementById('iconOpts').insertAdjacentHTML('beforeend', ICON_OPTS.map(o =>
+  `<button class="opt" data-set="icon:${o.key}">${P(ICON[o.key])}${o.label}</button>`).join(''));
+
+// レールの 1 枠 = 1 リポジトリ。Task の worktree はレールに載らないので、件数は枠へ合算する。
+const RAIL = [
+  { id: 'n', mono: 'n', color: 'var(--p1)' },
+  { id: 's', mono: 's', color: 'var(--p2)' },
+  { id: 'a', mono: 'a', color: 'var(--p3)' },
+];
+const SPACES = [
+  { id: 'n', rail: 'n', name: 'necoder', branch: 'main', color: 'var(--p1)', file: 'rail_view.rs' },
+  { id: 't', rail: 'n', name: '認証の修正', branch: 'task/auth', color: 'var(--p4)', file: 'auth.rs' },
+  { id: 's', rail: 's', name: 'site', branch: 'main', color: 'var(--p2)', file: 'hero.html' },
+  { id: 'a', rail: 'a', name: 'api', branch: 'fix/ci', color: 'var(--p3)', file: 'ci.yml' },
+];
+const initial = () => ({
+  threads: [
+    { id: 1, sp: 'n', name: '状態の設計', c: 'var(--t1)', st: 'seen', ask: '確認待ちの見せ方を比べて', res: '枠の案を 3 つ比べました。', age: '今', tok: '18k' },
+    { id: 2, sp: 'n', name: 'rope設計', c: 'var(--t2)', st: 'wait', ask: 'rope の設計を比べて詰めて', res: '許可待ち: cargo test を実行', age: '12分', tok: '42k', action: '許可' },
+    { id: 3, sp: 't', name: '認証調査', c: 'var(--t3)', st: 'work', ask: '401 の原因を調べて', res: 'auth.rs を読んでいます', age: '8分', tok: '9k' },
+    { id: 4, sp: 's', name: 'LP修正', c: 'var(--t1)', st: 'unread', ask: 'ヒーロー節を ja/en で書き換えて', res: 'スクショ検証まで完了しました。', age: '3分', tok: '12k' },
+    { id: 5, sp: 's', name: '価格表', c: 'var(--t2)', st: 'unread', ask: '価格表の注釈を直して', res: '注釈を 2 か所直しました。', age: '21分', tok: '4k' },
+    { id: 6, sp: 'a', name: 'CI修復', c: 'var(--t3)', st: 'wait', ask: 'CI の失敗を直して', res: '質問: musl のビルドも直しますか', age: '4分', tok: '27k', action: '答える' },
+    { id: 7, sp: 'a', name: '依存更新', c: 'var(--t1)', st: 'seen', ask: '依存を上げて', res: '更新しました。', age: '1時間', tok: '6k' },
+  ],
+  notes: [
+    { id: 1, th: 6, title: '質問待ち: CI修復', body: 'api — musl のビルドも直しますか', at: '4分前', fresh: true },
+    { id: 2, th: 4, title: '完了: LP修正', body: 'site — スクショ検証まで完了しました。', at: '3分前', fresh: true },
+    { id: 3, th: 2, title: '承認待ち: rope設計', body: 'necoder — cargo test を実行', at: '12分前', fresh: true },
+    { id: 4, th: 5, title: '完了: 価格表', body: 'site — 注釈を 2 か所直しました。', at: '21分前', fresh: true },
+    { id: 5, th: 7, title: '完了: 依存更新', body: 'api — 更新しました。', at: '1時間前', fresh: false },
+  ],
+});
+const hash = new URLSearchParams(location.hash.slice(1));
+const ui = { tab: hash.get('tab') || 'a', frame: hash.get('frame') || 'b', icon: hash.get('icon') || 'inbox', theme: hash.get('theme') || 'dark',
+  mode: 'editor', col: true, filter: hash.get('filter') || 'all', bell: hash.has('bell') };
+let data = initial(), current = 1, flashing = null, nextNote = 100;
+
+const thread = id => data.threads.find(t => t.id === id);
+const space = id => SPACES.find(s => s.id === id);
+const of = (st, list = data.threads) => list.filter(t => t.st === st);
+const slot = t => t.st === 'work' ? '<span class="slot spin"></span>'
+  : t.st === 'wait' ? '<span class="slot"><span class="half"></span></span>'
+  : t.st === 'unread' ? '<span class="slot"><span class="dot"></span></span>'
+  : '<span class="slot"><span class="dot dim"></span></span>';
+
+// 見た = 未確認も、そのスレッドの通知も、同じ瞬間に消える。あなた待ちは答えるまで残す。
+function open(id) {
+  const t = thread(id);
+  current = id;
+  if (t.st === 'unread') t.st = 'seen';
+  data.notes.filter(n => n.th === id).forEach(n => { n.fresh = false; });
+  ui.bell = false; flashing = null;
+  render();
+}
+function answer(id) {
+  const t = thread(id);
+  t.st = 'work'; t.action = null; t.res = '続きを実行しています'; t.age = '今';
+  render();
+}
+function nextAttention() {
+  const order = [...of('wait'), ...of('unread')];
+  const target = order.find(t => t.id !== current) || order[0];
+  if (target) open(target.id);
+}
+function pushNote(t, title, body) {
+  data.notes.unshift({ id: nextNote++, th: t.id, title: `${title}: ${t.name}`, body: `${space(t.sp).name} — ${body}`, at: '今', fresh: t.id !== current });
+}
+
+function render() {
+  const cur = thread(current), sp = space(cur.sp);
+  const wait = of('wait').length, unread = of('unread').length, work = of('work').length;
+  const win = document.getElementById('win');
+  win.className = 'win ' + (ui.theme === 'light' ? 'light' : '');
+  win.dataset.frame = ui.frame;
+  win.dataset.tab = ui.tab;
+  // 実際のスレッド名で並べる。状態名をタブに書くと、装飾の効き目を測れないため。
+  const sample = [
+    { name: '状態の設計', st: 'seen', c: 'var(--t1)', active: true },
+    { name: 'rope設計', st: 'wait', c: 'var(--t2)' },
+    { name: 'LP修正', st: 'unread', c: 'var(--t3)' },
+    { name: '認証調査', st: 'work', c: 'var(--t1)' },
+    { name: '依存更新', st: 'seen', c: 'var(--t2)' },
+  ];
+  const cmpTabs = sample.map(t => `<div class="tab st-${t.st} ${t.active ? 'active' : ''}" style="--c:${t.c}">${slot(t)}${t.name}</div>`).join('');
+  const compare = document.getElementById('compare');
+  compare.className = 'compare ' + (ui.theme === 'light' ? 'light' : '');
+  compare.innerHTML = [['a', 'A 面と線（決定）'], ['b', 'B 線だけ'], ['c', 'C 小さな印だけ']].map(([k, label]) =>
+    `<div class="cmp" data-tab="${k}"><b>${label}</b><div class="tabs">${cmpTabs}</div></div>`).join('');
+  win.style.setProperty('--frame', sp.color);
+  document.querySelectorAll('[data-set]').forEach(b => {
+    const [k, v] = b.dataset.set.split(':');
+    b.classList.toggle('on', ui[k] === v);
+  });
+
+  const mark = (w, u) => w ? `<span class="badge on-icon">${w}</span>` : u ? '<span class="pip on-icon"></span>' : '';
+  const rail = RAIL.map(r => {
+    const mine = data.threads.filter(t => space(t.sp).rail === r.id);
+    return `<span class="tile ${sp.rail === r.id ? 'active' : ''}" style="--pc:${r.color}" data-rail="${r.id}" title="${r.id}">${r.mono}${mark(of('wait', mine).length, of('unread', mine).length)}</span>`;
+  }).join('');
+  const act = (k, tip, on, extra = '', attr = '') => `<span class="act ${on ? 'on' : ''}" title="${tip}" ${attr}>${P(ICON[k])}${extra}</span>`;
+  const railHtml = `<div class="rail">${rail}<span class="add">＋</span><span class="sep"></span>
+    ${act(ui.icon, 'スレッド（全ワークスペース）', ui.col, mark(wait, unread), 'data-col')}
+    ${act('search', '検索', false)}${act('git', 'Git', false)}${act('todo', 'Todo', false)}
+    <span class="railfill"></span>${act('ai', 'AI パネル', true)}${act('term', 'ターミナル', false)}${act('server', 'リモート', false)}</div>`;
+
+  const visible = t => ui.filter === 'all' || t.st === 'wait' || t.st === 'unread';
+  const boxes = SPACES.map(s => {
+    const mine = data.threads.filter(t => t.sp === s.id);
+    const rows = mine.filter(visible);
+    if (!rows.length) return '';
+    const w = of('wait', mine).length, u = of('unread', mine).length;
+    return `<div class="box ${s.id === sp.id ? 'cur' : ''}" style="--wc:${s.color}">
+      <div class="boxhead"><span>${s.name}</span><span class="br">⎇ ${s.branch}</span>${w ? `<span class="badge">${w}</span>` : ''}${u ? `<span class="count" title="未確認">${u}</span>` : ''}</div>
+      ${rows.map(t => `<div class="row st-${t.st} ${t.id === current ? 'cur' : ''} ${t.id === flashing ? 'flash' : ''}" style="--c:${t.c}" data-t="${t.id}">
+        <div class="r1">${slot(t)}<span class="nm">${t.name}</span><span class="meta">${t.age} · ${t.tok}</span></div>
+        <div class="r2">› ${t.ask}</div>${t.st === 'seen' ? '' : `<div class="r3">${t.res}</div>`}</div>`).join('')}
+    </div>`;
+  }).join('') || '<div class="empty">確認するものはありません</div>';
+  const colHtml = ui.col ? `<div class="col"><div class="colhead">スレッド<div class="chips">
+      <span class="chip ${ui.filter === 'all' ? 'on' : ''}" data-filter="all">すべて</span>
+      <span class="chip ${ui.filter === 'todo' ? 'on' : ''}" data-filter="todo">確認待ち ${wait + unread}</span></div></div>
+      <div class="boxes">${boxes}</div></div>` : '';
+
+  const code = `<b>impl</b> Workspace {\n    <u>// ${sp.name} ⎇ ${sp.branch}</u>\n    <b>pub fn</b> <i>open_thread</i>(&<b>mut</b> self, id: ThreadId) {\n        self.mark_seen(id);\n        self.clear_notifications(id);\n        cx.notify();\n    }\n}`;
+  const center = ui.mode === 'editor'
+    ? `<div class="center"><div class="tabs"><div class="tab active" style="--c:${sp.color}">${sp.file}</div></div><div class="code">${code}</div></div>`
+    : `<div class="center"><div class="stage">Fleet の舞台（バッジと下部バーは同じ数字のまま）</div></div>`;
+
+  const tabs = data.threads.filter(t => t.sp === sp.id).map(t =>
+    `<div class="tab st-${t.st} ${t.id === current ? 'active' : ''} ${t.id === flashing ? 'flash' : ''}" style="--c:${t.c}" data-t="${t.id}">${slot(t)}${t.name}</div>`).join('');
+  const agent = `<div class="agent" style="--c:${cur.c}"><div class="tabs">${tabs}</div>
+    <div class="talk"><div class="you">${cur.ask}</div>${cur.st === 'wait'
+      ? `<div class="card">${cur.res}<div class="btns"><button class="btn" data-answer="${cur.id}">${cur.action}</button><button class="btn" data-answer="${cur.id}">拒否</button></div></div>`
+      : `<div class="res">${cur.res}</div>`}</div>
+    <div class="composer">${cur.name} へ · ${sp.name} ⎇ ${sp.branch}</div></div>`;
+
+  const parts = [];
+  if (wait) parts.push(`<span class="badge">${wait}</span><b>あなた待ち</b>`);
+  if (unread) parts.push(`<span>未確認 <b>${unread}</b></span>`);
+  if (work) parts.push(`<span>生成中 <b>${work}</b></span>`);
+  const roll = parts.length ? `<span class="roll" id="roll" title="次の確認待ちへ（⌘⇧U）">${parts.join('<span class="sepdot">·</span>')}</span>` : '';
+
+  const hasFresh = data.notes.some(n => n.fresh);
+  const pop = ui.bell ? `<div class="pop"><h4>通知の履歴</h4>${data.notes.slice(0, 7).map(n => {
+    const t = thread(n.th);
+    return `<div class="note-row ${n.fresh ? 'new' : ''}" data-t="${n.th}" style="--c:${t.c}"><span class="dot"></span><span class="tt">${n.title}<small>${n.body} · ${n.at}</small></span><span class="mark"></span></div>`;
+  }).join('')}</div>` : '';
+
+  win.innerHTML = `<div class="tb"><span class="lights"><i></i><i></i><i></i></span>
+      <span class="pill">${sp.name}<em>⎇ ${sp.branch}</em></span>
+      <span class="segs"><span class="seg ${ui.mode === 'editor' ? 'on' : ''}" data-mode="editor">Editor</span><span class="seg ${ui.mode === 'fleet' ? 'on' : ''}" data-mode="fleet">Fleet</span><span class="seg">Chat</span></span>
+      <span class="spacer"></span>
+      <span class="iconbtn" id="bell" title="通知の履歴">${P(ICON.bell)}${hasFresh ? '<span class="pip on-icon"></span>' : ''}</span></div>
+    <div class="body">${railHtml}${colHtml}${center}${agent}</div>
+    <div class="sb"><span class="side">⎇ ${sp.branch}</span>${roll}<span class="side right">行 3, 列 18　UTF-8　Rust</span></div>${pop}`;
+}
+
+document.addEventListener('click', e => {
+  const q = s => e.target.closest(s);
+  let el;
+  if ((el = q('[data-set]'))) { const [k, v] = el.dataset.set.split(':'); ui[k] = v; return render(); }
+  if ((el = q('[data-answer]'))) return answer(Number(el.dataset.answer));
+  if ((el = q('[data-filter]'))) { ui.filter = el.dataset.filter; return render(); }
+  if ((el = q('[data-mode]'))) { ui.mode = el.dataset.mode; return render(); }
+  if (q('[data-col]')) { ui.col = !ui.col; return render(); }
+  if (q('#bell')) { ui.bell = !ui.bell; return render(); }
+  if (q('#roll')) return nextAttention();
+  if ((el = q('[data-rail]'))) {
+    const mine = data.threads.filter(t => space(t.sp).rail === el.dataset.rail);
+    const next = mine.find(t => t.st === 'wait') || mine.find(t => t.st === 'unread') || mine[0];
+    return open(next.id);
+  }
+  if ((el = q('[data-t]'))) return open(Number(el.dataset.t));
+  if (ui.bell && !q('.pop')) { ui.bell = false; render(); }
+});
+document.getElementById('finish').onclick = e => {
+  e.stopPropagation();
+  const t = of('work').find(t => t.id !== current) || data.threads.find(t => t.st === 'seen' && t.id !== current);
+  if (!t) return;
+  t.st = 'unread'; t.res = '完了しました。結果を確かめてください。'; t.age = '今'; t.action = null;
+  pushNote(t, '完了', t.res); flashing = t.id; render();
+};
+document.getElementById('block').onclick = e => {
+  e.stopPropagation();
+  const t = of('work').find(t => t.id !== current) || data.threads.find(t => t.st === 'seen' && t.id !== current);
+  if (!t) return;
+  t.st = 'wait'; t.res = '許可待ち: git push を実行'; t.age = '今'; t.action = '許可';
+  pushNote(t, '承認待ち', 'git push を実行'); flashing = null; render();
+};
+document.getElementById('reset').onclick = e => {
+  e.stopPropagation();
+  data = initial(); current = 1; flashing = null; ui.filter = 'all'; ui.col = true; ui.bell = false; render();
+};
+render();
+</script>
+</body>
+</html>

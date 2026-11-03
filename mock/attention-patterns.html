@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>確認待ちの見せ方 — necoder 部品カタログ（提案・未決定）</title>
+<style>
+  /* UI-SPEC §1.1 の dark トークン。色は識別（スレッド色・プロジェクト色）に集約し、
+     赤（err）は「あなた待ちの件数」だけに置く案を比べる。ブラウザで開いて動きと連動を確かめる。 */
+  :root {
+    --bg0:#16181e; --bg1:#1b1e25; --bg2:#232733; --bg3:#2b3040;
+    --fg0:#d7dae3; --fg1:#9aa1b2; --fg2:#646b7a; --border:#262b36;
+    --err:#e06c75; --on-err:#16181e;
+    --p1:#7c8cf8; --p2:#34d3b6; --p3:#f0a24b; --p4:#ef7d9b;
+    --t1:#61afef; --t2:#e5c07b; --t3:#c678dd;
+  }
+  .light {
+    --bg0:#f0f1f4; --bg1:#ffffff; --bg2:#ffffff; --bg3:#e7eaf0;
+    --fg0:#333845; --fg1:#5c6370; --fg2:#9aa1b2; --border:#d8dce3;
+    --err:#e45649; --on-err:#16181e;
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { background:#101217; color:#d7dae3; padding:28px 32px 60px;
+    font:13px/1.6 "IBM Plex Sans JP","Hiragino Sans",sans-serif; }
+  h1 { font-size:17px; margin-bottom:2px; }
+  h2 { font-size:13.5px; margin:30px 0 2px; }
+  .note { color:#7d8494; font-size:11.5px; margin-bottom:12px; max-width:900px; }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; max-width:1240px; }
+  .card { background:var(--bg0); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+  .card.pick { outline:1px solid var(--fg1); outline-offset:1px; }
+  .card h3 { font-size:12px; font-weight:600; color:var(--fg0); }
+  .card p { color:var(--fg2); font-size:10.5px; line-height:1.5; margin:2px 0 12px; min-height:32px; }
+  .label { color:var(--fg2); font-size:9.5px; margin:10px 0 4px; }
+
+  /* ── 文脈の部品 ── */
+  .tile { position:relative; width:30px; height:30px; flex:none; border-radius:8px;
+    border:1px solid var(--border); background:var(--bg2); display:grid; place-items:center;
+    font-size:12px; font-weight:600; color:var(--pc); cursor:pointer; }
+  .tile.active { border-color:var(--pc); }
+  .segs { display:inline-flex; gap:2px; align-items:center; height:24px; padding:2px;
+    border:1px solid var(--border); border-radius:6px; }
+  .seg { display:flex; align-items:center; gap:4px; height:18px; padding:0 8px; border-radius:4px;
+    font-size:11px; color:var(--fg2); }
+  .seg.on { background:color-mix(in srgb,var(--p1) 16%,transparent); color:var(--fg0); }
+  .rowctx { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--fg0);
+    background:var(--bg1); border-radius:6px; padding:5px 8px; }
+  .rowctx .nm { flex:1; font-weight:600; }
+
+  /* ── バッジ 4 案 ── */
+  .b-outline { padding:0 4px; border:1px solid var(--err); border-radius:4px; color:var(--err);
+    font-size:9.5px; line-height:13px; white-space:nowrap; }
+  .b-solid { min-width:16px; height:16px; padding:0 4px; border-radius:8px; background:var(--err);
+    color:var(--on-err); font-size:10px; font-weight:700; line-height:16px; text-align:center;
+    font-variant-numeric:tabular-nums; }
+  .b-soft { min-width:16px; height:16px; padding:0 4px; border-radius:8px;
+    background:color-mix(in srgb,var(--err) 20%,transparent); color:var(--err); font-size:10px;
+    font-weight:700; line-height:16px; text-align:center; font-variant-numeric:tabular-nums; }
+  .b-dot { width:8px; height:8px; border-radius:50%; background:var(--err); }
+  /* アイコンの右上に載せる時だけ、面と同じ色の輪で切り抜く（Slack / macOS Dock の作法）。 */
+  .on-icon { position:absolute; top:-6px; right:-7px; box-shadow:0 0 0 2px var(--cut,var(--bg0)); }
+  .on-icon.b-outline { background:var(--bg0); }
+  .on-icon.b-dot { top:-3px; right:-3px; }
+
+  /* ── 状態ドットとタブ ── */
+  .tabs { display:flex; align-items:stretch; height:34px; background:var(--bg0);
+    border-bottom:1px solid var(--border); }
+  .tab { position:relative; display:flex; align-items:center; gap:7px; padding:0 12px;
+    font-size:12px; color:var(--fg1); cursor:pointer; white-space:nowrap;
+    border-right:1px solid var(--border); }
+  .tab.active { background:var(--bg1); color:var(--fg0); }
+  .tab.active::after { content:""; position:absolute; inset:0 0 auto 0; height:2px; background:var(--c); }
+  .dot { width:8px; height:8px; flex:none; border-radius:50%; background:var(--c); }
+  .slot { width:14px; height:14px; flex:none; display:grid; place-items:center; }
+
+  /* 今の実装 */
+  .now-done { box-shadow:0 0 0 3px var(--bg0),0 0 0 4px var(--c); }
+  .now-idle { opacity:.35; }
+  .half { width:8px; height:4px; overflow:hidden; }
+  .half::before { content:""; display:block; width:8px; height:8px; border-radius:50%; background:var(--c); }
+
+  /* 案 */
+  .st-seen .dot { opacity:.35; }
+  .st-seen { color:var(--fg2); }
+  .tab.active.st-seen { color:var(--fg0); }
+  .st-unread { color:var(--fg0); font-weight:700; }
+  .st-unread .dot { width:9px; height:9px; }
+  .st-wait { color:var(--fg0); font-weight:700; }
+  .st-wait .half { animation:breathe 1.8s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity:.35; } }
+  .spin::after { content:"⠋"; color:var(--c); font-size:13px; line-height:1;
+    animation:braille 1s steps(1) infinite; }
+  @keyframes braille { 0%{content:"⠋"} 10%{content:"⠙"} 20%{content:"⠹"} 30%{content:"⠸"}
+    40%{content:"⠼"} 50%{content:"⠴"} 60%{content:"⠦"} 70%{content:"⠧"} 80%{content:"⠇"} 90%{content:"⠏"} }
+  /* 完了した瞬間の 1 回だけ。スレッド色が左から流れて消える。以後は静止（idle 予算を使わない）。 */
+  .flash::before { content:""; position:absolute; inset:0; pointer-events:none;
+    background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--c) 32%,transparent),transparent);
+    background-size:200% 100%; animation:sweep 1.1s ease-out 1 both; }
+  @keyframes sweep { 0%{background-position:120% 0;opacity:1} 100%{background-position:-60% 0;opacity:0} }
+  @media (prefers-reduced-motion:reduce) {
+    .flash::before,.st-wait .half { animation:none; }
+  }
+
+  /* ── 動くシーン ── */
+  .scene { max-width:1240px; border:1px solid var(--border); border-radius:10px; overflow:hidden;
+    background:var(--bg1); color:var(--fg0); }
+  .tb { display:flex; align-items:center; gap:10px; height:38px; padding:0 12px; background:var(--bg0);
+    border-bottom:1px solid var(--border); font-size:12px; }
+  .lights { display:flex; gap:6px; }
+  .lights i { width:10px; height:10px; border-radius:50%; background:var(--bg3); }
+  .pill { padding:1px 10px; border:1px solid var(--border); border-left:3px solid var(--p1); border-radius:5px; }
+  .pill em { color:var(--fg2); font-style:normal; margin-left:6px; }
+  .spacer { flex:1; }
+  .bell { position:relative; color:var(--fg2); font-size:11px; }
+  .body { display:flex; height:470px; }
+  .rail { width:50px; flex:none; display:flex; flex-direction:column; align-items:center; gap:12px;
+    padding:12px 0; background:var(--bg0); border-right:1px solid var(--border); }
+  .rail hr { width:22px; border:0; border-top:1px solid var(--border); margin:2px 0; }
+  .act { position:relative; width:30px; height:30px; display:grid; place-items:center; border-radius:6px;
+    color:var(--fg2); cursor:pointer; }
+  .act.on { color:var(--p1); background:var(--bg2); }
+  .list { width:320px; flex:none; overflow:auto; background:var(--bg0); border-right:1px solid var(--border); }
+  .sec { padding:10px 12px 4px; color:var(--fg2); font-size:10px; display:flex; gap:6px; }
+  .sec b { color:var(--fg1); font-weight:600; }
+  .item { position:relative; padding:6px 12px 7px; cursor:pointer; }
+  .item:hover { background:var(--bg2); }
+  .item.cur { background:var(--bg3); }
+  .i1 { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--fg1); }
+  .i1 .nm { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .i1 .where { color:var(--fg2); font-size:10px; font-weight:400; white-space:nowrap; }
+  .i1 .age { margin-left:auto; color:var(--fg2); font-size:10px; font-weight:400; }
+  .i2,.i3 { padding-left:21px; font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .i2 { color:var(--fg1); }
+  .i3 { color:var(--fg2); }
+  .item.st-unread,.item.st-wait { font-weight:400; }
+  .item.st-unread .nm,.item.st-wait .nm { color:var(--fg0); font-weight:700; }
+  .main { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .talk { flex:1; padding:18px 22px; color:var(--fg1); font-size:12.5px; overflow:hidden; }
+  .talk .you { color:var(--fg0); border-left:2px solid var(--c); padding-left:10px; margin-bottom:12px; }
+  .talk .res::before { content:"⏺ "; color:#d97757; }
+  .ctrl { display:flex; gap:8px; padding:8px 12px; border-top:1px solid var(--border); }
+  .btn { font:inherit; font-size:11px; color:var(--fg0); background:var(--bg2); border:1px solid var(--border);
+    border-radius:5px; padding:2px 10px; cursor:pointer; }
+  .btn:hover { background:var(--bg3); }
+  .sb { display:flex; align-items:center; justify-content:center; gap:8px; height:24px; background:var(--bg0);
+    border-top:1px solid var(--border); font-size:10.5px; color:var(--fg1); }
+  .sb .pick { padding:0 8px; border-radius:4px; cursor:pointer; }
+  .sb .pick:hover { background:var(--bg2); }
+  .sb b { color:var(--fg0); }
+</style>
+</head>
+<body>
+<h1>確認待ちの見せ方（提案・未決定）</h1>
+<p class="note">赤は「あなた待ちの件数」だけに置き、全体は titlebar、プロジェクトはレール、スレッドはタブの 3 段で示します。数字の色は赤の上で読める濃色です（白は 3.2:1 で足りず、濃色は 5.55:1）。</p>
+
+<h2>1. 赤バッジ 4 案</h2>
+<p class="note">どれも実寸です。枠の付いた案が推し（B）です。</p>
+<div class="grid" id="badges"></div>
+
+<h2>2. タブの見分け</h2>
+<p class="note">上が今の実装、下が案です。名前の太さという、色を使わない段差を足しています。</p>
+<div class="card" style="max-width:1240px;padding:0;overflow:hidden">
+  <div class="tabs" style="--bg:#16181e">
+    <div class="tab active" style="--c:var(--t1)"><span class="slot"><span class="dot now-idle"></span></span>表示中</div>
+    <div class="tab" style="--c:var(--t2)"><span class="slot"><span class="half"></span></span>あなた待ち</div>
+    <div class="tab" style="--c:var(--t3)"><span class="slot"><span class="dot now-done"></span></span>未確認</div>
+    <div class="tab" style="--c:var(--t1)"><span class="slot spin"></span>生成中</div>
+    <div class="tab" style="--c:var(--t2)"><span class="slot"><span class="dot now-idle"></span></span>確認済み</div>
+  </div>
+  <div class="tabs" style="border-bottom:0">
+    <div class="tab active st-seen" style="--c:var(--t1)"><span class="slot"><span class="dot"></span></span>表示中</div>
+    <div class="tab st-wait" style="--c:var(--t2)"><span class="slot"><span class="half"></span></span>あなた待ち<span class="b-solid">1</span></div>
+    <div class="tab st-unread" style="--c:var(--t3)"><span class="slot"><span class="dot"></span></span>未確認</div>
+    <div class="tab" style="--c:var(--t1)"><span class="slot spin"></span>生成中</div>
+    <div class="tab st-seen" style="--c:var(--t2)"><span class="slot"><span class="dot"></span></span>確認済み</div>
+  </div>
+</div>
+
+<h2>3. 動くシーン（押して確かめる）</h2>
+<p class="note">タブか一覧の行を押すと、その 1 件が確認済みになり、レール・Fleet・Dock・下部バーの数字が同時に変わります。全部同じ状態から数えるからです。下のボタンは完了や承認待ちの発生を再現します。</p>
+<div class="scene">
+  <div class="tb">
+    <span class="lights"><i></i><i></i><i></i></span>
+    <span class="pill">necoder<em>⎇ main</em></span>
+    <span class="segs"><span class="seg on">Editor</span><span class="seg">Fleet<span class="b-solid" id="fleetBadge"></span></span><span class="seg">Chat</span></span>
+    <span class="spacer"></span>
+    <span class="bell" title="履歴だけを見る場所なので件数を持たない">🔔 履歴</span>
+    <span class="bell" id="dock" style="color:var(--fg2)"></span>
+  </div>
+  <div class="body">
+    <div class="rail" id="rail"></div>
+    <div class="list" id="list"></div>
+    <div class="main">
+      <div class="tabs" id="tabs"></div>
+      <div class="talk" id="talk"></div>
+      <div class="ctrl">
+        <button class="btn" id="finish">生成中を完了させる</button>
+        <button class="btn" id="block">承認待ちを発生させる</button>
+        <button class="btn" id="unread">表示中を未確認に戻す</button>
+        <button class="btn" id="reset">最初に戻す</button>
+      </div>
+    </div>
+  </div>
+  <div class="sb" id="sb"></div>
+</div>
+
+<h2>4. ライトテーマ</h2>
+<div class="card light" style="max-width:1240px;padding:0;overflow:hidden">
+  <div class="tabs" style="height:52px">
+    <div class="tab active st-seen" style="--c:var(--t1)"><span class="slot"><span class="dot"></span></span>表示中</div>
+    <div class="tab st-wait" style="--c:var(--t2)"><span class="slot"><span class="half"></span></span>あなた待ち<span class="b-solid">1</span></div>
+    <div class="tab st-unread" style="--c:var(--t3)"><span class="slot"><span class="dot"></span></span>未確認</div>
+    <div class="tab" style="--c:var(--t1)"><span class="slot spin"></span>生成中</div>
+    <div class="tab st-seen" style="--c:var(--t2)"><span class="slot"><span class="dot"></span></span>確認済み</div>
+    <div style="display:flex;align-items:center;gap:18px;padding:0 18px">
+      <span class="tile" style="--pc:var(--p2);--cut:var(--bg0)">s<span class="b-solid on-icon">3</span></span>
+      <span class="segs"><span class="seg">Fleet<span class="b-solid">3</span></span></span>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 1. バッジの比較カード ──
+const variants = [
+  { key: 'b-outline', name: 'A. 今の枠線', text: '2', desc: '今の Fleet の ◐ N です。静かですが、細い線と 9.5px の字で気づきにくいです。' , prefix: '◐ ' },
+  { key: 'b-solid', name: 'B. 塗りの丸（推し）', text: '2', desc: 'Slack と同じ読み方です。面積は小さいまま、一番早く目に入ります。', pick: true },
+  { key: 'b-soft', name: 'C. 淡い赤の丸', text: '2', desc: '上品ですが、暗い面に沈みます。小さいと字の読みやすさも落ちます。' },
+  { key: 'b-dot', name: 'D. 赤い点だけ', text: '', desc: '一番静かですが、何件あるか分かりません。未確認の点とも紛れます。' },
+];
+document.getElementById('badges').innerHTML = variants.map(v => {
+  const t = (v.prefix || '') + v.text;
+  return `<div class="card ${v.pick ? 'pick' : ''}">
+    <h3>${v.name}</h3><p>${v.desc}</p>
+    <div class="label">左レール</div>
+    <div style="display:flex;gap:16px;padding:4px 2px">
+      <span class="tile active" style="--pc:var(--p1)">n<span class="${v.key} on-icon">${t}</span></span>
+      <span class="tile" style="--pc:var(--p2)">s</span>
+    </div>
+    <div class="label">titlebar の Fleet</div>
+    <span class="segs"><span class="seg on">Editor</span><span class="seg">Fleet<span class="${v.key}">${t}</span></span></span>
+    <div class="label">タブの中</div>
+    <div class="rowctx" style="--c:var(--t2)"><span class="slot"><span class="half"></span></span><span class="nm">rope設計</span><span class="${v.key}">${v.key === 'b-dot' ? '' : (v.prefix ? '◐ 1' : '1')}</span></div>
+  </div>`;
+}).join('');
+
+// ── 3. 動くシーン ── 状態は threads の 1 か所だけに持ち、表示は全部ここから数える。
+const projects = [
+  { id: 'n', name: 'necoder', color: 'var(--p1)' },
+  { id: 's', name: 'site', color: 'var(--p2)' },
+  { id: 'a', name: 'api', color: 'var(--p3)' },
+];
+const initial = () => [
+  { id: 1, p: 'n', name: '状態の設計', c: 'var(--t1)', st: 'seen', ask: '確認待ちの見せ方を比べて', res: '4 案を比較しました。', age: '今' },
+  { id: 2, p: 'n', name: 'rope設計', c: 'var(--t2)', st: 'wait', ask: 'rope の設計を比べて詰めて', res: '許可待ち: cargo test を実行', age: '12分' },
+  { id: 3, p: 'n', name: '認証調査', c: 'var(--t3)', st: 'work', ask: '401 の原因を調べて', res: 'auth.rs を読んでいます', age: '8分' },
+  { id: 4, p: 's', name: 'LP修正', c: 'var(--t1)', st: 'unread', ask: 'ヒーロー節を ja/en で書き換えて', res: 'スクショ検証まで完了しました。', age: '3分' },
+  { id: 5, p: 's', name: '価格表', c: 'var(--t2)', st: 'unread', ask: '価格表の注釈を直して', res: '注釈を 2 か所直しました。', age: '21分' },
+  { id: 6, p: 'a', name: 'CI修復', c: 'var(--t3)', st: 'wait', ask: 'CI の失敗を直して', res: '質問: musl のビルドも直しますか', age: '4分' },
+  { id: 7, p: 'a', name: '依存更新', c: 'var(--t1)', st: 'seen', ask: '依存を上げて', res: '更新しました。', age: '1時間' },
+];
+let threads = initial(), current = 1, flashing = null;
+const of = st => threads.filter(t => t.st === st);
+const slot = t => t.st === 'work' ? '<span class="slot spin"></span>'
+  : t.st === 'wait' ? '<span class="slot"><span class="half"></span></span>'
+  : '<span class="slot"><span class="dot"></span></span>';
+const cls = t => t.st === 'wait' ? 'st-wait' : t.st === 'unread' ? 'st-unread' : t.st === 'seen' ? 'st-seen' : '';
+
+function open(id) {
+  const t = threads.find(t => t.id === id);
+  current = id;
+  if (t.st === 'unread') t.st = 'seen';    // 見た = その場で全部の数字から消える
+  if (t.st === 'wait') t.st = 'work';      // 再現のため、開いて答えたことにする
+  flashing = null;
+  render();
+}
+function render() {
+  const cur = threads.find(t => t.id === current);
+  const projectId = cur.p;
+  const wait = of('wait').length, unread = of('unread').length, work = of('work').length;
+
+  document.getElementById('rail').innerHTML = projects.map(p => {
+    const mine = threads.filter(t => t.p === p.id);
+    const w = mine.filter(t => t.st === 'wait').length;
+    const u = mine.filter(t => t.st === 'unread').length;
+    const mark = w ? `<span class="b-solid on-icon">${w}</span>`
+      : u ? `<span class="on-icon" style="top:-2px;right:-2px;width:8px;height:8px;border-radius:50%;background:var(--fg0)"></span>` : '';
+    return `<span class="tile ${p.id === projectId ? 'active' : ''}" style="--pc:${p.color}" data-p="${p.id}">${p.id}${mark}</span>`;
+  }).join('') + `<hr><span class="act on" title="確認待ち（合計の赤は titlebar の 1 か所だけ）">≡</span>`;
+
+  const fb = document.getElementById('fleetBadge');
+  fb.textContent = wait; fb.style.display = wait ? '' : 'none';
+  document.getElementById('dock').textContent = wait ? `Dock: ${wait}` : 'Dock: なし';
+
+  const section = (title, items) => items.length ? `<div class="sec"><b>${title}</b>${items.length}</div>` + items.map(t => {
+    const p = projects.find(p => p.id === t.p);
+    return `<div class="item ${cls(t)} ${t.id === current ? 'cur' : ''}" style="--c:${t.c}" data-t="${t.id}">
+      <div class="i1">${slot(t)}<span class="nm">${t.name}</span><span class="where">${p.name}</span><span class="age">${t.age}</span></div>
+      <div class="i2">› ${t.ask}</div><div class="i3">${t.res}</div></div>`;
+  }).join('') : '';
+  document.getElementById('list').innerHTML = section('あなた待ち', of('wait')) + section('未確認', of('unread')) + section('生成中', of('work'))
+    + `<div class="sec">▸ 確認済み ${of('seen').length}</div>`;
+
+  document.getElementById('tabs').innerHTML = threads.filter(t => t.p === projectId).map(t =>
+    `<div class="tab ${t.id === current ? 'active' : ''} ${cls(t)} ${t.id === flashing ? 'flash' : ''}" style="--c:${t.c}" data-t="${t.id}">${slot(t)}${t.name}${t.st === 'wait' ? '<span class="b-solid">1</span>' : ''}</div>`
+  ).join('');
+
+  document.getElementById('talk').innerHTML = `<div class="you" style="--c:${cur.c}">${cur.ask}</div><div class="res">${cur.res}</div>`;
+
+  const parts = [];
+  if (wait) parts.push(`<b>あなた待ち ${wait}</b>`);
+  if (unread) parts.push(`未確認 ${unread}`);
+  if (work) parts.push(`生成中 ${work}`);
+  document.getElementById('sb').innerHTML = `<span class="pick">${parts.join('　·　') || 'すべて確認済み'}</span>`;
+}
+document.querySelector('.scene').addEventListener('click', e => {
+  const id = e.target.closest('[data-t]')?.dataset.t;
+  if (id) return open(Number(id));
+  const p = e.target.closest('[data-p]')?.dataset.p;
+  if (p) {
+    const mine = threads.filter(t => t.p === p);
+    const next = mine.find(t => t.st === 'wait') || mine.find(t => t.st === 'unread') || mine[0];
+    open(next.id);
+  }
+});
+document.getElementById('finish').onclick = () => {
+  const t = threads.find(t => t.st === 'work' && t.id !== current) || of('work')[0];
+  if (!t) return;
+  t.st = t.id === current ? 'seen' : 'unread';
+  t.res = '完了しました。結果を確かめてください。'; t.age = '今';
+  flashing = t.st === 'unread' ? t.id : null;
+  render();
+};
+document.getElementById('block').onclick = () => {
+  const t = threads.find(t => t.st === 'work' && t.id !== current) || threads.find(t => t.st === 'seen' && t.id !== current);
+  if (!t) return;
+  t.st = 'wait'; t.res = '許可待ち: git push を実行'; t.age = '今'; flashing = null; render();
+};
+document.getElementById('unread').onclick = () => {
+  threads.find(t => t.id === current).st = 'unread'; flashing = null; render();
+};
+document.getElementById('reset').onclick = () => { threads = initial(); current = 1; flashing = null; render(); };
+render();
+</script>
+</body>
+</html>

@@ -1156,6 +1156,17 @@ impl Workspace {
                 div()
                     .id(("fleet-task-row", seq))
                     .group("fleet-task-row")
+                    .relative()
+                    .overflow_hidden()
+                    .children(agent_panel::thread_state_layers(
+                        format!("fleet-task-state-{seq}"),
+                        &theme,
+                        color,
+                        row.activity,
+                        false,
+                        agent_panel::StateEdge::Left,
+                        self.window_active && !cx.reduce_motion(),
+                    ))
                     .flex()
                     .items_start()
                     .gap(px(8.))
@@ -1741,10 +1752,18 @@ mod tests {
             if let Some(pending) = workspace.overlays.pending_project_switch.take() {
                 workspace.switch_project(pending, window, cx);
             }
-            assert_eq!(workspace.project_sessions.active, adopted, "取り込んだ Task を選ぶ");
-            let space = workspace.project_sessions.projects[adopted].task_space.id.clone();
+            assert_eq!(
+                workspace.project_sessions.active, adopted,
+                "取り込んだ Task を選ぶ"
+            );
+            let space = workspace.project_sessions.projects[adopted]
+                .task_space
+                .id
+                .clone();
             assert!(
-                workspace.stage_cards().iter().any(|(_, pane)| matches!(pane, FleetPane::Task { space: shown } if shown == &space)),
+                workspace.stage_cards().iter().any(
+                    |(_, pane)| matches!(pane, FleetPane::Task { space: shown } if shown == &space)
+                ),
                 "取り込んだ Task が舞台に出る"
             );
             assert_eq!(

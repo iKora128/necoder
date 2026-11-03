@@ -44,6 +44,14 @@ impl Workspace {
         event: &agent_panel::PanelEvent,
         cx: &mut Context<Self>,
     ) {
+        // 見た: Chat でも同じ（どのパネルでも通知は 1 か所に積まれている）。
+        if let agent_panel::PanelEvent::ThreadViewed { thread_id, cleared } = event {
+            self.mark_thread_notifications_read(&panel, thread_id, cx);
+            if *cleared {
+                cx.notify(); // レールの印と statusbar の集計を描き直す
+            }
+            return;
+        }
         // Chat のパネルはプロジェクトの session ではない（TaskSpace も Captain も無い）。
         if self.chat_panel().as_ref() == Some(&panel) {
             self.on_chat_panel_event(&panel, event, cx);
@@ -61,6 +69,7 @@ impl Workspace {
         // ターンの終わりはここを通る。推薦が無ければ何もしない）。
         self.prune_captain_recommendations(cx);
         match event {
+            agent_panel::PanelEvent::ThreadViewed { .. } => {} // 上で済ませた
             agent_panel::PanelEvent::HumanSend { thread, text } => {
                 if is_captain_thread_name(thread.as_ref()) {
                     self.refresh_captain_context(session_index, &panel, thread, cx);

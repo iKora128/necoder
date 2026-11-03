@@ -28,7 +28,12 @@
 | ↳ **プレビューチップ**（ツールカードからプレビュー表示で開く） | `preview_chip` | プレビュー | Preview |
 | **Fleet サイドバー**（状態一覧） | `fleet_sidebar`（← `herd`） | Fleet サイドバー | Fleet sidebar |
 | ↳ **Fleet の Σ**（Fleet 中の statusbar。サイドバーの Task 行と Captain バーのトークンの合計＝各会話の文脈の使用量の合計で、使った量の累計ではない。累計は使用量の統計） | `fleet_tokens_total` / `fleet.tokens_total` | Σ 〈トークン〉 | Σ 〈tokens〉 |
-| **AI スレッド一覧**（Editor の左カラム・全プロジェクトのスレッド状態。レールの activity アイコン・2026-09-24） | `render_herd_sidebar` / `show_herd`（`herd` は code 専用）・設定 `rail.threads` | AI スレッド一覧 | AI threads |
+| **スレッド一覧**（Editor の左カラム・全ワークスペースのスレッドを色の枠で分ける。レールの受信箱アイコン・2026-11-03。← AI スレッド一覧） | `render_herd_sidebar` / `show_herd`（`herd` は code 専用）・設定 `rail.threads` | スレッド | Threads |
+| ↳ **確認待ち**（人が次に見るべきもの = あなた待ち + 未確認。一覧の絞り込み・⌘⇧U の行き先） | `AttentionCounts` / `ControlNext` | 確認待ち | To check |
+| ↳ **あなた待ち**（承認・質問で止まったスレッド + 失敗した Task + 分解案。見ても消えない。赤い丸で数える） | `ThreadActivity::Blocked` / `AttentionCounts::waiting` | あなた待ち | Waiting for you |
+| ↳ **未確認**（ターンが終わった後、まだ見ていないスレッド。見たら消える。再起動を越えて残る） | `ThreadActivity::Done` / `Thread::done` / `thread_unseen` | 未確認 | Unread |
+| ↳ **生成中**（ターンが進行中） | `ThreadActivity::Working` | 生成中 | Working |
+| ↳ **確認済み**（何も足さない状態） | `ThreadActivity::Idle` | 確認済み | Read |
 | **系譜グラフ** | `lineage` / `graph` | 系譜 | Lineage |
 | ↳ 表示（4 種） | `GraphView::{Fan,Tree,Card,Hub}` | 扇形 / ツリー / カード / ハブ | Fan / Tree / Card / Hub |
 | **舞台**（Fleet 中央。Task カードを 1〜3 枚） | `stage` / `StageLayout::{One,Two,Three}` | 舞台 | Stage |
@@ -136,7 +141,7 @@
 | ↳ 削除の確認（失うものを数えて見せる） | `WorktreeDeleteConfirm` / `WorktreeStakes` | — | — |
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **OS の通知**（通知センター。その窓を見ていない時だけ・スレッドごとに 1 件） | `system_notifications` / `post_agent_notification` / 設定 `system_notifications` | OS の通知 | System notifications |
-| **Dock バッジ**（要対応の件数・全窓の合計・macOS） | `dock_badge` | — | — |
+| **Dock バッジ**（あなた待ちの件数・全窓の合計・macOS） | `dock_badge` | — | — |
 | **通知の履歴**（titlebar のベル。エージェントの出来事を窓ごとに最新 100 件・未読 / 既読・O13） | `inbox` / `InboxItem` / `ShowInbox` | 通知の履歴 / すべて既読 / 未読に戻す | Notification history / Mark all read / Mark as unread |
 | **プレビュータブ**（エクスプローラの 1 回クリックで開く・次の 1 回クリックで置き換わる・名前が斜体・O26） | `EditorTab::preview` / `open_file_preview`（設定 `preview_tabs`） | プレビュータブ | Preview tab |
 | **ピン留め**（タブを左端に留め、まとめて閉じる操作と ⌘W で閉じない・窓セッションに残る・O26） | `EditorTab::pinned` / `TogglePinTab` / 窓セッション `pinned_files` | ピン留め / ピン留めを外す | Pin tab / Unpin tab |
@@ -185,10 +190,11 @@
 
 | 禁止 | → 正 | 理由 |
 |---|---|---|
-| `herd` / herd サイドバー | `fleet_sidebar` / Fleet サイドバー（Editor の左カラムでは AI スレッド一覧） | Fleet に統一（`herd` は UI に一度も出ない code 専用語） |
+| `herd` / herd サイドバー | `fleet_sidebar` / Fleet サイドバー（Editor の左カラムではスレッド一覧） | Fleet に統一（`herd` は UI に一度も出ない code 専用語） |
 | 監督 / `coordinator` / Coordinator | Captain / `captain` | Fleet の比喩に合わせ中核機能として改名（2026-09-12）。旧設定キー `coordinator_agent` の読み替えは作らない |
 | セル / `FleetPane` / surface | Task カード（スレッドタブ + サイドペイン） | 同じ worktree のターミナルが別セルになって増殖していた。全部 Task の中へ（FLEET-V2 §3.5） |
 | 作業 / 作業ツリー / 列 / ペイン / 面 / 配置（`workbench` / `WorkColumn` / `WorkPane` / `WorkSurface` / `RepositoryLayout`） | 廃止 | 0.1.15 の作業タブは実機で取り回しが悪く降格 → FLEET-V2 で削除 |
+| AI スレッド一覧 | スレッド一覧（UI の文字は「スレッド」） | 長く、波形のアイコンと合わせて何の面か分からなかった（2026-11-03） |
 | 管制（中央タブ）/ `FleetCenterView` | 要対応（サイドバー常設）+ ブリッジ（統合先のカード） | 中央タブ 3 面は「今どこを見ているか」を失わせる。**リモート管制**の名前だけ P9 完了まで据え置き |
 | ＋ACP / ＋Terminal / ＋Worktree | ＋ Task（会話はスレッドタブ隣の ＋・端末はターミナルペイン見出しの ＋） | 押す前に「どれか」を考えさせない。1 プロンプト = 1 worktree |
 | Multi Agent / 編隊（UI） | Fleet | Fleet を新概念としてユーザーにも前面 |

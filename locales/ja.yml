@@ -149,9 +149,6 @@ agent:
   state_done: 完了
   state_done_interrupted: 中断
   state_idle: 待機
-  rollup_working: "%{n} 実行中"
-  rollup_blocked: "%{n} 承認待ち"
-  rollup_done: "%{n} 完了"
   empty: スレッドはありません（＋ / %{key} で開始）
   checkpoint_row: checkpoint — %{label}（クリックでこの時点へ戻す）
   context_filter: ファイル名で絞り込み…
@@ -384,9 +381,17 @@ cmd:
   show_inbox: "通知: 履歴を開く"
   show_resources: "リソース: メモリとプロセス"
   show_cleanup: "Task: 片付け…"
+attention:
+  waiting: あなた待ち
+  unread: "未確認 %{n}"
+  working: "生成中 %{n}"
+  next_tip: 次の確認待ちへ
 herd:
-  empty: 実行中のエージェントはいません
-  files_of: "ファイル · %{name} の worktree"
+  title: スレッド
+  filter_all: すべて
+  filter_to_check: "確認待ち %{n}"
+  none_to_check: 確認するものはありません
+  empty: スレッドはまだありません
   mute: このエージェントをミュート（トースト/完了音を止める）
   unmute: ミュート解除
 control:
@@ -728,7 +733,7 @@ rail:
   fleet: "Fleet"
   git: ソース管理  %{key}
   todos: Todo ボード
-  threads: AI スレッド一覧（全プロジェクト）
+  threads: スレッド（全ワークスペース）
   fleet_sidebar: Fleet サイドバー（Task 一覧）
   agent: AI エージェントの表示切替
   terminal: ターミナル  %{key}
@@ -737,7 +742,6 @@ rail:
 titlebar:
   editor: Editor
   mode_tip: Editor / Fleet / Chat を切り替える
-  attention_tip: "要対応 %{n} 件"
   fleet: Fleet
   chat: Chat
 settings:

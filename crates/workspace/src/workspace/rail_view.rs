@@ -98,32 +98,6 @@ impl Workspace {
         let chat_mode = self.chat_mode();
         let accent = self.accent();
         let rail = settings::get(cx).rail; // アイコンの表示/非表示（settings 反応）
-                                           // 他プロジェクトの承認待ち・完了に気づけるよう、各スロットへ最重要スレッドの状態ドットを出す。
-                                           // Working は左レールでは表示しない（動かない小さな loading 表示に見えるため）。実行中は
-                                           // herd / titlebar beacon / statusbar の情報量がある面へ集約する。
-                                           // （ARCHITECTURE §5「レールのドットが他 project 分を担う」・#）。cx を跨いで借用しないよう
-                                           // root → (スレッド色, 状態) を先に所有データへ畳んでおく。
-        let rail_signals: std::collections::HashMap<
-            std::path::PathBuf,
-            (Hsla, agent_panel::ThreadActivity),
-        > = cx
-            .try_global::<agent_panel::RunningRegistry>()
-            .map(|registry| {
-                registry
-                    .0
-                    .iter()
-                    .filter_map(|(root, rows)| {
-                        rows.iter()
-                            .filter(|row| {
-                                row.2.is_signal()
-                                    && !matches!(row.2, agent_panel::ThreadActivity::Working)
-                            })
-                            .max_by_key(|row| row.2.urgency())
-                            .map(|(_, color, activity)| (root.clone(), (*color, *activity)))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         let rail_focus = self.chrome.rail_focus.clone();
         let focused_surface = theme.bg2;
         // ⌘O で選んでいる行の行き先（開いている間だけ・overlays の `switcher_rail_slots`）。
@@ -270,22 +244,11 @@ impl Workspace {
                                     ),
                             )
                         })
-                        // 状態ドット（右上・絶対配置）。他プロジェクトが承認待ち/完了(未確認)なら灯る。
-                        // Working の loading 表示は左レールには重複させない。
-                        // （リモートバッジは右下なので衝突しない）。色はスレッド識別色・状態は形と動きで（§1.3）。
-                        .when_some(
-                            rail_signals.get(slot.worktree.root()).copied(),
-                            |element, (dot_color, activity)| {
-                                element.child(div().absolute().top(px(-2.)).right(px(-2.)).child(
-                                    agent_panel::activity_dot(
-                                        ("rail-activity", index),
-                                        7.0,
-                                        dot_color,
-                                        activity,
-                                    ),
-                                ))
-                            },
-                        )
+                        // 確認待ちの印（右上・UI-SPEC §8）。Task の worktree はレールに載らないので、
+                        // 同じリポジトリの分を足す。生成中は出さない。
+                        .children(self.attention_mark(
+                            self.repository_attention(slot.repository_key(), cx),
+                        ))
                         .tooltip(Tooltip::text(name, theme.clone()))
                         .on_mouse_down(
                             MouseButton::Left,
@@ -326,6 +289,40 @@ impl Workspace {
             )
             .child(div().flex_1())
             // ── アクティビティアイコン（settings.rail で個別に表示/非表示・Lucide SVG）──
+            .when(rail.threads, |element| {
+                if chat_mode {
+                    return element.child(
+                        div()
+                            .relative()
+                            .child(self.rail_icon_inert("rail-threads", "icons/inbox.svg"))
+                            .children(self.attention_mark(self.attention_totals(cx))),
+                    );
+                }
+                // スレッド一覧（herd）。右上に全体の確認待ちの印（UI-SPEC §8）。Fleet 中は同じ枠が
+                // Fleet サイドバーなので、名札だけ替える。
+                element.child(
+                    self.rail_icon(
+                        "rail-threads",
+                        "icons/inbox.svg",
+                        if self.chrome.fleet_mode {
+                            i18n::t!("rail.fleet_sidebar")
+                        } else {
+                            i18n::t!("rail.threads")
+                        },
+                        if self.herd_column_visible(cx) {
+                            accent
+                        } else {
+                            theme.fg2
+                        },
+                    )
+                    .relative()
+                    .children(self.attention_mark(self.attention_totals(cx)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| this.toggle_herd_sidebar(cx)),
+                    ),
+                )
+            })
             .when(rail.explorer, |element| {
                 element.child(
                     self.rail_icon(
@@ -441,38 +438,9 @@ impl Workspace {
                     ),
                 )
             })
-            .when(rail.threads, |element| {
-                if chat_mode {
-                    return element
-                        .child(self.rail_icon_inert("rail-threads", "icons/activity.svg"));
-                }
-                // AI スレッド一覧（herd・2026-09-24 本人要望）。Fleet から戻ると左カラムに残っていた一覧を、
-                // レールから開ける場所にした。Fleet 中は同じ枠が Fleet サイドバーなので、名札だけ替える。
-                element.child(
-                    self.rail_icon(
-                        "rail-threads",
-                        "icons/activity.svg",
-                        if self.chrome.fleet_mode {
-                            i18n::t!("rail.fleet_sidebar")
-                        } else {
-                            i18n::t!("rail.threads")
-                        },
-                        if self.herd_column_visible(cx) {
-                            accent
-                        } else {
-                            theme.fg2
-                        },
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.toggle_herd_sidebar(cx)),
-                    ),
-                )
-            })
             .when(rail.fleet, |element| {
                 // Fleet の入口（FLEET-V2 §3.0）。**herd サイドバーを開くのではなく面ごと切り替える**。
                 // 稼働中の Task があればアイコン下に activity ドット（既存のレール流儀）。
-                let attention = self.attention_badge_count(cx);
                 element.child(
                     self.rail_icon(
                         "rail-fleet",
@@ -480,8 +448,6 @@ impl Workspace {
                         i18n::t!("rail.fleet"),
                         if self.chrome.fleet_mode {
                             accent
-                        } else if attention > 0 {
-                            theme.err
                         } else {
                             theme.fg2
                         },

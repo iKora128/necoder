@@ -1,28 +1,13 @@
 //! Dock のアイコンの要対応バッジ（O12）。
 //!
-//! 数え方は titlebar の `◐N`（[`Workspace::attention_badge_count`]）と同じ = 承認待ち・質問待ちの
-//! スレッド + 失敗した Task + Captain の分解案を、**全窓で合計**する。0 件なら消す。隠している時・他のアプリを
+//! あなた待ちの件数（[`Workspace::attention_badge_count`] = 承認待ち・質問待ちのスレッド + 失敗した
+//! Task + Captain の分解案。Chat も含む）を**全窓で合計**する。未確認は数えない。0 件なら消す。隠している時・他のアプリを
 //! 触っている時に「呼ばれている」ことが Dock だけで分かる。
 //!
 //! GPUI に Dock バッジの API は無いので、macOS だけ objc2-app-kit で
 //! `NSApplication.dockTile.badgeLabel` を直接書く。他の OS では数えるだけで何もしない。
 
 use crate::workspace::*;
-
-/// 要対応の件数: 承認待ち・質問待ち（Blocked）のスレッド + 失敗した Task + 裁いていない Captain の
-/// 分解案（FLEET-V2 §5.5）。
-pub(crate) fn attention_count(
-    activities: impl IntoIterator<Item = agent_panel::ThreadActivity>,
-    failed_tasks: usize,
-    proposals: usize,
-) -> usize {
-    activities
-        .into_iter()
-        .filter(|activity| *activity == agent_panel::ThreadActivity::Blocked)
-        .count()
-        + failed_tasks
-        + proposals
-}
 
 /// バッジの文字。0 件は出さない（`None` = 消す）。
 pub(crate) fn dock_badge_label(total: usize) -> Option<String> {
@@ -93,21 +78,6 @@ fn show_on_dock(_label: Option<&str>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_panel::ThreadActivity;
-
-    #[test]
-    fn counts_waiting_threads_and_failed_tasks() {
-        let activities = [
-            ThreadActivity::Blocked, // 承認待ち
-            ThreadActivity::Blocked, // 質問待ち（同じ Blocked）
-            ThreadActivity::Working,
-            ThreadActivity::Done { interrupted: false },
-            ThreadActivity::Idle,
-        ];
-        assert_eq!(attention_count(activities, 1, 0), 3);
-        assert_eq!(attention_count([ThreadActivity::Working], 0, 0), 0);
-        assert_eq!(attention_count([], 0, 2), 2, "Captain の分解案も数える");
-    }
 
     #[test]
     fn zero_clears_the_badge() {

@@ -12,6 +12,20 @@
 
 use crate::workspace::*;
 
+/// ⌘⇧U の行き先。
+#[derive(Clone)]
+enum AttentionTarget {
+    Thread {
+        session_index: usize,
+        panel: Entity<AgentPanel>,
+        thread_index: usize,
+    },
+    Chat {
+        panel: Entity<AgentPanel>,
+        thread_id: SharedString,
+    },
+}
+
 /// 要対応キューの 1 項目。優先順は Blocked（経過時間降順）→ Failed → Review 系 → Done 未確認。
 pub(super) struct AttentionItem {
     session_index: usize,
@@ -99,21 +113,110 @@ fn elapsed_label(secs: u64) -> SharedString {
 }
 
 impl Workspace {
-    /// ⏎: 要対応キューの先頭へ没入（keymap "FleetControl" context / Captain バーの「次」ボタン）。
+    /// ⌘⇧U / statusbar の集計: 次の確認待ちへ（モードに関わらず効く・UI-SPEC §8）。
+    /// Fleet の ⏎ は「次 ⏎」が付いた先頭カード（選んでいるリポジトリ）を優先する。
     pub(crate) fn control_next(
         &mut self,
         _: &ControlNext,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.chrome.fleet_mode {
-            return;
+        if self.chrome.fleet_mode {
+            let active_repository = self.active_repository_key();
+            let head = self.control_attention_queue(cx).into_iter().find(|item| {
+                Some(self.project_sessions.projects[item.session_index].repository_key())
+                    == active_repository
+            });
+            if let Some(head) = head {
+                self.project_sessions.sessions[head.session_index].agent_panel = head.panel;
+                self.immerse_from_control(head.session_index, head.thread_index, window, cx);
+                return;
+            }
         }
-        let Some(head) = self.control_attention_queue(cx).into_iter().find(|item| Some(self.project_sessions.projects[item.session_index].repository_key()) == self.active_repository_key()) else {
+        let targets = self.attention_targets(cx);
+        let Some(target) = targets
+            .iter()
+            .find(|target| !self.is_current_attention_target(target, cx))
+            .or_else(|| targets.first())
+            .cloned()
+        else {
             return;
         };
-        self.project_sessions.sessions[head.session_index].agent_panel = head.panel;
-        self.immerse_from_control(head.session_index, head.thread_index, window, cx);
+        match target {
+            AttentionTarget::Thread {
+                session_index,
+                panel,
+                thread_index,
+            } => {
+                if self.chat_mode() {
+                    self.set_chat_mode(false, window, cx);
+                }
+                self.project_sessions.sessions[session_index].agent_panel = panel;
+                self.jump_to_thread(session_index, thread_index, window, cx);
+            }
+            AttentionTarget::Chat { panel, thread_id } => {
+                self.jump_to_notified_thread(&panel.downgrade(), &thread_id, window, cx);
+            }
+        }
+    }
+
+    /// 次へ巡る順: あなた待ち（全リポジトリ・Chat）→ 未確認（全リポジトリ・Chat）。
+    fn attention_targets(&self, cx: &App) -> Vec<AttentionTarget> {
+        let mut waiting = Vec::new();
+        let mut unread = Vec::new();
+        for item in self.control_attention_queue(cx) {
+            let target = AttentionTarget::Thread {
+                session_index: item.session_index,
+                panel: item.panel,
+                thread_index: item.thread_index,
+            };
+            match item.kind {
+                AttentionKind::Permission(_)
+                | AttentionKind::Question(_)
+                | AttentionKind::Failed { .. }
+                | AttentionKind::Proposal { .. } => waiting.push(target),
+                AttentionKind::DoneUnread { .. } => unread.push(target),
+                // レビュー待ちは Fleet の裁く列の物で、Editor の確認待ちには数えない。
+                AttentionKind::Review { .. } => {}
+            }
+        }
+        if let Some(panel) = self.chat_panel() {
+            for status in panel.read(cx).statuses() {
+                let target = AttentionTarget::Chat {
+                    panel: panel.clone(),
+                    thread_id: status.thread_id.clone(),
+                };
+                match status.activity {
+                    agent_panel::ThreadActivity::Blocked => waiting.push(target),
+                    agent_panel::ThreadActivity::Done { .. } => unread.push(target),
+                    _ => {}
+                }
+            }
+        }
+        waiting.extend(unread);
+        waiting
+    }
+
+    fn is_current_attention_target(&self, target: &AttentionTarget, cx: &App) -> bool {
+        match target {
+            AttentionTarget::Thread {
+                session_index,
+                panel,
+                thread_index,
+            } => {
+                !self.chat_mode()
+                    && self.project_sessions.active == *session_index
+                    && self.project_sessions.sessions[*session_index].agent_panel == *panel
+                    && panel.read(cx).active_thread() == *thread_index
+            }
+            AttentionTarget::Chat { panel, thread_id } => {
+                self.chat_mode()
+                    && panel
+                        .read(cx)
+                        .thread_position(thread_id)
+                        .is_some_and(|index| index == panel.read(cx).active_thread())
+            }
+        }
     }
 
     /// 編隊レベルの ✳ 総括（Tier 2・P4）: キューに影響する遷移から 5s デバウンスして oneshot 生成。
@@ -374,36 +477,9 @@ impl Workspace {
         queue
     }
 
-    /// titlebar のモード切替に出す**要対応の件数**（`◐ N`・FLEET-V2 §3.0）。キュー全体を組まずに
-    /// 数だけ数える（titlebar は毎フレーム描かれるので、カードの生成と clone を持ち込まない）。
-    /// 数える対象 = 承認待ち・質問待ち（Blocked）のスレッド + Failed な Task + Captain の分解案。Dock の
-    /// バッジ（O12）もこれを全窓で足す（数え方は `dock_badge::attention_count` の 1 か所）。
+    /// あなた待ちの件数（Dock のバッジが全窓で足す・UI-SPEC §8）。数え方は `attention_totals` の 1 か所。
     pub(crate) fn attention_badge_count(&self, cx: &App) -> usize {
-        let mut activities = Vec::new();
-        let mut failed_tasks = 0;
-        let mut proposals = 0;
-        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
-            let Some(session) = self.project_sessions.sessions.get(index) else {
-                continue;
-            };
-            for panel in &session.fleet_agents {
-                activities.extend(
-                    panel
-                        .read(cx)
-                        .beacons()
-                        .into_iter()
-                        .map(|(_, _, activity)| activity),
-                );
-            }
-            if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Failed {
-                failed_tasks += 1;
-            }
-            // 分解案はリポジトリに付く。統合先扱いの slot が複数あっても 1 度だけ数える（O21 と同じメイン）。
-            if self.integration_slot_for(slot.repository_key()) == Some(index) {
-                proposals += self.captain_proposals_for(slot.repository_key()).count();
-            }
-        }
-        super::dock_badge::attention_count(activities, failed_tasks, proposals)
+        self.attention_totals(cx).waiting
     }
 
     /// Task が**質問だけ**で止まっているなら、その質問のスレッド（承認待ちが 1 つでもあれば None
@@ -505,12 +581,30 @@ impl Workspace {
 
     /// ③ 要対応キュー（左 336px）。カード内のボタンが**その場で**判断を完了させる（没入不要が原則）。
     pub(super) fn render_stage_attention(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let queue: Vec<_> = self.control_attention_queue(cx).into_iter().filter(|item| {
-            Some(self.project_sessions.projects[item.session_index].repository_key()) == self.active_repository_key()
-        }).collect();
-        let mut list = div().id("stage-attention").flex_none().max_h(px(300.)).overflow_y_scroll().flex().flex_col().gap(px(6.)).p(px(8.))
-            .child(div().text_size(px(10.)).text_color(self.theme.fg2).child(SharedString::from(format!("{} {}", i18n::t!("control.queue"), queue.len()))));
-        for (position, item) in queue.iter().enumerate() { list = list.child(self.render_attention_card(position, item, cx)); }
+        let queue: Vec<_> = self
+            .control_attention_queue(cx)
+            .into_iter()
+            .filter(|item| {
+                Some(self.project_sessions.projects[item.session_index].repository_key())
+                    == self.active_repository_key()
+            })
+            .collect();
+        let mut list =
+            div()
+                .id("stage-attention")
+                .flex_none()
+                .max_h(px(300.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .p(px(8.))
+                .child(div().text_size(px(10.)).text_color(self.theme.fg2).child(
+                    SharedString::from(format!("{} {}", i18n::t!("control.queue"), queue.len())),
+                ));
+        for (position, item) in queue.iter().enumerate() {
+            list = list.child(self.render_attention_card(position, item, cx));
+        }
         list.into_any_element()
     }
 
@@ -534,9 +628,7 @@ impl Workspace {
         let activity = match &item.kind {
             AttentionKind::Permission(_)
             | AttentionKind::Question(_)
-            | AttentionKind::Proposal { .. } => {
-                agent_panel::ThreadActivity::Blocked
-            }
+            | AttentionKind::Proposal { .. } => agent_panel::ThreadActivity::Blocked,
             AttentionKind::Failed { .. } => agent_panel::ThreadActivity::Done { interrupted: true },
             AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                 agent_panel::ThreadActivity::Done { interrupted: false }

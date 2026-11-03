@@ -5,6 +5,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-11-03
+
+This release makes it clear which threads still need you when several agents run side by side. A thread that finished while you were away now stays marked until you see it, the same counts appear in Editor and Fleet, and notifications clear themselves once you view the thread.
+
+### Added
+
+- **Know what still needs you: threads now have four clear states: waiting for you, unread, working, and read. Tabs and thread rows show them with a tinted surface, a colored line, and motion, so you no longer have to remember dot shapes. A thread that finishes while you are not looking stays unread, even when it is the open tab of a background project, and it stays unread after a restart.
+- **Counts that work in Editor and Fleet**: a red badge counts threads waiting for you on the rail and in the status bar. A white dot means something is unread. ⌘⇧U or a click on the status bar goes to the next thread to check.
+
+### Changed
+
+- **Threads list**: the list now shows only threads, with a colored frame around each workspace and a "To check" filter. The file tree under it and the legend are gone. The rail icon is now an inbox.
+- **Status bar**: the rotating thread name is replaced by a fixed summary.
+- **Notifications clear themselves**: viewing a thread marks its notifications as read and removes them from the system notification center where the OS allows it. The bell shows a dot instead of a count.
+
+### 日本語
+
+複数のエージェントを並走させている時に、どのスレッドが自分を待っているかを分かるようにしました。離れている間に終わったスレッドは見るまで印が残り、Editor と Fleet で同じ件数を出し、通知はスレッドを見ると自動で消えます。
+
+#### 追加
+
+- **自分を待っているものが分かるように**: スレッドの状態を、あなた待ち、未確認、生成中、確認済みの 4 つに揃えました。タブと行の面、線、動きで見せるので、ドットの形を覚える必要はありません。見ていない間に終わったスレッドは、裏のプロジェクトで開いたままのタブでも未確認になり、再起動しても残ります。
+- **Editor でも Fleet でも同じ件数**: レールと下部バーの赤い丸であなた待ちを数え、白い点で未確認を知らせます。⌘⇧U か下部バーを押すと、次の確認待ちへ移動します。
+
+#### 変更
+
+- **スレッド一覧**: スレッドだけを出すようにしました。ワークスペースごとに色の枠で囲み、「確認待ち」で絞り込めます。下にあったファイルツリーと凡例はなくしました。レールのアイコンは受信箱になりました。
+- **下部バー**: スレッド名の入れ替え表示をやめ、固定の集計にしました。
+- **通知は見たら消える**: スレッドを見ると通知が既読になり、OS が許せば通知センターからも取り下げます。ベルは件数ではなく点で知らせます。
+
 ## [0.1.34] - 2026-11-02
 
 This release fixes Codex threads that failed when necoder updated the Codex adapter, and adds ⌘T for a new thread in the Agent tab. It is delivered through auto-update.

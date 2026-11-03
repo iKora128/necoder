@@ -351,8 +351,7 @@ impl Workspace {
     /// **モード切替**（titlebar 左・プロジェクトピルの右隣・FLEET-V2 §3.0）。
     /// 「今どちらの面にいるか」は「どのプロジェクトか」の隣にあるべき情報なので、右上の
     /// 設定っぽいトグルをやめてここに `Editor | Fleet` のセグメントで置く。
-    /// Fleet 側には**要対応の件数バッジ**（0 なら出さない）を載せ、Editor で作業中でも
-    /// 裁くべきものが目に入るようにする。
+    /// 確認待ちの件数はモードに関わらずレールと statusbar に出す（UI-SPEC §8）。
     /// titlebar のモード切替 `Editor | Fleet | Chat`。3 つは排他で、**押した面へ行く**
     /// （いま居る面を押しても何も起きない）。
     pub(crate) fn render_mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -360,7 +359,6 @@ impl Workspace {
         let accent = self.frame_accent();
         let chat = self.chat_mode();
         let fleet = self.chrome.fleet_mode && !chat;
-        let attention = self.attention_badge_count(cx);
         // セグメント 1 枚。選択側だけが accent（識別）・非選択は fg2（UI-SPEC §1.3: 色は識別のみ）。
         let segment = |id: &'static str, label: SharedString, active: bool| {
             div()
@@ -417,20 +415,6 @@ impl Workspace {
                     SharedString::from(i18n::t!("titlebar.fleet")),
                     fleet,
                 )
-                // 要対応バッジ: 件数 + err 色ボーダー。0 件では**出さない**（静かな時は静かに）。
-                .when(attention > 0, |element| {
-                    element.child(
-                        div()
-                            .flex_none()
-                            .px(px(4.))
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(theme.err)
-                            .text_size(px(9.5))
-                            .text_color(theme.err)
-                            .child(SharedString::from(format!("◐ {attention}"))),
-                    )
-                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
@@ -455,14 +439,7 @@ impl Workspace {
                     }),
                 ),
             )
-            .tooltip(Tooltip::text(
-                if attention > 0 {
-                    i18n::t!("titlebar.attention_tip", "n" => attention)
-                } else {
-                    i18n::t!("titlebar.mode_tip")
-                },
-                theme.clone(),
-            ))
+            .tooltip(Tooltip::text(i18n::t!("titlebar.mode_tip"), theme.clone()))
     }
 
     /// titlebar の beacon 列（アクティブプロジェクトのスレッド。実行中は色濃く・停止中は淡く）。
@@ -567,7 +544,10 @@ impl Workspace {
             .overflow_hidden()
             .text_size(px(12.))
             .child(inner)
-            .tooltip(Tooltip::text(i18n::t!("git.switcher_tip", "key" => keymap_core::keystroke_label("cmd-o")), theme.clone()))
+            .tooltip(Tooltip::text(
+                i18n::t!("git.switcher_tip", "key" => keymap_core::keystroke_label("cmd-o")),
+                theme.clone(),
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -2185,169 +2165,6 @@ impl Workspace {
             )
     }
 
-    /// フッター中央の**常設ロールアップ**（herdr の状態集約・#）。ウィンドウのレールに載る全プロジェクトの
-    /// スレッド状態を `RunningRegistry` から集計し「N 実行 · M 承認待ち · K 完了」を常時表示。最重要
-    /// （Blocked>Working>Done）の代表スレッドを状態ドット＋名前で出し、click で該当プロジェクト＋Agent へ。
-    /// ニュースティッカーではない（今どうなっているかの一覧性を優先）。0 件なら空スペーサー。
-    /// フッターのニュース欄に出す稼働シグナル（実行中/承認待ち/完了未確認）を全プロジェクトから集める。
-    /// 緊急度（Blocked>Working>Done）降順で安定ソート＝順送りの並びと先頭（初期代表）を決める。
-    /// render（表示）と回転ティッカー（自停止判定）の両方が使う。
-    fn activity_signals(
-        &self,
-        cx: &App,
-    ) -> Vec<(usize, SharedString, Hsla, agent_panel::ThreadActivity)> {
-        let registry = cx.try_global::<agent_panel::RunningRegistry>();
-        let mut signals: Vec<(usize, SharedString, Hsla, agent_panel::ThreadActivity)> = Vec::new();
-        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
-            if let Some(rows) = registry.and_then(|reg| reg.0.get(slot.worktree.root())) {
-                for (name, color, activity) in rows {
-                    if activity.is_signal() {
-                        signals.push((index, name.clone(), *color, *activity));
-                    }
-                }
-            }
-        }
-        signals.sort_by_key(|signal| std::cmp::Reverse(signal.3.urgency()));
-        signals
-    }
-
-    /// ニュース欄の順送りを回す（稼働シグナルが 2 件以上ある間だけ ~3.2 秒ごとに `rollup_index` を進める）。
-    /// 多重起動は `rollup_ticker` で防ぎ、2 件未満になったら次 tick で自停止する（idle 予算を守る＝
-    /// `fleet_clock` と同型）。トップの `render` から毎フレーム呼ばれるが、稼働中は即 return する。
-    pub(crate) fn ensure_rollup_ticker(&mut self, cx: &mut Context<Self>) {
-        if self.chrome.rollup_ticker || !self.window_active || self.activity_signals(cx).len() < 2 {
-            return;
-        }
-        self.chrome.rollup_ticker = true;
-        cx.spawn(async move |workspace, cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(3200))
-                .await;
-            let keep_running = workspace.update(cx, |workspace, cx| {
-                if workspace.window_active && workspace.activity_signals(cx).len() >= 2 {
-                    workspace.chrome.rollup_index = workspace.chrome.rollup_index.wrapping_add(1);
-                    cx.notify();
-                    true
-                } else {
-                    workspace.chrome.rollup_ticker = false;
-                    false
-                }
-            });
-            if !matches!(keep_running, Ok(true)) {
-                break;
-            }
-        })
-        .detach();
-    }
-
-    fn render_activity_rollup(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use agent_panel::ThreadActivity;
-        let theme = self.theme.clone();
-        let signals = self.activity_signals(cx);
-        let container = div()
-            .flex_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .h_full();
-        if signals.is_empty() {
-            return container.into_any_element(); // 空＝ただのスペーサー（従来と同じ）
-        }
-        // 右側の集計サマリ（従来どおり「N 実行 · M 承認待ち · K 完了」）。
-        let count = |want: ThreadActivity| {
-            signals
-                .iter()
-                .filter(|signal| std::mem::discriminant(&signal.3) == std::mem::discriminant(&want))
-                .count()
-        };
-        let blocked = count(ThreadActivity::Blocked);
-        let working = count(ThreadActivity::Working);
-        let done = count(ThreadActivity::Done { interrupted: false });
-        let mut segments: Vec<String> = Vec::new();
-        if blocked > 0 {
-            segments.push(i18n::t!("agent.rollup_blocked", "n" => blocked));
-        }
-        if working > 0 {
-            segments.push(i18n::t!("agent.rollup_working", "n" => working));
-        }
-        if done > 0 {
-            segments.push(i18n::t!("agent.rollup_done", "n" => done));
-        }
-        let summary = SharedString::from(segments.join("  ·  "));
-
-        // 順送りで今見せる 1 件（`rollup_index` を件数で mod。ティッカーが 3.2 秒ごとに進める）。
-        let total = signals.len();
-        let position = self.chrome.rollup_index % total;
-        let (index, name, color, activity) = signals[position].clone();
-        // 中身（●名前）は切替のたびに淡くフェードイン（id が rollup_index で変わる＝新アニメ）。
-        // 1回限りなので切替の 280ms 以外は再描画ゼロ（idle 予算を守る）。クリック判定は包まない
-        // 外側 div に持たせ、アニメは内容だけに掛ける（インタラクションを壊さない）。
-        let content = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(agent_panel::activity_dot(
-                "rollup-rep",
-                8.0,
-                color,
-                activity,
-            ))
-            .child(div().text_color(theme.fg1).child(name))
-            .with_animation(
-                ("rollup-fade", self.chrome.rollup_index),
-                Animation::new(std::time::Duration::from_millis(280)),
-                |element, delta| element.opacity(0.25 + 0.75 * delta),
-            );
-        let current = div()
-            .id("statusbar-activity-rollup")
-            .flex()
-            .items_center()
-            .px(px(8.))
-            .rounded(px(4.))
-            .cursor_pointer()
-            .hover(|style| style.bg(theme.bg2))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.switch_project(index, window, cx);
-                    this.chrome.show_right = true;
-                    this.agent_active = true;
-                    cx.notify();
-                }),
-            )
-            .child(content);
-
-        container
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(current)
-                    // 2 件以上なら位置ドット（●=今 / ·=他）で「順送り中・全部で N 件」を示す。
-                    .when(total >= 2, |element| {
-                        let mut dots = div().flex().items_center().gap(px(3.));
-                        for slot in 0..total {
-                            let on = slot == position;
-                            dots = dots.child(
-                                div()
-                                    .size(px(if on { 5. } else { 4. }))
-                                    .rounded_full()
-                                    .bg(if on { theme.fg1 } else { theme.fg2.alpha(0.4) }),
-                            );
-                        }
-                        element.child(dots)
-                    })
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(theme.fg2)
-                            .child(summary),
-                    ),
-            )
-            .into_any_element()
-    }
-
     pub(crate) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         // Peacock 相当: statusbar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。Chat は無彩色。
@@ -2803,7 +2620,7 @@ impl Workspace {
             })
             // 中央＝状態の常設ロールアップ（herdr 本来の形）。隠した時も左右を両端へ分ける空きは残す。
             .child(if show_activity {
-                self.render_activity_rollup(cx)
+                self.render_attention_summary(cx)
             } else {
                 div().flex_1().into_any_element()
             })

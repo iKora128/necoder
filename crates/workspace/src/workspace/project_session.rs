@@ -932,8 +932,6 @@ impl Workspace {
                     _ => GraphView::Hub,
                 },
                 fleet_clock: false,
-                rollup_index: 0,
-                rollup_ticker: false,
                 show_settings: std::env::var_os("NECODER_SETTINGS").is_some()
                     || (!settings::get(cx).onboarded
                         && !(cfg!(debug_assertions)
@@ -961,6 +959,7 @@ impl Workspace {
                 rail_focus: cx.focus_handle(),
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: true,
+                herd_to_check: false,
                 task_renaming: None,
                 terminal_renaming: None,
                 floating_terminal: None,
