@@ -4102,6 +4102,11 @@ PYEOF"#;
         self.mark_thread_viewed(index, cx);
     }
 
+    /// 表示するスレッドを替える。`focus_thread` と違って「見た」にしない（素通りで未確認を消さない）。
+    pub fn select_thread(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.switch_thread(index, cx);
+    }
+
     /// スレッドの transcript 末尾 `max` 件を (bullet, text) で返す（編隊グリッドの Agent セル・M14 #3）。
     /// bullet = ⏺ ステップ/本文 / ✳ 思考 / ▸ ユーザー / ⟲ checkpoint。空スレッドは空 Vec。
     pub fn transcript_lines(

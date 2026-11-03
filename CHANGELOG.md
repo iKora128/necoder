@@ -16,7 +16,7 @@ This release makes it clear which threads still need you when several agents run
 
 ### Changed
 
-- **Threads list**: the list now shows only threads, with a colored frame around each workspace and a "To check" filter. The file tree under it and the legend are gone. The rail icon is now an inbox.
+- **Threads list**: the list now shows only threads, with a colored frame around each workspace and a "To check" filter. The file tree under it and the legend are gone. The rail icon is now an inbox. After clicking a row, ↑ and ↓ switch threads across workspaces, Return moves to the message box, and Esc goes back to your work.
 - **Status bar**: the rotating thread name is replaced by a fixed summary.
 - **Notifications clear themselves**: viewing a thread marks its notifications as read and removes them from the system notification center where the OS allows it. The bell shows a dot instead of a count.
 
@@ -31,7 +31,7 @@ This release makes it clear which threads still need you when several agents run
 
 #### 変更
 
-- **スレッド一覧**: スレッドだけを出すようにしました。ワークスペースごとに色の枠で囲み、「確認待ち」で絞り込めます。下にあったファイルツリーと凡例はなくしました。レールのアイコンは受信箱になりました。
+- **スレッド一覧**: スレッドだけを出すようにしました。ワークスペースごとに色の枠で囲み、「確認待ち」で絞り込めます。下にあったファイルツリーと凡例はなくしました。レールのアイコンは受信箱になりました。行を押した後は ↑↓ でワークスペースをまたいでスレッドを切り替えられ、⏎ で入力欄へ、Esc で作業面へ戻ります。
 - **下部バー**: スレッド名の入れ替え表示をやめ、固定の集計にしました。
 - **通知は見たら消える**: スレッドを見ると通知が既読になり、OS が許せば通知センターからも取り下げます。ベルは件数ではなく点で知らせます。
 

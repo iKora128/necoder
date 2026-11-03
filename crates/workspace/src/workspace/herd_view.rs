@@ -85,8 +85,13 @@ impl Workspace {
     /// スレッド一覧本体（UI-SPEC §8「確認待ち」）。全ワークスペースのスレッドを、プロジェクト色の
     /// 枠で分けて出す。並びはレールの順で固定する（確認待ちで箱を動かさない）。Chat は確認待ちが
     /// ある時だけ末尾に灰色の枠で出す。スレッドだけを出す（ファイルはエクスプローラで見る）。
-    pub(crate) fn render_herd_sidebar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_herd_sidebar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = self.theme.clone();
+        let keys_here = self.chrome.threads_focus.is_focused(window);
         let to_check_only = self.chrome.herd_to_check;
         let totals = self.attention_totals(cx);
 
@@ -145,6 +150,7 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.chrome.herd_scroll)
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -193,6 +199,7 @@ impl Workspace {
                         *thread_index,
                         status,
                         seq,
+                        keys_here,
                         cx,
                     ));
                     seq += 1;
@@ -281,6 +288,9 @@ impl Workspace {
             );
 
         div()
+            .id("herd-sidebar")
+            .track_focus(&self.chrome.threads_focus)
+            .on_key_down(cx.listener(Self::on_threads_key_down))
             .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
@@ -469,6 +479,100 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// ↑↓ で巡る行（一覧に見えている順）。Chat の行は押すと Chat モードへ移って一覧が消えるので含めない。
+    fn herd_keyboard_rows(&self, cx: &App) -> Vec<(usize, Entity<AgentPanel>, usize)> {
+        let mut rows = Vec::new();
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
+            let Some(session) = self.project_sessions.sessions.get(index) else {
+                continue;
+            };
+            if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Archived {
+                continue;
+            }
+            for (panel, thread, status) in session.agent_statuses(cx) {
+                if !self.chrome.herd_to_check || agent_panel::wants_attention(status.activity) {
+                    rows.push((index, panel, thread));
+                }
+            }
+        }
+        rows
+    }
+
+    /// スレッド一覧にフォーカスがある間のキー。↑↓ でスレッドを切り替え（ワークスペースをまたぐ）、
+    /// ⏎ でそのスレッドの入力欄へ、Escape で作業面へ戻る。素の矢印をここで受ける理由はレールと同じ
+    /// （keymap に足すとエディタのキャレットと衝突する・`on_rail_key_down`）。
+    pub(crate) fn on_threads_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return; // ⌃⌘↑↓ や ⌘{ ⌘} を横取りしない
+        }
+        match event.keystroke.key.as_str() {
+            "down" => self.move_herd_selection(1, window, cx),
+            "up" => self.move_herd_selection(-1, window, cx),
+            "enter" => {
+                let panel = self.agent_panel.clone();
+                panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+            }
+            "escape" => self.focus_session_surface(false, false, window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn move_herd_selection(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.herd_keyboard_rows(cx);
+        if rows.is_empty() {
+            return;
+        }
+        let current = rows.iter().position(|(index, panel, thread)| {
+            *index == self.project_sessions.active
+                && *panel == self.agent_panel
+                && panel.read(cx).active_thread() == *thread
+        });
+        let count = rows.len() as isize;
+        let next = match current {
+            Some(position) => (position as isize + step).rem_euclid(count),
+            None if step > 0 => 0,
+            None => count - 1,
+        } as usize;
+        let (index, panel, thread) = rows[next].clone();
+        self.project_sessions.sessions[index].agent_panel = panel.clone();
+        self.switch_project(index, window, cx);
+        // 通り過ぎただけでは未確認を消さない（留まったら消える・`focus_thread` は使わない）。
+        panel.update(cx, |panel, cx| panel.select_thread(thread, cx));
+        self.chrome.show_right = true;
+        self.agent_active = true;
+        self.reveal_current_herd_row(window, cx);
+    }
+
+    /// 選んだ行が見えていなければ、見えるだけ動かす。行の位置は次の描画で決まるので 2 フレーム待つ。
+    fn reveal_current_herd_row(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let scroll = self.chrome.herd_scroll.clone();
+        let row_bounds = self.chrome.herd_current_row_bounds.clone();
+        let view = cx.entity_id();
+        window.on_next_frame(move |window, _cx| {
+            window.on_next_frame(move |_window, cx| {
+                let viewport = scroll.bounds();
+                let row = row_bounds.get();
+                let mut offset = scroll.offset();
+                if row.top() < viewport.top() {
+                    offset.y += viewport.top() - row.top();
+                } else if row.bottom() > viewport.bottom() {
+                    offset.y -= row.bottom() - viewport.bottom();
+                } else {
+                    return;
+                }
+                scroll.set_offset(offset);
+                cx.notify(view);
+            });
+        });
+    }
+
     /// スレッド 1 行: 状態ドット + エージェント + 名前 + 時刻 · トークン / › 頼んだこと / digest。
     /// 確認済みは 2 段に畳む。状態の面・線・動きは `thread_state_layers`。
     fn render_herd_row(
@@ -478,9 +582,11 @@ impl Workspace {
         thread_index: usize,
         status: &agent_panel::AgentStatus,
         seq: usize,
+        keys_here: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = self.theme.clone();
+        let current_row_bounds = self.chrome.herd_current_row_bounds.clone();
         let color = status.color;
         let activity = status.activity;
         let attention = agent_panel::wants_attention(activity);
@@ -553,7 +659,17 @@ impl Workspace {
             .border_color(theme.border)
             .cursor_pointer()
             .hover(|style| style.bg(theme.bg2))
-            .when(is_current_row, |row| row.bg(theme.bg3))
+            // キーが一覧に来ている間は選択の面を 1 段上げる（↑↓ が効く合図）。
+            .when(is_current_row, |row| {
+                row.bg(if keys_here { theme.bg3 } else { theme.bg2 }).child(
+                    gpui::canvas(
+                        move |bounds, _window, _cx| current_row_bounds.set(bounds),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             .children(agent_panel::thread_state_layers(
                 format!("herd-state-{}", status.thread_id),
                 &theme,
@@ -713,6 +829,10 @@ impl Workspace {
                     this.project_sessions.sessions[project_index].agent_panel = focus_panel.clone();
                     // Fleet ならグリッドに出し、Editor ならそのプロジェクト + スレッドへ。
                     this.jump_to_thread(project_index, thread_index, window, cx);
+                    // 続けて ↑↓ で切り替えられるよう、キーは一覧に置く（⏎ で入力欄へ）。
+                    let threads = this.chrome.threads_focus.clone();
+                    window.focus(&threads, cx);
+                    this.release_native_key_focus(cx);
                 }),
             )
             .into_any_element()
@@ -728,4 +848,96 @@ struct HerdGroup {
     statuses: Vec<(Entity<AgentPanel>, usize, agent_panel::AgentStatus)>,
     is_integration: bool,
     counts: agent_panel::AttentionCounts,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(stroke: &str) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(stroke).expect("キーを解釈できる"),
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    /// 一覧で ↑↓ を押すと、ワークスペースをまたいでスレッドが切り替わり、キーは一覧に残る。
+    #[gpui::test]
+    fn arrow_keys_walk_threads_across_workspaces(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_herd_arrows_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let (project_a, project_b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&project_a).expect("作業フォルダを作れる");
+        std::fs::create_dir_all(&project_b).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"system_notifications":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project_a, project_b], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            for index in 0..2 {
+                let panel = workspace.project_sessions.sessions[index].agent_panel.clone();
+                panel.update(cx, |panel, cx| {
+                    panel.new_thread(cx);
+                    panel.new_thread(cx);
+                    panel.select_thread(0, cx);
+                });
+            }
+            workspace.chrome.show_herd = true;
+            let threads = workspace.chrome.threads_focus.clone();
+            window.focus(&threads, cx);
+
+            let position = |workspace: &Workspace, cx: &App| {
+                (
+                    workspace.project_sessions.active,
+                    workspace.agent_panel.read(cx).active_thread(),
+                )
+            };
+            let rows = workspace.herd_keyboard_rows(cx);
+            let (first_of_b, _, _) = rows[rows
+                .iter()
+                .position(|(index, _, _)| *index == 1)
+                .expect("2 つ目のワークスペースの行")]
+            .clone();
+            assert_eq!(first_of_b, 1);
+            let threads_in_a = rows.iter().filter(|(index, _, _)| *index == 0).count();
+
+            workspace.on_threads_key_down(&key("down"), window, cx);
+            assert_eq!(position(workspace, cx), (0, 1), "同じワークスペースの次のタブへ");
+            assert!(
+                workspace.chrome.threads_focus.is_focused(window),
+                "切り替えてもキーは一覧に残る"
+            );
+
+            for _ in 1..threads_in_a {
+                workspace.on_threads_key_down(&key("down"), window, cx);
+            }
+            assert_eq!(position(workspace, cx), (1, 0), "次のワークスペースへまたぐ");
+            assert!(workspace.chrome.threads_focus.is_focused(window));
+
+            workspace.on_threads_key_down(&key("up"), window, cx);
+            assert_eq!(position(workspace, cx), (0, threads_in_a - 1), "↑ で戻る");
+
+            // 修飾キー付きは横取りしない。
+            workspace.on_threads_key_down(&key("ctrl-cmd-down"), window, cx);
+            assert_eq!(position(workspace, cx), (0, threads_in_a - 1));
+
+            // ⏎ で入力欄へ移ると、以後の矢印は入力欄のもの。
+            workspace.on_threads_key_down(&key("enter"), window, cx);
+            assert!(!workspace.chrome.threads_focus.is_focused(window));
+            assert!(workspace.agent_panel.read(cx).contains_focus(window, cx));
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

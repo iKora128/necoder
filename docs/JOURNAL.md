@@ -4367,4 +4367,5 @@
 - 性能の差し戻し: 本人「nyaco で一度 GPU/CPU が爆発した。スレッド本体と分けないと問題になる」。`with_animation` は `window.current_view()` を notify するので、タブの明滅は AgentPanel（transcript を含む）と Workspace を、一覧の行は Workspace を毎秒約 10 回描き直していた（数える試験で 5 秒 49 回）。`with_max_fps` は回数を抑えるだけで再描画の範囲は変えない。別 Entity に分けても `mark_view_dirty` が祖先を dirty にする。明滅と流れる線を撤去し、面と線は静止にした。残る動きは完了の 1 回の光（15fps で 1.1 秒）と既存のスピナー
 - 残件: 既存の `working_spinner`（タブ・行・beacon）も同じ作りで親を毎秒約 10 回描き直し、窓が裏でも止まらない。生成中の間だけなので今回は変えていない
 - 計測の罠: 実窓の CPU は、窓が途中で前面でなくなると桁で変わる（`ps` の %CPU も平均がならされる）。再描画は試験で数えるのが確か
+- 追加（本人要望）: スレッド一覧の行を押した後は ↑↓ でスレッドを切り替える（ワークスペースをまたぐ・レールの `on_rail_key_down` と同じ作り・`threads_focus`）。⏎ で入力欄、Esc で作業面へ。通り過ぎただけでは未確認を消さないよう `select_thread` を分けた。タブ復元がキーの宛先を奪わないよう `restore_chrome_focus_after_tabs` に広げた
 - 次: 本人の実機で OS の通知の取り下げと完了の光を確認

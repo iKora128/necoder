@@ -957,6 +957,9 @@ impl Workspace {
                 should_move_window: false,
                 rail_drag: None,
                 rail_focus: cx.focus_handle(),
+                threads_focus: cx.focus_handle(),
+                herd_scroll: gpui::ScrollHandle::new(),
+                herd_current_row_bounds: Default::default(),
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: true,
                 herd_to_check: false,
@@ -1462,7 +1465,11 @@ impl Workspace {
         // タブ列ごと入れ替わる（レール/ブランチ切替）ので ⌘F バー・hover は畳む。
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
-        let rail_had_focus = self.chrome.rail_focus.is_focused(window);
+        // レールとスレッド一覧は、タブの復元でキーの宛先を奪われない。
+        let chrome_focus = [&self.chrome.rail_focus, &self.chrome.threads_focus]
+            .into_iter()
+            .find(|handle| handle.is_focused(window))
+            .cloned();
         // ピン留めは開き終えてから戻す（1 枚開くたびに `sync_active_slot` が slot を今のタブ列で
         // 書き直すので、先に控えておく）。
         let (files, active_file, pinned) = match self.active_slot() {
@@ -1512,7 +1519,7 @@ impl Workspace {
             self.select_tab(first_file + active_file, window, cx);
         }
         self.restore_tab_pins(&pinned);
-        self.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
+        self.restore_chrome_focus_after_tabs(chrome_focus, window, cx);
     }
 
     /// タブ復元（`open_slot_files`）は**キーの宛先を変えない**。
@@ -1522,16 +1529,15 @@ impl Workspace {
     /// 最中にこれが起きると、その瞬間からキーがレールへ来なくなる＝「連打していたら急に止まる」。
     /// 復元が走るのはその session の初回表示だけなので、**特定のプロジェクトを跨いだ時だけ止まる**
     /// という見え方になる（2026-09-19 本人報告）。宛先がレールだったなら復元後に戻す。
-    fn restore_rail_focus_after_tabs(
+    fn restore_chrome_focus_after_tabs(
         &mut self,
-        rail_had_focus: bool,
+        chrome_focus: Option<FocusHandle>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !rail_had_focus {
+        let Some(handle) = chrome_focus else {
             return;
-        }
-        let handle = self.chrome.rail_focus.clone();
+        };
         window.focus(&handle, cx);
         // GPUI のフォーカスだけでは足りない。復元したタブが HTML プレビューだと OS の
         // キーボードフォーカスが WKWebView にあり、素の ↑/↓ はページのスクロールに食われて
@@ -1596,7 +1602,10 @@ impl Workspace {
                 if !still_same {
                     return;
                 }
-                let rail_had_focus = workspace.chrome.rail_focus.is_focused(window);
+                let chrome_focus = [&workspace.chrome.rail_focus, &workspace.chrome.threads_focus]
+                    .into_iter()
+                    .find(|handle| handle.is_focused(window))
+                    .cloned();
                 let first_file = workspace.tabs.len();
                 for tab in loaded {
                     match tab {
@@ -1610,7 +1619,7 @@ impl Workspace {
                     workspace.select_tab(first_file + active_file, window, cx);
                 }
                 workspace.restore_tab_pins(&pinned);
-                workspace.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
+                workspace.restore_chrome_focus_after_tabs(chrome_focus, window, cx);
             });
         })
         .detach();

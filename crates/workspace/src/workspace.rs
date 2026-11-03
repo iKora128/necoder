@@ -1633,6 +1633,11 @@ struct ChromeState {
     /// Workspace コンテキストへ足すと Editor コンテキストより浅く負ける。**本物のフォーカスを
     /// レールへ渡してエディタを dispatch 経路から外す**のが唯一の筋（`on_rail_key_down`）。
     rail_focus: FocusHandle,
+    /// スレッド一覧のキーの宛先（↑↓ でスレッドを切り替える）。
+    threads_focus: FocusHandle,
+    herd_scroll: gpui::ScrollHandle,
+    /// 選んでいる行の位置（見えていなければスクロールする）。
+    herd_current_row_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
 }
 
 struct WorkspaceOverlays {
@@ -2703,7 +2708,9 @@ impl Render for Workspace {
             // statusbar やタブ列の空き地のような「押せるだけでフォーカスを取らない面」を押した後も
             // ↑/↓ がプロジェクトを動かし続けるのを防ぐ（フォーカスの迷子を作らない）。
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                if this.chrome.rail_focus.is_focused(window) {
+                if this.chrome.rail_focus.is_focused(window)
+                    || this.chrome.threads_focus.is_focused(window)
+                {
                     this.focus_session_surface(false, false, window, cx);
                     cx.notify(); // レールの面（bg2）を元に戻す
                 }
@@ -2757,7 +2764,7 @@ impl Render for Workspace {
                     .when(self.chrome.show_left, |element| {
                         // 左カラムは herd / Todo ボード / git パネル / エクスプローラを切替（排他）。
                         let column = if self.chrome.show_herd {
-                            self.render_herd_sidebar(cx)
+                            self.render_herd_sidebar(window, cx)
                         } else if self.todo_panel.read(cx).open {
                             self.render_todo_board(cx)
                         } else if self.git_panel_open(cx) {

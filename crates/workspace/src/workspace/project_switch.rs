@@ -378,6 +378,7 @@ impl Workspace {
             // レールにフォーカスがある間は着地先へ飛ばさない。飛ばすと 1 回目の ↑ でエディタへ抜け、
             // 2 回目の ↑ がキャレット移動になって連打できなくなる（2026-09-12）。
             || self.chrome.rail_focus.is_focused(window)
+            || self.chrome.threads_focus.is_focused(window)
             || self.focus_handle.is_focused(window)
     }
 
