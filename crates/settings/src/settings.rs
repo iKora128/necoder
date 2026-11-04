@@ -25,6 +25,7 @@ mod agent_launch;
 mod agent_setup;
 mod agents_page;
 mod connections;
+mod connectors_page;
 mod remote;
 mod theme_colors;
 
@@ -520,6 +521,18 @@ pub fn set_nested_user_value(
     })
 }
 
+/// コネクタの道具 1 つの権限を更新して**即適用 + 永続化**する（確認カードの「常に許可」）。
+pub fn set_connector_tool_level(
+    cx: &mut App,
+    key: &str,
+    tool: String,
+    level: settings_core::ConnectorToolLevel,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_connector_tools(path, key, &[tool], level)
+    })
+}
+
 /// `theme_overrides.<theme>.<key>` を更新して**即適用 + 永続化**する（`None` = その色をテーマのデフォルトへ戻す）。
 pub fn set_theme_override(
     cx: &mut App,
@@ -770,7 +783,7 @@ impl SettingsPage {
         match self {
             SettingsPage::Agents => "settings.agents_heading",
             SettingsPage::Connections => "settings.connections_heading",
-            SettingsPage::Mcp => "settings.mcp_heading",
+            SettingsPage::Mcp => "settings.connectors_heading",
             SettingsPage::Appearance => "settings.appearance_heading",
             SettingsPage::Remote => "settings.remote_heading",
             SettingsPage::Preferences => "settings.prefs_heading",
@@ -781,12 +794,11 @@ impl SettingsPage {
     /// 副題の無いページ（見出しと中身で分かる）は `None`。説明は 1 行まで（UI-SPEC §1.5）。
     fn sub_key(self) -> Option<&'static str> {
         match self {
+            // ページ名は「コネクタ」でも、「MCP」で探す人に見つかるようにする（検索にだけ使う）。
+            SettingsPage::Mcp => Some("settings.mcp_heading"),
             SettingsPage::Connections => Some("settings.connections_sub"),
             SettingsPage::Remote => Some("settings.remote_sub"),
-            SettingsPage::Agents
-            | SettingsPage::Mcp
-            | SettingsPage::Appearance
-            | SettingsPage::Preferences => None,
+            SettingsPage::Agents | SettingsPage::Appearance | SettingsPage::Preferences => None,
         }
     }
 
@@ -876,6 +888,8 @@ pub struct SettingsView {
     launch_editor: Option<agent_launch::LaunchEditor>,
     /// 「エージェントを追加」のダイアログ（H2・`add_agent`）。
     add_agent: Option<add_agent::AddAgentDialog>,
+    /// 「コネクタ」ページのサービス一覧と詳細（`connectors_page`）。
+    connectors: connectors_page::ConnectorsState,
     /// 接続を足す / 変えるダイアログ（issue #38 H3・`connections`）。
     connection_editor: Option<connections::ConnectionEditor>,
     /// 接続ごとのキーの有無（キーチェーンを中身を読まずに引いた結果）。描画でキーチェーンを引かない
@@ -1030,6 +1044,7 @@ impl SettingsView {
             accounts: Vec::new(),
             launch_editor: None,
             add_agent: None,
+            connectors: connectors_page::ConnectorsState::default(),
             connection_editor: None,
             connection_keys: std::collections::BTreeMap::new(),
             connection_keys_generation: 0,
@@ -2713,11 +2728,7 @@ impl SettingsView {
                 false,
                 cx,
             ))
-            .child(self.pref_row(
-                i18n::t!("settings.open_json"),
-                None,
-                open_json,
-            ))
+            .child(self.pref_row(i18n::t!("settings.open_json"), None, open_json))
     }
 
     /// 書体の 1 行（O27）: 副題に今の書体（空なら既定の言い方）、右に「選ぶ…」（shell のピッカー）と
@@ -3003,8 +3014,13 @@ impl SettingsView {
             let page = *page;
             let selected = !searching && self.page == page;
             // MCP だけは「有効/全体」を添える＝開かなくても状態が見える。
-            let badge = (page == SettingsPage::Mcp && !self.mcp_servers.is_empty())
-                .then(|| format!("{enabled}/{}", self.mcp_servers.len()));
+            let badge = (page == SettingsPage::Mcp)
+                .then(|| {
+                    let (connected, connectors_on) = self.connector_counts(&get(cx));
+                    let total = self.mcp_servers.len() + connected;
+                    (total > 0).then(|| format!("{}/{total}", enabled + connectors_on))
+                })
+                .flatten();
             column = column.child(
                 div()
                     .id(("settings-nav", index))
@@ -3121,10 +3137,7 @@ impl SettingsView {
                         .flex()
                         .flex_col()
                         .gap(px(10.))
-                        .child(self.section_heading(
-                            i18n::t!("settings.agents_heading"),
-                            None,
-                        ))
+                        .child(self.section_heading(i18n::t!("settings.agents_heading"), None))
                         // ホスト（このマシン / SSH 先）を切り替えて、その機械での状態を見る（#38 H2）。
                         .child(self.agent_host_row(cx))
                         .child(self.agents_list(settings, true, cx))
@@ -3246,7 +3259,10 @@ impl SettingsView {
             .count();
         // claude.ai アカウントのコネクタは necoder の一覧を通らずに Claude のスレッドへ入ってくる
         // （ここで選んだ物だけを渡す、の唯一の例外）。だからこのページの一番上で切れるようにする。
-        let connectors = get(cx).claude_ai_connectors;
+        let settings = get(cx).clone();
+        let connectors = settings.claude_ai_connectors;
+        let chat_connectors = settings.chat.connectors;
+        let connector_services = self.connectors_section(&settings, cx);
         let mut rows = div().flex().flex_col().gap(px(6.));
         let mut shown = 0usize;
         for (index, server) in self.mcp_servers.iter().enumerate() {
@@ -3297,19 +3313,50 @@ impl SettingsView {
             .flex_col()
             .gap(px(6.))
             .child(self.section_heading(
-                i18n::t!("settings.mcp_heading"),
-                None,
+                i18n::t!("settings.connectors_heading"),
+                Some(i18n::t!("settings.connectors_sub")),
             ))
             // claude.ai のコネクタは**サーバの一覧ではない**（necoder の設定を通らずに入ってくる物を
             // 切る口）ので、下の件数・絞り込み・一覧の外に置く。
+            .child(
+                self.pref_row_with_keywords(
+                    &["chat.connectors", "gmail"],
+                    i18n::t!("settings.connectors_chat"),
+                    Some(i18n::t!("settings.connectors_chat_sub")),
+                    self.switch(("chat-connectors", 0), chat_connectors)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _window, cx| {
+                                let result = set_nested_user_value(
+                                    cx,
+                                    "chat",
+                                    "connectors",
+                                    serde_json::Value::Bool(!chat_connectors),
+                                );
+                                view.report_save(result, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                ),
+            )
             .child(self.toggle_row(
                 "claude_ai_connectors",
                 0,
-                i18n::t!("settings.mcp_claude_connectors"),
-                Some(i18n::t!("settings.mcp_claude_connectors_sub")),
+                i18n::t!("settings.connectors_editor"),
+                Some(i18n::t!("settings.connectors_editor_sub")),
                 connectors,
                 cx,
             ))
+            .child(connector_services)
+            .child(
+                div()
+                    .mt(px(6.))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(i18n::t!("settings.mcp_heading"))),
+            )
             // 件数と絞り込みは 1 件でもある時だけ（空の画面に操作子を並べても読ませるだけ）。
             .when(total > 0, |element| {
                 element.child(self.mcp_filter_bar(total, enabled_count, cx))
@@ -4253,6 +4300,10 @@ impl Render for SettingsView {
         if self.availability_pending {
             self.probe_availability(cx);
         }
+        // 「コネクタ」を初めて見た瞬間に 1 回だけ確かめる（設定を開くたびに claude を起こさない）。
+        if self.page == SettingsPage::Mcp {
+            self.ensure_connectors(cx);
+        }
         #[cfg(feature = "remote-preview")]
         if self.remote_preview_only {
             return div()
@@ -4320,6 +4371,7 @@ impl Render for SettingsView {
             )
             .children(self.render_launch_editor(cx))
             .children(self.render_add_agent(&settings, cx))
+            .children(self.render_connector_detail(&settings, cx))
             .children(self.render_connection_editor(cx))
     }
 }
@@ -4693,11 +4745,9 @@ mod tests {
             // 使わないにすると選べる一覧から消える（id で覚える）。
             view.toggle_agent_enabled("dsh", cx);
             assert!(get(cx).enabled_agents.is_empty());
-            assert!(
-                !selectable_agent_labels(cx)
-                    .iter()
-                    .any(|label| label.as_ref() == "DeepSeek Harness")
-            );
+            assert!(!selectable_agent_labels(cx)
+                .iter()
+                .any(|label| label.as_ref() == "DeepSeek Harness"));
             view.toggle_agent_enabled("dsh", cx);
             // 使うに戻すとログインの確かめ（実の CLI）を予約する。テストでは起こさない。
             view.availability_pending = false;

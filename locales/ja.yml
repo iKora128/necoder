@@ -393,8 +393,11 @@ attention:
   next_tip: 次の確認待ちへ
 herd:
   title: スレッド
-  filter_all: すべて
+  filter_all: "すべて %{n}"
   filter_to_check: "確認待ち %{n}"
+  group_total: "全 %{n}"
+  waiting_tip: "あなた待ち %{n}"
+  unread_tip: "未確認 %{n}"
   none_to_check: 確認するものはありません
   empty: スレッドはまだありません
   mute: このエージェントをミュート（トースト/完了音を止める）
@@ -763,8 +766,43 @@ settings:
   chat_idle_stop_sub: 指定した時間使わなければ停止します。0 = 自動停止しない
   chat_instructions: すべてのチャットへの指示
   chat_instructions_none: 未設定。settings.json の chat.instructions で編集できます
-  mcp_claude_connectors: claude.ai のコネクタを Claude のスレッドへ読み込む
-  mcp_claude_connectors_sub: Figma や Google Calendar など、アカウントに接続したサービスを利用します。オフにすると初回応答が速くなります。Chat モードには適用されません
+  connectors_heading: コネクタ
+  connectors_sub: AI に持たせるサービスと道具を、ここにまとめます。変更は新しいスレッドから適用されます。
+  connectors_chat: Chat でコネクタを使う
+  connectors_chat_sub: Gmail などのサービスと、有効にした MCP サーバを Chat の会話から使えます
+  connectors_editor: エディタのスレッドでコネクタを使う
+  connectors_editor_sub: オフにすると初回応答が速くなります
+  connectors_services: サービス
+  connectors_checking: 確かめています…
+  connectors_recheck: 確かめ直す
+  connectors_failed: コネクタを確かめられませんでした。Claude Code を入れてログインしているか確認してください。
+  connectors_empty: 接続済みのコネクタはありません。claude.ai で追加できます。
+  connectors_connected: "Claude で接続 · 道具 %{count}"
+  connectors_needs_login: ログインが必要です
+  connectors_pending: 接続しています…
+  connectors_unavailable: 接続できませんでした
+  connectors_login: claude.ai で接続
+  connectors_manage: claude.ai で管理
+  connectors_detail_sub: "%{host} · 道具 %{count}"
+  connectors_available_ai: 使える AI
+  connectors_codex_tools: "Codex で接続 · 道具 %{count}"
+  connectors_codex_manage: "ChatGPT で管理"
+  connectors_codex_connected: "ChatGPT アカウントに接続済み"
+  connectors_claude_connected: Claude アカウントで接続済み
+  connectors_permissions: 道具の権限
+  connectors_permissions_sub: Chat と Claude のスレッドに効きます
+  connectors_access_read: 読み取り
+  connectors_access_read_sub: 検索・読む・一覧
+  connectors_access_write: 作成と変更
+  connectors_access_write_sub: 作る・書き換える・整理する
+  connectors_access_delete: 削除
+  connectors_access_delete_sub: 消す・取り消しにくい変更
+  connectors_access_send: 外部への送信
+  connectors_access_send_sub: 相手に届く操作（メールの送信・返信・転送など）
+  connectors_level_allow: 常に許可
+  connectors_level_ask: 確認
+  connectors_level_block: ブロック
+  connectors_note: 既定はすべて「確認」です。確認カードの「常に許可」を押すと、ここの設定が変わります。
   title: 設定
   agents_heading: AI エージェント
   agents_sub: "使える AI と、準備すると使える AI が分かれて並びます。準備はボタンを順に押すだけです。"
@@ -1936,6 +1974,8 @@ chat:
   preview: プレビュー
   preview_tip: プレビュー表示で開く
   allow_in_this_chat: このチャットでは以後許可
+  connector_always_allow: 常に許可
+  denied_connector: "%{tool} はブロックされています。設定の「コネクタ」で変えられます"
   denied_write: "渡されていない場所への書き込みを拒否しました: %{path}"
   denied_execute: コマンドの実行を拒否しました（Chat はシェルを使いません）
   err_folder: "チャットのフォルダを用意できません: %{message}"

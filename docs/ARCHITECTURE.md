@@ -465,6 +465,7 @@ project 層から**外してから**重ねる（`SettingsStore::load`。外し�
 | `terminal_shell` / `terminal_shell_args` | 端末を開くたびに任意のコマンド |
 | `captain_agent` | 自分から起きて 1 ターン走る Captain の任命（人の明示操作に限る） |
 | `claude_ai_connectors` | claude.ai のコネクタ（メール・カレンダー等）をセッションへ持ち込む |
+| `chat.connectors` / `connectors` | Chat でコネクタを使うか（既定 off）/ サービスごとの ON / OFF と道具の権限。リポジトリの設定からは読まない（`USER_ONLY_KEYS`）。正は `CHAT.md` §5・§7 |
 | `chat` | 全チャットのシステムプロンプトへの追記と置き場（プロジェクトに紐づかない） |
 
 読むのは見た目と、人が押すまで何も起きない物（`quick_commands` は押すと端末で走るが、押すまで何も起きず中身は
@@ -609,3 +610,5 @@ workspace/view -> project model -> Host trait <- LocalHost / RemoteHost
 - local implementation を先に `Host` へ移し、既存機能の回帰 test 後に SSH implementation を挿す。
 - security/performance/reliability の受入条件は
   [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) を正とする。
+
+Chat の Codex セッションは `chat_core::preset::codex_session_preset` で構成する。`CODEX_CONFIG` に指示・ツール制限・アプリ権限・MCP をまとめ、ACP の mcpServers で OFF 指定が上書きされることを避ける。AI と権限の記憶は `chat.agent` / `chat.permission_modes`。詳細と未検証事項は `CHAT.md` 末尾。

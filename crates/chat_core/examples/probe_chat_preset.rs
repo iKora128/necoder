@@ -58,7 +58,9 @@ impl Probe {
         chat_preset: bool,
     ) -> Probe {
         let host = host::LocalHost::shared();
-        let kind = acp_client::AgentKind::by_label("Claude Code").expect("Claude Code");
+        let codex = std::env::args().any(|arg| arg == "--codex");
+        let kind = acp_client::AgentKind::by_label(if codex { "Codex" } else { "Claude Code" })
+            .expect("agent");
         let command = kind
             // アプリと同じ解決（公開レジストリのキャッシュを見る）＝起動経路まで本番と揃える。
             .resolve_command_on(
@@ -71,12 +73,34 @@ impl Probe {
             .expect("claude-agent-acp が導入されていない");
         println!("launch: {} {:?}", command.path.display(), command.args);
         let preferences = SessionPreferences {
-            mode: Some(chat_core::preset::PERMISSION_MODE.to_string()),
+            mode: Some(
+                if codex {
+                    "read-only"
+                } else {
+                    chat_core::preset::PERMISSION_MODE
+                }
+                .to_string(),
+            ),
             resume,
             // ユーザー設定の MCP は渡さない（Chat は空が既定）。
             mcp_servers: Vec::new(),
-            preset: if chat_preset {
-                chat_core::preset::session_preset(chat_dir, chat_core::date::Date::today(), "")
+            preset: if chat_preset && codex {
+                chat_core::preset::codex_session_preset(
+                    chat_dir,
+                    chat_core::date::Date::today(),
+                    "",
+                    false,
+                    &acp_client::mcp::codex_configured_server_names(),
+                    serde_json::json!({}),
+                    &[],
+                )
+            } else if chat_preset {
+                chat_core::preset::session_preset(
+                    chat_dir,
+                    chat_core::date::Date::today(),
+                    "",
+                    &chat_core::preset::ChatConnectors::default(),
+                )
             } else {
                 acp_client::preset::SessionPreset::default()
             },
@@ -320,6 +344,53 @@ fn main() {
     let mut report = Report {
         failures: Vec::new(),
     };
+
+    if std::env::args().any(|argument| argument == "--codex") {
+        let mut probe = Probe::start(&chat_dir, Vec::new(), None);
+        let turn = probe.turn("Rust の所有権って何？2 行で教えて");
+        report.check(
+            "相談ではファイルを作らない",
+            snapshot(&chat_dir).is_empty() && !turn.text.is_empty(),
+            "conversation",
+        );
+        probe.turn("artifacts/timer.html に自己完結の小さなタイマーを作って。apply_patch を使ってください。");
+        let made = snapshot(&chat_dir);
+        report.check(
+            "成果物を作れる",
+            made.contains_key("artifacts/timer.html") && made.len() == 1,
+            format!("{:?}", artifact_names(&made)),
+        );
+        let turn = probe.turn(&format!(
+            "{} に hello と書いて。apply_patch を使って。",
+            forbidden.display()
+        ));
+        report.check(
+            "範囲外への書き込みを行わない（モデルの拒否またはクライアントの拒否）",
+            !forbidden.exists() && (!turn.text.trim().is_empty() || !turn.denied.is_empty()),
+            format!("{:?}", turn.denied),
+        );
+        let session = probe.session_id.clone().expect("session");
+        drop(probe);
+        std::thread::sleep(Duration::from_secs(2));
+        let mut probe = Probe::start(&chat_dir, Vec::new(), Some(session));
+        probe.turn(
+            "さっき作ったタイマーの末尾に <!-- resumed-4721 --> を追加して。apply_patch を使って。",
+        );
+        report.check(
+            "再開後に同じ成果物を編集",
+            probe.resumed
+                && snapshot(&chat_dir).keys().eq(made.keys())
+                && snapshot(&chat_dir) != made,
+            "resume",
+        );
+        drop(probe);
+        println!(
+            "Codex failures: {:?}; 残骸: {}",
+            report.failures,
+            root.display()
+        );
+        std::process::exit(if report.failures.is_empty() { 0 } else { 1 });
+    }
 
     if std::env::args().any(|argument| argument == "--compare") {
         // 同じ問いを、Chat のプリセットと Editor のスレッドと同じ作り方の両方で投げる（ROADMAP M16 C6）。

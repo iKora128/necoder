@@ -41,7 +41,12 @@ libc.workspace = true
 # 画像タブ（ImageView）の寸法読み（ヘッダのみ・フルデコードしない）
 image.workspace = true
 
+[features]
+# 通知音を鳴らさない（necoder の screenshot feature と試験から）。
+silent = ["agent_panel/silent"]
+
 [dev-dependencies]
+agent_panel = { workspace = true, features = ["silent"] }
 gpui = { workspace = true, features = ["test-support"] }
 terminal_view = { workspace = true, features = ["test-support"] }
 

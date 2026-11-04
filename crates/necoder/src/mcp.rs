@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 enum Profile {
     Full,
     Captain,
+    /// Chat の Codex 用。読み取りだけ（書き込みは ACP の apply_patch）。
+    ChatRead,
 }
 
 impl Profile {
@@ -26,6 +28,7 @@ impl Profile {
         match self {
             Profile::Full => !workspace::CAPTAIN_ONLY_MCP_TOOLS.contains(&tool),
             Profile::Captain => workspace::CAPTAIN_MCP_TOOLS.contains(&tool),
+            Profile::ChatRead => matches!(tool, "read_file" | "list_files" | "search"),
         }
     }
 
@@ -34,6 +37,7 @@ impl Profile {
         match self {
             Profile::Full => format!("この道具は Captain の席だけで使える: {tool}"),
             Profile::Captain => format!("この道具は Captain の席では使えない: {tool}"),
+            Profile::ChatRead => format!("この道具は Chat の読み取りサーバでは使えない: {tool}"),
         }
     }
 }
@@ -44,7 +48,9 @@ pub fn run() -> bool {
     if args.first().map(String::as_str) != Some("mcp") {
         return false;
     }
-    let profile = if args.iter().any(|arg| arg == "--captain") {
+    let profile = if args.iter().any(|arg| arg == "--chat-read") {
+        Profile::ChatRead
+    } else if args.iter().any(|arg| arg == "--captain") {
         Profile::Captain
     } else {
         Profile::Full
@@ -912,5 +918,20 @@ mod tests {
         let message = refused["result"]["content"][0]["text"].as_str().unwrap();
         assert!(message.contains("done_when"), "{message}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod chat_read_tests {
+    use super::*;
+    #[test]
+    fn chat_read_cannot_call_write_or_fleet_tools_even_by_name() {
+        let tools = tool_schemas_for(Profile::ChatRead);
+        let names: Vec<_> = tools.as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["list_files", "read_file", "search"]);
+        for name in ["write_file", "fleet_create_task", "git_status"] {
+            let response = handle(&json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":name,"arguments":{}}}), Path::new("/"), Profile::ChatRead).unwrap();
+            assert_eq!(response["result"]["isError"], true);
+        }
     }
 }

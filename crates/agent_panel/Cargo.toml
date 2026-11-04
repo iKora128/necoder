@@ -38,3 +38,8 @@ base64.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 # Esc の配送（既定 keymap の Editor 文脈 → 親のパネル）を実際のキー配送で検証するため。
 keymap_core.workspace = true
+
+[features]
+# 通知音を鳴らさない（試験と offscreen 撮影用）。workspace / necoder の dev-dependencies と
+# necoder の screenshot feature からだけ有効にする。出荷の `cargo build -p necoder` には入らない。
+silent = []

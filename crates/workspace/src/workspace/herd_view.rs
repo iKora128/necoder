@@ -119,8 +119,11 @@ impl Workspace {
                     .clone()
                     .or_else(|| slot.worktree_branch.clone())
                     .map(SharedString::from),
+                total_threads: statuses.len(),
                 statuses,
                 counts: self.slot_attention(index, cx),
+                first_row: 0,
+                collapsed: false,
             });
         }
         if let Some(panel) = self.chat_panel() {
@@ -140,74 +143,71 @@ impl Workspace {
                     is_integration: false,
                     branch: None,
                     counts: panel.read(cx).attention_counts(),
+                    total_threads: statuses.len(),
                     statuses,
+                    first_row: 0,
+                    collapsed: false,
                 });
             }
         }
 
-        let mut list = div()
-            .id("herd-list")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.chrome.herd_scroll)
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .px(px(8.))
-            .pt(px(2.))
-            .pb(px(10.));
-        let mut seq = 0usize;
+        let total_threads: usize = groups.iter().map(|group| group.total_threads).sum();
+        // 絞り込みで残る行だけにする。行の番号（要素の id）は出す順の通し番号。
+        groups.retain_mut(|group| {
+            if to_check_only {
+                group
+                    .statuses
+                    .retain(|(_, _, status)| agent_panel::wants_attention(status.activity));
+            }
+            !group.statuses.is_empty()
+        });
         let mut shown = 0usize;
-        for (group_index, group) in groups.iter().enumerate() {
-            let rows: Vec<_> = group
-                .statuses
-                .iter()
-                .filter(|(_, _, status)| {
-                    !to_check_only || agent_panel::wants_attention(status.activity)
-                })
-                .collect();
-            if rows.is_empty() {
-                continue;
-            }
-            let is_current =
-                !self.chat_mode() && group.project_index == Some(self.project_sessions.active);
-            let mut frame = div()
-                .id(("herd-group-frame", group_index))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .rounded(px(8.))
-                .overflow_hidden()
-                .bg(theme.bg1)
-                // 枠 = ワークスペースの境界。今いる枠だけ濃くする（窓縁の枠と同じ色で結ばれる）。
-                .map(|frame| {
-                    if is_current {
-                        frame.border(px(1.5)).border_color(group.color)
-                    } else {
-                        frame.border_1().border_color(group.color.alpha(0.45))
-                    }
-                })
-                .child(self.render_herd_group_head(group, group_index, is_current, cx));
-            let collapsed =
+        for group in &mut groups {
+            group.first_row = shown;
+            group.collapsed =
                 self.chrome.fleet_mode && !self.chrome.herd_solo_expanded && group.is_integration;
-            if !collapsed {
-                for (panel, thread_index, status) in rows {
-                    frame = frame.child(self.render_herd_row(
-                        group.project_index,
-                        panel,
-                        *thread_index,
-                        status,
-                        seq,
-                        keys_here,
-                        cx,
-                    ));
-                    seq += 1;
-                    shown += 1;
-                }
+            if !group.collapsed {
+                shown += group.statuses.len();
             }
-            list = list.child(frame);
         }
+        let shapes: Vec<HerdGroupShape> = groups
+            .iter()
+            .map(|group| HerdGroupShape::of(group, self.herd_group_is_current(group)))
+            .collect();
+        sync_herd_list(
+            &self.chrome.herd_list,
+            &mut self.chrome.herd_list_shape.borrow_mut(),
+            shapes,
+        );
+        let groups = std::rc::Rc::new(groups);
+        let group_count = groups.len();
+        // 枠ごとに描く list。画面外の枠は組み立てもレイアウトもしない（スクロールのたびに全行を計算
+        // するとカクつく）。Auto は要素の高さを親の flex に任せ、幅の分からない 1 回目の計測を省く。
+        let list = gpui::list(
+            self.chrome.herd_list.clone(),
+            cx.processor(move |this: &mut Self, group_index: usize, _window, cx| {
+                let Some(group) = groups.get(group_index) else {
+                    return div().into_any_element();
+                };
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .px(px(8.))
+                    .when(group_index == 0, |item| item.pt(px(2.)))
+                    .pb(px(if group_index + 1 == group_count {
+                        10.
+                    } else {
+                        8.
+                    }))
+                    .child(this.render_herd_group(group, group_index, keys_here, cx))
+                    .into_any_element()
+            }),
+        )
+        .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+        .flex_1()
+        .min_h_0()
+        .w_full();
 
         let body = if shown == 0 {
             div()
@@ -261,7 +261,7 @@ impl Workspace {
             .child(
                 chip(
                     "herd-filter-all",
-                    i18n::t!("herd.filter_all"),
+                    i18n::t!("herd.filter_all", "n" => total_threads),
                     !to_check_only,
                 )
                 .on_mouse_down(
@@ -304,6 +304,54 @@ impl Workspace {
             .child(body)
             .child(self.left_dock_resize_handle(cx))
             .into_any_element()
+    }
+
+    /// 今いるワークスペースの枠か（枠の線を濃くする）。
+    fn herd_group_is_current(&self, group: &HerdGroup) -> bool {
+        !self.chat_mode() && group.project_index == Some(self.project_sessions.active)
+    }
+
+    /// 枠 1 つ: 見出し + スレッドの行。枠 = ワークスペースの境界。
+    fn render_herd_group(
+        &self,
+        group: &HerdGroup,
+        group_index: usize,
+        keys_here: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let is_current = self.herd_group_is_current(group);
+        let mut frame = div()
+            .id(("herd-group-frame", group_index))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .rounded(px(8.))
+            .overflow_hidden()
+            .bg(theme.bg1)
+            // 今いる枠だけ濃くする（窓縁の枠と同じ色で結ばれる）。
+            .map(|frame| {
+                if is_current {
+                    frame.border(px(1.5)).border_color(group.color)
+                } else {
+                    frame.border_1().border_color(group.color.alpha(0.45))
+                }
+            })
+            .child(self.render_herd_group_head(group, group_index, is_current, cx));
+        if !group.collapsed {
+            for (row, (panel, thread_index, status)) in group.statuses.iter().enumerate() {
+                frame = frame.child(self.render_herd_row(
+                    group.project_index,
+                    panel,
+                    *thread_index,
+                    status,
+                    group.first_row + row,
+                    keys_here,
+                    cx,
+                ));
+            }
+        }
+        frame.into_any_element()
     }
 
     /// 枠の見出し: 名前 + ⎇ ブランチ + 赤い丸（あなた待ち）+ グレーの丸（未確認）。
@@ -404,11 +452,23 @@ impl Workspace {
                     }),
             )
             .when(group.counts.waiting > 0, |element| {
-                element.child(self.attention_badge(group.counts.waiting))
+                element.child(
+                    self.attention_badge(group.counts.waiting)
+                        .id(("herd-waiting", group_index))
+                        .tooltip(Tooltip::text(
+                            i18n::t!("herd.waiting_tip", "n" => group.counts.waiting),
+                            theme.clone(),
+                        )),
+                )
             })
             .when(group.counts.unread > 0, |element| {
                 element.child(
                     div()
+                        .id(("herd-unread", group_index))
+                        .tooltip(Tooltip::text(
+                            i18n::t!("herd.unread_tip", "n" => group.counts.unread),
+                            theme.clone(),
+                        ))
                         .flex_none()
                         .flex()
                         .items_center()
@@ -422,6 +482,21 @@ impl Workspace {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.fg1)
                         .child(SharedString::from(group.counts.unread.to_string())),
+                )
+            })
+            // 枠の総数。Chat の枠は確認待ちしか並ばないので出さない。
+            .when(project_index.is_some(), |element| {
+                element.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!(
+                            "herd.group_total",
+                            "n" => group.total_threads
+                        ))),
                 )
             })
             // worktree を削除 🗑（ホバーで出現）。押すと「失うものを数える」確認ダイアログ
@@ -550,25 +625,29 @@ impl Workspace {
         self.reveal_current_herd_row(window, cx);
     }
 
-    /// 選んだ行が見えていなければ、見えるだけ動かす。行の位置は次の描画で決まるので 2 フレーム待つ。
+    /// 選んだ行が見えていなければ、見えるだけ動かす。画面外の枠は描かれず行の位置が分からないので、
+    /// 先に枠を見えるところへ出す。行の位置は次の描画で決まるので 2 フレーム待つ。
     fn reveal_current_herd_row(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let scroll = self.chrome.herd_scroll.clone();
+        let list = self.chrome.herd_list.clone();
         let row_bounds = self.chrome.herd_current_row_bounds.clone();
+        let active = Some(self.project_sessions.active);
+        let group_index = self
+            .chrome
+            .herd_list_shape
+            .borrow()
+            .iter()
+            .position(|shape| shape.project_index == active);
+        if let Some(group_index) =
+            group_index.filter(|&index| herd_group_is_outside_viewport(&list, index))
+        {
+            list.scroll_to_reveal_item(group_index);
+        }
         let view = cx.entity_id();
         window.on_next_frame(move |window, _cx| {
             window.on_next_frame(move |_window, cx| {
-                let viewport = scroll.bounds();
-                let row = row_bounds.get();
-                let mut offset = scroll.offset();
-                if row.top() < viewport.top() {
-                    offset.y += viewport.top() - row.top();
-                } else if row.bottom() > viewport.bottom() {
-                    offset.y -= row.bottom() - viewport.bottom();
-                } else {
-                    return;
+                if scroll_herd_row_into_view(&list, row_bounds.get()) {
+                    cx.notify(view);
                 }
-                scroll.set_offset(offset);
-                cx.notify(view);
             });
         });
     }
@@ -848,6 +927,125 @@ struct HerdGroup {
     statuses: Vec<(Entity<AgentPanel>, usize, agent_panel::AgentStatus)>,
     is_integration: bool,
     counts: agent_panel::AttentionCounts,
+    /// 枠のスレッドの総数（絞り込む前）。
+    total_threads: usize,
+    /// この枠の最初の行の通し番号（行の要素 id）。
+    first_row: usize,
+    /// 行を畳んで見出しだけ出すか。
+    collapsed: bool,
+}
+
+/// 枠の高さを決めるもの。変わった枠だけ list に測り直してもらう（画面外の枠は測り直されないので、
+/// 伝えないとスクロールの上限がずれる）。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HerdGroupShape {
+    project_index: Option<usize>,
+    rows: usize,
+    sub_lines: usize,
+    is_current: bool,
+}
+
+impl HerdGroupShape {
+    fn of(group: &HerdGroup, is_current: bool) -> Self {
+        let (rows, sub_lines) = if group.collapsed {
+            (0, 0)
+        } else {
+            let sub_lines = group
+                .statuses
+                .iter()
+                .map(|(_, _, status)| {
+                    usize::from(status.last_prompt.is_some())
+                        + usize::from(status.activity != agent_panel::ThreadActivity::Idle)
+                })
+                .sum();
+            (group.statuses.len(), sub_lines)
+        };
+        Self {
+            project_index: group.project_index,
+            rows,
+            sub_lines,
+            is_current,
+        }
+    }
+}
+
+/// list に伝える変更: 測り直す枠（前の並びの添字）と、入れ替わった範囲。
+#[derive(Debug, Default, PartialEq)]
+struct HerdListChange {
+    remeasure: Vec<usize>,
+    splice: Option<(std::ops::Range<usize>, usize)>,
+}
+
+/// 前後の枠の並びを比べる。全部を作り直すとスクロール位置が飛ぶので、枠が増減した範囲だけを入れ替える。
+fn diff_herd_groups(old: &[HerdGroupShape], new: &[HerdGroupShape]) -> HerdListChange {
+    let same_group = |a: &HerdGroupShape, b: &HerdGroupShape| a.project_index == b.project_index;
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(a, b)| same_group(a, b))
+        .count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| same_group(a, b))
+        .count();
+    let remeasure = (0..prefix)
+        .filter(|&index| old[index] != new[index])
+        .chain((1..=suffix).filter_map(|from_end| {
+            (old[old.len() - from_end] != new[new.len() - from_end]).then_some(old.len() - from_end)
+        }))
+        .collect();
+    let old_end = old.len() - suffix;
+    let new_count = new.len() - suffix - prefix;
+    let splice = (old_end > prefix || new_count > 0).then_some((prefix..old_end, new_count));
+    HerdListChange { remeasure, splice }
+}
+
+fn sync_herd_list(
+    list: &gpui::ListState,
+    shapes: &mut Vec<HerdGroupShape>,
+    new_shapes: Vec<HerdGroupShape>,
+) {
+    if *shapes == new_shapes {
+        return;
+    }
+    let change = diff_herd_groups(shapes, &new_shapes);
+    for index in change.remeasure {
+        list.remeasure_items(index..index + 1);
+    }
+    if let Some((range, count)) = change.splice {
+        list.splice(range, count);
+    }
+    *shapes = new_shapes;
+}
+
+/// 枠が丸ごと画面の外か。まだ測っていない枠も外として扱う。
+fn herd_group_is_outside_viewport(list: &gpui::ListState, group_index: usize) -> bool {
+    list.item_is_above_viewport(group_index).unwrap_or(true)
+        || list.item_is_below_viewport(group_index).unwrap_or(true)
+}
+
+/// 行が見えるだけ list を動かす距離（下へ動かすなら正）。見えていれば `None`。
+fn herd_row_reveal_distance(
+    row: gpui::Bounds<gpui::Pixels>,
+    viewport: gpui::Bounds<gpui::Pixels>,
+) -> Option<gpui::Pixels> {
+    if row.top() < viewport.top() {
+        Some(row.top() - viewport.top())
+    } else if row.bottom() > viewport.bottom() {
+        Some(row.bottom() - viewport.bottom())
+    } else {
+        None
+    }
+}
+
+fn scroll_herd_row_into_view(list: &gpui::ListState, row: gpui::Bounds<gpui::Pixels>) -> bool {
+    let Some(distance) = herd_row_reveal_distance(row, list.viewport_bounds()) else {
+        return false;
+    };
+    list.scroll_by(distance);
+    true
 }
 
 #[cfg(test)]
@@ -862,11 +1060,167 @@ mod tests {
         }
     }
 
+    fn shape(project_index: usize, rows: usize) -> HerdGroupShape {
+        HerdGroupShape {
+            project_index: Some(project_index),
+            rows,
+            sub_lines: 0,
+            is_current: false,
+        }
+    }
+
+    #[test]
+    fn group_changes_touch_only_the_groups_that_changed() {
+        let old = [shape(0, 1), shape(1, 2), shape(2, 3)];
+        assert_eq!(diff_herd_groups(&old, &old), HerdListChange::default());
+
+        // 行が増えた枠だけ測り直す。枠の増減は無いので入れ替えない。
+        let grown = [shape(0, 1), shape(1, 5), shape(2, 3)];
+        assert_eq!(
+            diff_herd_groups(&old, &grown),
+            HerdListChange {
+                remeasure: vec![1],
+                splice: None
+            }
+        );
+
+        // 真ん中の枠が消えても、前後の枠の測定は残す。
+        let removed = [shape(0, 1), shape(2, 4)];
+        assert_eq!(
+            diff_herd_groups(&old, &removed),
+            HerdListChange {
+                remeasure: vec![2],
+                splice: Some((1..2, 0))
+            }
+        );
+
+        // 枠が現れる。
+        assert_eq!(
+            diff_herd_groups(&removed, &[shape(0, 1), shape(1, 2), shape(2, 4)]),
+            HerdListChange {
+                remeasure: vec![],
+                splice: Some((1..1, 1))
+            }
+        );
+        assert_eq!(
+            diff_herd_groups(&[], &old),
+            HerdListChange {
+                remeasure: vec![],
+                splice: Some((0..0, 3))
+            }
+        );
+    }
+
+    #[test]
+    fn reveal_distance_moves_only_as_far_as_needed() {
+        let bounds = |top: f32, height: f32| {
+            gpui::Bounds::new(
+                gpui::point(px(0.), px(top)),
+                gpui::size(px(100.), px(height)),
+            )
+        };
+        let viewport = bounds(100., 200.);
+        assert_eq!(herd_row_reveal_distance(bounds(150., 40.), viewport), None);
+        assert_eq!(
+            herd_row_reveal_distance(bounds(80., 40.), viewport),
+            Some(px(-20.))
+        );
+        assert_eq!(
+            herd_row_reveal_distance(bounds(280., 40.), viewport),
+            Some(px(20.))
+        );
+    }
+
+    /// 低い窓に枠をたくさん並べると、画面外の枠は測られない。スクロールすれば末尾まで届き、
+    /// ↓ で画面外の枠のスレッドへ移ると、その枠が見えるところへ出てくる。
+    #[gpui::test]
+    fn only_visible_groups_are_laid_out(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_herd_virtual_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let projects: Vec<_> = (0..12)
+            .map(|index| root.join(format!("p{index}")))
+            .collect();
+        for project in &projects {
+            std::fs::create_dir_all(project).expect("作業フォルダを作れる");
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"system_notifications":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(projects.clone(), Theme::dark(), None, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1200.), px(420.)));
+        let list = workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            for index in 0..projects.len() {
+                let panel = workspace.project_sessions.sessions[index]
+                    .agent_panel
+                    .clone();
+                panel.update(cx, |panel, cx| {
+                    panel.new_thread(cx);
+                    panel.new_thread(cx);
+                });
+            }
+            workspace.chrome.show_left = true;
+            workspace.chrome.show_herd = true;
+            let threads = workspace.chrome.threads_focus.clone();
+            window.focus(&threads, cx);
+            cx.notify();
+            workspace.chrome.herd_list.clone()
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        draw(cx);
+        draw(cx);
+        let last = projects.len() - 1;
+        assert_eq!(list.item_count(), projects.len());
+        assert!(list.bounds_for_item(0).is_some(), "先頭の枠は測られている");
+        assert!(list.bounds_for_item(last).is_none(), "画面外の枠は測らない");
+
+        // 末尾までスクロールできる（まだ測っていない枠は描きながら測る）。
+        for _ in 0..40 {
+            list.scroll_by(px(300.));
+            draw(cx);
+        }
+        let last_group = list.bounds_for_item(last).expect("末尾の枠まで届く");
+        assert!(last_group.bottom() <= list.viewport_bounds().bottom() + px(1.));
+
+        // 先頭へ戻ってから、画面外の枠のスレッドへキーで移る。
+        list.scroll_to(gpui::ListOffset::default());
+        draw(cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.project_sessions.active = 0;
+            let rows = workspace.herd_keyboard_rows(cx);
+            let (_, panel, _) = rows
+                .iter()
+                .find(|(index, _, _)| *index == 8)
+                .expect("9 つ目のワークスペースの行")
+                .clone();
+            workspace.project_sessions.sessions[8].agent_panel = panel;
+            workspace.switch_project(8, window, cx);
+            workspace.reveal_current_herd_row(window, cx);
+        });
+        draw(cx);
+        assert!(
+            !herd_group_is_outside_viewport(&list, 8),
+            "選んだスレッドの枠が見えるところへ出る"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// 一覧で ↑↓ を押すと、ワークスペースをまたいでスレッドが切り替わり、キーは一覧に残る。
     #[gpui::test]
     fn arrow_keys_walk_threads_across_workspaces(cx: &mut gpui::TestAppContext) {
-        let root =
-            std::env::temp_dir().join(format!("necoder_herd_arrows_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("necoder_herd_arrows_{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         let (project_a, project_b) = (root.join("a"), root.join("b"));
         std::fs::create_dir_all(&project_a).expect("作業フォルダを作れる");
@@ -887,7 +1241,9 @@ mod tests {
                 session._watch_pump = None;
             }
             for index in 0..2 {
-                let panel = workspace.project_sessions.sessions[index].agent_panel.clone();
+                let panel = workspace.project_sessions.sessions[index]
+                    .agent_panel
+                    .clone();
                 panel.update(cx, |panel, cx| {
                     panel.new_thread(cx);
                     panel.new_thread(cx);
@@ -914,7 +1270,11 @@ mod tests {
             let threads_in_a = rows.iter().filter(|(index, _, _)| *index == 0).count();
 
             workspace.on_threads_key_down(&key("down"), window, cx);
-            assert_eq!(position(workspace, cx), (0, 1), "同じワークスペースの次のタブへ");
+            assert_eq!(
+                position(workspace, cx),
+                (0, 1),
+                "同じワークスペースの次のタブへ"
+            );
             assert!(
                 workspace.chrome.threads_focus.is_focused(window),
                 "切り替えてもキーは一覧に残る"
@@ -923,7 +1283,11 @@ mod tests {
             for _ in 1..threads_in_a {
                 workspace.on_threads_key_down(&key("down"), window, cx);
             }
-            assert_eq!(position(workspace, cx), (1, 0), "次のワークスペースへまたぐ");
+            assert_eq!(
+                position(workspace, cx),
+                (1, 0),
+                "次のワークスペースへまたぐ"
+            );
             assert!(workspace.chrome.threads_focus.is_focused(window));
 
             workspace.on_threads_key_down(&key("up"), window, cx);

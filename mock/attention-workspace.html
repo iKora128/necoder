@@ -62,6 +62,8 @@
   .on-icon { position:absolute; top:-5px; right:-6px; box-shadow:0 0 0 2px var(--bg0); }
   .pip.on-icon { top:-2px; right:-2px; }
   .iconbtn .pip.on-icon { top:4px; right:4px; }
+  .badge.plain { background:var(--fg0); color:var(--bg0); }
+  .bellcount { position:absolute; top:1px; right:1px; min-width:14px; height:14px; padding:0 3px; box-sizing:border-box; border-radius:7px; background:var(--fg0); color:var(--bg0); font-size:9.5px; font-weight:700; line-height:14px; text-align:center; }
 
   /* ── レール ── */
   .rail { flex:none; width:50px; display:flex; flex-direction:column; align-items:center; gap:10px; padding:12px 0;
@@ -89,6 +91,7 @@
   .boxhead { display:flex; align-items:center; gap:6px; height:28px; padding:0 8px 0 10px; font-size:11.5px; font-weight:600; color:var(--fg1); }
   .boxhead .br { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--fg2);
     font:10px ui-monospace,Menlo,monospace; }
+  .boxhead .total { flex:none; font-size:10px; font-weight:400; color:var(--fg2); }
   .box.cur .boxhead { color:var(--fg0); }
   /* 枠の 3 案。--wc = そのワークスペースのプロジェクト色 */
   [data-frame=a] .box { border:1.5px solid var(--wc); }
@@ -360,7 +363,7 @@ function render() {
   }).join('');
   const act = (k, tip, on, extra = '', attr = '') => `<span class="act ${on ? 'on' : ''}" title="${tip}" ${attr}>${P(ICON[k])}${extra}</span>`;
   const railHtml = `<div class="rail">${rail}<span class="add">＋</span><span class="sep"></span>
-    ${act(ui.icon, 'スレッド（全ワークスペース）', ui.col, mark(wait, unread), 'data-col')}
+    ${act(ui.icon, 'スレッド（全ワークスペース）', ui.col, wait ? mark(wait, 0) : unread ? `<span class="badge on-icon plain">${unread}</span>` : '', 'data-col')}
     ${act('search', '検索', false)}${act('git', 'Git', false)}${act('todo', 'Todo', false)}
     <span class="railfill"></span>${act('ai', 'AI パネル', true)}${act('term', 'ターミナル', false)}${act('server', 'リモート', false)}</div>`;
 
@@ -371,14 +374,14 @@ function render() {
     if (!rows.length) return '';
     const w = of('wait', mine).length, u = of('unread', mine).length;
     return `<div class="box ${s.id === sp.id ? 'cur' : ''}" style="--wc:${s.color}">
-      <div class="boxhead"><span>${s.name}</span><span class="br">⎇ ${s.branch}</span>${w ? `<span class="badge">${w}</span>` : ''}${u ? `<span class="count" title="未確認">${u}</span>` : ''}</div>
+      <div class="boxhead"><span>${s.name}</span><span class="br">⎇ ${s.branch}</span>${w ? `<span class="badge">${w}</span>` : ''}${u ? `<span class="count" title="未確認">${u}</span>` : ''}<span class="total">全 ${mine.length}</span></div>
       ${rows.map(t => `<div class="row st-${t.st} ${t.id === current ? 'cur' : ''} ${t.id === flashing ? 'flash' : ''}" style="--c:${t.c}" data-t="${t.id}">
         <div class="r1">${slot(t)}<span class="nm">${t.name}</span><span class="meta">${t.age} · ${t.tok}</span></div>
         <div class="r2">› ${t.ask}</div>${t.st === 'seen' ? '' : `<div class="r3">${t.res}</div>`}</div>`).join('')}
     </div>`;
   }).join('') || '<div class="empty">確認するものはありません</div>';
   const colHtml = ui.col ? `<div class="col"><div class="colhead">スレッド<div class="chips">
-      <span class="chip ${ui.filter === 'all' ? 'on' : ''}" data-filter="all">すべて</span>
+      <span class="chip ${ui.filter === 'all' ? 'on' : ''}" data-filter="all">すべて ${data.threads.length}</span>
       <span class="chip ${ui.filter === 'todo' ? 'on' : ''}" data-filter="todo">確認待ち ${wait + unread}</span></div></div>
       <div class="boxes">${boxes}</div></div>` : '';
 
@@ -401,7 +404,7 @@ function render() {
   if (work) parts.push(`<span>生成中 <b>${work}</b></span>`);
   const roll = parts.length ? `<span class="roll" id="roll" title="次の確認待ちへ（⌘⇧U）">${parts.join('<span class="sepdot">·</span>')}</span>` : '';
 
-  const hasFresh = data.notes.some(n => n.fresh);
+  const freshCount = new Set(data.notes.filter(n => n.fresh).map(n => n.th)).size;
   const pop = ui.bell ? `<div class="pop"><h4>通知の履歴</h4>${data.notes.slice(0, 7).map(n => {
     const t = thread(n.th);
     return `<div class="note-row ${n.fresh ? 'new' : ''}" data-t="${n.th}" style="--c:${t.c}"><span class="dot"></span><span class="tt">${n.title}<small>${n.body} · ${n.at}</small></span><span class="mark"></span></div>`;
@@ -411,7 +414,7 @@ function render() {
       <span class="pill">${sp.name}<em>⎇ ${sp.branch}</em></span>
       <span class="segs"><span class="seg ${ui.mode === 'editor' ? 'on' : ''}" data-mode="editor">Editor</span><span class="seg ${ui.mode === 'fleet' ? 'on' : ''}" data-mode="fleet">Fleet</span><span class="seg">Chat</span></span>
       <span class="spacer"></span>
-      <span class="iconbtn" id="bell" title="通知の履歴">${P(ICON.bell)}${hasFresh ? '<span class="pip on-icon"></span>' : ''}</span></div>
+      <span class="iconbtn" id="bell" title="通知の履歴">${P(ICON.bell)}${freshCount ? `<span class="bellcount">${freshCount}</span>` : ''}</span></div>
     <div class="body">${railHtml}${colHtml}${center}${agent}</div>
     <div class="sb"><span class="side">⎇ ${sp.branch}</span>${roll}<span class="side right">行 3, 列 18　UTF-8　Rust</span></div>${pop}`;
 }

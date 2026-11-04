@@ -24,7 +24,9 @@ Web タブのツールバー（`arrow-left` / `arrow-right` / `code-xml` / `exte
 ## ブランドロゴ（`brand-*.svg`）
 
 AI エージェント識別用のブランドマーク（`brand-claude` / `brand-copilot` /
-`brand-qwen` / `brand-opencode` / `brand-kimi`）は **Simple Icons**（https://simpleicons.org）由来。
+`brand-qwen` / `brand-opencode` / `brand-kimi`）と、コネクタのサービス識別用（`brand-gmail` /
+`brand-googlecalendar` / `brand-googledrive` / `brand-supabase` / `brand-figma` / `brand-stripe` /
+`brand-drawio`）は **Simple Icons**（https://simpleicons.org）由来。
 Simple Icons の SVG は **CC0 1.0（パブリックドメイン）**。単色マスクとして描くため `fill` は
 `currentColor` に正規化済み。
 

@@ -45,6 +45,11 @@ const SYSTEM_SOUND: &str = "/System/Library/Sounds/Glass.aiff";
 /// 同梱の声（[`SOUND_VOICES`]）/ `"system"`（OS の音）/ `"off"` / 任意のファイルパス。
 /// `volume_percent` は `settings.sound_volume`（0〜100・0 は鳴らさない）。
 pub fn play(cue: Cue, choice: &str, volume_percent: u64) {
+    // 試験と撮影は本物の音を出さない。本人の設定を読まないので OFF でも既定の声で鳴り、
+    // 試験は並列に走るので連打になる（2026-11-04）。出荷ビルドにこの feature は入らない。
+    if cfg!(any(test, feature = "silent")) {
+        return;
+    }
     // 再生手段があるのは今のところ macOS だけ。無い環境では一時ファイルも作らない。
     if !cfg!(target_os = "macos") {
         return;

@@ -224,8 +224,16 @@ impl AgentPanel {
                 .unwrap_or(0);
             let mut thread =
                 thread_from_storage(&storage, id, &row.name, color_index, RESTORED_TURNS, cx);
-            thread.agent = "Claude Code".into();
-            thread.permission_mode = SharedString::from(chat_core::preset::PERMISSION_MODE);
+            thread.agent = storage
+                .load_threads()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|row| row.0 == id)
+                .and_then(|row| row.5)
+                .unwrap_or_else(|| "Claude Code".into())
+                .into();
+            apply_agent_sticky(&mut thread, cx);
+            thread.permission_mode = chat_start_mode(&thread.agent, cx);
             thread.last_input_at_ms = Some(row.sort_at_ms);
             thread.name_is_custom = true; // 既に名前がある＝自動命名で上書きしない
             let record = storage
@@ -441,8 +449,9 @@ impl AgentPanel {
 
     /// Chat のスレッドなら、セッションの希望を Chat 用に組み替える。
     ///
-    /// - 権限モードは常に `default`（bypass だとエージェントが聞いてこず、裁定が素通りになる）
-    /// - MCP は渡さない（ユーザー設定の MCP をチャットへ持ち込まない）
+    /// - 権限モードはこのチャットで選んだ物（エディタの既定は引き継がない）。bypass ではエージェントが
+    ///   聞いてこないので、書ける範囲の裁定は効かない（エディタと同じ。本人が選んだ時だけ＝`docs/CHAT.md` §3.2）なる）
+    /// - MCP は設定「コネクタ」のスイッチが on の時だけ渡す
     /// - プリセットは `session/new` と `session/load` の両方に乗る（`acp_client` 側の責務）
     pub(crate) fn chat_session_preferences(
         &self,
@@ -458,12 +467,64 @@ impl AgentPanel {
         else {
             return preferences;
         };
-        preferences.mode = Some(chat_core::preset::PERMISSION_MODE.to_string());
-        preferences.mcp_servers = Vec::new();
+        let chosen = self
+            .threads
+            .get(thread_index)
+            .map(|thread| thread.permission_mode.to_string())
+            .filter(|mode| !mode.is_empty());
+        preferences.mode =
+            Some(chosen.unwrap_or_else(|| chat_core::preset::PERMISSION_MODE.to_string()));
+        let settings = settings::get(cx);
+        // 設定「コネクタ」のスイッチが on なら、ページの一覧で有効にした MCP サーバも渡す。
+        if !settings.chat.connectors {
+            preferences.mcp_servers = Vec::new();
+        }
+        if self.threads[thread_index].agent.as_ref() == "Codex" {
+            let override_env = agent_server_override("codex", cx)
+                .map(|entry| entry.env)
+                .unwrap_or_default();
+            let codex_home = override_env.get("CODEX_HOME").map(Path::new);
+            let servers = acp_client::mcp::codex_configured_server_names_for(codex_home);
+            // 読む道具だけを足す。書く道具・Fleet・端末はこのサーバでは提供しない。
+            if let Ok(executable) = std::env::current_exe() {
+                preferences
+                    .mcp_servers
+                    .push(acp_client::mcp::McpServerConfig {
+                        name: "necoder_chat".into(),
+                        source: acp_client::mcp::McpSource::Necoder,
+                        enabled: true,
+                        transport: acp_client::mcp::McpTransport::Stdio {
+                            command: executable.to_string_lossy().into_owned(),
+                            args: vec![
+                                "mcp".into(),
+                                "--chat-read".into(),
+                                dir.to_string_lossy().into_owned(),
+                            ],
+                            env: Default::default(),
+                        },
+                    });
+            }
+            preferences.preset = chat_core::preset::codex_session_preset(
+                dir,
+                chat_core::date::Date::today(),
+                &settings.chat.instructions,
+                settings.chat.connectors,
+                &servers,
+                settings_core::codex_chat_apps(&settings.connectors),
+                &preferences.mcp_servers,
+            );
+            // ACP に渡すと codex-acp が mcp_servers を丸ごと置換し、上の OFF が消える。
+            preferences.mcp_servers.clear();
+            return preferences;
+        }
         preferences.preset = chat_core::preset::session_preset(
             dir,
             chat_core::date::Date::today(),
-            &settings::get(cx).chat.instructions,
+            &settings.chat.instructions,
+            &chat_core::preset::ChatConnectors {
+                enabled: settings.chat.connectors,
+                disallowed_tools: settings_core::connector_disallowed_tools(&settings.connectors),
+            },
         );
         preferences
     }
@@ -493,6 +554,32 @@ impl AgentPanel {
         }
     }
 
+    /// claude.ai のコネクタの道具の裁定（設定「コネクタ」）。Chat とエディタのスレッドで共通。
+    /// コネクタの道具でなければ `None`。「確認」はエディタのスレッドでは `None`＝いつもの流れ
+    /// （権限モードに任せる）、Chat ではカードを出す（`judge` は道具を知らないのでここで答える）。
+    pub(crate) fn connector_permission(
+        thread: &Thread,
+        title: &str,
+        cx: &App,
+    ) -> Option<ChatPermission> {
+        let level = settings_core::connector_tool_level(&settings::get(cx).connectors, title)?;
+        match level {
+            settings_core::ConnectorToolLevel::Allow => Some(ChatPermission::Allow),
+            settings_core::ConnectorToolLevel::Block => {
+                let tool =
+                    settings_core::parse_connector_tool(title).map_or(title, |(_, tool)| tool);
+                Some(ChatPermission::Deny {
+                    notice: i18n::t!("chat.denied_connector", "tool" => tool),
+                })
+            }
+            settings_core::ConnectorToolLevel::Ask => (thread.chat.is_some()
+                && !is_bypass_mode(&thread.permission_mode))
+            .then_some(ChatPermission::Ask {
+                grantable: Vec::new(),
+            }),
+        }
+    }
+
     /// 権限リクエストの裁定。Chat のスレッドでなければ `None`（＝従来どおり）。
     pub(crate) fn chat_permission(
         thread: &Thread,
@@ -500,6 +587,10 @@ impl AgentPanel {
         paths: &[String],
     ) -> Option<ChatPermission> {
         let chat = thread.chat.as_ref()?;
+        // 「聞かずに進める」を選んだチャットはエディタと同じに扱う（レースで届いた要求も止めない）。
+        if is_bypass_mode(&thread.permission_mode) {
+            return None;
+        }
         let chat_dir = chat.dir.as_deref()?;
         let attachments: Vec<PathBuf> = thread
             .context
@@ -901,11 +992,38 @@ impl AgentPanel {
 fn new_chat_thread(color_index: usize, cx: &App) -> Thread {
     let mut thread = Thread::empty(i18n::t!("chat.new_chat"), color_index);
     apply_thread_defaults(&mut thread, cx);
-    // Chat はプロンプトの差し替えが `claude-agent-acp` 固有なので、当面 Claude 限定（DECISIONS 2026-09-18）。
-    thread.agent = "Claude Code".into();
-    thread.permission_mode = SharedString::from(chat_core::preset::PERMISSION_MODE);
+    let chosen = settings::get(cx).chat.agent;
+    thread.agent = if chosen == "Codex" {
+        "Codex"
+    } else {
+        "Claude Code"
+    }
+    .into();
+    apply_agent_sticky(&mut thread, cx);
+    thread.permission_mode = chat_start_mode(&thread.agent, cx);
     thread.chat = Some(ChatThreadState::default());
     thread
+}
+
+/// チャットを始める権限モード（Chat の入力欄で選んだ物。エディタの記憶は引き継がない）。
+pub(super) fn chat_start_mode(agent: &str, cx: &App) -> SharedString {
+    let chat = settings::get(cx).chat;
+    let id = if agent == "Codex" { "codex" } else { "claude" };
+    let remembered = chat
+        .permission_modes
+        .get(id)
+        .cloned()
+        .or_else(|| (id == "claude").then_some(chat.permission_mode))
+        .filter(|mode| !mode.is_empty());
+    remembered
+        .unwrap_or_else(|| {
+            if id == "codex" {
+                "read-only".into()
+            } else {
+                chat_core::preset::PERMISSION_MODE.into()
+            }
+        })
+        .into()
 }
 
 /// 一致した語の前後を 1 行に畳んで返す（一覧の行に収まる長さ）。
@@ -1087,8 +1205,8 @@ mod tests {
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
             let active = panel.active;
-            // ユーザーの既定が bypass でも、Chat は引き継がない。
-            panel.threads[active].permission_mode = "bypassPermissions".into();
+            // エディタから渡された既定が bypass でも、Chat はチャットのモードで始める。
+            assert_eq!(panel.threads[active].permission_mode.as_ref(), "default");
             let dir = panel.ensure_chat_dir(active, "相談", cx).expect("フォルダ");
             let preferences = panel.chat_session_preferences(
                 active,
@@ -1122,6 +1240,154 @@ mod tests {
                 "設定のカスタム指示が末尾に付く"
             );
             assert_eq!(preferences.preset.setting_sources, Some(Vec::new()));
+
+            // チャットで選んだモードは、そのままセッションへ渡す。
+            panel.threads[active].permission_mode = "bypassPermissions".into();
+            let chosen = panel.chat_session_preferences(
+                active,
+                acp_client::SessionPreferences::default(),
+                cx,
+            );
+            assert_eq!(chosen.mode.as_deref(), Some("bypassPermissions"));
+        });
+        drop(fixture);
+    }
+
+    #[gpui::test]
+    fn codex_chat_keeps_its_own_modes_and_restores_its_agent(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "codex_memory");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage_for_chat(fixture.storage(), cx);
+            panel.select_option(Selector::Mode, "bypassPermissions".into(), cx);
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            assert_eq!(panel.threads[panel.active].permission_mode.as_ref(), "read-only");
+            panel.select_option(Selector::Mode, "agent-full-access".into(), cx);
+            assert!(is_bypass_mode(&panel.threads[panel.active].permission_mode));
+            let next = new_chat_thread(0, cx);
+            assert_eq!(next.agent.as_ref(), "Codex");
+            assert_eq!(next.permission_mode.as_ref(), "agent-full-access");
+            panel.select_option(Selector::Agent, "Claude Code".into(), cx);
+            assert_eq!(panel.threads[panel.active].permission_mode.as_ref(), "bypassPermissions");
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            panel.ensure_chat_dir(panel.active, "Codex の会話", cx).expect("folder");
+            panel.persist_thread(panel.active);
+            let id = panel.threads[panel.active].id.clone();
+            panel.refresh_chat_rows(cx);
+            panel.threads.clear();
+            panel.open_chat(&id, cx);
+            assert_eq!(panel.threads[panel.active].agent.as_ref(), "Codex");
+            assert!(settings::get(cx).agent_config_defaults.is_empty());
+        });
+        drop(fixture);
+    }
+
+    #[gpui::test]
+    fn codex_chat_uses_its_preset_on_every_start(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "codex_preset");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            panel.ensure_chat_dir(panel.active, "相談", cx).expect("folder");
+            let preferences = panel.chat_session_preferences(panel.active, Default::default(), cx);
+            assert_eq!(preferences.mode.as_deref(), Some("read-only"));
+            assert!(preferences.preset.to_meta().is_none(), "Claude の meta は送らない");
+            assert!(preferences.mcp_servers.is_empty(), "ACP の MCP で OFF を上書きさせない");
+            let config: serde_json::Value = serde_json::from_str(&preferences.preset.env["CODEX_CONFIG"]).unwrap();
+            assert_eq!(config["features"]["shell_tool"], false);
+            assert_eq!(config["features"]["apps"], false);
+            assert!(config["developer_instructions"].as_str().unwrap().contains("敬語は使わない"));
+            assert_eq!(config["mcp_servers"]["necoder_chat"]["args"][1], "--chat-read");
+        });
+        drop(fixture);
+    }
+
+    #[gpui::test]
+    fn codex_mcp_reads_use_paths_and_other_mcp_tools_ask(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "codex_mcp");
+        let note = fixture.root.join("note.txt");
+        std::fs::write(&note, "attachment").unwrap();
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            panel.ensure_chat_dir(active, "読む", cx).expect("folder");
+            panel.add_context_path(&note, cx);
+            let (respond, mut answers) = mpsc::unbounded();
+            panel.on_event(active, AgentEvent::PermissionRequest {
+                title: String::new(), kind: Some(acp_client::ToolCallKind::Execute), paths: vec![], diffs: vec![],
+                raw_input: Some(serde_json::json!({"server":"necoder_chat", "tool":"read_file", "arguments":{"path":note}}).to_string()),
+                options: choices(), tool_call_id: "read-1".into(), mcp_tool: true, respond,
+            }, cx);
+            assert_eq!(answers.try_recv().ok(), Some(1), "添付の読み取りは許可");
+            let (respond, mut answers) = mpsc::unbounded();
+            panel.on_event(active, AgentEvent::PermissionRequest {
+                title: "mail draft".into(), kind: Some(acp_client::ToolCallKind::Execute), paths: vec![], diffs: vec![],
+                raw_input: Some(serde_json::json!({"server":"codex_apps", "tool":"gmail.draft", "arguments":{}}).to_string()),
+                options: choices(), tool_call_id: "draft-1".into(), mcp_tool: true, respond,
+            }, cx);
+            assert!(answers.try_recv().is_err());
+            assert!(panel.threads[active].pending_permission.is_some(), "MCP をシェルとして拒否せず確認する");
+        });
+        drop(fixture);
+    }
+
+    /// bypass のチャットは聞かない。ただしブロックした道具は止める。
+    #[gpui::test]
+    fn a_bypass_chat_does_not_ask_but_blocked_tools_stay_blocked(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "bypass_connectors");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let tool = "mcp__claude_ai_Gmail__reply";
+            assert!(matches!(
+                AgentPanel::connector_permission(&panel.threads[active], tool, cx),
+                Some(ChatPermission::Ask { .. })
+            ));
+            panel.threads[active].permission_mode = "bypassPermissions".into();
+            assert!(AgentPanel::connector_permission(&panel.threads[active], tool, cx).is_none());
+            assert!(
+                AgentPanel::chat_permission(
+                    &panel.threads[active],
+                    Some(acp_client::ToolCallKind::Edit),
+                    &["/somewhere/else.txt".to_string()],
+                )
+                .is_none(),
+                "書ける範囲の裁定もしない"
+            );
+            settings::set_connector_tool_level(
+                cx,
+                "claude_ai_Gmail",
+                "reply".to_string(),
+                settings_core::ConnectorToolLevel::Block,
+            )
+            .expect("保存");
+            assert!(matches!(
+                AgentPanel::connector_permission(&panel.threads[active], tool, cx),
+                Some(ChatPermission::Deny { .. })
+            ));
+        });
+        drop(fixture);
+    }
+
+    /// Chat で選んだモードはエディタの記憶を書き換えない（逆も同じ）。
+    #[gpui::test]
+    fn the_mode_chosen_in_chat_is_remembered_apart_from_the_editor(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "chat_mode_memory");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.select_option(Selector::Mode, "bypassPermissions".into(), cx);
+            let settings = settings::get(cx);
+            assert_eq!(settings.chat.permission_mode, "bypassPermissions");
+            assert!(
+                settings.agent_config_defaults.is_empty(),
+                "エディタの記憶は触らない"
+            );
+            assert_eq!(
+                new_chat_thread(0, cx).permission_mode.as_ref(),
+                "bypassPermissions",
+                "次のチャットも同じモードで始める"
+            );
         });
         drop(fixture);
     }
