@@ -7,7 +7,6 @@
 use acp_client::{AgentCommand, AgentEvent, SessionCommand, SessionPreferences};
 use futures::StreamExt as _;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn main() {

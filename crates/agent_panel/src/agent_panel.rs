@@ -16791,8 +16791,8 @@ PYEOF"#;
 
             panel.start_auth_login(auth_choices_for_test()[0].clone(), cx);
             assert!(matches!(
-                command_rx.try_next(),
-                Ok(Some(SessionCommand::Authenticate(id))) if id == "oauth"
+                command_rx.try_recv(),
+                Ok(SessionCommand::Authenticate(id)) if id == "oauth"
             ));
             let login = panel.threads[active].auth_login.clone().expect("進行中");
             assert_eq!(login.method, "Log in with Google");
