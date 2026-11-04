@@ -42,6 +42,9 @@ pub struct SessionPreset {
     /// 文脈を 11 万トークン食った（2026-09-19 の通し確認）。止める口は
     /// `ENABLE_CLAUDEAI_MCP_SERVERS=false` だけ。
     pub env: BTreeMap<String, String>,
+    /// モデルから隠す道具（SDK の `disallowedTools`）。設定でオフにしたコネクタは
+    /// `mcp__claude_ai_Figma`、ブロックした道具は `mcp__claude_ai_Gmail__reply` の形で渡す。
+    pub disallowed_tools: Vec<String>,
 }
 
 impl SessionPreset {
@@ -60,6 +63,12 @@ impl SessionPreset {
         }
         if self.strict_mcp {
             options.insert("strictMcpConfig".to_string(), serde_json::json!(true));
+        }
+        if !self.disallowed_tools.is_empty() {
+            options.insert(
+                "disallowedTools".to_string(),
+                serde_json::json!(self.disallowed_tools),
+            );
         }
 
         let mut meta = v1::Meta::new();
@@ -159,6 +168,7 @@ mod tests {
                 "ENABLE_CLAUDEAI_MCP_SERVERS".to_string(),
                 "false".to_string(),
             )]),
+            disallowed_tools: vec!["mcp__claude_ai_Figma".to_string()],
         };
         let meta = serde_json::Value::Object(preset.to_meta().expect("meta"));
         assert_eq!(
@@ -167,6 +177,7 @@ mod tests {
                 "systemPrompt": "会話で答える",
                 "claudeCode": { "options": {
                     "tools": ["Read", "Write"], "settingSources": [], "strictMcpConfig": true,
+                    "disallowedTools": ["mcp__claude_ai_Figma"],
                 } },
             })
         );
@@ -193,7 +204,11 @@ mod tests {
             enabled: true,
             transport: crate::mcp::McpTransport::Stdio {
                 command: "/Applications/necoder.app/Contents/MacOS/necoder".to_string(),
-                args: vec!["mcp".to_string(), "--captain".to_string(), "/repo".to_string()],
+                args: vec![
+                    "mcp".to_string(),
+                    "--captain".to_string(),
+                    "/repo".to_string(),
+                ],
                 env: BTreeMap::new(),
             },
         }
@@ -216,7 +231,10 @@ mod tests {
         assert_eq!(config["mcp_servers"]["computer-use"]["enabled"], false);
         assert_eq!(config["mcp_servers"]["node_repl"]["enabled"], false);
         assert_eq!(config["mcp_servers"]["necoder"]["args"][1], "--captain");
-        assert_eq!(config["mcp_servers"]["necoder"]["default_tools_approval_mode"], "approve");
+        assert_eq!(
+            config["mcp_servers"]["necoder"]["default_tools_approval_mode"],
+            "approve"
+        );
     }
 
     /// Claude Code は mcpServers で渡し、他の MCP・ユーザー設定（許可ルール含む）・claude.ai のコネクタを閉じる。
@@ -224,12 +242,20 @@ mod tests {
     #[test]
     fn a_claude_seat_is_strict_about_mcp_and_settings() {
         let mut preferences = crate::SessionPreferences::default();
-        restrict_mcp_to(&mut preferences, "claude", vec![necoder_server()], &["x".to_string()]);
+        restrict_mcp_to(
+            &mut preferences,
+            "claude",
+            vec![necoder_server()],
+            &["x".to_string()],
+        );
         assert_eq!(preferences.mcp_servers, vec![necoder_server()]);
         assert!(preferences.preset.strict_mcp);
         assert_eq!(preferences.preset.setting_sources, Some(Vec::new()));
         assert_eq!(preferences.preset.tools, None, "組み込みの道具は絞らない");
-        assert_eq!(preferences.preset.env["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
+        assert_eq!(
+            preferences.preset.env["ENABLE_CLAUDEAI_MCP_SERVERS"],
+            "false"
+        );
         assert!(!preferences.preset.env.contains_key("CODEX_CONFIG"));
     }
 }

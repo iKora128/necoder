@@ -8,6 +8,7 @@
 
 pub mod codex_limits;
 pub mod connections;
+pub mod connector;
 pub mod custom;
 pub mod deploy;
 pub mod history;
@@ -2684,8 +2685,10 @@ async fn run_session_attempt(
                     let mut replay_log = preferences
                         .replay_history
                         .then(|| history::ReplayLog::new(history::REPLAY_KEEP));
-                    let mut session = connection
-                        .attach_session(v1::NewSessionResponse::new(previous.clone()), Vec::new())?;
+                    let mut session = connection.attach_session(
+                        v1::NewSessionResponse::new(previous.clone()),
+                        Vec::new(),
+                    )?;
                     let load = connection
                         .send_request(
                             v1::LoadSessionRequest::new(previous.clone(), &cwd)
@@ -2724,7 +2727,9 @@ async fn run_session_attempt(
                             }
                             resumed_session = Some((session, loaded.modes, loaded.config_options));
                         }
-                        Err(error) if acp::is_incoming_transport_closed(&error) => return Err(error),
+                        Err(error) if acp::is_incoming_transport_closed(&error) => {
+                            return Err(error)
+                        }
                         Err(error) if may_retry_load && is_auth_required(&error) => {
                             may_retry_load = false;
                             drop(session); // 仮のハンドラを外してからログインへ
@@ -2769,9 +2774,7 @@ async fn run_session_attempt(
                             .await;
                         match attempt {
                             Ok(response) => break response,
-                            Err(error)
-                                if !login_choices.is_empty() && is_auth_required(&error) =>
-                            {
+                            Err(error) if !login_choices.is_empty() && is_auth_required(&error) => {
                                 // ログインが通ったのに断られたら、その理由をカードに出す
                                 // （例: 方式は選べたが GEMINI_API_KEY が無い）。
                                 let detail = logged_in.then(|| auth_failure_text(&error));
@@ -4831,9 +4834,8 @@ for line in sys.stdin:
             )),
             "標準エラーの URL を拾う: {events:?}"
         );
-        let position = |wanted: fn(&AgentEvent) -> bool| {
-            events.iter().position(wanted).expect("届く")
-        };
+        let position =
+            |wanted: fn(&AgentEvent) -> bool| events.iter().position(wanted).expect("届く");
         assert!(
             position(|event| matches!(event, AgentEvent::AuthLoginCompleted))
                 < position(|event| matches!(event, AgentEvent::SessionStarted { .. })),

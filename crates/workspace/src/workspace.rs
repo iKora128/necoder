@@ -58,8 +58,8 @@ mod explorer_controller;
 mod explorer_view;
 mod fleet_stage;
 mod fleet_view;
-mod new_task_dialog;
 mod image_view;
+mod new_task_dialog;
 mod pdf_view;
 mod remote_control;
 mod web_preview_view;
@@ -71,14 +71,15 @@ pub(crate) use web_preview_view::{
     WebPreviewView,
 };
 mod about;
+mod attention;
 mod cleanup;
 mod conflicts;
 mod editor_manners;
+mod font_settings;
 mod git_controller;
 mod git_view;
 mod herd_view;
 mod history_view;
-mod attention;
 mod inbox;
 mod keep_awake;
 mod keymap_editing;
@@ -86,17 +87,16 @@ mod notifications;
 mod overlays;
 mod ports;
 mod quit_guard;
-mod resources;
 mod rail;
 mod rail_view;
 mod remote_connection;
 mod remote_ssh;
 mod remote_transfer;
+mod resources;
 mod shortcut_sheet;
 mod ssh_register;
-mod system_notifications;
-mod font_settings;
 mod statusbar_items;
+mod system_notifications;
 mod terminal_colors;
 mod terminal_float;
 mod terminal_rename;
@@ -105,12 +105,12 @@ mod terminal_tabs;
 mod usage_view;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
-pub use keep_awake::install_keep_awake;
 pub use font_settings::install_font_settings;
-pub use terminal_settings::install_terminal_settings;
+pub use keep_awake::install_keep_awake;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
 pub use system_notifications::install_agent_notifications;
+pub use terminal_settings::install_terminal_settings;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
 mod captain;
@@ -1635,7 +1635,10 @@ struct ChromeState {
     rail_focus: FocusHandle,
     /// スレッド一覧のキーの宛先（↑↓ でスレッドを切り替える）。
     threads_focus: FocusHandle,
-    herd_scroll: gpui::ScrollHandle,
+    /// スレッド一覧の枠の list（見えている枠だけ描く）。
+    herd_list: gpui::ListState,
+    /// list に伝え済みの枠の並び。描画中に比べて、変わった枠だけ測り直す。
+    herd_list_shape: std::cell::RefCell<Vec<herd_view::HerdGroupShape>>,
     /// 選んでいる行の位置（見えていなければスクロールする）。
     herd_current_row_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
 }
@@ -5427,7 +5430,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let settings_path = root.join("settings.json");
-        std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
         cx.update(|cx| {
             settings::init(Some(settings_path), None, cx);
             // Esc（`editor::Cancel`）を実キーで通すため既定 keymap を張る。
@@ -5467,7 +5474,10 @@ mod tests {
         cx.run_until_parked();
 
         workspace.update_in(cx, |workspace, window, cx| {
-            assert!(workspace.chrome.new_task.is_some(), "＋ Task のクリックでダイアログが開く");
+            assert!(
+                workspace.chrome.new_task.is_some(),
+                "＋ Task のクリックでダイアログが開く"
+            );
             assert!(
                 workspace.new_task_input_focused(window, cx),
                 "ダイアログは出ているのに入力欄にフォーカスが無い＝打鍵が裏へ流れる"
@@ -5478,7 +5488,11 @@ mod tests {
         cx.simulate_input("fix login");
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, _window, cx| {
-            assert_eq!(workspace.new_task_input_text(cx).as_deref(), Some("fix login"), "打鍵が ＋ Task の入力欄に入らない");
+            assert_eq!(
+                workspace.new_task_input_text(cx).as_deref(),
+                Some("fix login"),
+                "打鍵が ＋ Task の入力欄に入らない"
+            );
         });
 
         // 入力欄の外（ダイアログの余白）を押しても入力欄のまま。背面の occlude が無いと、
@@ -5493,14 +5507,20 @@ mod tests {
         );
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, cx| {
-            assert!(workspace.new_task_input_focused(window, cx), "ダイアログの余白クリックで入力欄からフォーカスが外れた");
+            assert!(
+                workspace.new_task_input_focused(window, cx),
+                "ダイアログの余白クリックで入力欄からフォーカスが外れた"
+            );
         });
 
         // Esc で閉じ、押す前に居たサイドバーへフォーカスが戻る（UI-SPEC §7）。
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, window, _cx| {
-            assert!(workspace.chrome.new_task.is_none(), "Esc で ＋ Task ダイアログが閉じない");
+            assert!(
+                workspace.chrome.new_task.is_none(),
+                "Esc で ＋ Task ダイアログが閉じない"
+            );
             assert!(
                 workspace.chrome.control_focus.is_focused(window),
                 "取り消し後、押す前に居たサイドバーへフォーカスが戻らない"
@@ -5517,7 +5537,9 @@ mod tests {
     /// ブリッジ（統合先のカード）: Fleet の家に入ったら編隊図が見えていて、Captain は設定ファイルを
     /// 手で書かなくても任命できる（FLEET-V2 §3.6 / §5.7）。
     #[gpui::test]
-    fn the_bridge_shows_the_formation_and_lets_you_appoint_a_captain(cx: &mut gpui::TestAppContext) {
+    fn the_bridge_shows_the_formation_and_lets_you_appoint_a_captain(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let root = std::env::temp_dir().join(format!(
             "necoder_fleet_bridge_{}_{}",
             std::process::id(),
@@ -5528,7 +5550,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let settings_path = root.join("settings.json");
-        std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
         cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
         let (workspace, cx) =
             cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
@@ -5540,16 +5566,27 @@ mod tests {
             workspace.chrome.fleet_mode = true;
             workspace.chrome.stage_width = 1500.;
             workspace.seed_fleet_cells(cx);
-            assert!(workspace.project_sessions.projects[0].task_space.is_integration());
+            assert!(workspace.project_sessions.projects[0]
+                .task_space
+                .is_integration());
             let space = workspace.project_sessions.projects[0].task_space.id.clone();
 
             // 何も選んでいない統合先は編隊図を開いている。閉じたら閉じたまま。
-            assert!(matches!(workspace.stage_side(&space), Some(FleetPane::Formation { .. })));
+            assert!(matches!(
+                workspace.stage_side(&space),
+                Some(FleetPane::Formation { .. })
+            ));
             workspace.set_stage_side(0, None, cx);
-            assert!(workspace.stage_side(&space).is_none(), "× で閉じたら勝手に開き直さない");
+            assert!(
+                workspace.stage_side(&space).is_none(),
+                "× で閉じたら勝手に開き直さない"
+            );
             // ⌘⇧G（系譜ヘッダの ⚑ 編隊図）で開く / もう一度で閉じる。
             workspace.toggle_formation(window, cx);
-            assert!(matches!(workspace.stage_side(&space), Some(FleetPane::Formation { .. })));
+            assert!(matches!(
+                workspace.stage_side(&space),
+                Some(FleetPane::Formation { .. })
+            ));
             workspace.toggle_formation(window, cx);
             assert!(workspace.stage_side(&space).is_none());
 
@@ -5575,7 +5612,11 @@ mod tests {
                 .iter()
                 .position(|status| captain::is_captain_thread_name(&status.name))
                 .expect("Captain スレッドができる");
-            assert_eq!(panel.read(cx).active_thread(), captain_thread, "⌘0 は Captain の会話へ寄せる");
+            assert_eq!(
+                panel.read(cx).active_thread(),
+                captain_thread,
+                "⌘0 は Captain の会話へ寄せる"
+            );
             assert!(workspace.conversation_panel(0) == panel);
 
             // 解任 = キーを外す（設定の「なし」と同じ経路）。
@@ -5584,7 +5625,10 @@ mod tests {
             assert!(settings::get(cx).captain_agent.is_none());
         });
         let written = std::fs::read_to_string(&settings_path).unwrap();
-        assert!(!written.contains("captain_agent"), "解任で null を残さない: {written}");
+        assert!(
+            !written.contains("captain_agent"),
+            "解任で null を残さない: {written}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5632,7 +5676,8 @@ mod tests {
             Workspace::new(vec![project.clone()], Theme::dark(), Some(persistence), cx)
         });
         let settle = |cx: &mut gpui::VisualTestContext| {
-            cx.executor().advance_clock(std::time::Duration::from_secs(3));
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(3));
             cx.run_until_parked();
         };
         settle(cx);
@@ -5641,7 +5686,9 @@ mod tests {
                 session._watch = None;
                 session._watch_pump = None;
             }
-            workspace.project_sessions.projects[0].repository_key().to_string()
+            workspace.project_sessions.projects[0]
+                .repository_key()
+                .to_string()
         });
         storage
             .upsert_task_space(&storage::TaskSpaceRecord {
@@ -5662,7 +5709,9 @@ mod tests {
             })
             .unwrap();
         // 初めての任命: 位置はその時点の末尾から（過去の全履歴は渡さない）。
-        workspace.update(cx, |workspace, cx| workspace.request_captain_wake(&repository, cx));
+        workspace.update(cx, |workspace, cx| {
+            workspace.request_captain_wake(&repository, cx)
+        });
         settle(cx);
         let start = storage.load_captain_cursor(&repository).unwrap();
         assert!(start.is_some(), "初回に位置を作る");
@@ -5671,13 +5720,20 @@ mod tests {
         let working = storage
             .append_task_event("space-rope", "phase_changed", r#"{"phase":"working"}"#)
             .unwrap();
-        workspace.update(cx, |workspace, cx| workspace.request_captain_wake(&repository, cx));
+        workspace.update(cx, |workspace, cx| {
+            workspace.request_captain_wake(&repository, cx)
+        });
         settle(cx);
-        assert_eq!(storage.load_captain_cursor(&repository).unwrap(), Some(working));
+        assert_eq!(
+            storage.load_captain_cursor(&repository).unwrap(),
+            Some(working)
+        );
         let panel = workspace.update(cx, |workspace, _| {
             workspace.project_sessions.sessions[0].fleet_agents[0].clone()
         });
-        assert!(panel.read_with(cx, |panel, _| panel.seat_thread(captain::CAPTAIN_SEAT).is_none()));
+        assert!(panel.read_with(cx, |panel, _| panel
+            .seat_thread(captain::CAPTAIN_SEAT)
+            .is_none()));
 
         // 采配に要る出来事は 1 通で届く。人間が別のスレッドを見ていても表示を奪わない。
         let other = panel.update(cx, |panel, cx| panel.new_thread_index(cx));
@@ -5688,10 +5744,14 @@ mod tests {
                 r#"{"phase":"review_ready","digest":"ropey に置き換えた"}"#,
             )
             .unwrap();
-        workspace.update(cx, |workspace, cx| workspace.request_captain_wake(&repository, cx));
+        workspace.update(cx, |workspace, cx| {
+            workspace.request_captain_wake(&repository, cx)
+        });
         settle(cx);
         panel.read_with(cx, |panel, _| {
-            let seat = panel.seat_thread(captain::CAPTAIN_SEAT).expect("Captain が席に座る");
+            let seat = panel
+                .seat_thread(captain::CAPTAIN_SEAT)
+                .expect("Captain が席に座る");
             // 知らせは人の発話（▸）ではなく necoder の知らせ（◇ の行・§3.6）として積まれ、「頼んだこと」に
             // ならない（このテストではターンが失敗で終わるので、失敗の行が後ろに付く）。
             let lines = panel.transcript_lines(seat, usize::MAX);
@@ -5706,26 +5766,44 @@ mod tests {
                 .map(|(_, text)| text.clone())
                 .expect("知らせが transcript に積まれる");
             assert!(
-                delivered.contains(&format!("#{review} space-rope rope 設計: → review_ready — ropey に置き換えた")),
+                delivered.contains(&format!(
+                    "#{review} space-rope rope 設計: → review_ready — ropey に置き換えた"
+                )),
                 "{delivered}"
             );
-            assert!(!delivered.contains("working"), "途中経過は載せない: {delivered}");
+            assert!(
+                !delivered.contains("working"),
+                "途中経過は載せない: {delivered}"
+            );
             assert!(
                 panel.statuses()[seat].last_prompt.is_none(),
                 "知らせは頼んだことではない"
             );
-            assert_eq!(panel.active_thread(), other, "知らせは表示中のタブを奪わない");
+            assert_eq!(
+                panel.active_thread(),
+                other,
+                "知らせは表示中のタブを奪わない"
+            );
         });
         // このテストの設定ではエージェントを起こせない＝ターンは失敗で終わる → 位置は進めない（次の wake で再送）。
-        assert_eq!(storage.load_captain_cursor(&repository).unwrap(), Some(working));
+        assert_eq!(
+            storage.load_captain_cursor(&repository).unwrap(),
+            Some(working)
+        );
 
         // 成功したターンの終わりで、渡した所まで「読んだ」と書く。
         workspace.update(cx, |workspace, cx| {
-            workspace.chrome.captain_inflight.insert(repository.clone(), review);
+            workspace
+                .chrome
+                .captain_inflight
+                .insert(repository.clone(), review);
             workspace.finish_captain_turn(0, true, cx);
         });
         settle(cx);
-        assert_eq!(storage.load_captain_cursor(&repository).unwrap(), Some(review));
+        assert_eq!(
+            storage.load_captain_cursor(&repository).unwrap(),
+            Some(review)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5740,7 +5818,12 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let git = |args: &[&str]| {
             let status = child_process::command("git")
-                .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+                .args([
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
                 .args(args)
                 .current_dir(&project)
                 .status()
@@ -5748,7 +5831,11 @@ mod tests {
             assert!(status.success(), "git {args:?}");
         };
         git(&["init", "-q"]);
-        std::fs::write(project.join("calc.py"), "def add(a, b):\n    return a + b\n").unwrap();
+        std::fs::write(
+            project.join("calc.py"),
+            "def add(a, b):\n    return a + b\n",
+        )
+        .unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "initial"]);
         cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
@@ -5766,7 +5853,9 @@ mod tests {
                 session._watch = None;
                 session._watch_pump = None;
             }
-            workspace.project_sessions.projects[0].repository_key().to_string()
+            workspace.project_sessions.projects[0]
+                .repository_key()
+                .to_string()
         });
         let tasks = vec![
             ProposedTask {
@@ -5802,23 +5891,40 @@ mod tests {
                 captain_proposals::CaptainProposal::from_record(record).unwrap(),
                 cx,
             );
-            assert_eq!(workspace.attention_badge_count(cx), 1, "Editor 画面のバッジにも数える");
+            assert_eq!(
+                workspace.attention_badge_count(cx),
+                1,
+                "Editor 画面のバッジにも数える"
+            );
             assert!(workspace
                 .control_attention_queue(cx)
                 .iter()
-                .any(|item| matches!(&item.kind, control_view::AttentionKind::Proposal { rows: 2, .. })));
+                .any(|item| matches!(
+                    &item.kind,
+                    control_view::AttentionKind::Proposal { rows: 2, .. }
+                )));
             workspace.toggle_proposal_row(&proposal_id, 1, cx);
             workspace.approve_captain_proposal(&proposal_id, cx);
-            assert!(workspace.chrome.captain_proposals.is_empty(), "二度押しできない");
+            assert!(
+                workspace.chrome.captain_proposals.is_empty(),
+                "二度押しできない"
+            );
         });
         cx.run_until_parked();
-        cx.executor().advance_clock(std::time::Duration::from_secs(3));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
         cx.run_until_parked();
         assert!(storage.load_pending_captain_proposals().unwrap().is_empty());
         workspace.update(cx, |workspace, _| {
             // ＋ Task と同じ作成中の行を通って作り終えた（O20）。舞台は奪わない（fan-out ではない）。
-            assert!(workspace.chrome.task_creations.is_empty(), "作成中の行は作り終えたら消える");
-            assert!(workspace.chrome.stage_pinned.is_empty(), "分解案の承認は舞台に並べない");
+            assert!(
+                workspace.chrome.task_creations.is_empty(),
+                "作成中の行は作り終えたら消える"
+            );
+            assert!(
+                workspace.chrome.stage_pinned.is_empty(),
+                "分解案の承認は舞台に並べない"
+            );
         });
         let created = workspace.update(cx, |workspace, _| {
             workspace

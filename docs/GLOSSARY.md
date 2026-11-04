@@ -171,6 +171,8 @@
 | **Task の指し方**（CLI の `<task>`。id / `branch:` / `name:` / `active` = GUI で選択中） | `fleet::TaskSelector` / `select_task` | — | — |
 | **端末ハンドル**（`ne terminal list` が返す端末の名前 `t<番号>`。GUI を再起動すると変わる） | `terminal_handle`（control_ipc） | — | — |
 | **CLI から端末へ入力を送る**（`ne terminal send` の許可。既定 off） | `allow_terminal_send` | CLI から端末へ入力を送る | Let the CLI type into terminals |
+| **コネクタ**（Claude アカウントに繋いだサービス。necoder の MCP 一覧を通らずに Claude のセッションへ入る。設定のページ名でもあり、下の MCP サーバの一覧もこのページに置く） | `acp_client::connector` / `settings_core::ConnectorSetting`・設定 `connectors` / `chat.connectors` | コネクタ | Connectors |
+| ↳ **道具の権限**（常に許可 / 確認 / ブロック。既定は確認） | `settings_core::ConnectorToolLevel` | 常に許可 / 確認 / ブロック | Always allow / Ask / Block |
 | **MCP サーバ**（エージェントに持たせる道具。`session/new` で渡す） | `acp_client::mcp` / `mcp_servers` | MCP サーバ | MCP server |
 | ↳ **発見**（他ツールの設定に居るサーバを一覧に載せる・既定 off） | `mcp::discover` / `McpSource` | 〈出所〉で発見 | found in 〈source〉 |
 | **無視されたファイルも探す**（⌘P の 2 回目。1 回目で何も一致しない時だけ出る行） | `ignored_files_local` / `FINDER_ACTION_SEARCH_IGNORED` / `Picker::set_fallback_action` | 無視されたファイルも探す / 無視 | Also search ignored files / ignored |

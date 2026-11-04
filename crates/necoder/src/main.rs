@@ -440,6 +440,14 @@ impl gpui::AssetSource for Assets {
             "icons/brand-qwen.svg" => icon!("brand-qwen.svg"),
             "icons/brand-opencode.svg" => icon!("brand-opencode.svg"),
             "icons/brand-kimi.svg" => icon!("brand-kimi.svg"),
+            // コネクタのサービス（Simple Icons・CC0・設定「コネクタ」）。
+            "icons/brand-gmail.svg" => icon!("brand-gmail.svg"),
+            "icons/brand-googlecalendar.svg" => icon!("brand-googlecalendar.svg"),
+            "icons/brand-googledrive.svg" => icon!("brand-googledrive.svg"),
+            "icons/brand-supabase.svg" => icon!("brand-supabase.svg"),
+            "icons/brand-figma.svg" => icon!("brand-figma.svg"),
+            "icons/brand-stripe.svg" => icon!("brand-stripe.svg"),
+            "icons/brand-drawio.svg" => icon!("brand-drawio.svg"),
             // ファイルタイプ別アイコン。言語ロゴ = Simple Icons（CC0）、フォルダ/汎用 = Lucide（ISC）。
             // すべて単色マスクとして描き、色は `file_type_color` で薄く付ける（形で見分ける・色は識別に集約）。
             "icons/file-rust.svg" => icon!("file-rust.svg"),
@@ -2048,7 +2056,9 @@ mod tests {
     fn external_file_urls_preserve_folder_names() {
         let folder = std::env::temp_dir().join("folder with spaces 日本語 #1");
         let urls = vec![
-            url::Url::from_directory_path(&folder).expect("絶対パス").into(),
+            url::Url::from_directory_path(&folder)
+                .expect("絶対パス")
+                .into(),
             "https://example.com/ignored".into(),
             "invalid url".into(),
         ];

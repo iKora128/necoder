@@ -810,7 +810,7 @@ impl Workspace {
                 repository: RepositoryController {
                     status: HashMap::new(),
                     refresh_generation: 0,
-                task_files: Vec::new(),
+                    task_files: Vec::new(),
                 },
                 git_panel,
                 review: Some(review),
@@ -958,7 +958,8 @@ impl Workspace {
                 rail_drag: None,
                 rail_focus: cx.focus_handle(),
                 threads_focus: cx.focus_handle(),
-                herd_scroll: gpui::ScrollHandle::new(),
+                herd_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(240.)),
+                herd_list_shape: Default::default(),
                 herd_current_row_bounds: Default::default(),
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: true,
@@ -1602,10 +1603,13 @@ impl Workspace {
                 if !still_same {
                     return;
                 }
-                let chrome_focus = [&workspace.chrome.rail_focus, &workspace.chrome.threads_focus]
-                    .into_iter()
-                    .find(|handle| handle.is_focused(window))
-                    .cloned();
+                let chrome_focus = [
+                    &workspace.chrome.rail_focus,
+                    &workspace.chrome.threads_focus,
+                ]
+                .into_iter()
+                .find(|handle| handle.is_focused(window))
+                .cloned();
                 let first_file = workspace.tabs.len();
                 for tab in loaded {
                     match tab {
@@ -1702,10 +1706,16 @@ impl Workspace {
                         if *kind == StatusKind::Untracked
                             && !task_files.iter().any(|file| &file.path == path)
                         {
-                            let size = host.metadata(path).map_or(u64::MAX, |metadata| metadata.len);
-                            let added = if size <= project::review::MAX_TEXT_BYTES as u64 && size <= count_budget {
+                            let size = host
+                                .metadata(path)
+                                .map_or(u64::MAX, |metadata| metadata.len);
+                            let added = if size <= project::review::MAX_TEXT_BYTES as u64
+                                && size <= count_budget
+                            {
                                 count_budget -= size;
-                                host.read_file(path).map_or(0, |content| project::review::untracked_line_count(&content.bytes))
+                                host.read_file(path).map_or(0, |content| {
+                                    project::review::untracked_line_count(&content.bytes)
+                                })
                             } else {
                                 0
                             };

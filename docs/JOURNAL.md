@@ -4370,6 +4370,49 @@
 - 追加（本人要望）: スレッド一覧の行を押した後は ↑↓ でスレッドを切り替える（ワークスペースをまたぐ・レールの `on_rail_key_down` と同じ作り・`threads_focus`）。⏎ で入力欄、Esc で作業面へ。通り過ぎただけでは未確認を消さないよう `select_thread` を分けた。タブ復元がキーの宛先を奪わないよう `restore_chrome_focus_after_tabs` に広げた
 - 次: 本人の実機で OS の通知の取り下げと完了の光を確認
 
+## 2026-11-03 — チャットのスクロールで本文レイアウトを再利用
+- やったこと: `agent_panel` の本文 Entity キャッシュをフレーム全体の登録順から `(RegionId, 同じリージョンの出現回数)` に変更。可視範囲・描画順が変わっても同じ本文を再利用し、計測と描画で同じ View を二度使うことは避ける。List 自身が通知するため、親の重複ホイール通知も除去。
+- 検証: 修正前に可視範囲変更の回帰テストが失敗することを確認。修正後は再利用・重複計測の分離に加え、実ホイール配送での移動、最新へボタン、移動後の文字ヒットテストを検証。実機の CPU / フレーム時間の改善率は未計測。
+- 学び/罠: 文章の内容だけでなく、フレーム全体での登録順もキャッシュ鍵にすると、スクロールで同じ文章のキャッシュが外れる。`ListState::is_scrolled_to_end()` は未計測項目が残ると `None` を返すため、長い会話の「最新へ」判定は別途見直す余地がある。
+
+## 2026-11-04 — スレッド一覧のカクつき: 見えている枠だけ計算する / 数を出す
+
+- きっかけ: 本人「Box を上下スクロールするとカクつく。CPU は大丈夫か」「今何個あって何個見ていないか数を出してほしい」「ベルも数値が出ないのは良くない」
+- 分かったこと: 実機の `sample` でメインスレッドの 25〜68% が描画、うち窓全体のレイアウト計算が 11〜31%。行の組み立ては 0.5〜2.5% で軽い。`overflow_y_scroll` の div は画面外の行も毎回レイアウトする。スクロールは `cx.notify(current_view)` で Workspace ごと描き直す
+- やったこと:
+  - 一覧を `gpui::list` へ（枠 1 つ = 1 項目）。枠の高さを変える要素（行数・副行の数・今いる枠か）だけ `HerdGroupShape` に持って比べ、変わった枠だけ `remeasure_items`、増減した範囲だけ `splice`（`reset` はスクロール位置が飛ぶ）
+  - `ListSizingBehavior::Auto`: 既定の Infer は要素の高さを求めるために、幅の分からないまま 1 回余分に全項目を描く
+  - ↑↓ の追従: 画面外の枠は描かれず行の位置が無いので、先に `scroll_to_reveal_item` で枠を出してから、行の位置で `scroll_by`
+  - 数: 枠の見出しに `全 N`（絞り込む前の数）、絞り込みに `すべて N`、丸にツールチップ。ベルは白い点をやめて未読の件数（`99+` まで）。11-03 の「数字は確認待ちの印に一本化」を本人の指摘で戻した
+- 計測（60 行・12 枠・1680x1000・release。計測コードは一時ツリーだけで本体には入れない。`Window::draw` を直接呼んで時間を取る）:
+
+  | 1 回の描画 | 変更前 p50 | 変更後 p50 |
+  |---|---|---|
+  | スクロール | 11.66ms | 4.58ms |
+  | Workspace の再描画のみ | 11.50ms | 4.60ms |
+  | Workspace + Agent パネル | 12.05ms | 5.52ms |
+
+- やらなかったこと: 一覧の別 Entity 化。生成中の行のスピナーが一覧を dirty にし、別 Entity でも祖先の Workspace は描き直されるので、生成中にほぼ効かない。古い表示が残る危険の方が大きい。スピナー自体の更新を減らすのは見た目が変わるので本人判断待ち
+- 検証: workspace 326 本緑（新しい試験: 画面外の枠を測らない / 末尾まで届く / キーで画面外の枠へ移ると出てくる / 変わった枠だけ測り直す）。隔離 offscreen の実アプリで枠・`全 N`・`すべて N`・ベルの数字を目視
+- 罠: 改名中の入力欄を画面外へスクロールすると、入力欄が描かれずキーが外れる。`cargo ... | grep` はビルド失敗でも成功に見える（`set -o pipefail`）。別セッションが同じ作業ツリーで動いていたので計測は `git worktree` で分けた
+- 次: 実スクロールの体感は本人の実機で確認（ここで測ったのは描画時間で、実際のホイール操作ではない）
+
+## 2026-11-04 — ACP 入力遅延の再調査
+- 計測: 症状が落ち着いた状態で CPU idle 約87%、8論理CPUの負荷平均は1分3.85 / 15分14.64。16GB RAM、スワップ使用約1.96GBだが計測区間のswap入出力は0。遅延発生時の原因は未確定。necoder の短時間 sample では画面レイアウト処理を確認。
+- 修正: `@` 補完が通知ごとに取り出す本文をカーソルの現在行に限定（以前は先頭からキャレットまで、@があればさらに全文を複製）。通常入力で非表示の `/` 候補を組み立てない。長文の途中・末尾での絶対byte位置と全角メンションを保つ回帰テストを追加。
+- 検証: `cargo test -p agent_panel --quiet` 194件通過。ビルドは負荷を抑えるため `CARGO_BUILD_JOBS=2` / `nice -n 10`。実機アプリへの入替え・入力遅延の改善率計測は未実施。
+
+## 2026-11-04 — 通知の数字を「スレッドの本数」に揃える
+
+- きっかけ: ベルを数字にしたら、ベルだけ出来事の件数で、他はスレッドの本数というズレが見えるようになった（同じスレッドで 2 回 / すべて既読 / 再起動 / ミュート）。本人と整理して決めた
+- やったこと:
+  - ベル = まだ見ていないスレッドの本数（`inbox_unread_count` を panel + thread_id で重複排除）。履歴は全件残す
+  - すべて既読 = 全ワークスペース + Chat の未確認も消す（`AgentPanel::mark_all_done_seen`）。あなた待ちは残す。ベルが 0 でも未確認があればボタンを出す（再起動後）
+  - 行の ● で既読 = そのスレッドの項目すべて + 未確認を消す（本数で数えるので 1 件だけ既読にしても数字が減らないため・本人が決めた「未読を 2 種類にしない」の帰結）。○ で未読に戻すのはその行だけで、未確認は戻らない
+  - Box アイコン = 赤が無い時は未確認の本数を白い丸で（`attention_count_mark`）。レールのプロジェクトは白い点のまま（行き先の目印）
+- 残す差: 見たあとのあなた待ちはベルから消えて赤に残る。ミュートはベルに載らないが赤とグレーには数える。再起動後はベル 0 で未確認は残る
+- 検証: workspace 327・agent_panel 194 本緑（新しい試験: 同じスレッドの 2 件を 1 と数える / 行の既読で未確認が消える / すべて既読であなた待ちだけ残る）。隔離 offscreen で 6 件 3 スレッドのときベル・Box・確認待ち・statusbar がすべて 3 になるのを目視
+
 ## 2026-11-04 — ACP のログイン（`authenticate`）に対応 / Antigravity を「追加」から使えるように
 
 - きっかけ: 本人の質問「Antigravity / Gemini は ACP に対応していたか」。コードのコメントは「ACP 非対応」のままだったが、公開レジストリに Google 配布の `antigravity-acp`（`agy_acp_server`）が載っていて、CLI にも `agy acp` があった（公式の案内: https://antigravity.google/docs/ide/extensions/acp）。necoder は `authenticate` を送らないので、足しても会話できなかった。
@@ -4390,3 +4433,39 @@
 - 注意（規約）: Antigravity 追加利用規約の §6 と FAQ は、第三者のソフトから Antigravity のログインで使うことを違反とし、停止の対象と書いている（FAQ の例は Claude Code / OpenClaw / OpenCode・勧めは API キー）。一方で公式の案内は「ACP に対応した**どのエディタでも**使える」と書き、対応エディタの申請の窓口も無い。ACP 経由を規約がどう扱うかを明記した文は見つかっていない。`agy -p` を第三者アプリに包むのは FAQ が個人プランでは対象外と明言しているので使わない。
 - 検証: acp_client 153・agent_panel 194・necoder 25 本緑（このコミットの内容だけの作業ツリーで全 crate を実行）。実アプリ（`runtime-shaders` + `NECODER_SCREENSHOT`・隔離した `NECODER_HOME` と HOME）で、`type: registry` の `antigravity-acp` のダウンロード・sha256 検証・展開・起動・カードの表示までを目視。
 - 次: v0.1.36 で本人が実機のサインインを確かめる。
+
+## 2026-11-04 — Chat でコネクタを使う（Claude のみ）
+- やったこと: `chat.connectors`・設定「コネクタ」のページと詳細モーダル・道具ごとの 3 段階の権限・確認カードの「常に許可」。一覧は `acp_client::connector`（`mcp_status`・モデルを呼ばない）。ロゴは Simple Icons。文書は CHAT / DECISIONS / UI-SPEC / GLOSSARY / ARCHITECTURE。
+- 確かめたこと（実アプリ・隔離環境・Claude Code 2.1.317 / claude-agent-acp 0.84.0）: 既定はカードで止まる / 常に許可は `settings.json` に残る / 許可した `list_labels` は聞かずに走る / ブロックした `send_message` とオフにした Figma は ToolSearch に出ない。メールの本文は読ませず、送信もしていない。
+- 学び/罠: `mcp_status` は起動直後に空で返る（`is_settled`）。PATH に古い CLI があると制御要求に答えない。`NECODER_HOME` の設定は `<home>/settings.json`（`config/` を挟まない）。**別セッションが同じ target を使うと、成果物が古くなったり別のツリーのバイナリに置き換わる**ので、確認の前にビルドして変更ファイルを touch する。i18n は locales だけ変えても再コンパイルされない（`crates/i18n/src/i18n.rs` を touch）。
+- 未解決: 検証の途中で 1 回、既定の設定なのにカードを見ないまま `list_labels` が走った。同じ時間帯の別のクラッシュログは別セッションの複製ツリー（`/tmp/necoder-shot`）のバイナリを指していて、同じバイナリだった可能性が高いが断定できない。自分のビルドでは同じ条件で 3 回ともカードで止まった。
+- 次: Chat で Codex を選べるようにする（ChatGPT 側の Gmail プラグインが necoder 経由で届くかを実機で確かめる）→ necoder が OAuth でログインして配る。
+- 追加（同日）: Chat に権限モードのピル。実機: `bypassPermissions` はカードなしで `list_labels` が走り、ブロックした `send_message` は ToolSearch に出ない。Codex の広告は `read-only` / `agent` / `agent-full-access`（`is_bypass_mode` は `agent-full-access` を bypass と見ない）。bypass では PermissionRequest が来ないので、添付への書き込みの巻き戻しの記録が残らない可能性がある（未検証）。
+
+
+
+## 2026-11-04 — Chat の Codex 対応
+
+- AI 選択、AI ごとの Chat のモード記憶、履歴を開く時の AI 復元を追加。
+- Codex は `CODEX_CONFIG.developer_instructions`、シェル OFF、読むだけの MCP、ネイティブ apply_patch を使う。ACP の mcpServers が CODEX_CONFIG の OFF 指定を消すため、MCP は同じ設定テーブルに集約。
+- 設定のコネクタ一覧へ ChatGPT のアプリを追加。モデルを呼ばず Codex App Server の状態を取得し、注記から Read/Write/Delete/Send に分類。OFF/Block/Ask/Allow は apps 設定へ写す。
+- 実機プローブで相談・作成・範囲外書き込み拒否・再開後の編集を確認。`base_instructions` の設定はモデルのシステム指示を置換しなかったため、公式の developer_instructions へ修正。
+- 残件: Gmail 接続後の実メール検証、Codex の PDF 読み取り、承認のない変更の checkpoint、エディタの Codex へのコネクタ設定適用。未検証の機能をリリース済み扱いにしない。
+
+- 最終確認: 関連 494 件のテスト（acp_client / chat_core / settings_core / agent_panel / necoder / settings）通過、runtime-shaders の check/build 通過。実 Chat の Codex で添付テキストを MCP 経由で読み取ることと、確認カードが出ないことを画面で確認。Gmail は未接続のため未検証。コミット・リリースは実施していない。
+
+## 2026-11-04 — 音を OFF にしているのに、にゃーが連打で鳴る
+
+- きっかけ: 本人「音声を OFF にしているのに、にゃーが流れた。しかも連打になる」
+- 分かったこと: 本人の設定は完了も入力待ちも `off` で、出荷のアプリは鳴らさない。鳴らしていたのは開発中の試験と撮影。隔離した設定を使うので既定の `nyaan` になり、`on_event` の承認・質問・完了から本物の `afplay` まで届く。試験は並列なので連打になる
+- 計測: `sandbox-exec` で `/usr/bin/afplay` の起動だけを禁止して試験バイナリを動かすと、音を出さずに回数を数えられる（agent_panel 全件で 9 回 / workspace の通知の試験で 1 回）。`通知音の再生に失敗` の行を数える
+- やったこと: `sound::play` は `cfg!(any(test, feature = "silent"))` なら何もしない。agent_panel に feature `silent`。workspace / necoder の dev-dependencies と necoder の `screenshot` feature から有効にする。出荷の `cargo build -p necoder` には dev-dependencies の feature が入らない（resolver 2）
+- 罠: 別の crate の試験では agent_panel の `cfg(test)` が立たないので、`cfg(test)` だけでは止まらない
+
+
+## 2026-11-04 — v0.1.37 のリリース準備
+
+- 本人の依頼で、これまでの未公開分を一括リリースする。公開済み最新版は v0.1.35。中止された v0.1.36 向けのログイン・Antigravity 対応と、Chat の Codex・コネクタ・権限モード、スレッド一覧・未確認数・入力処理の改善、試験の通知音抑止をまとめる。
+- Cargo.toml / Cargo.lock を 0.1.37 へ更新し、英日リリースノートを作成。Codex の Gmail・Auto / Full access の通し検証、PDF、承認なしの変更の checkpoint は既知の制限として公開する。本人が公開後の確認を選んだため、これらを公開前の承認待ちにはしない。
+- cargo-deny 0.20.2 の公式配布物を GitHub の SHA-256 と照合して /tmp で実行。advisories / bans / licenses / sources 全て通過。ライセンス境界検査も通過。
+- 容量不足のため再生成可能な target/debug/incremental を整理。relay/.wrangler はローカル実行状態なので Git の対象から外す。

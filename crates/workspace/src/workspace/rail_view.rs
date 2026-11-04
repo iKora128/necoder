@@ -295,7 +295,7 @@ impl Workspace {
                         div()
                             .relative()
                             .child(self.rail_icon_inert("rail-threads", "icons/inbox.svg"))
-                            .children(self.attention_mark(self.attention_totals(cx))),
+                            .children(self.attention_count_mark(self.attention_totals(cx))),
                     );
                 }
                 // スレッド一覧（herd）。右上に全体の確認待ちの印（UI-SPEC §8）。Fleet 中は同じ枠が
@@ -316,7 +316,7 @@ impl Workspace {
                         },
                     )
                     .relative()
-                    .children(self.attention_mark(self.attention_totals(cx)))
+                    .children(self.attention_count_mark(self.attention_totals(cx)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| this.toggle_herd_sidebar(cx)),

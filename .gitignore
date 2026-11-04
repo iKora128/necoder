@@ -33,3 +33,6 @@ herdr/
 
 # cf CLI が作業したフォルダに作るビルドの出力（relay/ と site/ は各自の .gitignore でも外している）
 .cloudflare/
+
+# Wrangler のローカル実行キャッシュ・状態（配布しない）
+.wrangler/

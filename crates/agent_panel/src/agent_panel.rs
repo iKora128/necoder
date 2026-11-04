@@ -275,7 +275,7 @@ fn previous_user_entry_index(entries: &[Entry], top_item: usize) -> Option<usize
 /// **登録順ではない**のが肝: `list` は可視範囲だけを描く代わりに、可視外のエントリも
 /// 高さを知るために「計測だけ」描く。しかも末尾追従中は下から上へ向かって描くので、
 /// 登録順は画面順と一致しない（2026-09-11 のクラッシュの原因）。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct RegionId {
     /// transcript item（= エントリ）の index。
     item: usize,
@@ -478,9 +478,11 @@ struct StyledTextCacheKey {
     content: ContentCacheKey,
     styles_hash: u64,
     styles_len: usize,
-    /// 同じ本文が複数箇所にある場合も TextLayout を共有しないための登録順スロット。
-    /// 1 フレーム内で同じ View が二度描かれないよう、id ではなく登録順を鍵にする。
-    slot: usize,
+    /// 可視範囲や描画順が変わっても本文のレイアウトを再利用する。
+    region: RegionId,
+    /// List は同じリージョンを計測用と描画用に組むことがある。
+    /// 同一フレームで同じ View を二度使わないよう、そのリージョン内だけで数える。
+    occurrence: usize,
 }
 
 /// 本文 hash ごとの独立 View。Entity の Render cache に `StyledText` と shape/wrap 済み layout が
@@ -533,6 +535,8 @@ struct StyledTextEntityCache {
         ),
     >,
     order: VecDeque<StyledTextCacheKey>,
+    /// フレームごとにクリアする。同じ項目の重複計測だけを区別し、他の項目の出入りには依存しない。
+    occurrences: HashMap<RegionId, usize>,
 }
 
 impl StyledTextEntityCache {
@@ -3836,6 +3840,7 @@ PYEOF"#;
         cx: &mut Context<Self>,
     ) {
         let mut grants_changed = false;
+        let mut always_allowed_connector_tool = None;
         if let Some(thread) = self.threads.get_mut(thread_index) {
             if let Some(pending) = thread.pending_permission.take() {
                 let mut answer = option_index;
@@ -3845,7 +3850,18 @@ PYEOF"#;
                     .options
                     .get(option_index)
                     .is_some_and(|option| option.kind == PermissionKind::AllowAlways);
-                if chose_always && thread.chat.is_some() {
+                // コネクタの道具の「常に許可」は設定へ覚える。エージェントには今回だけの許可で返す
+                // （裁定は necoder が持ち続ける。設定で戻せるようにするため）。
+                let connector_tool = settings_core::parse_connector_tool(&pending.title)
+                    .map(|(key, tool)| (key.to_string(), tool.to_string()));
+                if chose_always && connector_tool.is_some() {
+                    always_allowed_connector_tool = connector_tool;
+                    answer = pending
+                        .options
+                        .iter()
+                        .position(|option| option.kind == PermissionKind::Allow)
+                        .unwrap_or(option_index);
+                } else if chose_always && thread.chat.is_some() {
                     if let Some(chat) = thread.chat.as_mut() {
                         for path in &pending.chat_grantable {
                             if !chat.write_grants.contains(path) {
@@ -3861,6 +3877,17 @@ PYEOF"#;
                         .unwrap_or(option_index);
                 }
                 pending.respond.unbounded_send(answer).ok();
+            }
+        }
+        if let Some((key, tool)) = always_allowed_connector_tool {
+            let saved = settings::set_connector_tool_level(
+                cx,
+                &key,
+                tool,
+                settings_core::ConnectorToolLevel::Allow,
+            );
+            if let Err(error) = saved {
+                eprintln!("コネクタの権限を保存できません: {error:#}");
             }
         }
         if grants_changed {
@@ -4041,6 +4068,22 @@ PYEOF"#;
         cx.emit(PanelEvent::ThreadViewed { thread_id, cleared });
     }
 
+    /// id で指定して「見た」にする（通知の履歴の行を既読にした時）。閉じたスレッドなら何もしない。
+    pub fn mark_thread_viewed_by_id(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        if let Some(index) = self.thread_index_by_id(thread_id) {
+            self.mark_thread_viewed(index, cx);
+        }
+    }
+
+    /// このパネルの未確認をすべて消す（通知の履歴の「すべて既読」）。あなた待ちは答えるまで残る。
+    pub fn mark_all_done_seen(&mut self, cx: &mut Context<Self>) {
+        for index in 0..self.threads.len() {
+            if self.threads[index].done.is_some() {
+                self.mark_thread_viewed(index, cx);
+            }
+        }
+    }
+
     /// 変わった未確認の印を DB へ書く（再起動を越えて残す）。読めなくても動作は止めない。
     fn persist_unseen_changes(&mut self) {
         let Some(storage) = self.storage.clone() else {
@@ -4193,7 +4236,13 @@ PYEOF"#;
         // 計算より前に混ぜるので、検索語が変われば作り直される。
         let mut base_highlights = base_highlights;
         base_highlights.extend(self.transcript_search_highlights(id.item, text.as_ref()));
-        let slot = self.transcript_regions.borrow().len();
+        let occurrence = {
+            let mut cache = self.styled_text_cache.borrow_mut();
+            let next = cache.occurrences.entry(id).or_default();
+            let occurrence = *next;
+            *next += 1;
+            occurrence
+        };
         let selection = self.region_selection(id, text.len()).map(|range| {
             (
                 range,
@@ -4209,7 +4258,8 @@ PYEOF"#;
             content: content_cache_key(text.as_ref()),
             styles_hash: style_hasher.finish(),
             styles_len: base_highlights.len(),
-            slot,
+            region: id,
+            occurrence,
         };
         let cached = {
             let cache = self.styled_text_cache.borrow();
@@ -6463,7 +6513,11 @@ PYEOF"#;
         cx: &App,
     ) -> Vec<SelectorChoice> {
         if selector == Selector::Agent {
-            return agent_choices(thread.agent.clone(), cx);
+            let mut choices = agent_choices(thread.agent.clone(), cx);
+            if thread.chat.is_some() {
+                choices.retain(|choice| matches!(choice.value.as_ref(), "Claude Code" | "Codex"));
+            }
+            return choices;
         }
         // このスレッドのセッションが開いていれば**そのセッションの広告**が正。まだなら同じ agent の
         // 在庫（別タブ・先張りで受け取った物）で代替する。どちらも無ければ空＝ピルは押せない。
@@ -6630,7 +6684,10 @@ PYEOF"#;
             cx.notify();
             return;
         }
-        if selector == Selector::Agent && self.agent_selector_locked() {
+        if selector == Selector::Agent
+            && (self.agent_selector_locked()
+                || (self.chat_mode && !matches!(value.as_ref(), "Claude Code" | "Codex")))
+        {
             self.open_menu = None;
             cx.notify();
             return;
@@ -6644,7 +6701,37 @@ PYEOF"#;
             .get(self.active)
             .and_then(|thread| settings::agent_by_label(cx, thread.agent.as_ref()))
             .map(|agent| agent.id().to_string());
-        if let (Some(agent_id), Some(config_id)) = (active_agent_id, selector.config_id()) {
+        // Chat の権限モードは Chat の記憶へ（エディタの「聞かずに進める」と混ぜない）。
+        let chat_mode_choice = selector == Selector::Mode
+            && self
+                .threads
+                .get(self.active)
+                .is_some_and(|thread| thread.chat.is_some());
+        if chat_mode_choice {
+            let mut modes = settings::get(cx).chat.permission_modes;
+            if let Some(agent_id) = &active_agent_id {
+                modes.insert(agent_id.clone(), value.to_string());
+            }
+            let result = settings::set_nested_user_value(
+                cx,
+                "chat",
+                "permission_modes",
+                serde_json::json!(modes),
+            );
+            self.report_settings_save(result, cx);
+            // 旧設定を Claude 用に保つ（既存ユーザーの移行）。
+            let result = if active_agent_id.as_deref() == Some("claude") {
+                settings::set_nested_user_value(
+                    cx,
+                    "chat",
+                    "permission_mode",
+                    serde_json::json!(value.to_string()),
+                )
+            } else {
+                Ok(())
+            };
+            self.report_settings_save(result, cx);
+        } else if let (Some(agent_id), Some(config_id)) = (active_agent_id, selector.config_id()) {
             let result = settings::set_agent_config_default(cx, &agent_id, config_id, &value);
             self.report_settings_save(result, cx);
         }
@@ -6657,6 +6744,9 @@ PYEOF"#;
                     // 切り替え先 agent の sticky（モデル/思考量/モード）で開き直す。無ければ vendor
                     // フォールバック — Claude の sticky を Codex へ持ち込むとメニューが Claude 一色になる。
                     apply_agent_sticky(thread, cx);
+                    if thread.chat.is_some() {
+                        thread.permission_mode = chat::chat_start_mode(&value, cx);
+                    }
                     // 先張り済みのセッションは**前の agent のプロセス**。送信路を捨てると
                     // `run_session` が抜けてプロセスも落ちる。広告とセッション id も前の agent の
                     // 物なので一緒に捨て、下で新しい agent に張り直す。
@@ -6714,6 +6804,16 @@ PYEOF"#;
             }
         }
         if let Some(thread_id) = agent_changed {
+            if self.chat_mode {
+                let result = settings::set_nested_user_value(
+                    cx,
+                    "chat",
+                    "agent",
+                    serde_json::json!(value.to_string()),
+                );
+                self.report_settings_save(result, cx);
+                self.persist_thread(self.active);
+            }
             // 前の agent の試行履歴は無効。新しい agent で先に繋いで、ピルの一覧を入れ替える。
             self.prewarmed.remove(&thread_id);
             self.schedule_prewarm(cx);
@@ -7479,14 +7579,19 @@ PYEOF"#;
     fn refresh_mention_state(&mut self, cx: &mut Context<Self>) {
         let word = {
             let composer = self.composer.read(cx);
-            let before = composer.text_before_caret(usize::MAX);
-            // 点滅の notify でも呼ばれるので、`@` が無ければ本文全体は写さない。
-            if before.contains(['@', '＠']) {
-                let text = composer.plain_text();
-                mention_query_at(&before, text.get(before.len()..).unwrap_or_default())
-            } else {
-                None
-            }
+            // @語は改行をまたがない。長い下書きでも現在行だけを読み、
+            // 打鍵・キャレット点滅のたびに先頭からの全文を複製しない。
+            let buffer = composer.buffer();
+            let head = buffer
+                .selections()
+                .first()
+                .map_or(0, |selection| selection.head);
+            let snapshot = buffer.snapshot();
+            let point = snapshot.byte_to_point(head);
+            let line = snapshot.line_text(point.row);
+            let column = point.column.min(line.len());
+            mention_query_at(&line[..column], &line[column..])
+                .map(|(start, query)| (head - point.column + start, query))
         };
         if word == self.mention.word {
             return;
@@ -8043,15 +8148,20 @@ PYEOF"#;
             })
             .unwrap_or_default();
         // claude.ai のコネクタを読み込まない設定なら、エージェントのプロセスへそう伝える
-        // （`settings.claude_ai_connectors`。Chat は下で常に切る）。
+        // （`settings.claude_ai_connectors`。Chat は `chat.connectors` で別に決める＝下の `chat_session_preferences`）。
         let mut preferences = preferences;
         if !settings::get(cx).claude_ai_connectors {
             preferences.preset.env.insert(
                 "ENABLE_CLAUDEAI_MCP_SERVERS".to_string(),
                 "false".to_string(),
             );
+        } else {
+            // オフにしたサービスとブロックした道具はモデルから隠す。`_meta.claudeCode` なので
+            // 他のエージェントは読まない。何も無ければ `_meta` は増えない。
+            preferences.preset.disallowed_tools =
+                settings_core::connector_disallowed_tools(&settings::get(cx).connectors);
         }
-        // Chat のスレッドはセッションの作り方が違う（プリセット・権限モード固定・MCP なし）。
+        // Chat のスレッドはセッションの作り方が違う（プリセット・チャットの権限モード・コネクタのスイッチ）。
         let preferences = self.chat_session_preferences(thread_index, preferences, cx);
         // 席のスレッドは権限モードと MCP を席の決まりで上書きする（FLEET-V2 §5.8）。
         let preferences = self.seat_session_preferences(thread_index, preferences, cx);
@@ -8664,10 +8774,38 @@ PYEOF"#;
                 mcp_tool,
                 respond,
             } => {
+                // Codex の MCP は Execute として届く。シェルと区別し、未知の MCP は確認する。
+                // 自前の読む道具だけは引数のパスを使って、添付かどうかを通常の裁定へ渡す。
+                let (kind, paths) = if mcp_tool && thread.chat.is_some() {
+                    let input = raw_input
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+                    if let Some(input) = input.filter(|input| {
+                        input["server"] == "necoder_chat"
+                            && matches!(
+                                input["tool"].as_str(),
+                                Some("read_file" | "list_files" | "search")
+                            )
+                    }) {
+                        let paths = input["arguments"]["path"]
+                            .as_str()
+                            .map(|path| vec![path.to_string()])
+                            .unwrap_or(paths);
+                        (Some(acp_client::ToolCallKind::Read), paths)
+                    } else {
+                        (Some(acp_client::ToolCallKind::Other), paths)
+                    }
+                } else {
+                    (kind, paths)
+                };
                 // Chat は「ファイルを渡す = 触ってよいと伝える」で裁く（`chat.rs`）。それ以外は `None`。
-                let chat_permission = Self::chat_permission(thread, kind, &paths).or_else(|| {
-                    Self::seat_permission(thread, kind, &title, &tool_call_id, mcp_tool)
-                });
+                let connector_decision = Self::connector_permission(thread, &title, cx);
+                let connector_decided = connector_decision.is_some();
+                let chat_permission = connector_decision
+                    .or_else(|| Self::chat_permission(thread, kind, &paths))
+                    .or_else(|| {
+                        Self::seat_permission(thread, kind, &title, &tool_call_id, mcp_tool)
+                    });
                 // checkpoint は**書かれる前**にここで切る（M12-2）。手動でも自動 Allow でも一本道。
                 // 変更前内容は**常にディスクから全文を読む**。diff の old_text は Edit ツールだと
                 // **置換ハンクの断片**であり、全文として保存すると restore がファイルを断片へ
@@ -8745,13 +8883,18 @@ PYEOF"#;
                         // 間引くと別の選択肢を選んだことになる。出さない判断は描画側でする。
                         for option in &mut options {
                             if option.kind == PermissionKind::AllowAlways {
-                                option.label = i18n::t!("chat.allow_in_this_chat");
+                                option.label =
+                                    if settings_core::parse_connector_tool(&title).is_some() {
+                                        i18n::t!("chat.connector_always_allow")
+                                    } else {
+                                        i18n::t!("chat.allow_in_this_chat")
+                                    };
                             }
                         }
                         chat_grantable = grantable;
                     }
                 }
-                if auto_allow && thread.chat.is_some() {
+                if auto_allow && (thread.chat.is_some() || connector_decided) {
                     permission_waiting = false; // 聞いていないので「承認待ち」を鳴らさない
                 }
                 let storage = self.storage.clone();
@@ -10627,6 +10770,7 @@ PYEOF"#;
         // 選択リージョンは可視 Entry だけをフレーム毎に作り直す。巨大 transcript でも offscreen の
         // StyledText/TextLayout を構築しない（ドラッグ選択は現在のビューポート内を対象にする）。
         self.transcript_regions.borrow_mut().clear();
+        self.styled_text_cache.borrow_mut().occurrences.clear();
         div()
             .id("agent-transcript")
             .track_focus(&self.transcript_focus)
@@ -10641,8 +10785,8 @@ PYEOF"#;
             } else {
                 CursorStyle::IBeam
             })
-            // List が wheel を処理し、親は浮遊ボタンの出没だけ再評価する。
-            .on_scroll_wheel(cx.listener(|_, _: &gpui::ScrollWheelEvent, _, cx| cx.notify()))
+            // List 自身がスクロール位置の更新後にこの View へ notify する。
+            // 浮遊ボタンもその描画で更新されるので、親からの重複通知は不要。
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(Self::on_transcript_mouse_down),
@@ -12839,11 +12983,10 @@ PYEOF"#;
                         ))
                     })
                     .child(
-                        quiet_button("auth-dismiss".into(), dismiss_label)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| this.dismiss_auth_card(cx)),
-                            ),
+                        quiet_button("auth-dismiss".into(), dismiss_label).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.dismiss_auth_card(cx)),
+                        ),
                     ),
             );
         Some(card.into_any_element())
@@ -12937,7 +13080,7 @@ PYEOF"#;
                             .min_w_0()
                             .text_size(px(12.5))
                             .text_color(theme.fg0)
-                            .child(pending.title.clone()),
+                            .child(connector_card_title(&pending.title)),
                     ),
             );
 
@@ -12983,9 +13126,11 @@ PYEOF"#;
                     .iter()
                     .enumerate()
                     .filter(|(_, option)| {
+                        // コネクタの「常に許可」は設定へ覚えるので、Chat でも出す。
                         !(self.chat_mode
                             && option.kind == PermissionKind::AllowAlways
-                            && pending.chat_grantable.is_empty())
+                            && pending.chat_grantable.is_empty()
+                            && settings_core::parse_connector_tool(&pending.title).is_none())
                     })
                     .map(|(index, option)| permission_button(index, option, color, &theme, cx)),
             );
@@ -13047,7 +13192,7 @@ PYEOF"#;
         composer_focused: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !composer_focused {
+        if !composer_focused || self.slash.input == SlashInput::Inactive {
             return None;
         }
         let theme = self.theme.clone();
@@ -13313,6 +13458,11 @@ PYEOF"#;
 
     fn render_composer(&self, composer_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
+        // 「書き込み: フォルダ + 添付」は、エージェントが聞いてくる既定のモードの時だけ本当のこと。
+        let chat_scope_applies = self.chat_mode
+            && self.threads.get(self.active).is_some_and(|thread| {
+                thread.permission_mode.as_ref() == chat_core::preset::PERMISSION_MODE
+            });
         let color = self.active_color();
         // 本文が `!` の間は「シェルへ行く」見た目（枠・宛先・実行ボタンを syn-mac に・#37）。
         let shell_mode = self.shell_input;
@@ -13585,13 +13735,11 @@ PYEOF"#;
                             .items_center()
                             .gap(px(6.))
                             .pt(px(6.))
-                            .when(!self.chat_mode, |row| {
-                                row.child(self.render_selector_pill(Selector::Agent, cx))
-                                    .child(self.render_selector_pill(Selector::Mode, cx))
-                            })
-                            // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
+                            .child(self.render_selector_pill(Selector::Agent, cx))
+                            .child(self.render_selector_pill(Selector::Mode, cx))
+                            // 既定のモードの間は、書ける範囲を示す
                             // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
-                            .when(self.chat_mode, |row| {
+                            .when(chat_scope_applies, |row| {
                                 row.child(
                                     div()
                                         .id("chat-write-scope")
@@ -14855,9 +15003,25 @@ fn agent_server_override(agent_id: &str, cx: &App) -> Option<acp_client::AgentOv
 /// 「聞かずに進める」権限モードの id か（O16）。Claude Code の `bypassPermissions`（と同じく bypass を
 /// 名に持つもの）、Qwen Code の `yolo`、Codex の `full-access`。この id のスレッドは、エージェントが
 /// それでも許可を聞いてきたら UI でも自動で許可する（モード切替のレースの窓で止めない）。
+/// 確認カードの題名。コネクタの道具は `Gmail · list_labels` の形で見せる（内部名を読ませない）。
+fn connector_card_title(title: &SharedString) -> SharedString {
+    match settings_core::parse_connector_tool(title) {
+        Some((key, tool)) => {
+            let service = key
+                .strip_prefix("claude_ai_")
+                .unwrap_or(key)
+                .replace('_', " ");
+            SharedString::from(format!("{service} · {tool}"))
+        }
+        None => title.clone(),
+    }
+}
+
 fn is_bypass_mode(mode_id: &str) -> bool {
     let lowered = mode_id.to_lowercase();
-    lowered.contains("bypass") || lowered == "yolo" || lowered == "full-access"
+    lowered.contains("bypass")
+        || lowered == "yolo"
+        || matches!(lowered.as_str(), "full-access" | "agent-full-access")
 }
 
 /// 広告されたモードのうち「聞かずに進める」もの（広告の順で最初の 1 つ）。無ければ `None`。
@@ -16156,6 +16320,139 @@ PYEOF"#;
             copied.is_some_and(|text| text.contains(&live_text)),
             "生成中の本文が選択テキストに含まれる（= ⌘C でコピーできる）"
         );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// スクロールで可視項目の順序が変わっても本文の Entity を使い回す。
+    /// 同じ項目を計測・描画で複数回組む場合は独立した TextLayout が必要。
+    #[gpui::test]
+    fn transcript_text_cache_survives_visible_range_changes(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "scroll_text_cache");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            let frame = |panel: &mut AgentPanel, items: &[usize], cx: &mut Context<AgentPanel>| {
+                // 実際の描画と同じ経路でフレーム内の登録を初期化する。
+                let _transcript = panel.render_transcript(cx);
+                for &item in items {
+                    panel
+                        .transcript_region_cursor
+                        .set(RegionId { item, sub: 0 });
+                    let text = if item == 11 || item == 12 {
+                        "同じ本文 日本語".into()
+                    } else {
+                        format!("本文 {item} 日本語").into()
+                    };
+                    let _element = panel.selectable_text(text, cx);
+                }
+                panel
+                    .transcript_regions
+                    .borrow()
+                    .iter()
+                    .map(|region| region.styled.clone())
+                    .collect::<Vec<_>>()
+            };
+            let first = frame(panel, &[10, 11, 11, 12], cx);
+            assert_ne!(
+                first[0].entity_id(),
+                first[1].entity_id(),
+                "別の項目は別のレイアウト"
+            );
+            assert_ne!(
+                first[1].entity_id(),
+                first[2].entity_id(),
+                "同一フレームの重複計測も分離"
+            );
+            let scrolled = frame(panel, &[11, 11, 12, 13], cx);
+            assert_eq!(
+                first[1].entity_id(),
+                scrolled[0].entity_id(),
+                "可視範囲が動いても再利用"
+            );
+            assert_eq!(first[2].entity_id(), scrolled[1].entity_id());
+            assert_eq!(first[3].entity_id(), scrolled[2].entity_id());
+            let reversed = frame(panel, &[12, 11, 11, 10], cx);
+            assert_eq!(
+                first[0].entity_id(),
+                reversed[3].entity_id(),
+                "末尾追従の逆順でも再利用"
+            );
+            assert_eq!(first[1].entity_id(), reversed[1].entity_id());
+            assert_eq!(first[2].entity_id(), reversed[2].entity_id());
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// ホイールイベントを実際に配送し、List だけの通知で表示位置が更新されることを確かめる。
+    #[gpui::test]
+    fn transcript_wheel_scroll_updates_view_and_reuses_text(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "scroll_reuse_wheel");
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let mut panel = AgentPanel::new(Theme::dark(), cx);
+            let active = panel.active;
+            panel.threads[active].entries = (0..12)
+                .map(|index| {
+                    Entry::Agent(
+                        format!("本文 {index} 日本語の段落です。\n\n二段落目 {index} です。")
+                            .into(),
+                    )
+                })
+                .collect();
+            panel.reset_transcript_list(true);
+            panel
+        });
+        cx.simulate_resize(gpui::size(px(600.), px(800.)));
+        cx.run_until_parked();
+        let (position, before, entities) = panel.update(cx, |panel, _cx| {
+            let entities: HashSet<_> = panel
+                .transcript_regions
+                .borrow()
+                .iter()
+                .map(|region| region.styled.entity_id())
+                .collect();
+            (
+                panel.transcript_list.viewport_bounds().center(),
+                panel.transcript_list.logical_scroll_top(),
+                entities,
+            )
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(120.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            let after = panel.transcript_list.logical_scroll_top();
+            assert!(
+                after.item_ix < before.item_ix
+                    || (after.item_ix == before.item_ix
+                        && after.offset_in_item < before.offset_in_item),
+                "ホイールで過去の本文へ動く"
+            );
+            assert!(
+                panel.render_jump_to_latest(cx).is_some(),
+                "最新へボタンも更新する"
+            );
+            let regions = panel.transcript_regions.borrow();
+            assert!(
+                regions.iter().any(|region| region.bounds.get().is_some()
+                    && entities.contains(&region.styled.entity_id())),
+                "表示中の本文 Entity を再利用する"
+            );
+            // スクロール後の表示位置から文字を拾える（古い TextLayout の座標を使わない）。
+            let region = regions
+                .iter()
+                .find(|region| region.bounds.get().is_some())
+                .unwrap();
+            let point = region.bounds.get().unwrap().center();
+            let expected = region.id;
+            drop(regions);
+            assert_eq!(
+                panel.transcript_point_at(point, cx).unwrap().region,
+                expected
+            );
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 
@@ -18640,15 +18937,27 @@ PYEOF"#;
             // ⌃Tab で 1 を通り過ぎて 2 へ。
             panel.switch_thread(1, cx);
             panel.note_thread_on_screen(true, cx);
-            assert_eq!(panel.threads[1].activity(), done, "切り替えただけでは消えない");
+            assert_eq!(
+                panel.threads[1].activity(),
+                done,
+                "切り替えただけでは消えない"
+            );
             panel.switch_thread(2, cx);
             panel.note_thread_on_screen(true, cx);
         });
         vcx.executor().advance_clock(VIEW_DWELL * 2);
         vcx.run_until_parked();
         panel.update(vcx, |panel, cx| {
-            assert_eq!(panel.threads[1].activity(), done, "素通りのタブは未確認のまま");
-            assert_eq!(panel.threads[2].activity(), ThreadActivity::Idle, "留まったら消える");
+            assert_eq!(
+                panel.threads[1].activity(),
+                done,
+                "素通りのタブは未確認のまま"
+            );
+            assert_eq!(
+                panel.threads[2].activity(),
+                ThreadActivity::Idle,
+                "留まったら消える"
+            );
 
             // 狙って開く = 待たずに消える。
             panel.focus_thread(3, cx);
@@ -18681,9 +18990,7 @@ PYEOF"#;
     }
 
     #[gpui::test]
-    fn an_unread_mark_survives_a_restart_until_the_thread_is_viewed(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn an_unread_mark_survives_a_restart_until_the_thread_is_viewed(cx: &mut gpui::TestAppContext) {
         let settings_path = init_test_settings(cx, "unread-restart");
         let db_path = std::env::temp_dir().join(format!(
             "necoder_agent_unread_restart_{}_{}.db",
@@ -20402,6 +20709,42 @@ PYEOF"#;
             SlashInput::Inactive
         );
         assert!(names(cx).is_empty());
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 長い下書きの末尾でも現在行だけで補完でき、置換位置は全文の byte 座標を保つ。
+    #[gpui::test]
+    fn mention_completion_preserves_multiline_offsets(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "mention-multiline-offsets");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            let prefix = "以前の説明。\n".repeat(1000);
+            panel.set_context_files(vec!["src/file.rs".into()], cx);
+            panel.composer.update(cx, |composer, cx| {
+                composer.set_plain_text(&format!("{prefix}見て ＠ｆｉｌ"), cx);
+            });
+            panel.refresh_mention_state(cx);
+            assert_eq!(
+                panel.mention.word,
+                Some((prefix.len() + "見て ".len(), "fil".into()))
+            );
+            assert_eq!(
+                panel.mention.candidates,
+                vec![SharedString::from("src/file.rs")]
+            );
+            panel.accept_mention(0, cx);
+            assert_eq!(
+                panel.composer.read(cx).plain_text(),
+                format!("{prefix}見て @src/file.rs ")
+            );
+            // 前の行に @ が残っていても、今の行の通常文では候補を出さない。
+            panel.composer.update(cx, |composer, cx| {
+                composer.set_plain_text("@file\n普通の入力", cx);
+            });
+            panel.refresh_mention_state(cx);
+            assert!(panel.mention.word.is_none());
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 

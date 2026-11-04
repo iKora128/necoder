@@ -79,6 +79,35 @@ impl Workspace {
             .child(SharedString::from(badge_label(count)))
     }
 
+    /// Box アイコンの印: あなた待ちがあれば赤い丸、無くて未確認があれば白い丸に本数を出す。
+    pub(crate) fn attention_count_mark(&self, counts: AttentionCounts) -> Option<gpui::AnyElement> {
+        if counts.waiting > 0 {
+            return self.attention_mark(counts);
+        }
+        (counts.unread > 0).then(|| {
+            div()
+                .absolute()
+                .top(px(-7.))
+                .right(px(-8.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .min_w(px(20.))
+                .h(px(20.))
+                .px(px(4.))
+                .rounded(px(10.))
+                .bg(self.theme.fg0)
+                .border_2()
+                .border_color(self.theme.bg0)
+                .text_size(px(10.))
+                .line_height(px(16.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(self.theme.bg0)
+                .child(SharedString::from(badge_label(counts.unread)))
+                .into_any_element()
+        })
+    }
+
     /// アイコンの右上の印: あなた待ちがあれば赤い丸、無くて未確認があれば白い点、どちらも無ければ
     /// 何も出さない。面と同じ色の 2px で切り抜いて、アイコンから浮かせる。親は `.relative()`。
     pub(crate) fn attention_mark(&self, counts: AttentionCounts) -> Option<gpui::AnyElement> {
@@ -188,7 +217,7 @@ impl Workspace {
 }
 
 /// 2 桁を超えたら詰める（丸の幅を保つ）。
-fn badge_label(count: usize) -> String {
+pub(crate) fn badge_label(count: usize) -> String {
     if count > 99 {
         "99+".to_string()
     } else {

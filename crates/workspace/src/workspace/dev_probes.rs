@@ -1368,6 +1368,11 @@ impl Workspace {
                 let view = self.chrome.settings_view.clone();
                 view.update(cx, |view, cx| view.debug_select_page(argument, cx));
             }
+            // コネクタの詳細を開く（一覧を確かめ終わってから。引数はサービス名 `claude.ai Gmail`）。
+            "connector" => {
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_open_connector(argument, cx));
+            }
             // transcript 内の検索（⌘F）。
             "find" => {
                 self.set_chat_mode(true, window, cx);

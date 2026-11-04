@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>設定 › コネクタ — サービスと道具を 1 か所に（案 A を採用・Claude の分は実装済み）</title>
+<style>
+/* ============================================================
+   設定 › コネクタ（2026-11-04・案 A を採用。Claude の分は実装済みで、Codex などの接続は次の段階）
+   ねらい: claude.ai のコネクタと MCP サーバを 1 枚に並べ、
+     「何に繋がっているか」「どの AI で使えるか」「道具ごとの権限」を 1 か所で見る。
+     権限は Claude と同じ 3 段階（常に許可 / 確認 / ブロック）。既定は Claude と同じく確認。
+   アイコン: Claude / OpenCode は crates/necoder/assets/icons の在庫。他のロゴは Simple Icons（CC0-1.0）、汎用は Lucide の server（ISC）。
+   規律: 色 = 識別だけ（UI-SPEC §1）。状態は文字の濃さ（fg0 / fg1 / fg2）で分ける。
+         色が付くのは スイッチの on（プロジェクト色）・ナビの選択の左バー・ブランドのロゴ・スレッド色・⏺ のテラコッタだけ
+   ============================================================ */
+:root {
+  --desktop: #0c0d11;
+  --bg0: #16181e; --bg1: #1b1e25; --bg2: #232733; --bg3: #2b3040;
+  --fg0: #d7dae3; --fg1: #9aa1b2; --fg2: #646b7a;
+  --border: #262b36;
+  --accent: #7c8cf8;
+  --thread: #e5a14b;
+  --mono: "SF Mono", Menlo, monospace;
+  --shadow: 0 24px 80px rgba(0,0,0,.55);
+}
+[data-theme="light"] {
+  --desktop: #d8dce3;
+  --bg0: #f0f1f4; --bg1: #ffffff; --bg2: #ffffff; --bg3: #e7eaf0;
+  --fg0: #333845; --fg1: #5c6370; --fg2: #9aa1b2;
+  --border: #d8dce3;
+  --shadow: 0 24px 70px rgba(30,35,50,.28), 0 2px 8px rgba(30,35,50,.14);
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { background: var(--desktop); color: var(--fg0); font: 12.5px/1.5 -apple-system, "Hiragino Sans", sans-serif;
+  display: flex; flex-direction: column; overflow: hidden; }
+code, .mono { font-family: var(--mono); font-size: 11px; }
+
+/* ---- mockbar ---- */
+.mockbar { flex: none; display: flex; align-items: center; gap: 14px; padding: 8px 16px; font-size: 11px; color: var(--fg1);
+  border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.mockbar .grp { display: flex; align-items: center; gap: 4px; }
+.mockbar .grp > span { color: var(--fg2); margin-right: 4px; }
+.mockbar button { font: inherit; color: var(--fg1); background: var(--bg1); border: 1px solid var(--border); border-radius: 5px; padding: 3px 9px; cursor: pointer; }
+.mockbar button.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
+.mockbar .title { font-weight: 700; color: var(--fg0); margin-right: 8px; }
+
+/* ---- window ---- */
+.win { flex: 1; min-height: 0; margin: 12px 16px 14px; display: flex; flex-direction: column; border-radius: 10px; overflow: hidden;
+  border: 2px solid var(--accent); background: var(--bg0); box-shadow: var(--shadow); position: relative; }
+.titlebar { flex: none; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border);
+  font-size: 11.5px; background: color-mix(in srgb, var(--accent) 22%, var(--bg0)); }
+.lights { display: flex; gap: 7px; margin-right: 6px; }
+.lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+.pill { display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 6px; background: var(--bg1); border: 1px solid var(--border); border-left: 3px solid var(--accent); }
+.pill .dest { color: var(--fg2); }
+.body { flex: 1; min-height: 0; display: flex; }
+.rail { flex: none; width: 46px; border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding-top: 8px; gap: 8px; }
+.rail .pj { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; font-size: 12px; color: var(--fg0);
+  background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); }
+.rail .pj.on { border: 1px solid var(--c); box-shadow: 0 0 0 2px color-mix(in srgb, var(--c) 45%, transparent); }
+.rail .gear { margin-top: auto; margin-bottom: 10px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 6px; color: var(--accent); background: var(--bg2); }
+
+/* ---- 設定（2 ペイン） ---- */
+.settings { flex: 1; min-width: 0; display: flex; background: var(--bg1); }
+.nav { flex: none; width: 184px; border-right: 1px solid var(--border); padding: 24px 12px; display: flex; flex-direction: column; gap: 2px; }
+.nav .t { padding: 0 8px 10px; font-size: 18px; font-weight: 600; }
+.nav .search { margin-bottom: 8px; height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border-radius: 6px; background: var(--bg2); border: 1px solid var(--border); color: var(--fg2); font-size: 12px; }
+.nav .it { height: 30px; display: flex; align-items: center; padding: 0 8px; border-radius: 6px; border-left: 2px solid transparent; color: var(--fg1); font-size: 12.5px; }
+.nav .it.sel { background: var(--bg3); color: var(--fg0); border-left-color: var(--accent); }
+.nav .it .b { margin-left: auto; color: var(--fg2); font-size: 11px; }
+.page { flex: 1; min-width: 0; overflow-y: auto; }
+.col { max-width: 720px; margin: 0 auto; padding: 24px 28px 60px; display: flex; flex-direction: column; gap: 14px; }
+.h { display: flex; flex-direction: column; gap: 3px; }
+.h .t { font-size: 13px; font-weight: 600; color: var(--fg1); }
+.h .s { font-size: 11.5px; color: var(--fg2); }
+.sec { font-size: 12px; font-weight: 600; color: var(--fg1); margin-top: 6px; }
+
+.chips { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.chip { height: 22px; padding: 0 8px; display: inline-flex; align-items: center; border-radius: 5px; font-size: 11px; cursor: pointer; white-space: nowrap; border: 1px solid var(--border); color: var(--fg1); }
+.chip.sel { background: var(--bg3); color: var(--fg0); border-color: transparent; }
+.chips .count { margin-left: auto; color: var(--fg2); font-size: 11px; }
+
+/* 1 枚のカードに 1 列 */
+.list { border: 1px solid var(--border); border-radius: 9px; background: var(--bg2); overflow: hidden; }
+.row + .row { border-top: 1px solid var(--border); }
+.rhead { display: flex; align-items: center; gap: 10px; padding: 9px 12px; }
+.rhead.click { cursor: pointer; }
+.rhead.click:hover .nm { text-decoration: underline; text-underline-offset: 2px; }
+.logo { flex: none; width: 26px; height: 26px; display: grid; place-items: center; color: var(--b); }
+.logo svg { width: 20px; height: 20px; display: block; }
+.logo.generic { color: var(--fg2); }
+.row.off .logo { opacity: .4; }
+.txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.nm { font-size: 13px; font-weight: 600; color: var(--fg0); }
+.row.off .nm { color: var(--fg1); }
+.sub { font-size: 11px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub.need { color: var(--fg0); }
+.ais { flex: none; display: flex; gap: 3px; }
+.ai { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; color: var(--c); }
+.ai svg { width: 14px; height: 14px; display: block; }
+.ai.on { background: var(--bg3); }
+.ai.no { color: var(--fg2); opacity: .45; }
+.legend { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--fg2); }
+.legend .ai { width: 18px; height: 18px; }
+.legend .ai svg { width: 11px; height: 11px; }
+.drow .dicon { flex: none; width: 20px; height: 20px; display: grid; place-items: center; color: var(--c); }
+.drow .dicon svg, .menu .m svg, .mini svg { display: block; }
+.drow .dicon svg { width: 16px; height: 16px; }
+.menu .m { color: var(--c); }
+.menu .m .mline { display: flex; align-items: center; gap: 6px; }
+.menu .m .mline svg { width: 13px; height: 13px; }
+.menu .m b { color: var(--fg0); }
+.mini svg { width: 12px; height: 12px; }
+.chev { flex: none; width: 14px; text-align: center; color: var(--fg2); font-size: 13px; }
+.chev::before { content: "›"; }
+.row.open .chev::before { content: "⌄"; }
+.sw { flex: none; width: 34px; height: 18px; border-radius: 9px; background: var(--bg3); position: relative; border: 1px solid var(--border); cursor: pointer; }
+.sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--fg2); transition: left .12s; }
+.sw.on { background: var(--accent); border-color: var(--accent); }
+.sw.on::after { left: 18px; background: #fff; }
+.act { flex: none; height: 22px; padding: 0 8px; display: inline-flex; align-items: center; border-radius: 5px; border: 1px solid var(--border); color: var(--fg1); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.act:hover { background: var(--bg3); color: var(--fg0); }
+.add { align-self: flex-start; }
+
+/* ---- 詳細（モーダル / 行を開く で同じ中身） ---- */
+.scrim { position: absolute; inset: 0; background: rgba(8,9,12,.55); display: none; align-items: center; justify-content: center; z-index: 5; }
+[data-theme="light"] .scrim { background: rgba(60,66,80,.28); }
+.scrim.show { display: flex; }
+.modal { width: 600px; max-height: calc(100% - 44px); display: flex; flex-direction: column; border-radius: 12px; background: var(--bg1); border: 1px solid var(--border); box-shadow: var(--shadow); overflow: hidden; }
+.mhead { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.mhead .close { color: var(--fg2); font-size: 15px; cursor: pointer; padding: 0 4px; }
+.mbody { overflow-y: auto; padding: 14px 16px 16px; }
+.inline { display: none; padding: 2px 12px 12px 48px; }
+.row.open .inline { display: block; }
+.dsec { font-size: 11px; font-weight: 600; color: var(--fg1); margin: 12px 0 6px; }
+.dsec:first-child { margin-top: 0; }
+.dsec .s { font-weight: 400; color: var(--fg2); margin-left: 6px; }
+.dcard { border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); overflow: hidden; }
+.drow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; }
+.drow + .drow, .tools + .drow { border-top: 1px solid var(--border); }
+.drow .a { font-size: 12px; color: var(--fg0); }
+.drow .b { font-size: 10.5px; color: var(--fg2); }
+.drow .l { flex: 1; min-width: 0; }
+.drow.click { cursor: pointer; }
+.drow .tw { width: 12px; color: var(--fg2); flex: none; }
+/* 3 段階（選択 = bg3 + fg0・色相は使わない） */
+.seg { flex: none; display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg span { height: 22px; padding: 0 8px; display: inline-flex; align-items: center; font-size: 10.5px; color: var(--fg2); cursor: pointer; white-space: nowrap; }
+.seg span + span { border-left: 1px solid var(--border); }
+.seg span.sel { background: var(--bg3); color: var(--fg0); font-weight: 600; }
+.tools { display: none; border-top: 1px solid var(--border); background: var(--bg1); padding: 4px 0; }
+.tools.show { display: block; }
+.tool { display: flex; align-items: center; gap: 10px; padding: 3px 10px 3px 32px; }
+.tool code { flex: 1; color: var(--fg1); }
+.note { font-size: 10.5px; color: var(--fg2); margin-top: 6px; }
+
+/* ---- Chat ---- */
+.chatview { flex: 1; min-width: 0; display: none; }
+.chatside { flex: none; width: 200px; border-right: 1px solid var(--border); padding: 12px 8px; display: flex; flex-direction: column; gap: 2px; background: var(--bg1); }
+.chatside .new { height: 28px; display: flex; align-items: center; padding: 0 8px; color: var(--fg1); font-size: 12px; }
+.chatside .c { height: 28px; display: flex; align-items: center; gap: 7px; padding: 0 8px; border-radius: 6px; color: var(--fg1); font-size: 12px; white-space: nowrap; overflow: hidden; }
+.chatside .c i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.chatside .c.sel { background: var(--bg3); color: var(--fg0); }
+.chatmain { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg0); }
+.transcript { flex: 1; min-height: 0; overflow-y: auto; }
+.tcol { max-width: 680px; margin: 0 auto; padding: 22px 24px; display: flex; flex-direction: column; gap: 10px; }
+.you { align-self: flex-end; max-width: 80%; padding: 7px 11px; border-radius: 9px; background: var(--bg2); border: 1px solid var(--border); }
+.step { display: flex; gap: 8px; color: var(--fg0); }
+.step .bullet { color: #d97757; flex: none; }
+.step .r { color: var(--fg2); font-size: 11.5px; }
+.perm { border: 1px solid var(--border); border-left: 3px solid var(--thread); border-radius: 8px; background: var(--bg2); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.perm .q { font-size: 12.5px; font-weight: 600; }
+.perm .q .svc { color: var(--fg1); font-weight: 400; margin-left: 4px; }
+.perm dl { display: grid; grid-template-columns: 52px 1fr; gap: 2px 8px; font-size: 11.5px; }
+.perm dt { color: var(--fg2); }
+.perm dd { margin: 0; color: var(--fg1); }
+.perm .btns { display: flex; align-items: center; gap: 6px; }
+.pbtn { height: 26px; padding: 0 11px; display: inline-flex; align-items: center; border-radius: 6px; border: 1px solid var(--border); color: var(--fg1); font-size: 11.5px; cursor: pointer; }
+.pbtn.main { color: var(--fg0); background: var(--bg3); border-color: transparent; font-weight: 600; }
+.perm .hint { margin-left: auto; font-size: 10.5px; color: var(--fg2); }
+.composerwrap { flex: none; padding: 0 24px 16px; }
+.composer { max-width: 632px; margin: 0 auto; border: 1px solid var(--thread); border-radius: 10px; background: var(--bg1); padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; position: relative; }
+.composer .ph { color: var(--fg2); }
+.composer .bar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg1); }
+.mini { height: 22px; padding: 0 7px; display: inline-flex; align-items: center; gap: 4px; border-radius: 5px; border: 1px solid var(--border); white-space: nowrap; cursor: pointer; }
+.mini .k { color: var(--fg2); }
+.send { margin-left: auto; width: 24px; height: 24px; border-radius: 6px; background: var(--thread); color: #1b1e25; display: grid; place-items: center; font-weight: 700; }
+.menu { position: absolute; left: 8px; bottom: 40px; width: 280px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg2); box-shadow: 0 8px 30px rgba(0,0,0,.4); padding: 4px; display: none; }
+.menu.show { display: block; }
+.menu .m { display: flex; flex-direction: column; padding: 5px 8px; border-radius: 5px; }
+.menu .m.sel { background: var(--bg3); }
+.menu .m b { font-weight: 500; font-size: 12px; }
+.menu .m span { font-size: 10.5px; color: var(--fg2); }
+</style>
+</head>
+<body>
+<div class="mockbar">
+  <span class="title">設定 › コネクタ（Codex などの接続は次の段階）</span>
+  <div class="grp"><span>テーマ</span><button class="on" id="t-dark" onclick="setTheme('dark')">Dark</button><button id="t-light" onclick="setTheme('light')">Light</button></div>
+  <div class="grp"><span>画面</span><button id="v-settings" onclick="setScreen('settings')">設定</button><button id="v-chat" onclick="setScreen('chat')">Chat の確認カード</button></div>
+  <div class="grp"><span>詳細の出し方</span><button id="d-modal" onclick="setDetail('modal')">モーダル（案 A）</button><button id="d-inline" onclick="setDetail('inline')">行を開く（案 B）</button></div>
+  <div class="grp"><span>確認カード</span><button id="p-draft" onclick="setPerm('draft')">下書き</button><button id="p-send" onclick="setPerm('send')">送信</button></div>
+  <div class="grp"><span>Chat の AI</span><button id="m-menu" onclick="toggleMenu()">選択肢を開く</button></div>
+</div>
+
+<div class="win">
+  <div class="titlebar">
+    <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <div class="pill"><b>necoder</b><span class="dest">⎇ main</span></div>
+  </div>
+  <div class="body">
+    <div class="rail">
+      <div class="pj on" style="--c:#7c8cf8">ね</div>
+      <div class="pj" style="--c:#34d3b6">D</div>
+      <div class="gear">⚙</div>
+    </div>
+
+    <div class="settings" id="settings">
+      <nav class="nav">
+        <div class="t">設定</div>
+        <div class="search">⌕ 設定を検索</div>
+        <div class="it">AI エージェント</div>
+        <div class="it sel">コネクタ<span class="b">6/11</span></div>
+        <div class="it">外観</div>
+        <div class="it">リモート</div>
+        <div class="it">動作とエディタ</div>
+      </nav>
+      <main class="page"><div class="col">
+        <div class="h">
+          <div class="t">コネクタ</div>
+          <div class="s">AI に持たせるサービスと道具を、ここにまとめます。変更は新しいスレッドから適用されます。</div>
+        </div>
+
+        <div class="list">
+          <div class="row"><div class="rhead"><div class="txt"><div class="nm" style="font-weight:500;font-size:12.5px">Chat でコネクタを使う</div><div class="sub">Gmail などを Chat の会話から使えます</div></div><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+          <div class="row"><div class="rhead"><div class="txt"><div class="nm" style="font-weight:500;font-size:12.5px">エディタのスレッドでコネクタを使う</div><div class="sub">オフにすると初回応答が速くなります</div></div><div class="sw on" onclick="this.classList.toggle('on')"></div></div></div>
+        </div>
+
+        <div class="chips">
+          <span class="chip sel">すべて</span><span class="chip">有効のみ</span><span class="chip">要ログイン</span><span class="chip">他ツールで発見</span>
+          <span class="count">11 件中 6 件有効</span>
+        </div>
+
+        <div class="sec">サービス</div>
+        <div class="legend" id="legend"></div>
+        <div class="list" id="services"></div>
+
+        <div class="sec">MCP サーバ</div>
+        <div class="list" id="servers"></div>
+
+        <span class="act add">＋ コネクタを追加</span>
+      </div></main>
+    </div>
+
+    <div class="chatview" id="chatview">
+      <div class="chatside">
+        <div class="new">＋ 新しいチャット</div>
+        <div class="c sel" style="--c:#e5a14b"><i></i>取引先への返信</div>
+        <div class="c" style="--c:#59c2a0"><i></i>旅行の計画</div>
+        <div class="c" style="--c:#c583e0"><i></i>確定申告のメモ</div>
+      </div>
+      <div class="chatmain">
+        <div class="transcript"><div class="tcol">
+          <div class="you">田中さんから来た打ち合わせのメールに、来週木曜なら行けると返信を考えて</div>
+          <div class="step"><span class="bullet">⏺</span><div>Gmail を検索しました<div class="r">⎿ 「打ち合わせの日程について」田中さんから · 2 通</div></div></div>
+          <div class="step"><span class="bullet">⏺</span><div id="plan"></div></div>
+          <div class="perm" id="perm"></div>
+        </div></div>
+        <div class="composerwrap"><div class="composer">
+          <div class="menu" id="menu">
+            <div class="m sel" style="--c:#d97757"><div class="mline" data-ai="Claude"><b>Claude</b></div><span>コネクタ 6 件</span></div>
+            <div class="m" style="--c:var(--fg0)"><div class="mline" data-ai="Codex"><b>Codex</b></div><span id="menu-codex"></span></div>
+            <div class="m" style="--c:var(--fg0)"><div class="mline" data-ai="OpenCode"><b>OpenCode</b></div><span>コネクタ 1 件</span></div>
+          </div>
+          <div class="ph">返信を入力…</div>
+          <div class="bar">
+            <span class="mini" onclick="toggleMenu()" style="color:var(--fg1)"><span id="composer-ai" style="color:#d97757;display:inline-flex"></span>Claude <span class="k">▾</span></span>
+            <span class="mini"><span class="k">コネクタ</span> 6</span>
+            <span class="send">↑</span>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" id="scrim" onclick="if(event.target===this)closeDetail()">
+    <div class="modal">
+      <div class="mhead">
+        <div class="logo" id="modal-logo"></div>
+        <div class="txt"><div class="nm">Gmail</div><div class="sub mono">gmailmcp.googleapis.com · 道具 30</div></div>
+        <span class="close" onclick="closeDetail()">✕</span>
+      </div>
+      <div class="mbody" id="mbody"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const GLYPHS = {"openai": "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z", "gmail": "M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z", "googlecalendar": "M18.316 5.684H24v12.632h-5.684V5.684zM5.684 24h12.632v-5.684H5.684V24zM18.316 5.684V0H1.895A1.894 1.894 0 0 0 0 1.895v16.421h5.684V5.684h12.632zm-7.207 6.25v-.065c.272-.144.5-.349.687-.617s.279-.595.279-.982c0-.379-.099-.72-.3-1.025a2.05 2.05 0 0 0-.832-.714 2.703 2.703 0 0 0-1.197-.257c-.6 0-1.094.156-1.481.467-.386.311-.65.671-.793 1.078l1.085.452c.086-.249.224-.461.413-.633.189-.172.445-.257.767-.257.33 0 .602.088.816.264a.86.86 0 0 1 .322.703c0 .33-.12.589-.36.778-.24.19-.535.284-.886.284h-.567v1.085h.633c.407 0 .748.109 1.02.327.272.218.407.499.407.843 0 .336-.129.614-.387.832s-.565.327-.924.327c-.351 0-.651-.103-.897-.311-.248-.208-.422-.502-.521-.881l-1.096.452c.178.616.505 1.082.977 1.401.472.319.984.478 1.538.477a2.84 2.84 0 0 0 1.293-.291c.382-.193.684-.458.902-.794.218-.336.327-.72.327-1.149 0-.429-.115-.797-.344-1.105a2.067 2.067 0 0 0-.881-.689zm2.093-1.931l.602.913L15 10.045v5.744h1.187V8.446h-.827l-2.158 1.557zM22.105 0h-3.289v5.184H24V1.895A1.894 1.894 0 0 0 22.105 0zm-3.289 23.5l4.684-4.684h-4.684V23.5zM0 22.105C0 23.152.848 24 1.895 24h3.289v-5.184H0v3.289z", "googledrive": "M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z", "supabase": "M11.9 1.036c-.015-.986-1.26-1.41-1.874-.637L.764 12.05C-.33 13.427.65 15.455 2.409 15.455h9.579l.113 7.51c.014.985 1.259 1.408 1.873.636l9.262-11.653c1.093-1.375.113-3.403-1.645-3.403h-9.642z", "figma": "M15.852 8.981h-4.588V0h4.588c2.476 0 4.49 2.014 4.49 4.49s-2.014 4.491-4.49 4.491zM12.735 7.51h3.117c1.665 0 3.019-1.355 3.019-3.019s-1.355-3.019-3.019-3.019h-3.117V7.51zm0 1.471H8.148c-2.476 0-4.49-2.014-4.49-4.49S5.672 0 8.148 0h4.588v8.981zm-4.587-7.51c-1.665 0-3.019 1.355-3.019 3.019s1.354 3.02 3.019 3.02h3.117V1.471H8.148zm4.587 15.019H8.148c-2.476 0-4.49-2.014-4.49-4.49s2.014-4.49 4.49-4.49h4.588v8.98zM8.148 8.981c-1.665 0-3.019 1.355-3.019 3.019s1.355 3.019 3.019 3.019h3.117V8.981H8.148zM8.172 24c-2.489 0-4.515-2.014-4.515-4.49s2.014-4.49 4.49-4.49h4.588v4.441c0 2.503-2.047 4.539-4.563 4.539zm-.024-7.51a3.023 3.023 0 0 0-3.019 3.019c0 1.665 1.365 3.019 3.044 3.019 1.705 0 3.093-1.376 3.093-3.068v-2.97H8.148zm7.704 0h-.098c-2.476 0-4.49-2.014-4.49-4.49s2.014-4.49 4.49-4.49h.098c2.476 0 4.49 2.014 4.49 4.49s-2.014 4.49-4.49 4.49zm-.097-7.509c-1.665 0-3.019 1.355-3.019 3.019s1.355 3.019 3.019 3.019h.098c1.665 0 3.019-1.355 3.019-3.019s-1.355-3.019-3.019-3.019h-.098z", "stripe": "M13.976 9.15c-2.172-.806-3.356-1.426-3.356-2.409 0-.831.683-1.305 1.901-1.305 2.227 0 4.515.858 6.09 1.631l.89-5.494C18.252.975 15.697 0 12.165 0 9.667 0 7.589.654 6.104 1.872 4.56 3.147 3.757 4.992 3.757 7.218c0 4.039 2.467 5.76 6.476 7.219 2.585.92 3.445 1.574 3.445 2.583 0 .98-.84 1.545-2.354 1.545-1.875 0-4.965-.921-6.99-2.109l-.9 5.555C5.175 22.99 8.385 24 11.714 24c2.641 0 4.843-.624 6.328-1.813 1.664-1.305 2.525-3.236 2.525-5.732 0-4.128-2.524-5.851-6.594-7.305h.003z", "diagramsdotnet": "M19.69 13.419h-2.527l-2.667-4.555a1.292 1.292 0 001.035-1.28V4.16c0-.725-.576-1.312-1.302-1.312H9.771c-.726 0-1.312.576-1.312 1.301v3.435c0 .619.426 1.152 1.034 1.28l-2.666 4.555H4.309c-.725 0-1.312.576-1.312 1.301v3.435c0 .725.576 1.312 1.302 1.312h4.458c.726 0 1.312-.576 1.312-1.302v-3.434c0-.726-.576-1.312-1.301-1.312h-.437l2.645-4.523h2.059l2.656 4.523h-.438c-.725 0-1.312.576-1.312 1.301v3.435c0 .725.576 1.312 1.302 1.312H19.7c.726 0 1.312-.576 1.312-1.302v-3.434c0-.726-.576-1.312-1.301-1.312zM24 22.976c0 .565-.459 1.024-1.013 1.024H1.024A1.022 1.022 0 010 22.987V1.024C0 .459.459 0 1.013 0h21.963C23.541 0 24 .459 24 1.013z", "claude": "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z", "opencode": "M22 24H2V0h20zM17 4.8H7v14.4h10z"};
+const SERVER_ICON = "<rect width=\"20\" height=\"8\" x=\"2\" y=\"2\" rx=\"2\" ry=\"2\" />\n  <rect width=\"20\" height=\"8\" x=\"2\" y=\"14\" rx=\"2\" ry=\"2\" />\n  <line x1=\"6\" x2=\"6.01\" y1=\"6\" y2=\"6\" />\n  <line x1=\"6\" x2=\"6.01\" y1=\"18\" y2=\"18\" />";
+const AI_COLOR = { Claude: "#d97757", Codex: "var(--fg0)", OpenCode: "var(--fg0)" };
+const AI_GLYPH = { Claude: "claude", Codex: "openai", OpenCode: "opencode" };
+function glyph(slug) { return `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${GLYPHS[slug]}"/></svg>`; }
+function genericIcon() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${SERVER_ICON}</svg>`; }
+function aiIcon(ai) { return glyph(AI_GLYPH[ai]); }
+const LOGO = { gmail: ["gmail", "#EA4335"], calendar: ["googlecalendar", "#4285F4"], drive: ["googledrive", "#4285F4"], supabase: ["supabase", "#3FCF8E"], figma: ["figma", "#F24E1E"], stripe: ["stripe", "#635BFF"], drawio: ["diagramsdotnet", "#F08705"], docs: ["claude", "#d97757"] };
+function logoHtml(id) {
+  const logo = LOGO[id];
+  if (!logo || !GLYPHS[logo[0]]) return `<div class="logo generic">${genericIcon()}</div>`;
+  return `<div class="logo" style="--b:${logo[1]}">${glyph(logo[0])}</div>`;
+}
+const SERVICES = [
+  { id: "gmail", n: "Gmail", l: "G", b: "#d9503f", sub: "Claude アカウントで接続 · 道具 30", ais: ["Claude"], no: ["Codex"], on: true },
+  { id: "calendar", n: "Google Calendar", l: "C", b: "#3d7ee0", sub: "Claude アカウントで接続 · 道具 9", ais: ["Claude"], no: ["Codex"], on: true },
+  { id: "drive", n: "Google Drive", l: "D", b: "#2f9e6b", sub: "Claude アカウントで接続 · 道具 11", ais: ["Claude"], no: ["Codex"], on: true },
+  { id: "supabase", n: "Supabase", l: "S", b: "#2a9d74", sub: "Claude アカウントで接続 · 道具 30", ais: ["Claude"], no: ["Codex"], on: true },
+  { id: "figma", n: "Figma", l: "F", b: "#a259ff", sub: "Claude アカウントで接続 · 道具 42", ais: ["Claude"], no: ["Codex"], on: true },
+  { id: "higgsfield", n: "Higgsfield", l: "H", b: "#6a6f7d", sub: "Claude アカウントで接続 · 道具 145", ais: ["Claude"], no: ["Codex"], on: false },
+  { id: "stripe", n: "Stripe", l: "S", b: "#635bff", sub: "ログインが必要です", need: true, ais: [], no: ["Claude", "Codex"], on: false, action: "ログイン" },
+  { id: "drawio", n: "Draw.io", l: "D", b: "#d98324", sub: "ログインが必要です", need: true, ais: [], no: ["Claude", "Codex"], on: false, action: "ログイン" },
+  { id: "docs", n: "Claude Docs", l: "C", b: "#d97757", sub: "Claude アカウントで接続 · 道具 8", ais: ["Claude"], no: [], on: false },
+];
+const SERVERS = [
+  { id: "aws", n: "aws-pricing-calculator", l: "A", b: "#b9772a", sub: "Claude Code の設定で発見 · stdio · 道具 10", ais: ["Claude", "Codex", "OpenCode"], no: [], on: true },
+  { id: "pencil", n: "pencil", l: "P", b: "#6a6f7d", sub: "起動できません: 実行ファイルが見つかりません", need: true, ais: [], no: [], on: false },
+];
+const PERMS = [
+  { id: "read", a: "読み取り", b: "検索・メールを読む・一覧", n: 6, tools: ["search_threads", "get_thread", "get_message", "list_labels", "list_drafts", "get_draft"] },
+  { id: "org", a: "下書きと整理", b: "下書き・ラベル・復元", n: 15, tools: ["create_draft", "update_draft", "label_message", "label_thread", "update_message_labels"] },
+  { id: "del", a: "削除", b: "ゴミ箱・迷惑メール・下書きの削除", n: 6, tools: ["trash_message", "trash_thread", "delete_draft", "delete_label", "mark_message_spam", "mark_thread_spam"] },
+  { id: "send", a: "送信", b: "送信・返信・転送", n: 3, tools: ["send_message", "reply", "forward"] },
+];
+const state = { screen: "settings", detail: "modal", perm: "draft", open: false, levels: { read: 1, org: 1, del: 1, send: 1 }, expanded: "send", codex: "none" };
+const LABELS = ["常に許可", "確認", "ブロック"];
+
+function seg(key) {
+  return `<span class="seg">` + LABELS.map((label, i) =>
+    `<span class="${state.levels[key] === i ? "sel" : ""}" onclick="event.stopPropagation();setLevel('${key}',${i})">${label}</span>`).join("") + `</span>`;
+}
+function codexRowHtml() {
+  const head = `<span class="dicon" style="--c:${AI_COLOR.Codex}">${aiIcon("Codex")}</span>`;
+  if (state.codex === "waiting") {
+    return `<div class="drow">${head}<div class="l"><div class="a">Codex</div><div class="b">ブラウザで ChatGPT の Gmail 接続を待っています。終えたら戻ってきてください</div></div><span class="act" onclick="setCodex('none')">やめる</span><span class="act" onclick="setCodex('done')">確かめる</span></div>`;
+  }
+  if (state.codex === "done") {
+    return `<div class="drow">${head}<div class="l"><div class="a">Codex</div><div class="b">ChatGPT アカウントで接続済み。新しいスレッドから使えます</div></div><span class="act">ChatGPT で管理</span><div class="sw on" title="Codex で Gmail を使う" onclick="this.classList.toggle('on')"></div></div>`;
+  }
+  return `<div class="drow">${head}<div class="l"><div class="a">Codex</div><div class="b">未接続。ChatGPT アカウントの Gmail と接続します</div></div><span class="act" onclick="setCodex('waiting')">接続する</span></div>`;
+}
+function setCodex(value) { state.codex = value; render(); }
+function detailHtml() {
+  let html = `<div class="dsec">使える AI</div><div class="dcard">
+    <div class="drow"><span class="dicon" style="--c:${AI_COLOR.Claude}">${aiIcon("Claude")}</span><div class="l"><div class="a">Claude</div><div class="b">Claude アカウントで接続済み</div></div><span class="act">claude.ai で管理</span><div class="sw on" title="Claude で Gmail を使う" onclick="this.classList.toggle('on')"></div></div>
+    ${codexRowHtml()}
+    <div class="drow"><span class="dicon" style="--c:${AI_COLOR.OpenCode}">${aiIcon("OpenCode")}</span><div class="l"><div class="a">OpenCode</div><div class="b">未接続。自分の Google Cloud の OAuth クライアントが要ります</div></div><span class="act">接続する</span></div>
+  </div>
+  <div class="dsec">道具の権限<span class="s">necoder の全部の AI に効きます</span></div><div class="dcard">`;
+  for (const perm of PERMS) {
+    const open = state.expanded === perm.id;
+    html += `<div class="drow click" onclick="setExpanded('${perm.id}')"><span class="tw">${open ? "⌄" : "›"}</span><div class="l"><div class="a">${perm.a}<span style="color:var(--fg2);font-size:10.5px;margin-left:6px">${perm.n}</span></div><div class="b">${perm.b}</div></div>${seg(perm.id)}</div>`;
+    if (open) {
+      html += `<div class="tools show">` + perm.tools.map(tool => `<div class="tool"><code>${tool}</code><span style="color:var(--fg2);font-size:10.5px">${LABELS[state.levels[perm.id]]}</span></div>`).join("") + `</div>`;
+    }
+  }
+  return html + `</div><div class="note">既定は Claude と同じくすべて「確認」です。確認カードの「常に許可」を押すと、ここの設定が変わります。</div>`;
+}
+function rowHtml(item) {
+  const clickable = item.id === "gmail";
+  const open = clickable && state.open && state.detail === "inline";
+  const gmailOnCodex = item.id === "gmail" && state.codex === "done";
+  const onList = gmailOnCodex ? [...item.ais, "Codex"] : item.ais;
+  const noList = gmailOnCodex ? item.no.filter(ai => ai !== "Codex") : item.no;
+  const ais = onList.map(ai => `<span class="ai on" style="--c:${AI_COLOR[ai]}" title="${ai}: 使えます">${aiIcon(ai)}</span>`).join("") + noList.map(ai => `<span class="ai no" title="${ai}: 未接続">${aiIcon(ai)}</span>`).join("");
+  const right = item.action ? `<span class="act">${item.action}</span>` : (item.need ? "" : `<div class="sw ${item.on ? "on" : ""}" onclick="event.stopPropagation();this.classList.toggle('on')"></div>`);
+  return `<div class="row ${item.on ? "" : "off"} ${open ? "open" : ""}">
+    <div class="rhead ${clickable ? "click" : ""}" ${clickable ? `onclick="openDetail()"` : ""}>
+      ${logoHtml(item.id)}
+      <div class="txt"><div class="nm">${item.n}</div><div class="sub ${item.need ? "need" : ""}">${item.sub}</div></div>
+      <div class="ais">${ais}</div>${right}<span class="chev"></span>
+    </div>
+    ${open ? `<div class="inline">${detailHtml()}</div>` : ""}
+  </div>`;
+}
+function permHtml() {
+  if (state.perm === "send") {
+    return `<div class="q">このメールを送信しますか？<span class="svc">Gmail · reply</span></div>
+      <dl><dt>宛先</dt><dd>tanaka@example.com</dd><dt>件名</dt><dd>Re: 打ち合わせの日程について</dd><dt>本文</dt><dd>来週木曜の午後でしたら伺えます。ご都合のよいお時間を教えていただけますか。</dd></dl>
+      <div class="btns"><span class="pbtn main">送信する</span><span class="pbtn">常に許可</span><span class="pbtn">拒否</span><span class="hint">相手に届くと取り消せません</span></div>`;
+  }
+  return `<div class="q">下書きを作成しますか？<span class="svc">Gmail · create_draft</span></div>
+    <dl><dt>宛先</dt><dd>tanaka@example.com</dd><dt>件名</dt><dd>Re: 打ち合わせの日程について</dd><dt>本文</dt><dd>来週木曜の午後でしたら伺えます。ご都合のよいお時間を教えていただけますか。</dd></dl>
+    <div class="btns"><span class="pbtn main">許可</span><span class="pbtn">常に許可</span><span class="pbtn">拒否</span><span class="hint">「常に許可」は設定の「コネクタ」で戻せます</span></div>`;
+}
+function render() {
+  document.getElementById("modal-logo").innerHTML = glyph("gmail");
+  document.getElementById("modal-logo").style.setProperty("--b", "#EA4335");
+  document.getElementById("legend").innerHTML = `右のアイコンは、そのサービスを使える AI です。<span class="ai on" style="--c:${AI_COLOR.Claude}">${aiIcon("Claude")}</span>使える<span class="ai no">${aiIcon("Codex")}</span>未接続`;
+  document.getElementById("composer-ai").innerHTML = aiIcon("Claude");
+  document.querySelectorAll(".mline[data-ai]").forEach(line => { if (!line.querySelector("svg")) line.insertAdjacentHTML("afterbegin", aiIcon(line.dataset.ai)); });
+  document.getElementById("services").innerHTML = SERVICES.map(rowHtml).join("");
+  document.getElementById("servers").innerHTML = SERVERS.map(rowHtml).join("");
+  document.getElementById("mbody").innerHTML = detailHtml();
+  document.getElementById("menu-codex").textContent = state.codex === "done" ? "コネクタ 2 件" : "コネクタ 1 件。Gmail は未接続です";
+  document.getElementById("perm").innerHTML = permHtml();
+  document.getElementById("plan").textContent = state.perm === "send" ? "返信案を作りました。このまま送信します。" : "返信案を作りました。下書きに入れます。";
+  document.getElementById("settings").style.display = state.screen === "settings" ? "flex" : "none";
+  document.getElementById("chatview").style.display = state.screen === "chat" ? "flex" : "none";
+  document.getElementById("scrim").classList.toggle("show", state.screen === "settings" && state.open && state.detail === "modal");
+  for (const [id, on] of [["v-settings", state.screen === "settings"], ["v-chat", state.screen === "chat"], ["d-modal", state.detail === "modal"], ["d-inline", state.detail === "inline"], ["p-draft", state.perm === "draft"], ["p-send", state.perm === "send"]]) {
+    document.getElementById(id).classList.toggle("on", on);
+  }
+}
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  document.getElementById("t-dark").classList.toggle("on", theme === "dark");
+  document.getElementById("t-light").classList.toggle("on", theme === "light");
+}
+function setScreen(screen) { state.screen = screen; render(); }
+function setDetail(detail) { state.detail = detail; state.screen = "settings"; state.open = true; render(); }
+function setPerm(perm) { state.perm = perm; state.screen = "chat"; render(); }
+function setLevel(key, level) { state.levels[key] = level; render(); }
+function setExpanded(key) { state.expanded = state.expanded === key ? null : key; render(); }
+function openDetail() { state.open = state.detail === "inline" ? !state.open : true; render(); }
+function closeDetail() { state.open = false; render(); }
+function toggleMenu() { state.screen = "chat"; render(); document.getElementById("menu").classList.toggle("show"); document.getElementById("m-menu").classList.toggle("on"); }
+
+// 確認用: ?screen=chat&detail=modal&open=1&perm=send&menu=1&theme=light
+const query = new URLSearchParams(location.search);
+if (query.get("screen")) state.screen = query.get("screen");
+if (query.get("detail")) state.detail = query.get("detail");
+if (query.get("open")) state.open = true;
+if (query.get("perm")) state.perm = query.get("perm");
+if (query.get("codex")) state.codex = query.get("codex");
+render();
+if (query.get("menu")) toggleMenu();
+if (query.get("theme")) setTheme(query.get("theme"));
+</script>
+</body>
+</html>

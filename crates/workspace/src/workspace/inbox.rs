@@ -3,7 +3,7 @@
 //! エージェントの出来事（完了 / 中断 / 失敗 / 承認待ち / 質問待ち）は、トースト（数秒で消える）と
 //! OS の通知（見ていない時だけ）で知らせる。どちらも後から見返せないので、この窓の分を**履歴**に残す。
 //!
-//! - titlebar のベル（未読があれば白い点）→ 一覧（新しい順）。行を押すとそのスレッドへ飛び、既読にする。
+//! - titlebar のベル（まだ見ていないスレッドの本数）→ 一覧（新しい順）。行を押すとそのスレッドへ飛び、既読にする。
 //! - 行の右の ● / ○ で既読にする / 未読に戻す。見出しの「すべて既読」。
 //! - **見たら自動で既読**（UI-SPEC §8）: スレッドを見た時にそのスレッドの項目を既読にし、OS の通知も
 //!   取り下げる。今見ているスレッドの出来事は既読で積む。
@@ -102,13 +102,28 @@ impl Workspace {
         }
     }
 
-    /// 未読の数。
+    /// まだ見ていないスレッドの本数（ベルの数字）。1 スレッドに何件来ても 1 と数える。
     pub(crate) fn inbox_unread_count(&self) -> usize {
         self.notifications
             .inbox
             .iter()
             .filter(|item| item.unread)
-            .count()
+            .map(|item| (item.panel.entity_id(), &item.thread_id))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
+    /// そのスレッドの項目をすべて既読にする。本数で数えるので、1 件だけ既読にしても数字が減らない。
+    fn mark_inbox_thread_items_read(
+        &mut self,
+        panel: &WeakEntity<AgentPanel>,
+        thread_id: &SharedString,
+    ) {
+        for item in &mut self.notifications.inbox {
+            if item.panel == *panel && item.thread_id == *thread_id {
+                item.unread = false;
+            }
+        }
     }
 
     /// パレット「通知: 履歴を開く」/ ベル: 一覧を開く（開いていれば閉じる）。
@@ -144,26 +159,58 @@ impl Workspace {
 
     /// 行を押した: 既読にしてそのスレッドへ飛ぶ（スレッドが閉じられていれば既読にするだけ）。
     fn open_inbox_item(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.notifications.inbox.get_mut(index) else {
+        let Some(item) = self.notifications.inbox.get(index) else {
             return;
         };
-        item.unread = false;
         let (panel, thread_id) = (item.panel.clone(), item.thread_id.clone());
+        self.mark_inbox_thread_items_read(&panel, &thread_id);
         self.close_inbox(window, cx);
         self.jump_to_notified_thread(&panel, &thread_id, window, cx);
     }
 
-    /// 行の ● / ○: 既読と未読を入れ替える。
+    /// 行の ● / ○: 既読にするとそのスレッドの未確認も消える（未読を 2 種類にしない）。
+    /// 未読に戻すのはこの行だけで、消えた未確認は戻らない。
     fn toggle_inbox_item_read(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(item) = self.notifications.inbox.get_mut(index) {
-            item.unread = !item.unread;
+        let Some(item) = self.notifications.inbox.get_mut(index) else {
+            return;
+        };
+        if !item.unread {
+            item.unread = true;
             cx.notify();
+            return;
         }
+        let (panel, thread_id) = (item.panel.clone(), item.thread_id.clone());
+        self.mark_inbox_thread_items_read(&panel, &thread_id);
+        cx.dismiss_system_notification(
+            super::system_notifications::notification_tag(&thread_id).as_ref(),
+        );
+        if let Some(panel) = panel.upgrade() {
+            panel.update(cx, |panel, cx| {
+                panel.mark_thread_viewed_by_id(&thread_id, cx);
+            });
+        }
+        cx.notify();
     }
 
+    /// 「すべて既読」: 通知も、全ワークスペースと Chat の未確認も消す。あなた待ちは答えるまで残る。
     fn mark_inbox_read(&mut self, cx: &mut Context<Self>) {
         for item in &mut self.notifications.inbox {
-            item.unread = false;
+            if item.unread {
+                item.unread = false;
+                cx.dismiss_system_notification(
+                    super::system_notifications::notification_tag(&item.thread_id).as_ref(),
+                );
+            }
+        }
+        let panels: Vec<_> = self
+            .project_sessions
+            .sessions
+            .iter()
+            .flat_map(|session| session.fleet_agents.iter().cloned())
+            .chain(self.chat_panel())
+            .collect();
+        for panel in panels {
+            panel.update(cx, |panel, cx| panel.mark_all_done_seen(cx));
         }
         cx.notify();
     }
@@ -179,7 +226,7 @@ impl Workspace {
         }
     }
 
-    /// titlebar のベル。未読があれば件数を添える（中立の面・識別色は使わない）。
+    /// titlebar のベル。まだ見ていないスレッドの本数を添える（中立の面・識別色は使わない）。
     pub(crate) fn render_inbox_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let unread = self.inbox_unread_count();
@@ -201,16 +248,25 @@ impl Workspace {
         )
         .relative()
         .when(open, |bell| bell.bg(theme.bg2))
-        // 件数は出さない（数字は確認待ちの印に一本化・UI-SPEC §3）。
         .when(unread > 0, |bell| {
             bell.child(
                 div()
                     .absolute()
-                    .top(px(4.))
-                    .right(px(4.))
-                    .size(px(8.))
-                    .rounded_full()
-                    .bg(theme.fg0),
+                    .top(px(1.))
+                    .right(px(1.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(14.))
+                    .h(px(14.))
+                    .px(px(3.))
+                    .rounded(px(7.))
+                    .bg(theme.fg0)
+                    .text_size(px(9.5))
+                    .line_height(px(14.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.bg0)
+                    .child(SharedString::from(super::attention::badge_label(unread))),
             )
         })
         .on_mouse_down(
@@ -226,7 +282,8 @@ impl Workspace {
     pub(crate) fn render_inbox(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.overlays.inbox.as_ref()?;
         let theme = self.theme.clone();
-        let unread = self.inbox_unread_count();
+        // ベルが 0 でも未確認は残りうる（再起動で履歴が消えた後など）。
+        let can_mark_read = self.inbox_unread_count() > 0 || self.attention_totals(cx).unread > 0;
         let header = div()
             .flex()
             .items_center()
@@ -242,7 +299,7 @@ impl Workspace {
                     .text_color(theme.fg0)
                     .child(SharedString::from(i18n::t!("inbox.title"))),
             )
-            .when(unread > 0, |header| {
+            .when(can_mark_read, |header| {
                 header.child(
                     div()
                         .id("inbox-mark-all-read")
@@ -510,7 +567,11 @@ mod tests {
         panel.update(cx, |panel, cx| panel.mark_thread_viewed(0, cx));
         cx.run_until_parked();
         workspace.read_with(cx, |workspace, _| {
-            assert_eq!(workspace.inbox_unread_count(), 1, "見たスレッドの分だけ消える");
+            assert_eq!(
+                workspace.inbox_unread_count(),
+                1,
+                "見たスレッドの分だけ消える"
+            );
             let remaining = workspace
                 .notifications
                 .inbox
@@ -589,6 +650,79 @@ mod tests {
             assert_eq!(workspace.inbox_unread_count(), 1);
             workspace.mark_inbox_read(cx);
             assert_eq!(workspace.inbox_unread_count(), 0);
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ベルはスレッドの本数を数える。既読にすると未確認も消え、あなた待ちは残る。
+    #[gpui::test]
+    fn the_bell_counts_threads_and_reading_clears_unread(cx: &mut gpui::TestAppContext) {
+        use super::super::system_notifications::AgentAlert;
+        let root = std::env::temp_dir().join(format!("necoder_inbox_bell_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"system_notifications":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| {
+            i18n::set_locale("ja");
+            settings::init(Some(settings_path), None, cx);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        let panel = workspace.read_with(cx, |workspace, _| workspace.agent_panel.clone());
+        panel.update(cx, |panel, cx| {
+            panel.new_thread(cx);
+            panel.new_thread(cx);
+            panel.debug_set_state(2, cx);
+        });
+        let id_of = |index: usize, cx: &mut gpui::VisualTestContext| {
+            panel
+                .read_with(cx, |panel, _| panel.thread_id(index))
+                .expect("スレッドがある")
+        };
+        let (first, second) = (id_of(0, cx), id_of(1, cx));
+        let name = SharedString::from("parser");
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for thread in [&first, &first, &second] {
+                workspace.post_agent_notification(
+                    AgentAlert::Done,
+                    &panel,
+                    thread,
+                    &name,
+                    "necoder",
+                    "直した",
+                    false,
+                    cx,
+                );
+            }
+            assert_eq!(workspace.notifications.inbox.len(), 3, "履歴は全件残す");
+            assert_eq!(workspace.inbox_unread_count(), 2, "ベルは 2 スレッド");
+            assert_eq!(workspace.attention_totals(cx).unread, 1);
+
+            // 行を既読にすると、そのスレッドの項目すべてと未確認が消える。
+            workspace.toggle_inbox_item_read(0, cx);
+            assert_eq!(workspace.inbox_unread_count(), 1);
+            assert_eq!(workspace.notifications.inbox.len(), 3);
+            assert_eq!(workspace.attention_totals(cx).unread, 0);
+
+            // すべて既読: 未確認は消え、あなた待ちは答えるまで残る。
+            panel.update(cx, |panel, cx| {
+                panel.debug_set_state(2, cx);
+                panel.focus_thread(1, cx);
+                panel.debug_ask_question(cx);
+            });
+            assert_eq!(workspace.attention_totals(cx).unread, 1);
+            assert_eq!(workspace.attention_totals(cx).waiting, 1);
+            workspace.mark_inbox_read(cx);
+            assert_eq!(workspace.inbox_unread_count(), 0);
+            assert_eq!(workspace.attention_totals(cx).unread, 0);
+            assert_eq!(workspace.attention_totals(cx).waiting, 1);
         });
         std::fs::remove_dir_all(&root).ok();
     }

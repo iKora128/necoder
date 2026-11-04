@@ -5,6 +5,66 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-11-04
+
+Chat now supports Claude Code and Codex, connected services, and permission modes. This release also includes the sign-in and Google Antigravity changes prepared for v0.1.36, whose release was cancelled.
+
+### Added
+
+- **Codex in Chat**: choose Claude Code or Codex before starting a conversation. Chat remembers your AI and each AI's permission mode separately from the editor, and restores the original AI when reopening a conversation. Codex can read attached text files and create or edit artifacts without a shell.
+- **Connectors in Chat**: enable "Use connectors in Chat" in Settings › Connectors to use connected services and the MCP servers you enabled. It is off by default. The settings page lists Claude and ChatGPT connections separately, with service switches and per-tool Always allow, Ask, and Block settings. Codex app permissions apply to Chat; editor Codex app permissions are not managed here yet.
+- **Permission modes in Chat**: choose the modes advertised by your AI, including Auto or Bypass / Full access where available. Full access skips confirmation and the normal Chat write-scope checks. Claude's blocked tools were tested in Bypass; Codex's Full access connector behavior still needs end-to-end verification.
+- **Sign in from the thread**: when an agent advertises sign-in methods over ACP, a card above the composer lets you choose one and finish in your browser. After sign-in, the refused message is sent again.
+- **Google Antigravity**: add Google's ACP server from Settings › AI agents › Add agent. The server is downloaded and verified, and the sign-in card appears on first use. SSH hosts are not supported yet.
+
+### Changed
+
+- **Smoother threads list**: workspace frames are laid out only when visible, reducing redraw work with many threads open.
+- **Consistent counts**: workspace frames show thread totals; the All filter shows the overall total. The title-bar bell counts unread threads, and the Threads rail icon shows the same count when no thread is waiting for you.
+- **Mark all read** also clears unread thread state across workspaces and Chat. Threads waiting for an answer remain waiting.
+- **Slow agent startup**: the initial handshake now waits up to 60 seconds instead of 30.
+
+### Fixed
+
+- Long messages do less copying when updating @-mention completion, and hidden slash-command suggestions are not rebuilt on ordinary typing.
+- Tests and screenshot builds no longer play notification sounds from isolated settings. Normal application builds retain notification sounds.
+- "Authentication required" errors show the sign-in card instead of only a generic failure.
+
+### Known limitations
+
+- Codex Gmail access, draft creation, Auto review, and Full access connector blocking have not been verified end to end. Gmail was not connected in the test account.
+- Codex Chat currently reads text attachments; PDF text extraction is not supported.
+- Changes made without a permission request may not have a rollback checkpoint, including changes in Bypass / Full access.
+- Antigravity's real Google account sign-in has not been verified. The sign-in card and download flow were checked.
+
+### 日本語
+
+Chat で Claude Code と Codex を選び、コネクタと権限モードを使えるようにしました。公開処理を中止した v0.1.36 向けのログイン・Google Antigravity 対応も含めています。
+
+#### 追加
+
+- **Chat で Codex**: 会話を始める前に Claude Code / Codex を選べます。選んだ AI と AI ごとの権限モードは、エディタとは別に覚えます。履歴も元の AI で再開します。Codex はシェルを使わず、添付テキストの読み取りと成果物の作成・編集ができます。
+- **Chat のコネクタ**: 設定 › コネクタの「Chat でコネクタを使う」をオンにすると、接続済みサービスと有効にした MCP サーバを使えます。既定はオフです。Claude と ChatGPT の接続を別々に表示し、サービスのオン・オフと道具ごとの「常に許可／確認／ブロック」を設定できます。Codex のアプリ権限は Chat 用で、エディタの Codex への適用は未対応です。
+- **Chat の権限モード**: AI が提示したモードをそのまま選べます。対応する AI では Auto や Bypass / Full access も使えます。Full access では確認と通常の書き込み範囲の裁定を省きます。Claude の Bypass 中のブロックは確認済みですが、Codex の Full access 中のコネクタ制限は実機確認が残っています。
+- **スレッド内のログイン**: エージェントが ACP でログイン方法を示す場合、入力欄の上のカードから選べます。ブラウザでログイン後、断られた発話を送り直します。
+- **Google Antigravity**: 設定 › AI エージェント › エージェントを追加から、Google の ACP サーバをダウンロード・検証して使えます。初回はログインカードを表示します。SSH 先は未対応です。
+
+#### 変更・修正
+
+- スレッド一覧は見えている枠だけを計算し、スレッドが多い時の描画を軽くしました。
+- 枠と「すべて」にスレッド総数を表示します。ベルは未確認スレッドの本数になり、あなた待ちがなければレールにも同じ本数を表示します。
+- 「すべて既読」で全ワークスペースと Chat の未確認も消します。あなた待ちは残します。
+- 長文入力時の @ 補完のコピーを減らし、通常入力で非表示の / 補完を組み立てないようにしました。
+- 試験・スクリーンショット撮影で、本物の通知音を鳴らさないようにしました。通常のアプリの通知音は引き続き使えます。
+- エージェントの初回起動は 60 秒まで待ちます。「Authentication required」はログインのカードで案内します。
+
+#### 未確認・制限
+
+- Codex の Gmail 読み取り・下書き・Auto review・Full access 中のコネクタのブロックは、通しで未確認です。検証用アカウントには Gmail が接続されていませんでした。
+- Codex の添付読み取りは現在テキストのみです。PDF の内容抽出は未対応です。
+- Bypass / Full access など、許可の確認を経由しない変更は巻き戻し用の記録が残らない場合があります。
+- Antigravity はダウンロードとカード表示まで確認済みです。本物の Google アカウントでのログインは未確認です。
+
 ## [0.1.36] - 2026-11-04
 
 This release lets agents ask you to sign in right in the thread, and makes Google Antigravity usable when you add it from the agent list.
