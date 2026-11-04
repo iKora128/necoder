@@ -290,7 +290,7 @@
 - necoder:
   - ACP の 7 種（`claude` / `codex` / `copilot` / `qwen` / `opencode` / `kimi` / `grok`）`crates/acp_client/src/acp_client.rs:386-477`
   - 公開 ACP レジストリ（39 件）は版を決めるのに使うだけ。`agent_servers` は既存 7 種の起動を上書きするだけで、8 本目は足せない `crates/settings_core/src/settings_core.rs:108-125`
-  - Gemini は、後継の Antigravity CLI が ACP に対応していないため外している（意図した判断・コメントあり）`crates/acp_client/src/acp_client.rs:413-415`
+  - Gemini は、後継の Antigravity CLI が ACP に対応していないため外している（意図した判断・コメントあり）`crates/acp_client/src/acp_client.rs:413-415`。**2026-11-04 訂正**: 今は CLI に `agy acp` があり（公式の案内: docs/ide/extensions/acp）、公開レジストリの `antigravity-acp`（Google 配布）も「エージェントを追加」から足せる
 
 ### B02 検出・自動導入・有効 / 無効 — 一部
 - Orca: od:agents/supported.mdx「one-click launch/setup」。od:settings.mdx §Agents「Installed agents — detected CLIs you can enable or disable.」

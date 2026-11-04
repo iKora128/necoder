@@ -4369,3 +4369,24 @@
 - 計測の罠: 実窓の CPU は、窓が途中で前面でなくなると桁で変わる（`ps` の %CPU も平均がならされる）。再描画は試験で数えるのが確か
 - 追加（本人要望）: スレッド一覧の行を押した後は ↑↓ でスレッドを切り替える（ワークスペースをまたぐ・レールの `on_rail_key_down` と同じ作り・`threads_focus`）。⏎ で入力欄、Esc で作業面へ。通り過ぎただけでは未確認を消さないよう `select_thread` を分けた。タブ復元がキーの宛先を奪わないよう `restore_chrome_focus_after_tabs` に広げた
 - 次: 本人の実機で OS の通知の取り下げと完了の光を確認
+
+## 2026-11-04 — ACP のログイン（`authenticate`）に対応 / Antigravity を「追加」から使えるように
+
+- きっかけ: 本人の質問「Antigravity / Gemini は ACP に対応していたか」。コードのコメントは「ACP 非対応」のままだったが、公開レジストリに Google 配布の `antigravity-acp`（`agy_acp_server`）が載っていて、CLI にも `agy acp` があった（公式の案内: https://antigravity.google/docs/ide/extensions/acp）。necoder は `authenticate` を送らないので、足しても会話できなかった。
+- 実物の確認（1.4.5・arm64 Mac・空の HOME・サインインはしていない）:
+  - 未ログインの `session/new` は `-32000 "Authentication required"`。手順は `data.message` に入る。
+  - `oauth-personal`: 標準エラーに「Open the following link…」で URL を出して待つ（URL は 521 バイト＝`StderrTail` の 1 行の上限 1000 に収まる）。
+  - `gemini-api-key`: `authenticate` は `GEMINI_API_KEY` の有無を見ずに通り、次の `session/new` が理由つきで断る。キーがあれば開く（偽のキーで確認・prompt は送っていない）。
+  - 起動の initialize は初回 25 秒・2 回目以降 3〜6 秒。
+- 他のエージェントの広告: Codex（codex-acp 2.5.0）= `api-key` / `chat-gpt`（実物）、Gemini CLI 0.66.0 = `oauth-personal` / `gemini-api-key` ほか（配布物のソース）、Claude（claude-agent-acp 0.100.0）= 空（実物）。Codex は未ログイン時にカードから ChatGPT ログインへ進める見込み（Codex のログインそのものは未確認）。
+- やったこと:
+  - `acp_client`: `AgentEvent::AuthRequired` / `AuthLoginUrl` / `AuthLoginCompleted`、`SessionCommand::Authenticate`、`SessionPreferences::login_prompt`。`session/new` と `session/load` はログイン後に開き直す。`session/prompt` の `-32000` は失敗を出してから方式を見せる。判定語に「authentication required」を追加。
+  - パネル: ログインのカード（UI-SPEC §6）。通ったら最後の発話を送り直す。
+  - 初回の遅い起動を落とさないよう `HANDSHAKE_TIMEOUT` を 30 秒から 60 秒へ。
+  - `examples/probe_login.rs`（prompt を送らず実物でログインの流れを見る）。古いコメント・調査文書の「ACP 非対応」を訂正。
+  - ログインで断られた発話だけを通った後に送り直す（`auth_resend`）。先張りや復元のセッションが断られただけなら、返事済みの古い発話を送らない。
+- 決めたこと: 組み込みには戻さない（バイナリ配布は「追加」の経路が合う）。方式はどれも同じ重さで並べる（下の規約の件があるので necoder から勧めない）。
+- 未確認: **本物の Google アカウントでのサインイン**は未実施。`terminal` / `env_var` 型の方式は未対応。SSH 先はバイナリ配布を起動できないので Antigravity は使えない。
+- 注意（規約）: Antigravity 追加利用規約の §6 と FAQ は、第三者のソフトから Antigravity のログインで使うことを違反とし、停止の対象と書いている（FAQ の例は Claude Code / OpenClaw / OpenCode・勧めは API キー）。一方で公式の案内は「ACP に対応した**どのエディタでも**使える」と書き、対応エディタの申請の窓口も無い。ACP 経由を規約がどう扱うかを明記した文は見つかっていない。`agy -p` を第三者アプリに包むのは FAQ が個人プランでは対象外と明言しているので使わない。
+- 検証: acp_client 153・agent_panel 194・necoder 25 本緑（このコミットの内容だけの作業ツリーで全 crate を実行）。実アプリ（`runtime-shaders` + `NECODER_SCREENSHOT`・隔離した `NECODER_HOME` と HOME）で、`type: registry` の `antigravity-acp` のダウンロード・sha256 検証・展開・起動・カードの表示までを目視。
+- 次: v0.1.36 で本人が実機のサインインを確かめる。

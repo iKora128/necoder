@@ -5,6 +5,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-11-04
+
+This release lets agents ask you to sign in right in the thread, and makes Google Antigravity usable when you add it from the agent list.
+
+### Added
+
+- **Sign in from the thread**: when an agent needs a sign-in and offers its methods over ACP (Agent Client Protocol), a card above the composer lists them. Pick one and finish in your browser. Once it succeeds, the message that was refused is sent again. This works for any agent that advertises sign-in methods, including ones you added yourself
+- **Google Antigravity**: add it from Settings, AI agents, Add agent. necoder downloads Google's ACP server, verifies it, and shows the sign-in card on first use. It does not run on SSH hosts yet. For a Gemini API key, set `GEMINI_API_KEY` in the agent's environment, then choose "Gemini API key"
+
+### Changed
+
+- **More time for a slow first start**: an agent now has 60 seconds instead of 30 to answer when it starts. Antigravity took 25 seconds on its first run on an Apple Silicon Mac
+
+### Fixed
+
+- **"Authentication required" is treated as a sign-in problem**: this error used to appear as a general failure, without the sign-in card
+
+### 日本語
+
+エージェントがログインを求めた時に、スレッドの中でログインできるようにしました。エージェントの一覧から足した Google Antigravity も、これで使えます。
+
+#### 追加
+
+- **スレッドの中でログイン**: エージェントが ACP でログインの方法を示している時は、入力欄の上のカードに方法が並びます。選んでブラウザで済ませると、断られていた発話を送り直します。自分で足したエージェントでも、方法を示していれば同じように動きます
+- **Google Antigravity**: 設定の AI エージェントにある「エージェントを追加」から足せます。最初に使う時に Google の ACP サーバーをダウンロードして検証し、ログインのカードを出します。SSH 先ではまだ動きません。Gemini の API キーを使う時は、エージェントの環境変数に `GEMINI_API_KEY` を入れてから「Gemini API key」を選んでください
+
+#### 変更
+
+- **遅い初回起動を待つ**: エージェントの起動を待つ上限を 30 秒から 60 秒に延ばしました。Apple Silicon の Mac で、Antigravity の初回起動に 25 秒かかったためです
+
+#### 修正
+
+- **「Authentication required」をログインの問題として扱う**: これまでは一般のエラーとして表示され、ログインのカードが出ませんでした
+
 ## [0.1.35] - 2026-11-03
 
 This release makes it clear which threads still need you when several agents run side by side. A thread that finished while you were away now stays marked until you see it, the same counts appear in Editor and Fleet, and notifications clear themselves once you view the thread.

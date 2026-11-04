@@ -223,7 +223,13 @@ manifest の名前・版・`bin` を確かめてから rename で公開し、以
   重ならないようにずらす（`名前 (id)`）。引く時は表示名 → id の順（名前を後から変えても前のスレッドが
   相手を見失わない）。`enabled_agents` / `agent_config_defaults` は id で引く
 - 組み込みと足した物を 1 つの型で扱う入口は `acp_client::Agent`（`Builtin(&AgentKind)` / `Custom`）。
-  oneshot（題名づけ）・再ログインの案内・レジストリの版の解決・ログインの確かめは組み込みだけ
+  oneshot（題名づけ）・再ログインの案内（コマンドの提示）・レジストリの版の解決・ログインの確かめは組み込みだけ
+- **ACP のログイン**（`authenticate`）は組み込み・足した物を問わない。`session/new`・`session/load`・`session/prompt` が
+  `-32000 auth_required` を返し、`initialize` の `authMethods` が空でなければ、`AgentEvent::AuthRequired` で方式を UI へ渡して
+  `SessionCommand::Authenticate` を待つ（`SessionPreferences::login_prompt`。パネルだけが立てる）。ログインは**同じ接続**で行い、
+  通ったら開き直す（load は 1 回だけ読み直す＝会話を失わない）。待つ間の prompt は捨てて `AuthRequired` で UI へ返す。URL は
+  エージェントの標準エラーから拾い、画面にだけ出す（保存しない・necoder は開かない）。`terminal` / `env_var` 型は未対応
+  （`clientCapabilities.auth` で受けると言っていないので広告されない）
 - 起動は書いたコマンドをそのまま組む（PATH で探し、無ければ書いたまま渡す＝起動の失敗として原因が見える）。
   リモートは探索をリモートに任せる
 

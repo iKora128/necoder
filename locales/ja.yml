@@ -122,6 +122,11 @@ agent:
   auth_reconnect_resend: 再接続して再送
   auth_reconnect: 再接続
   auth_dismiss: 閉じる
+  auth_login_title: ● ログインが必要
+  auth_login_choose: "%{agent} を使うにはログインが必要です。ログインの方法を選んでください"
+  auth_login_running: "%{method} でログインしています。ブラウザで続けてください"
+  auth_login_open_browser: ブラウザで開く
+  auth_login_cancel: やめる
   permission_files: "%{title}（%{n} ファイル）"
   done: 完了 %{elapsed}
   done_touched: 完了 %{elapsed}・触ったファイル %{n}

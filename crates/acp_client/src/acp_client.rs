@@ -38,6 +38,15 @@ pub use custom::{
     LaunchPlan,
 };
 
+/// エージェントが `initialize` の `authMethods` で広告したログイン方式の 1 つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthChoice {
+    /// [`SessionCommand::Authenticate`] で返す id。
+    pub id: String,
+    /// エージェントが付けた表示名（翻訳しない）。
+    pub name: String,
+}
+
 /// 権限リクエストの選択肢の種類（UI のスタイル分け用。ACP `PermissionOptionKind` を簡約）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionKind {
@@ -441,6 +450,18 @@ pub enum AgentEvent {
     TurnEnded { reason: TurnEnd },
     /// エラー（接続断・プロトコル異常・起動失敗など）。
     Failed(String),
+    /// エージェントが `auth_required`（`-32000`）を返し、ACP でログインできる方式を広告している
+    /// （[`SessionPreferences::login_prompt`] の時だけ流す）。UI は方式を選ばせて
+    /// [`SessionCommand::Authenticate`] を送る。`detail` = 前のログインが通らなかった理由。
+    /// ログイン待ちの間に届いた prompt は捨て、捨てたことをこのイベントで UI に返す（生成中のまま残さない）。
+    AuthRequired {
+        choices: Vec<AuthChoice>,
+        detail: Option<String>,
+    },
+    /// ログイン中にエージェントが標準エラーへ出したログインの URL（画面にだけ出す・保存しない）。
+    AuthLoginUrl(String),
+    /// ログインが通った。セッションは開いている（開いたまま続けられる）。UI は最後の発話を送り直す。
+    AuthLoginCompleted,
     /// 失敗ではないが黙って進めたくない知らせ（MCP サーバを渡せなかった等）。transcript に 1 行
     /// 出すだけで、ターン状態（running / auth_required）には触らない。
     Notice(String),
@@ -689,6 +710,8 @@ pub struct PromptImage {
 pub enum SessionCommand {
     /// prompt を送る。
     Prompt(String),
+    /// [`AgentEvent::AuthRequired`] の方式（id）でログインする（ACP の `authenticate`）。
+    Authenticate(String),
     /// 画像つきの prompt（貼り付けたスクリーンショット・ドロップした画像）。エージェントが
     /// `promptCapabilities.image` を広告していなければ画像は落として、その旨を 1 行知らせる。
     PromptWithImages {
@@ -968,9 +991,10 @@ pub const AGENTS: &[AgentKind] = &[
         brand_color: 0x10_a3_7f,
         monogram: ">_",
     },
-    // 旧 Gemini CLI は 2026-06-18 に廃止 → 後継 Antigravity CLI（`agy`）はクローズド Go 書き直しで **ACP 非対応**
-    // （`--acp`/acp サブコマンド無し・実機 + ドキュメント確認済み）。よって会話エージェント一覧から除外。
-    // Antigravity が ACP を出したら再追加する（`agy -p` の title 生成自体は動くが、会話に選べない＝utility も使われない）。
+    // Gemini CLI（個人アカウントは 2026-06-18 に停止）と Antigravity は組み込みに置かない。Antigravity の
+    // ACP の入口は 2 つあり、どちらも足した物として動く: 公開レジストリの `antigravity-acp`（Google 配布の
+    // `agy_acp_server`・「エージェントを追加」から。実機の応答は 2026-11-04 に 1.4.5 で確認）と、
+    // Antigravity CLI の `agy acp`（公式の案内・settings.json の `agent_servers` に書く・実機は未確認）。
     AgentKind {
         id: "copilot",
         label: "GitHub Copilot",
@@ -1109,9 +1133,10 @@ pub fn authenticated_agent_labels() -> Vec<&'static str> {
 
 /// [`AgentEvent::Failed`] のメッセージが **認証切れ**（再ログインで直る失敗）かを判定する。
 ///
-/// ACP は認証エラーに専用コードを持たず、`-32603 Internal error` の message に各 Agent が
-/// 自由文で載せてくる（例: claude-agent-acp「Internal error: Failed to authenticate: OAuth
-/// session expired and could not be refreshed: {"errorKind":"authentication_failed"}」）。
+/// ACP には専用コード（`-32000 auth_required`）があるが、実際には `-32603 Internal error` の message に
+/// 自由文で載せる Agent も多い（例: claude-agent-acp「Internal error: Failed to authenticate: OAuth
+/// session expired and could not be refreshed: {"errorKind":"authentication_failed"}」）。ここへ届くのは
+/// 文字列だけなので、`-32000` の定型文「Authentication required」も語彙に含める。
 /// 語彙は Agent ごとに違うので、Claude / Codex / Copilot / Gemini 系 CLI の実文言に現れる
 /// 定型句を大文字小文字無視で拾う。UI はこれが真なら「エラー: …」の一般表示ではなく
 /// 「再ログインが必要」のカード（案内 + 再接続導線）を出し、古いトークンを抱えた
@@ -1120,6 +1145,7 @@ pub fn is_auth_failure(message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "authentication_failed",
         "authentication failed",
+        "authentication required",
         "failed to authenticate",
         "oauth",
         "not logged in",
@@ -1971,10 +1997,183 @@ fn find_stored_config(
 
 /// ACP ハンドシェイク（initialize）応答の上限。これを超えたら「エージェントが無言でハング」とみなし、
 /// 無限に待ち続けず**エラーを返す**（＝チャットに「エラー: …」として出て、無言のスピナー継続が断てる）。
-/// ローカル起動の initialize は通常 1〜3 秒。初回だけ npx が shim を取得する分の余裕を見て、host の
-/// `REQUEST_TIMEOUT` と同じ 30 秒。プロセスが即死した場合は stdout の EOF で即エラーになる（この
+/// ローカル起動の initialize は通常 1〜3 秒だが、自己展開するバイナリの初回は長い（Antigravity の
+/// `agy_acp_server` 1.4.5 は arm64 の Mac で 25 秒・2 回目以降は 3〜6 秒・2026-11-04 実測）。遅いマシンの
+/// 初回を落とさないよう 60 秒。プロセスが即死した場合は stdout の EOF で即エラーになる（この
 /// timeout は**プロセスが生きたまま応答しない“真の無言ハング”専用**の最後の砦）。
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// ログイン 1 回の上限（ブラウザで操作する人を待つ。放置された `authenticate` を残さない）。
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// ログイン中に標準エラーの URL を見に行く間隔。
+const LOGIN_URL_POLL: Duration = Duration::from_millis(300);
+
+/// ACP の `auth_required`（`-32000`）か。
+fn is_auth_required(error: &acp::Error) -> bool {
+    error.code == acp::ErrorCode::AuthRequired
+}
+
+/// `initialize` の広告を UI の言葉へ。ACP の `agent` 型（`authenticate` で進める方式）だけを拾う。
+/// `terminal` / `env_var` は `clientCapabilities.auth` で受けると言っていないので来ない前提。
+fn auth_choices(methods: &[v1::AuthMethod]) -> Vec<AuthChoice> {
+    methods
+        .iter()
+        .map(|method| AuthChoice {
+            id: method.id().to_string(),
+            name: method.name().to_string(),
+        })
+        .collect()
+}
+
+/// ログインが通らなかった理由の短い文。Antigravity のように `data.message` に手順を書くエージェントが
+/// あるので、そちらを優先する（`Display` は data を JSON のまま繋げるので画面に向かない）。
+fn auth_failure_text(error: &acp::Error) -> String {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("message"))
+        .and_then(|message| message.as_str())
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string())
+}
+
+/// ログインの結果。
+enum LoginOutcome {
+    /// 通った。
+    Completed,
+    /// 通らなかった（理由つき）。UI は方式を選び直せる。
+    Failed(String),
+    /// UI が送信路を捨てた（やめた・スレッドを閉じた）。
+    Abandoned,
+}
+
+/// ログイン待ちの間に届いたコマンドの扱い。設定の変更は後で効かせ、prompt は捨てて UI へ返す。
+fn hold_command_during_login(
+    command: SessionCommand,
+    pending: &mut std::collections::VecDeque<SessionCommand>,
+    choices: &[AuthChoice],
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    match command {
+        SessionCommand::Prompt(_) | SessionCommand::PromptWithImages { .. } => {
+            event_tx
+                .unbounded_send(AgentEvent::AuthRequired {
+                    choices: choices.to_vec(),
+                    detail: None,
+                })
+                .ok();
+        }
+        SessionCommand::Steer { id, .. } => {
+            event_tx
+                .unbounded_send(AgentEvent::Steered {
+                    id,
+                    outcome: SteerOutcome::TurnOver,
+                })
+                .ok();
+        }
+        // ターンが無いので畳む物も無い。別のログインの要求は今のログインが終わるまで受けない。
+        SessionCommand::Cancel | SessionCommand::Authenticate(_) => {}
+        other => pending.push_back(other),
+    }
+}
+
+/// `authenticate` を 1 回送って結果を待つ。OAuth はブラウザの人を待つので長く、その間も UI が送信路を
+/// 捨てたら抜ける。URL はエージェントが標準エラーに出す（Antigravity は「Open the following link…」）。
+/// 始める前から標準エラーにあった URL は出さない。標準エラーは URL だけを取り出し、他は画面へ出さない。
+async fn run_login(
+    connection: &acp::ConnectionTo<acp::Agent>,
+    method_id: String,
+    stderr: &host::StderrTail,
+    choices: &[AuthChoice],
+    command_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    pending: &mut std::collections::VecDeque<SessionCommand>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> std::result::Result<LoginOutcome, acp::Error> {
+    use futures::future::FutureExt as _;
+    let mut shown_url = setup::login_url(&stderr.lines().join("\n"));
+    let response = connection
+        .send_request(v1::AuthenticateRequest::new(method_id))
+        .block_task()
+        .fuse();
+    let deadline = FutureExt::fuse(async_io::Timer::after(LOGIN_TIMEOUT));
+    futures::pin_mut!(response, deadline);
+    loop {
+        let poll = FutureExt::fuse(async_io::Timer::after(LOGIN_URL_POLL));
+        let command = command_rx.next().fuse();
+        futures::pin_mut!(poll, command);
+        futures::select_biased! {
+            result = response => {
+                return match result {
+                    Ok(_) => Ok(LoginOutcome::Completed),
+                    Err(error) if acp::is_incoming_transport_closed(&error) => Err(error),
+                    Err(error) => Ok(LoginOutcome::Failed(auth_failure_text(&error))),
+                };
+            }
+            _ = deadline => {
+                return Ok(LoginOutcome::Failed(format!(
+                    "{} 分以内にログインが終わりませんでした",
+                    LOGIN_TIMEOUT.as_secs() / 60
+                )));
+            }
+            command = command => match command {
+                Some(command) => hold_command_during_login(command, pending, choices, event_tx),
+                None => return Ok(LoginOutcome::Abandoned),
+            },
+            _ = poll => {
+                let url = setup::login_url(&stderr.lines().join("\n"));
+                if url.is_some() && url != shown_url {
+                    shown_url = url.clone();
+                    if let Some(url) = url {
+                        event_tx.unbounded_send(AgentEvent::AuthLoginUrl(url)).ok();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// セッションを開く前に `auth_required` を受けた時: 方式を UI へ見せ、ログインが通るまで待つ。
+/// `true` = 通ったので開き直す。`false` = UI が送信路を捨てた。
+async fn wait_for_login(
+    connection: &acp::ConnectionTo<acp::Agent>,
+    detail: Option<String>,
+    stderr: &host::StderrTail,
+    choices: &[AuthChoice],
+    command_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    pending: &mut std::collections::VecDeque<SessionCommand>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> std::result::Result<bool, acp::Error> {
+    event_tx
+        .unbounded_send(AgentEvent::AuthRequired {
+            choices: choices.to_vec(),
+            detail,
+        })
+        .ok();
+    while let Some(command) = command_rx.next().await {
+        let SessionCommand::Authenticate(method_id) = command else {
+            hold_command_during_login(command, pending, choices, event_tx);
+            continue;
+        };
+        match run_login(
+            connection, method_id, stderr, choices, command_rx, pending, event_tx,
+        )
+        .await?
+        {
+            LoginOutcome::Completed => return Ok(true),
+            LoginOutcome::Abandoned => return Ok(false),
+            LoginOutcome::Failed(reason) => {
+                event_tx
+                    .unbounded_send(AgentEvent::AuthRequired {
+                        choices: choices.to_vec(),
+                        detail: Some(reason),
+                    })
+                    .ok();
+            }
+        }
+    }
+    Ok(false)
+}
 
 /// ACP リクエスト `future` を [`HANDSHAKE_TIMEOUT`] 付きで待つ薄いラッパ（各ハンドシェイクの入口）。
 async fn with_handshake_timeout<T>(
@@ -2183,6 +2382,9 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
 /// 各値は表示名 or id（大文字小文字無視）。エージェントが広告していなければ黙って既定のままにする。
 #[derive(Debug, Clone, Default)]
 pub struct SessionPreferences {
+    /// `auth_required` の時に [`AgentEvent::AuthRequired`] を流し、UI のログインを待つ。`false` は
+    /// 待つ相手がいない呼び手（検証用の例など）向けで、従来どおり失敗で戻る。
+    pub login_prompt: bool,
     /// 権限モード（`session/set_mode`）。
     pub mode: Option<String>,
     /// モデル（`session/set_config_option`・category = Model）。
@@ -2388,6 +2590,8 @@ async fn run_session_attempt(
         blocking::Unblock::new(stdin),
         blocking::Unblock::new(stdout),
     );
+    // ログイン中に URL を読む（[`run_login`]）。
+    let login_stderr = process.stderr_tail();
 
     let cwd = command.cwd.clone();
     // セッションを開けたか（開く前の失敗だけを「起動してすぐ終わった」として理由を見せる）。
@@ -2404,6 +2608,17 @@ async fn run_session_attempt(
                 connection.send_request(initialize_request()).block_task(),
             )
             .await?;
+            // ACP でログインできる方式。空か、待つ相手がいなければ `auth_required` は普通の失敗。
+            let login_choices = if preferences.login_prompt {
+                auth_choices(&initialized.auth_methods)
+            } else {
+                Vec::new()
+            };
+            // ログイン待ちの間に届いた設定の変更（ターンの待ち行列へ引き継ぐ）。
+            let mut deferred: std::collections::VecDeque<SessionCommand> =
+                std::collections::VecDeque::new();
+            // このセッションを開くまでにログインしたか（開いてから UI に知らせる）。
+            let mut logged_in = false;
             // 接続（issue #38 H3）: `providers/set` を `session/new` / `session/load` より前に送る。
             // 広告しないエージェントにはセッションを開かずに戻り、env で起こし直してもらう。
             if route == ConnectionRoute::Providers {
@@ -2463,54 +2678,78 @@ async fn run_session_attempt(
             let mut resumed_session = None;
             if let Some(previous) = resume_id {
                 use futures::future::FutureExt as _;
-                let mut replay_log = preferences
-                    .replay_history
-                    .then(|| history::ReplayLog::new(history::REPLAY_KEEP));
-                let mut session = connection
-                    .attach_session(v1::NewSessionResponse::new(previous.clone()), Vec::new())?;
-                let load = connection
-                    .send_request(
-                        v1::LoadSessionRequest::new(previous.clone(), &cwd)
-                            .mcp_servers(mcp_servers.clone())
-                            .meta(session_meta.clone()),
-                    )
-                    .block_task()
-                    .fuse();
-                futures::pin_mut!(load);
-                let loaded = loop {
-                    let update = session.read_update().fuse();
-                    futures::pin_mut!(update);
-                    futures::select_biased! {
-                        update = update => match update {
-                            // 履歴の再生。状態は流し、本文は畳む（replay_history の時）か捨てる。
-                            Ok(replayed) => {
-                                forward_replayed_state(replayed, &event_tx, replay_log.as_mut())
-                                    .await;
-                                continue;
-                            }
-                            Err(error) => break Err(error),
-                        },
-                        result = load => break result,
-                    }
-                };
-                while let Some(Ok(replayed)) = session.read_update().now_or_never() {
-                    forward_replayed_state(replayed, &event_tx, replay_log.as_mut()).await;
-                }
-                match loaded {
-                    Ok(loaded) => {
-                        if let Some(replay_log) = replay_log.take() {
-                            let (items, omitted) = replay_log.finish();
-                            event_tx
-                                .unbounded_send(AgentEvent::HistoryReplayed { items, omitted })
-                                .ok();
+                // 未ログインで load を断られた時は、ログインしてから 1 回だけ読み直す（会話を失わない）。
+                let mut may_retry_load = !login_choices.is_empty();
+                loop {
+                    let mut replay_log = preferences
+                        .replay_history
+                        .then(|| history::ReplayLog::new(history::REPLAY_KEEP));
+                    let mut session = connection
+                        .attach_session(v1::NewSessionResponse::new(previous.clone()), Vec::new())?;
+                    let load = connection
+                        .send_request(
+                            v1::LoadSessionRequest::new(previous.clone(), &cwd)
+                                .mcp_servers(mcp_servers.clone())
+                                .meta(session_meta.clone()),
+                        )
+                        .block_task()
+                        .fuse();
+                    futures::pin_mut!(load);
+                    let loaded = loop {
+                        let update = session.read_update().fuse();
+                        futures::pin_mut!(update);
+                        futures::select_biased! {
+                            update = update => match update {
+                                // 履歴の再生。状態は流し、本文は畳む（replay_history の時）か捨てる。
+                                Ok(replayed) => {
+                                    forward_replayed_state(replayed, &event_tx, replay_log.as_mut())
+                                        .await;
+                                    continue;
+                                }
+                                Err(error) => break Err(error),
+                            },
+                            result = load => break result,
                         }
-                        resumed_session = Some((session, loaded.modes, loaded.config_options));
+                    };
+                    while let Some(Ok(replayed)) = session.read_update().now_or_never() {
+                        forward_replayed_state(replayed, &event_tx, replay_log.as_mut()).await;
                     }
-                    Err(error) if acp::is_incoming_transport_closed(&error) => return Err(error),
-                    Err(error) => {
-                        eprintln!("ACP session/load に失敗（新規セッションで続行）: {error}");
-                        drop(session); // 仮のハンドラを外してから session/new へ
+                    match loaded {
+                        Ok(loaded) => {
+                            if let Some(replay_log) = replay_log.take() {
+                                let (items, omitted) = replay_log.finish();
+                                event_tx
+                                    .unbounded_send(AgentEvent::HistoryReplayed { items, omitted })
+                                    .ok();
+                            }
+                            resumed_session = Some((session, loaded.modes, loaded.config_options));
+                        }
+                        Err(error) if acp::is_incoming_transport_closed(&error) => return Err(error),
+                        Err(error) if may_retry_load && is_auth_required(&error) => {
+                            may_retry_load = false;
+                            drop(session); // 仮のハンドラを外してからログインへ
+                            if !wait_for_login(
+                                &connection,
+                                None,
+                                &login_stderr,
+                                &login_choices,
+                                &mut *command_rx,
+                                &mut deferred,
+                                &event_tx,
+                            )
+                            .await?
+                            {
+                                return Ok(Attempt::Finished);
+                            }
+                            logged_in = true;
+                            continue;
+                        }
+                        Err(error) => {
+                            eprintln!("ACP session/load に失敗（新規セッションで続行）: {error}");
+                            drop(session); // 仮のハンドラを外してから session/new へ
+                        }
                     }
+                    break;
                 }
             }
             let resumed = resumed_session.is_some();
@@ -2519,14 +2758,41 @@ async fn run_session_attempt(
                 None => {
                     // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
                     // NewSessionResponse から config_options を取り出してから attach する。
-                    let response = connection
-                        .send_request(
-                            v1::NewSessionRequest::new(&cwd)
-                                .mcp_servers(mcp_servers)
-                                .meta(session_meta),
-                        )
-                        .block_task()
-                        .await?;
+                    let response = loop {
+                        let attempt = connection
+                            .send_request(
+                                v1::NewSessionRequest::new(&cwd)
+                                    .mcp_servers(mcp_servers.clone())
+                                    .meta(session_meta.clone()),
+                            )
+                            .block_task()
+                            .await;
+                        match attempt {
+                            Ok(response) => break response,
+                            Err(error)
+                                if !login_choices.is_empty() && is_auth_required(&error) =>
+                            {
+                                // ログインが通ったのに断られたら、その理由をカードに出す
+                                // （例: 方式は選べたが GEMINI_API_KEY が無い）。
+                                let detail = logged_in.then(|| auth_failure_text(&error));
+                                if !wait_for_login(
+                                    &connection,
+                                    detail,
+                                    &login_stderr,
+                                    &login_choices,
+                                    &mut *command_rx,
+                                    &mut deferred,
+                                    &event_tx,
+                                )
+                                .await?
+                                {
+                                    return Ok(Attempt::Finished);
+                                }
+                                logged_in = true;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    };
                     let modes_state = response.modes.clone();
                     let config_options = response.config_options.clone();
                     let session = connection.attach_session(response, Vec::new())?;
@@ -2534,6 +2800,9 @@ async fn run_session_attempt(
                 }
             };
             opened.store(true, std::sync::atomic::Ordering::SeqCst);
+            if logged_in {
+                event_tx.unbounded_send(AgentEvent::AuthLoginCompleted).ok();
+            }
             // 実行中のターンへの差し込み（`_session/steering`）を受けるか。initialize の実物で決める。
             let steerable = steering_supported(initialized.meta.as_ref());
             event_tx
@@ -2673,10 +2942,8 @@ async fn run_session_attempt(
             // ターン中に `session/cancel` を送るための ID（`session` はターン中
             // `read_update` で可変借用されるので、先に控えておく）。
             let session_id = session.session_id().clone();
-            // ターン中に届いた非 Cancel コマンド（モデル変更等）を落とさないための待ち行列。
-            // ターンが畳まれてから順に処理する。
-            let mut deferred: std::collections::VecDeque<SessionCommand> =
-                std::collections::VecDeque::new();
+            // `deferred`: ターン中に届いた非 Cancel コマンド（モデル変更等）を落とさないための待ち行列。
+            // ターンが畳まれてから順に処理する（ログイン待ちの間に届いた分から続く）。
             // 応答を待っている差し込み（ターンを跨いで見張る）。
             let mut steering = Steering::new();
 
@@ -2757,6 +3024,34 @@ async fn run_session_attempt(
                     SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
+                    // 開いたセッションでトークンが切れた時のログイン。通ったら UI が最後の発話を送り直す。
+                    SessionCommand::Authenticate(method_id) => {
+                        match run_login(
+                            &connection,
+                            method_id,
+                            &login_stderr,
+                            &login_choices,
+                            &mut *command_rx,
+                            &mut deferred,
+                            &event_tx,
+                        )
+                        .await?
+                        {
+                            LoginOutcome::Completed => {
+                                event_tx.unbounded_send(AgentEvent::AuthLoginCompleted).ok();
+                            }
+                            LoginOutcome::Failed(reason) => {
+                                event_tx
+                                    .unbounded_send(AgentEvent::AuthRequired {
+                                        choices: login_choices.clone(),
+                                        detail: Some(reason),
+                                    })
+                                    .ok();
+                            }
+                            LoginOutcome::Abandoned => break,
+                        }
+                        continue;
+                    }
                     // 差し込む先のターンが無い。送らずに返す（UI が普通の送信として送り直す）。
                     SessionCommand::Steer { id, .. } => {
                         event_tx
@@ -2956,6 +3251,15 @@ async fn run_session_attempt(
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
+                            // 動いていたセッションでログインが切れた。方式を見せて選び直してもらう。
+                            if !login_choices.is_empty() && is_auth_required(&error) {
+                                event_tx
+                                    .unbounded_send(AgentEvent::AuthRequired {
+                                        choices: login_choices.clone(),
+                                        detail: None,
+                                    })
+                                    .ok();
+                            }
                             break;
                         }
                     };
@@ -3665,6 +3969,8 @@ mod tests {
         ));
         assert!(super::is_auth_failure("Not logged in. Run `codex login`."));
         assert!(super::is_auth_failure("401 Unauthorized"));
+        // ACP の `-32000` の定型文（Antigravity の `session/new` の実物）。
+        assert!(super::is_auth_failure("Authentication required"));
         assert!(super::is_auth_failure(
             "Invalid API key · Please run /login"
         ));
@@ -4369,6 +4675,281 @@ for line in sys.stdin:
                 .iter()
                 .any(|event| matches!(event, AgentEvent::Failed(_))),
             "transport 断を Failed として二重に報告しない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント: ACP でログインする。`GATE` の要求だけログインするまで `-32000` で断る。
+    /// `oauth` は標準エラーへ URL を出してから通り、`bad` は理由つきで断る。
+    const AGENT_THAT_NEEDS_LOGIN: &str = r#"
+import json, sys, time
+logged_in = False
+GATE = "GATE_METHOD"
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def refuse(rid):
+    send({"jsonrpc": "2.0", "id": rid,
+          "error": {"code": -32000, "message": "Authentication required"}})
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": params.get("protocolVersion", 1),
+            "agentCapabilities": {"loadSession": True},
+            "authMethods": [
+                {"id": "oauth", "name": "Log in with Google", "description": "x"},
+                {"id": "bad", "name": "Broken method"}]}})
+    elif method == "authenticate":
+        if params.get("methodId") == "bad":
+            send({"jsonrpc": "2.0", "id": rid, "error": {
+                "code": -32000, "message": "Authentication required",
+                "data": {"message": "API key is not set"}}})
+        else:
+            sys.stderr.write("Open the following link: https://accounts.example/auth?state=1\n")
+            sys.stderr.flush()
+            time.sleep(0.7)
+            logged_in = True
+            send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    elif method == GATE and not logged_in:
+        refuse(rid)
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "sess-new"}})
+    elif method == "session/load":
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+"#;
+
+    /// [`AGENT_THAT_NEEDS_LOGIN`] を、イベントへの反応（`react`）で進める。反応が `Err(())` を返したら
+    /// 送信路を捨てて終わる（UI のやめる操作と同じ）。
+    fn drive_login_agent(
+        gate: &str,
+        preferences: SessionPreferences,
+        mut react: impl FnMut(&AgentEvent) -> std::result::Result<Option<SessionCommand>, ()>,
+    ) -> Option<(Result<()>, Vec<AgentEvent>)> {
+        let script = AGENT_THAT_NEEDS_LOGIN.replace("GATE_METHOD", gate);
+        let command = fake_agent_command(&script)?;
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("やあ".into()))
+            .expect("send");
+        Some(futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let collect = async move {
+                let mut command_tx = Some(command_tx);
+                let mut seen = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    match react(&event) {
+                        Ok(Some(next)) => {
+                            if let Some(command_tx) = &command_tx {
+                                command_tx.unbounded_send(next).expect("send");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(()) => command_tx = None,
+                    }
+                    seen.push(event);
+                }
+                seen
+            };
+            futures::join!(session, collect)
+        }))
+    }
+
+    fn with_login_prompt() -> SessionPreferences {
+        SessionPreferences {
+            login_prompt: true,
+            ..Default::default()
+        }
+    }
+
+    /// 未ログインで `session/new` を断られたら、方式を見せて待つ。送った prompt は捨てて知らせ、
+    /// 断られた方式は理由つきで選び直せて、通ったら開き直す。
+    #[test]
+    fn a_logged_out_agent_offers_its_login_methods_and_opens_after_login() {
+        let mut tried_bad = false;
+        let Some((outcome, events)) =
+            drive_login_agent("session/new", with_login_prompt(), |event| match event {
+                AgentEvent::AuthRequired { detail: None, .. } if !tried_bad => {
+                    tried_bad = true;
+                    Ok(Some(SessionCommand::Authenticate("bad".into())))
+                }
+                AgentEvent::AuthRequired {
+                    detail: Some(_), ..
+                } => Ok(Some(SessionCommand::Authenticate("oauth".into()))),
+                AgentEvent::AuthLoginCompleted => {
+                    Ok(Some(SessionCommand::Prompt("もう一度".into())))
+                }
+                AgentEvent::TurnEnded { .. } => Err(()),
+                _ => Ok(None),
+            })
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("ログイン後は正常に進む");
+        let choices = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AuthRequired { choices, .. } => Some(choices.clone()),
+                _ => None,
+            })
+            .expect("方式を見せる");
+        assert_eq!(
+            choices,
+            vec![
+                AuthChoice {
+                    id: "oauth".into(),
+                    name: "Log in with Google".into()
+                },
+                AuthChoice {
+                    id: "bad".into(),
+                    name: "Broken method".into()
+                },
+            ]
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::AuthRequired { detail: Some(detail), .. } if detail == "API key is not set"
+            )),
+            "断られた理由は data.message を出す: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::AuthLoginUrl(url) if url == "https://accounts.example/auth?state=1"
+            )),
+            "標準エラーの URL を拾う: {events:?}"
+        );
+        let position = |wanted: fn(&AgentEvent) -> bool| {
+            events.iter().position(wanted).expect("届く")
+        };
+        assert!(
+            position(|event| matches!(event, AgentEvent::AuthLoginCompleted))
+                < position(|event| matches!(event, AgentEvent::SessionStarted { .. })),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Failed(_))),
+            "ログイン待ちは失敗として出さない: {events:?}"
+        );
+    }
+
+    /// ログインを待つ呼び手でなければ、従来どおりエラーで戻る（誰も答えないのに待ち続けない）。
+    #[test]
+    fn without_a_login_prompt_auth_required_is_a_plain_failure() {
+        let Some((outcome, events)) =
+            drive_login_agent("session/new", SessionPreferences::default(), |_| Ok(None))
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect_err("失敗で戻る");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::AuthRequired { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// ログインの途中で UI が送信路を捨てたら、ブラウザを待たずに終わる。
+    #[test]
+    fn dropping_the_session_while_waiting_for_login_ends_it() {
+        let Some((outcome, events)) =
+            drive_login_agent("session/new", with_login_prompt(), |event| match event {
+                AgentEvent::AuthRequired { .. } => Err(()),
+                _ => Ok(None),
+            })
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("やめるのは異常終了ではない");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::SessionStarted { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// 開いたセッションで prompt を断られたら、失敗を出してから方式を見せ、同じセッションでログインする。
+    #[test]
+    fn a_prompt_refused_for_login_offers_the_methods_on_the_open_session() {
+        let Some((outcome, events)) =
+            drive_login_agent("session/prompt", with_login_prompt(), |event| match event {
+                AgentEvent::AuthRequired { .. } => {
+                    Ok(Some(SessionCommand::Authenticate("oauth".into())))
+                }
+                AgentEvent::AuthLoginCompleted => Err(()),
+                _ => Ok(None),
+            })
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("正常に終わる");
+        let failed = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::Failed(_)))
+            .expect("失敗を出す");
+        let offered = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::AuthRequired { .. }))
+            .expect("方式を見せる");
+        assert!(failed < offered, "{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::AuthLoginCompleted)),
+            "{events:?}"
+        );
+    }
+
+    /// 未ログインで `session/load` を断られても会話を捨てない。ログインしてから読み直す。
+    #[test]
+    fn a_load_refused_for_login_is_retried_after_login() {
+        let preferences = SessionPreferences {
+            login_prompt: true,
+            resume: Some("sess-old".into()),
+            ..Default::default()
+        };
+        let Some((outcome, events)) =
+            drive_login_agent("session/load", preferences, |event| match event {
+                AgentEvent::AuthRequired { .. } => {
+                    Ok(Some(SessionCommand::Authenticate("oauth".into())))
+                }
+                AgentEvent::SessionStarted { .. } => Err(()),
+                _ => Ok(None),
+            })
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("正常に終わる");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SessionStarted {
+                    session_id,
+                    resumed: true,
+                    ..
+                } if session_id == "sess-old"
+            )),
+            "{events:?}"
         );
     }
 
@@ -5683,6 +6264,7 @@ for line in sys.stdin:
             .expect("send");
         // 表示名（Opus）と value_id（max）の両方で引けること・大文字小文字を無視することを兼ねる。
         let preferences = SessionPreferences {
+            login_prompt: false,
             mode: None,
             model: Some("opus".into()),
             effort: Some("MAX".into()),
@@ -6360,7 +6942,7 @@ for line in sys.stdin:
                 && codex.contains("--output-last-message")
                 && codex.contains("{out}")
         );
-        // 旧 Gemini CLI(→Antigravity/agy) は ACP 非対応で agent 一覧から除外済み。utility 対応は claude/codex のみ。
+        // Gemini / Antigravity は組み込みに置かない（AGENTS のコメント参照）。utility 対応は claude/codex のみ。
         // 非対応 agent は None＝タイトルは既定名フォールバック（Claude へ勝手に流さない）。
         assert_eq!(
             AgentKind::by_label("GitHub Copilot").and_then(|k| k.oneshot()),
@@ -6562,6 +7144,11 @@ for line in sys.stdin:
                             eprintln!("\n[turn ended: {reason:?}]")
                         }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
+                        AgentEvent::AuthRequired { choices, detail } => {
+                            eprintln!("[auth required] {choices:?} {detail:?}")
+                        }
+                        AgentEvent::AuthLoginUrl(url) => eprintln!("[login url] {url}"),
+                        AgentEvent::AuthLoginCompleted => eprintln!("[logged in]"),
                         AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
                         AgentEvent::TaskEnvSkipped(names) => {
                             eprintln!("[task.env skipped] {}", names.join(", "))

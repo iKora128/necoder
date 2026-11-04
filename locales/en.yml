@@ -121,6 +121,11 @@ agent:
   auth_reconnect_resend: Reconnect and resend
   auth_reconnect: Reconnect
   auth_dismiss: Dismiss
+  auth_login_title: ● Sign-in required
+  auth_login_choose: "%{agent} needs you to sign in. Choose how to sign in"
+  auth_login_running: "Signing in with %{method}. Continue in your browser"
+  auth_login_open_browser: Open in browser
+  auth_login_cancel: Cancel
   permission_files: "%{title} (%{n} files)"
   done: Done %{elapsed}
   done_touched: Done %{elapsed} · touched %{n} files

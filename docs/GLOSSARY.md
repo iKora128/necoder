@@ -73,6 +73,7 @@
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
 | ↳ **足したエージェント**（組み込みの 7 件の外から一覧に足したエージェント。settings.json の `agent_servers.<新しい id>` に自分のコマンドを書いた物・issue #38 H1。表示名は `name`・無ければ id） | `acp_client::CustomAgent` / `acp_client::AgentCatalog` / `acp_client::Agent`（組み込みと共通の入口）/ `settings::agent_catalog` | 足したエージェント / 削除 | Added agent / Remove |
+| ↳ **ログインのカード**（エージェントが ACP でログインの方式を広告している時に composer の上へ出す。方式のボタンで `authenticate` を送る） | `agent_panel::render_auth_card` / `acp_client::AuthChoice` / `AgentEvent::AuthRequired` / `SessionCommand::Authenticate` | ログインが必要 / ブラウザで開く / やめる | Sign-in required / Open in browser / Cancel |
 | ↳ **エージェントを追加**（ACP の公開レジストリの全件から選んで足す画面。足すと `agent_servers.<レジストリの id>` に `type: registry` と `name` を書く・issue #38 H2） | `settings::add_agent`（`AddAgentDialog`）/ `acp_client::registry::Registry::search` / `acp_client::CustomLaunch::Registry` | エージェントを追加 / 追加 / 追加済み / 一覧を取得 / 一覧を更新 | Add agent / Add / Added / Fetch list / Refresh list |
 | ↳ **使う / 使わない**（エージェントごとのスイッチ。既定は全部オフ＝使う物だけを `enabled_agents` に持つ・2026-10-19） | `Settings::enabled_agents` / `Settings::agent_enabled` / `settings::toggled_enabled_agents` | 利用可能 · オフ | Ready · off |
 | **初回の案内**（`onboarded == false` の設定の面。① AI エージェント ② ne コマンド ③ フォルダ・UI-SPEC §12） | `settings::OnboardingStep` / `SettingsView::onboarding_body` / `Workspace::open_first_thread` | ようこそ / 次へ / 戻る / これで始める | Welcome / Next / Back / Get started |

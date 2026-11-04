@@ -611,7 +611,7 @@ impl Drop for LoginSession {
 }
 
 /// 出力の中の最後の `https://…`（空白・引用符・山括弧で終わる）。
-fn login_url(output: &str) -> Option<String> {
+pub(crate) fn login_url(output: &str) -> Option<String> {
     output
         .split(|character: char| character.is_whitespace() || matches!(character, '"' | '\'' | '<' | '>'))
         .filter(|word| word.starts_with("https://"))

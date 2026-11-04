@@ -1202,6 +1202,15 @@ fn user_entry_text(prompt: &str, image_paths: &[SharedString]) -> SharedString {
     SharedString::from(format!("{prompt}\n\n▦ {}", names.join(" · ")))
 }
 
+/// 進行中のログイン（ACP の `authenticate`）。
+#[derive(Clone)]
+struct AuthLogin {
+    /// 方式の表示名（エージェントが付けた名前）。
+    method: String,
+    /// エージェントが標準エラーに出したログインの URL。
+    url: Option<String>,
+}
+
 /// 1 スレッド = 1 会話。固有色を持ち、UI 全体へ貫通する。
 struct Thread {
     /// 永続化キー（unix ms + 連番。再起動を跨いで同一・M12-1）。
@@ -1326,6 +1335,15 @@ struct Thread {
     /// resume に失敗して「session has ended」が返ったら [`acp_client::is_session_ended`] で送信路を捨てる。
     /// 永続化しない（プロセスの状態であって会話ではない）。
     auth_required: bool,
+    /// ACP でログインできる方式（[`acp_client::AgentEvent::AuthRequired`]）。空 = 案内だけのカード。
+    auth_choices: Vec<acp_client::AuthChoice>,
+    /// 進行中のログイン（方式の名前と、エージェントが出した URL）。メモリだけで保存しない。
+    auth_login: Option<AuthLogin>,
+    /// 前のログインが通らなかった理由。メモリだけで保存しない。
+    auth_detail: Option<String>,
+    /// ログインで断られた発話がある（通ったら送り直す）。先張りや復元のセッションが断られただけなら
+    /// 立たない＝返事済みの古い発話を勝手に送り直さない。
+    auth_resend: bool,
     /// Chat モードのスレッドだけが持つ状態（フォルダ・書き込み許可・ピン）。`docs/CHAT.md`。
     chat: Option<chat::ChatThreadState>,
     /// いまのセッションを畳んでも会話を引き継げるか（エージェントが `loadSession` を広告）。
@@ -1449,6 +1467,10 @@ impl Thread {
             session_serial: 0,
             session_used: false,
             auth_required: false,
+            auth_choices: Vec::new(),
+            auth_login: None,
+            auth_detail: None,
+            auth_resend: false,
             chat: None,
             session_resumable: false,
             last_active_at_ms: 0,
@@ -4897,25 +4919,81 @@ PYEOF"#;
     /// [`Self::send_prompt_text`] の遅延起動が新プロセスを立てる（この時は文脈は新規）。
     /// 添付コンテキストは送信時に付け直されるので、透過 prompt ではなく表示用の指示文を送る。
     /// 指示が無ければカードを閉じるだけ。
+    ///
+    /// ACP でログインするエージェント（方式の広告あり）は、外でログインや環境変数を直してから押す想定で、
+    /// **プロセスを立て直す**（ログイン待ちのプロセスへ送っても prompt は捨てられ、環境変数も読み直せない）。
+    /// 会話は `session/load` で引き継ぐ。
     fn reconnect_after_auth(&mut self, cx: &mut Context<Self>) {
-        let last_prompt = self.threads.get(self.active).and_then(|thread| {
-            thread.entries.iter().rev().find_map(|entry| match entry {
-                Entry::User(text) => Some(text.to_string()),
-                _ => None,
-            })
-        });
-        self.dismiss_auth_card(cx);
-        if let Some(prompt) = last_prompt {
-            self.send_prompt_text(prompt, cx);
+        let active = self.active;
+        if let Some(thread) = self
+            .threads
+            .get_mut(active)
+            .filter(|thread| !thread.auth_choices.is_empty())
+        {
+            thread.command_tx = None;
+            thread.session_serial = 0;
         }
+        self.dismiss_auth_card(cx);
+        self.resend_last_prompt_at(active, cx);
     }
 
     /// 「再ログインが必要」カードを閉じる（セッションはそのまま＝次の送信が再接続になる）。
+    /// ログインの途中なら**やめる**: 送信路を捨ててプロセスごと止める（ブラウザを待ち続けない）。
     fn dismiss_auth_card(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.threads.get_mut(self.active) {
             thread.auth_required = false;
+            thread.auth_detail = None;
+            thread.auth_resend = false;
+            if thread.auth_login.take().is_some() {
+                thread.command_tx = None;
+                thread.session_serial = 0;
+            }
         }
         cx.notify();
+    }
+
+    /// カードの方式のボタン: そのセッションでログインを始める。セッションが無ければ立て直す
+    /// （開いたら同じ方式の一覧がまた届く）。
+    fn start_auth_login(&mut self, choice: acp_client::AuthChoice, cx: &mut Context<Self>) {
+        let active = self.active;
+        let sent = self.threads.get_mut(active).is_some_and(|thread| {
+            let sent = thread.command_tx.as_ref().is_some_and(|command_tx| {
+                command_tx
+                    .unbounded_send(SessionCommand::Authenticate(choice.id.clone()))
+                    .is_ok()
+            });
+            if sent {
+                thread.auth_detail = None;
+                thread.auth_login = Some(AuthLogin {
+                    method: choice.name.clone(),
+                    url: None,
+                });
+            }
+            sent
+        });
+        if sent {
+            cx.notify();
+        } else {
+            self.reconnect_after_auth(cx);
+        }
+    }
+
+    /// 最後の発話をそのスレッドへ送り直す。返事が付いていない発話（セッションが開けなかった）は
+    /// transcript から外して 1 件に保つ。発話が無ければ何もしない。
+    fn resend_last_prompt_at(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        let last_prompt = thread.entries.iter().rev().find_map(|entry| match entry {
+            Entry::User(text) => Some(text.to_string()),
+            _ => None,
+        });
+        if matches!(thread.entries.last(), Some(Entry::User(_))) {
+            thread.entries.pop();
+        }
+        if let Some(prompt) = last_prompt {
+            self.send_prompt_entry(thread_index, prompt, None, cx);
+        }
     }
 
     /// このパネルで走っている全スレッドを中断する（編隊セルの「エージェントを止める」・2026-07-27）。
@@ -4954,6 +5032,8 @@ PYEOF"#;
         }
         thread.command_tx = None;
         thread.session_lost = true;
+        // 待っていたログインはプロセスごと終わった（方式は選び直せる）。
+        thread.auth_login = None;
         // 「再開中…」の一言はもう当たらない（切れた印とカードが代わりに出る）。
         thread.session_note = None;
         thread.requeue_pending_steer();
@@ -7723,6 +7803,11 @@ PYEOF"#;
                         thread.usage_key = Some(usage_key);
                         thread.session_lost = false;
                         thread.session_seated = thread.seat.is_some();
+                        // ログインの方式はエージェントごと（替えたら前の物を見せない・開けば届き直す）。
+                        thread.auth_choices.clear();
+                        thread.auth_login = None;
+                        thread.auth_detail = None;
+                        thread.auth_resend = false;
                     }
                 }
                 Err(message) => {
@@ -7929,6 +8014,7 @@ PYEOF"#;
             .threads
             .get(thread_index)
             .map(|thread| acp_client::SessionPreferences {
+                login_prompt: true,
                 // 希望の無いスレッドは、権限の既定（O16）が「聞かずに進める」なら、この agent の在庫に
                 // ある「聞かない」モードで始める（在庫が無い初回は広告を受けた時に合わせる）。
                 mode: Some(thread.permission_mode.to_string())
@@ -8147,6 +8233,7 @@ PYEOF"#;
             thread_index == active && panel_visibly_active && !cx.reduce_motion();
         let mut start_token_ticker = false;
         let mut celebrate_now = false;
+        let mut logged_in = false;
         // 広告（モデル/思考量/モード）は agent 固有なので、受け取ったら在庫へ控えて他タブでも使う。
         // `thread` の借用が残っている間は self を触れないので、末尾でまとめて反映する。
         // 在庫の鍵はセッションを立てた時の鍵（[`Thread::stock_key`]・無ければ今の設定の鍵を末尾で引く）。
@@ -8178,7 +8265,10 @@ PYEOF"#;
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
-        let turn_finished = matches!(event, AgentEvent::TurnEnded { .. } | AgentEvent::Failed(_));
+        let turn_finished = matches!(
+            event,
+            AgentEvent::TurnEnded { .. } | AgentEvent::Failed(_) | AgentEvent::AuthRequired { .. }
+        );
         let turn_started = matches!(event, AgentEvent::TurnStarted);
         // 完了音・バンザイは**正常完了時のみ**（中断＝拒否/キャンセルや失敗では祝わない）。
         let turn_succeeded = matches!(
@@ -8774,6 +8864,37 @@ PYEOF"#;
                         "names" => names.join(", ")
                     ))));
             }
+            // 未ログイン。方式を選ばせる（失敗の行は出さない・セッションは待っている）。
+            AgentEvent::AuthRequired { choices, detail } => {
+                thread.auth_required = true;
+                thread.auth_choices = choices;
+                // 走っていた＝送った発話が断られた。先張りの断りは知らせも再送もしない。
+                let refused_prompt = std::mem::take(&mut thread.running);
+                thread.auth_resend |= refused_prompt;
+                thread.pending_permission = None;
+                thread.pending_elicitation = None;
+                // `None` = 捨てた prompt の知らせ（進行中のログインはそのまま）。理由つき = 通らなかった。
+                if detail.is_some() {
+                    thread.auth_detail = detail;
+                    thread.auth_login = None;
+                }
+                if refused_prompt && (thread_index != active || !panel_visibly_active) {
+                    thread.done = Some(TurnEnd::Interrupted);
+                    thread.done_at = Some(std::time::Instant::now());
+                }
+            }
+            AgentEvent::AuthLoginUrl(url) => {
+                if let Some(login) = thread.auth_login.as_mut() {
+                    login.url = Some(url);
+                }
+            }
+            AgentEvent::AuthLoginCompleted => {
+                thread.auth_required = false;
+                thread.auth_choices.clear();
+                thread.auth_login = None;
+                thread.auth_detail = None;
+                logged_in = std::mem::take(&mut thread.auth_resend);
+            }
             AgentEvent::Failed(error) => {
                 // 遷移スナップショット（P1 素材③）: Failed = エラー文字列（1 行に畳む）。
                 thread.digest = digest_tail(&error).or(thread.digest.take());
@@ -8791,6 +8912,7 @@ PYEOF"#;
                 // その経路を自分で潰すことになる（adapter 0.75.1 の `respawnSignedOutSession`）。
                 if acp_client::is_auth_failure(&error) {
                     thread.auth_required = true;
+                    thread.auth_resend = true;
                     thread.pending_permission = None;
                     thread.pending_elicitation = None;
                 }
@@ -8944,6 +9066,10 @@ PYEOF"#;
         // 送信はスレッド宛て（表示中のタブを変えない）なので、裏のタブでも完了した時点で流す。
         if turn_finished {
             self.flush_queued_prompt_at(thread_index, cx);
+        }
+        // ログインが通った: 断られていた最後の発話を同じセッションへ送り直す。
+        if logged_in {
+            self.resend_last_prompt_at(thread_index, cx);
         }
         if let Some((key, configs)) = stocked_configs {
             let key = key.unwrap_or_else(|| self.prospective_stock_key_at(thread_index, cx));
@@ -12538,11 +12664,27 @@ PYEOF"#;
         }
         let theme = self.theme.clone();
         let color = thread.color;
-        let login_command =
-            acp_client::AgentKind::by_label(&thread.agent).and_then(|kind| kind.login_command());
-        let body = match login_command {
-            Some(_) => i18n::t!("agent.auth_required_body"),
-            None => i18n::t!("agent.auth_required_body_generic", "agent" => thread.agent),
+        // 方式の広告があれば方式のボタン（ACP の authenticate）。無ければ従来のコマンドの案内。
+        let choices = thread.auth_choices.clone();
+        let login = thread.auth_login.clone();
+        let detail = thread.auth_detail.clone();
+        let login_command = acp_client::AgentKind::by_label(&thread.agent)
+            .and_then(|kind| kind.login_command())
+            .filter(|_| choices.is_empty());
+        let body = match (&login, choices.is_empty(), login_command) {
+            (Some(login), _, _) => {
+                i18n::t!("agent.auth_login_running", "method" => &login.method)
+            }
+            (None, false, _) => i18n::t!("agent.auth_login_choose", "agent" => thread.agent),
+            (None, true, Some(_)) => i18n::t!("agent.auth_required_body"),
+            (None, true, None) => {
+                i18n::t!("agent.auth_required_body_generic", "agent" => thread.agent)
+            }
+        };
+        let title = if choices.is_empty() {
+            i18n::t!("agent.auth_required_title")
+        } else {
+            i18n::t!("agent.auth_login_title")
         };
         let has_last_prompt = thread
             .entries
@@ -12553,7 +12695,7 @@ PYEOF"#;
         } else {
             i18n::t!("agent.auth_reconnect")
         };
-        let button = |id: &'static str, label: String| {
+        let button = |id: gpui::ElementId, label: String| {
             div()
                 .id(id)
                 .flex()
@@ -12566,6 +12708,28 @@ PYEOF"#;
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
                 .child(SharedString::from(label))
+        };
+        let quiet_button = |id: gpui::ElementId, label: String| {
+            button(id, label)
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.fg1)
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+        };
+        let dismiss_label = if login.is_some() {
+            i18n::t!("agent.auth_login_cancel")
+        } else {
+            i18n::t!("agent.auth_dismiss")
+        };
+        let login_url = login.as_ref().and_then(|login| login.url.clone());
+        let show_reconnect = login.is_none();
+        let reconnect = if choices.is_empty() {
+            button("auth-reconnect".into(), reconnect_label)
+                .bg(color)
+                .text_color(theme.bg0)
+                .hover(|style| style.opacity(0.85))
+        } else {
+            quiet_button("auth-reconnect".into(), reconnect_label)
         };
         let card = div()
             .id("auth-card")
@@ -12593,7 +12757,7 @@ PYEOF"#;
                             .text_size(px(10.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(color)
-                            .child(SharedString::from(i18n::t!("agent.auth_required_title"))),
+                            .child(SharedString::from(title)),
                     )
                     .child(
                         div()
@@ -12610,6 +12774,16 @@ PYEOF"#;
                     .text_color(theme.fg1)
                     .child(SharedString::from(body)),
             )
+            // 前のログインが通らなかった理由（エージェントの言葉のまま）。
+            .when_some(detail, |card, detail| {
+                card.child(
+                    div()
+                        .id("auth-detail")
+                        .text_size(px(11.5))
+                        .text_color(theme.fg0)
+                        .child(SharedString::from(detail)),
+                )
+            })
             // 打つべきコマンド（等幅・承認カードの rawInput と同じ箱）
             .when_some(login_command, |card, command| {
                 card.child(
@@ -12633,22 +12807,39 @@ PYEOF"#;
                     .flex_wrap()
                     .items_center()
                     .gap(px(6.))
-                    .child(
-                        button("auth-reconnect", reconnect_label)
-                            .bg(color)
-                            .text_color(theme.bg0)
-                            .hover(|style| style.opacity(0.85))
+                    // 方式はどれも同じ重さで並べる（エージェントの並び順のまま・necoder は勧めない）。
+                    .when(login.is_none(), |row| {
+                        row.children(choices.iter().enumerate().map(|(index, choice)| {
+                            let choice = choice.clone();
+                            quiet_button(("auth-method", index).into(), choice.name.clone())
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.start_auth_login(choice.clone(), cx)
+                                    }),
+                                )
+                        }))
+                    })
+                    .when_some(login_url, |row, url| {
+                        row.child(
+                            quiet_button(
+                                "auth-open-browser".into(),
+                                i18n::t!("agent.auth_login_open_browser"),
+                            )
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| this.reconnect_after_auth(cx)),
+                                cx.listener(move |_this, _, _window, cx| cx.open_url(&url)),
                             ),
-                    )
+                        )
+                    })
+                    .when(show_reconnect, |row| {
+                        row.child(reconnect.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.reconnect_after_auth(cx)),
+                        ))
+                    })
                     .child(
-                        button("auth-dismiss", i18n::t!("agent.auth_dismiss"))
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_color(theme.fg1)
-                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        quiet_button("auth-dismiss".into(), dismiss_label)
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _window, cx| this.dismiss_auth_card(cx)),
@@ -14951,6 +15142,10 @@ fn seed_threads() -> Vec<Thread> {
         session_serial: 0,
         session_used: false,
         auth_required: false,
+        auth_choices: Vec::new(),
+        auth_login: None,
+        auth_detail: None,
+        auth_resend: false,
         chat: None,
         session_resumable: false,
         last_active_at_ms: 0,
@@ -16548,6 +16743,168 @@ PYEOF"#;
                 )
                 .count();
             assert_eq!(resent, 2, "直近の指示を送り直す");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    fn auth_choices_for_test() -> Vec<acp_client::AuthChoice> {
+        vec![
+            acp_client::AuthChoice {
+                id: "oauth".into(),
+                name: "Log in with Google".into(),
+            },
+            acp_client::AuthChoice {
+                id: "api-key".into(),
+                name: "API key".into(),
+            },
+        ]
+    }
+
+    /// ACP のログイン: 方式を受けるとカードを立て、失敗の行は出さず、生成中を畳む。方式を押すと
+    /// `authenticate` を頼み、通ったら最後の発話を**重ねずに**送り直す。
+    #[gpui::test]
+    fn auth_required_offers_methods_and_resends_once_after_login(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "auth_methods");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.threads[active]
+                .entries
+                .push(Entry::User("やあ".into()));
+            panel.threads[active].running = true;
+
+            panel.on_event(
+                active,
+                AgentEvent::AuthRequired {
+                    choices: auth_choices_for_test(),
+                    detail: None,
+                },
+                cx,
+            );
+            let thread = &panel.threads[active];
+            assert!(thread.auth_required);
+            assert!(!thread.running, "ログイン待ちは生成中にしない");
+            assert_eq!(thread.auth_choices.len(), 2);
+            assert_eq!(thread.entries.len(), 1, "失敗の行を足さない");
+
+            panel.start_auth_login(auth_choices_for_test()[0].clone(), cx);
+            assert!(matches!(
+                command_rx.try_next(),
+                Ok(Some(SessionCommand::Authenticate(id))) if id == "oauth"
+            ));
+            let login = panel.threads[active].auth_login.clone().expect("進行中");
+            assert_eq!(login.method, "Log in with Google");
+
+            panel.on_event(
+                active,
+                AgentEvent::AuthLoginUrl("https://accounts.example/auth".into()),
+                cx,
+            );
+            let login = panel.threads[active].auth_login.clone().expect("進行中");
+            assert_eq!(login.url.as_deref(), Some("https://accounts.example/auth"));
+
+            // 捨てた prompt の知らせ（理由なし）では進行中のログインを消さない。
+            panel.on_event(
+                active,
+                AgentEvent::AuthRequired {
+                    choices: auth_choices_for_test(),
+                    detail: None,
+                },
+                cx,
+            );
+            assert!(panel.threads[active].auth_login.is_some());
+
+            // 通らなかった理由はカードに出て、方式を選び直せる。
+            panel.on_event(
+                active,
+                AgentEvent::AuthRequired {
+                    choices: auth_choices_for_test(),
+                    detail: Some("API key is not set".into()),
+                },
+                cx,
+            );
+            let thread = &panel.threads[active];
+            assert!(thread.auth_login.is_none());
+            assert_eq!(thread.auth_detail.as_deref(), Some("API key is not set"));
+
+            panel.on_event(active, AgentEvent::AuthLoginCompleted, cx);
+            let thread = &panel.threads[active];
+            assert!(!thread.auth_required, "通ったらカードを消す");
+            assert!(thread.auth_choices.is_empty());
+            assert!(thread.auth_detail.is_none());
+            let users = thread
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::User(text) if text.as_ref() == "やあ"))
+                .count();
+            assert_eq!(users, 1, "返事の無い発話は重ねない");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 発話を送っていないセッション（先張り・復元）がログインで断られても、通った時に古い発話を
+    /// 送り直さない。裏のスレッドでも未確認の印を付けない。
+    #[gpui::test]
+    fn login_without_a_refused_prompt_resends_nothing(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "auth_prewarm");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, _command_rx) = mpsc::unbounded::<SessionCommand>();
+            let thread = &mut panel.threads[active];
+            thread.command_tx = Some(command_tx);
+            thread.entries.push(Entry::User("前の発話".into()));
+            thread.entries.push(Entry::Agent("前の返事".into()));
+            let before = thread.entries.len();
+            thread.running = false;
+            thread.done = None;
+
+            panel.on_event(
+                active,
+                AgentEvent::AuthRequired {
+                    choices: auth_choices_for_test(),
+                    detail: None,
+                },
+                cx,
+            );
+            assert!(panel.threads[active].auth_required, "方式は見せる");
+            panel.on_event(active, AgentEvent::AuthLoginCompleted, cx);
+            let thread = &panel.threads[active];
+            assert!(!thread.auth_required);
+            assert_eq!(thread.entries.len(), before, "古い発話を送り直さない");
+            assert!(!thread.running);
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// ログイン中の「やめる」はプロセスごと止める（ブラウザを待ち続けない）。ログイン前に閉じるだけなら
+    /// セッションは残す。
+    #[gpui::test]
+    fn cancelling_a_login_drops_the_session(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "auth_cancel");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, _command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.on_event(
+                active,
+                AgentEvent::AuthRequired {
+                    choices: auth_choices_for_test(),
+                    detail: None,
+                },
+                cx,
+            );
+            panel.dismiss_auth_card(cx);
+            assert!(!panel.threads[active].auth_required);
+            assert!(panel.threads[active].command_tx.is_some(), "閉じるだけ");
+
+            panel.start_auth_login(auth_choices_for_test()[0].clone(), cx);
+            panel.dismiss_auth_card(cx);
+            assert!(panel.threads[active].auth_login.is_none());
+            assert!(panel.threads[active].command_tx.is_none(), "やめたら止める");
         });
         let _ = std::fs::remove_file(settings_path);
     }

@@ -254,7 +254,7 @@ cmux も同じ種類の機能を持っている（[cmux #8533](https://github.co
 
 | ID | Orca の機能 | 判定 | necoder の現状 |
 |---|---|---|---|
-| B01 | 35 種以上の CLI エージェント + 任意 CLI | 一部 | ACP の 7 種（`crates/acp_client/src/acp_client.rs:386-477`）。レジストリ 39 件は一覧に出ず、任意の CLI は足せない。Gemini は後継の Antigravity が ACP 非対応のため除外（`crates/acp_client/src/acp_client.rs:413-415`） |
+| B01 | 35 種以上の CLI エージェント + 任意 CLI | 一部 | ACP の 7 種（`crates/acp_client/src/acp_client.rs:386-477`）。レジストリ 39 件は一覧に出ず、任意の CLI は足せない。Gemini は組み込みから除外（当時は後継の Antigravity が ACP 非対応）。**2026-11-04 訂正**: Antigravity は公開レジストリの `antigravity-acp`（Google 配布）を「エージェントを追加」から足せる。CLI にも `agy acp` がある（公式の案内: docs/ide/extensions/acp） |
 | B02 | 検出・自動導入・有効 / 無効 | 一部 | PATH 検出と 1 クリック導入・ログインはある（`install.rs`）。有効 / 無効の切替は無い |
 | B03 | 状態の検出と表示 | 有 | Idle / Working / Blocked / Done を形と動きで表し、全画面で共用（`crates/agent_panel/src/agent_panel.rs:785-811`） |
 | B04 | Agent Dashboard（カンバン・検索・フィルタ・pop-out） | 一部 | herd・要対応キュー・titlebar バッジはある |
