@@ -26,8 +26,9 @@ nav{position:sticky;top:0;z-index:10;backdrop-filter:blur(16px);background:#0708
 nav .in{max-width:1200px;margin:0 auto;padding:14px 32px;display:flex;align-items:center;gap:26px}
 nav .logo{display:flex;gap:10px;align-items:center;font-weight:800;font-size:17px;text-decoration:none}nav .logo img{width:26px}
 nav .sp{flex:1}nav a.l{text-decoration:none;color:var(--dim);font-size:14px}nav a.l:hover{color:var(--fg)}
-.btn{display:inline-flex;align-items:center;gap:10px;padding:14px 28px;border-radius:12px;background:linear-gradient(180deg,#ff8a5c,#ff5a2b);color:#fff;text-decoration:none;font-weight:800;font-size:16px;box-shadow:0 0 0 1px #ffffff26 inset,0 12px 40px #ff6a3d55;transition:transform .15s}
+.btn{display:inline-flex;align-items:center;gap:10px;padding:14px 28px;border-radius:12px;background:linear-gradient(180deg,#ff8a5c,#ff5a2b);color:#fff;text-decoration:none;font-weight:800;font-size:16px;white-space:nowrap;box-shadow:0 0 0 1px #ffffff26 inset,0 12px 40px #ff6a3d55;transition:transform .15s}
 .btn:hover{transform:translateY(-1px)}.btn.sm{padding:8px 16px;font-size:14px;box-shadow:0 0 0 1px #ffffff26 inset}
+.dl{display:flex;flex-wrap:wrap;justify-content:center;gap:12px}
 .note{color:var(--dim);font-size:13px;margin-top:14px}.note a{color:var(--dim)}
 /* hero */
 .hero{text-align:center;padding:100px 0 40px;position:relative}
@@ -63,6 +64,8 @@ h2{font-size:48px;line-height:1.12;letter-spacing:-.03em;margin:0 0 16px}
 .ph.front{left:0;top:40px;z-index:2}
 .ph.back{right:0;top:0;transform:rotate(4deg);opacity:.92}
 
+.ph-copy{display:flex;flex-direction:column;justify-content:center;padding:48px}.ph-copy h2{font-size:42px}.ph-copy p{font-size:17px}.ph-copy img{width:200px;margin:26px 0 0}
+.ph-stage{display:grid;place-items:center;padding:40px 20px}
 .phone{width:280px;border-radius:40px;background:#0a0b10;border:8px solid #1d2030;box-shadow:0 30px 80px #0009,0 0 0 1px #ffffff14;padding:14px 12px 18px;font-size:12.5px;margin:0 auto}
 .phone .top{display:flex;justify-content:space-between;color:var(--dim);font-size:11px;padding:0 6px 10px}
 .phone .row{border-left:3px solid;padding:9px 10px;margin:0 0 8px;background:#ffffff07;border-radius:0 10px 10px 0}
@@ -81,27 +84,53 @@ footer{border-top:1px solid var(--line);padding:26px 0 40px;color:var(--dim);fon
 
 @media (max-width: 900px){
   nav a.l{display:none}
+  nav .in{padding:10px 20px}
   .wrap{padding:0 20px}
-  .hero{padding:64px 0 24px}
-  h1{font-size:42px}
-  .hero p.sub{font-size:16px}
-  .shot .wave{width:110px;right:-6px;top:-70px}
+  .hero{padding:48px 0 24px}
+  h1,h2,h3,.hero p.sub,.note{word-break:keep-all;overflow-wrap:anywhere}
+  h1{font-size:clamp(26px,8.2vw,42px)}
+  .hero p.sub{font-size:16px;margin-bottom:26px}
+  .shot{margin-top:48px}
+  .shot .wave{width:88px;right:-4px;top:-44px}
   section.s{padding:88px 0 0}
-  h2{font-size:32px}.cta h2{font-size:34px}
+  h2{font-size:clamp(22px,6.9vw,32px)}.cta h2{font-size:clamp(22px,6.9vw,34px)}
   .lead{font-size:16px;margin-bottom:28px}
-  .bento{grid-template-columns:1fr}
+  .bento{grid-template-columns:minmax(0,1fr);gap:12px}
   .s2,.s3,.s4,.s6{grid-column:auto}
-  .t{min-height:0}
-  .big{font-size:64px}
-  .spark{position:static;width:130px;margin:16px 0 0 auto}
-  .phones{transform:scale(.72);transform-origin:top center;height:410px}
-  .mascots{grid-template-columns:repeat(2,1fr)}
-  .trust{grid-template-columns:repeat(2,1fr)}
+  .t{min-height:0;padding:22px;border-radius:18px}
+  .t h3{font-size:19px}
+  .pic{margin:20px -22px -22px}
+  .big{font-size:56px}
+  .spark{position:static;width:120px;margin:12px 0 0 auto}
+  .ph-copy{padding:26px 22px}.ph-copy h2{font-size:clamp(26px,7.6vw,34px)}.ph-copy p{font-size:16px}.ph-copy img{width:130px;margin:18px auto 0}
+  .ph-stage{padding:28px 16px}
+  .phones{width:min(100%,300px);height:auto;aspect-ratio:300/360}
+  .ph{width:60%;border-width:5px;border-radius:26px}
+  .ph.front{top:6%}
+  .mascots{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .m{padding:14px;border-radius:18px}
+  .m img{width:100%;max-width:120px}
+  .trust{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:40px}
+  .cta{padding:96px 0 72px}
+  .cta img{width:150px}
   footer .in{flex-wrap:wrap;gap:14px}
 }
-html[data-os=mac] .dl-win,html[data-os=windows] .dl-mac{display:none!important}html:not([data-os]) .dl-other{display:none!important}
+/* OS が分からない訪問者（スマホ・タブレット・Linux）: ナビのボタンは出さず、両 OS を並べる */
+html[data-os=mac] .dl-win,html[data-os=windows] .dl-mac,html[data-os] .dl-any{display:none!important}
+html:not([data-os]) nav .btn,html:not([data-os]) .note .dl-mac,html:not([data-os]) .note .dl-win{display:none!important}
+.dl-any>span{display:inline-block;margin:0 .4em}.nb{white-space:nowrap}
+@media (max-width: 640px){
+  /* スマホには入れられないので、大きな主ボタンにせず控えめに並べる */
+  html:not([data-os]) .dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;max-width:320px;margin:0 auto}
+  html:not([data-os]) .dl .btn{justify-content:center;padding:10px 12px;font-size:15px;font-weight:700;background:#ffffff0f;box-shadow:0 0 0 1px #ffffff26 inset}
+  html:not([data-os]) .dl-word{display:none}
+  .dl-any>span{display:block;margin:0}
+  /* 全景だと文字が読めないので、スクショは見どころを拡大して切り出す */
+  .pic{overflow:hidden;aspect-ratio:4/3}
+  .pic img{width:210%;max-width:none;transform:translate(calc(var(--x,0%)*-1),calc(var(--y,0%)*-1))}
+}
 </style>
-<script>(function(){var f=new URLSearchParams(location.search).get('os');var p=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||'';var a=navigator.userAgent||'';var o=f==='windows'||f==='mac'?f:/Win/i.test(p)||/Windows/.test(a)?'windows':/Mac/i.test(p)||/Macintosh/.test(a)?'mac':'';if(o)document.documentElement.dataset.os=o})();</script>
+<script>(function(){var f=new URLSearchParams(location.search).get('os');var p=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||'';var a=navigator.userAgent||'';var o=f==='windows'||f==='mac'?f:/Win/i.test(p)||/Windows/.test(a)?'windows':(/Mac/i.test(p)||/Macintosh/.test(a))&&!(navigator.maxTouchPoints>1)?'mac':'';if(o)document.documentElement.dataset.os=o})();</script>
 </head><body>
 <nav><div class="in"><a class="logo" href="/"><img class="pix" src="/assets/img/necoder-mark.png" alt="">necoder</a><span class="sp"></span>
 <a class="l" href="#fast">速さ</a><a class="l" href="#ai">AI</a><a class="l" href="#color">色とプロジェクト</a><a class="l" href="#fleet">Fleet</a><a class="l" href="#phone">スマホ</a><a class="l" href="#nyaco">Nyaco</a>
@@ -109,9 +138,9 @@ html[data-os=mac] .dl-win,html[data-os=windows] .dl-mac{display:none!important}h
 <div class="wrap">
 <section class="hero">
 <h1>AI と書くための、<br>いちばん軽いエディタ。</h1>
-<p class="sub"><b>Rust 製</b>で、GPU で直接描くから <b>60fps でぬるぬる</b>。Claude Code や Codex を、<b>今のサブスクのまま</b>エディタの中で。</p>
-<a class="btn dl-mac" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg">Mac 用ダウンロード</a><a class="btn dl-win" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe">Windows 用ダウンロード</a>
-<p class="note"><span class="dl-mac">無料 · macOS 13 以降（Apple Silicon）<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe">Windows 用はこちら</a></span></span><span class="dl-win">無料 · Windows 10 以降<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg">Mac 用はこちら</a></span></span></p>
+<p class="sub"><b>Rust 製</b>で、<wbr>GPU で直接描くから <wbr><b>60fps でぬるぬる</b>。<wbr>Claude Code や Codex を、<wbr><b>今のサブスクのまま</b><wbr>エディタの中で。</p>
+<div class="dl"><a class="btn dl-mac" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg"><span>Mac 用<span class="dl-word">ダウンロード</span></span></a><a class="btn dl-win" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe"><span>Windows 用<span class="dl-word">ダウンロード</span></span></a></div>
+<p class="note"><span class="dl-mac">無料 · macOS 13 以降（Apple Silicon）<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe">Windows 用はこちら</a></span></span><span class="dl-win">無料 · Windows 10 以降<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg">Mac 用はこちら</a></span></span><span class="dl-any"><span>パソコン用の無料アプリ</span><span><span class="nb">macOS 13 以降（Apple Silicon）</span> / <span class="nb">Windows 10 以降</span></span></span></p>
 <div class="shot"><img class="wave pix" src="/assets/img/lp/wave.png" alt=""><div class="frame"><img src="/assets/gif/stream.gif" alt="necoder の中で Claude Code が答えている実際の画面"></div></div>
 </section>
 
@@ -124,42 +153,42 @@ html[data-os=mac] .dl-win,html[data-os=windows] .dl-mac{display:none!important}h
 
 <section class="s" id="ai"><div class="eyebrow">YOUR AI, INSIDE</div><h2>いつもの AI が、<br>そのまま中で動く。</h2><p class="lead">API キーは要らない。契約中のサブスクのまま、Claude Code や Codex にエディタの中で話しかける。</p>
 <div class="bento">
-<div class="t s4"><div class="glow" style="background:var(--blue);left:-60px;top:-60px"></div><h3>手持ちの AI エージェントが、そのまま</h3><p>標準のプロトコル（ACP）でつながる。好きなエージェントを追加もできる。</p>
+<div class="t s4"><div class="glow" style="background:var(--blue);left:-60px;top:-60px"></div><h3>手持ちの AI エージェントが、<wbr>そのまま</h3><p>標準のプロトコル（ACP）でつながる。好きなエージェントを追加もできる。</p>
 <div class="chips"><span><img src="/assets/icon/claude.svg" alt="">Claude Code</span><span>Codex</span><span><img src="/assets/icon/github-copilot.svg" alt="">Copilot</span><span><img src="/assets/icon/qwen.svg" alt="">Qwen</span><span><img src="/assets/icon/opencode.svg" alt="">OpenCode</span><span><img src="/assets/icon/moonshot-ai.svg" alt="">Kimi</span><span>＋ 追加</span></div>
-<div class="pic"><img src="/assets/img/streaming.png" alt=""></div></div>
+<div class="pic" style="--x:52%;--y:0%"><img src="/assets/img/streaming.png" alt=""></div></div>
 <div class="t s2"><div class="glow" style="background:var(--green);right:-80px;top:-80px"></div><h3>ボタン 1 つで準備完了</h3><p>ターミナルを開かずに、インストールからログインまで。</p>
 <div class="steps"><div><b>1</b>使う AI をオン</div><div><b>2</b>「インストール」を押す</div><div><b>3</b>ブラウザでログイン</div><div><b>✓</b>もう話しかけられる</div></div></div>
-<div class="t s3"><h3>変更は、見てから取り込む</h3><p>AI が書いた差分を 1 つずつ確認。気に入らなければ、いつでも前に戻せる。</p><div class="pic"><img src="/assets/demo/diff.png" alt=""></div></div>
-<div class="t s3"><h3>やることは、AI が自分で消していく</h3><p>Todo ボードを AI が更新。今どこまで進んだかが一目で分かる。</p><div class="pic"><img src="/assets/demo/todos.png" alt=""></div></div>
+<div class="t s3"><h3>変更は、見てから取り込む</h3><p>AI が書いた差分を 1 つずつ確認。気に入らなければ、いつでも前に戻せる。</p><div class="pic" style="--x:20%;--y:6%"><img src="/assets/demo/diff.png" alt=""></div></div>
+<div class="t s3"><h3>やることは、<wbr>AI&nbsp;が自分で消していく</h3><p>Todo ボードを AI が更新。今どこまで進んだかが一目で分かる。</p><div class="pic" style="--x:0%;--y:4%"><img src="/assets/demo/todos.png" alt=""></div></div>
 </div></section>
 
 <section class="s" id="color"><div class="eyebrow">COLOR &amp; WORKSPACE</div><h2>色で、迷わない。<br>いくつのプロジェクトでも。</h2><p class="lead">プロジェクトごとに色。レールからタブ、カーソル、AI のスレッドまで同じ色だから、今どこで何が動いているかを見失わない。</p>
 <div class="bento">
 <div class="t s2"><div class="glow" style="background:var(--violet);left:-80px;bottom:-80px"></div><h3>色がそのまま目印</h3><p>どの AI が、どのプロジェクトのどのブランチに向いているか。宛先も使ったトークンも、いつも見える。</p><div class="dots"><i style="background:var(--red);color:var(--red)"></i><i style="background:var(--amber);color:var(--amber)"></i><i style="background:var(--green);color:var(--green)"></i><i style="background:var(--blue);color:var(--blue)"></i><i style="background:var(--violet);color:var(--violet)"></i></div><img class="spark pix" src="/assets/img/lp/folders.png" alt=""></div>
-<div class="t s4"><h3>プロジェクトもブランチも、1 つのウィンドウで</h3><p>左のレールにプロジェクトを並べて、⌘O で一覧から切り替え。worktree もブランチもそのまま行き来できる。</p><div class="pic"><img src="/assets/demo/switcher.png" alt=""></div></div>
-<div class="t s3"><div class="glow" style="background:var(--green);right:-80px;bottom:-80px"></div><h3>SSH の先でも、同じエディタ</h3><p>いつもの SSH の設定のまま、サーバのファイルも手元と同じ速さで。サーバ側に Node も要らない。</p>
+<div class="t s4"><h3>プロジェクトもブランチも、<wbr>1&nbsp;つのウィンドウで</h3><p>左のレールにプロジェクトを並べて、⌘O で一覧から切り替え。worktree もブランチもそのまま行き来できる。</p><div class="pic" style="--x:26%;--y:3%"><img src="/assets/demo/switcher.png" alt=""></div></div>
+<div class="t s3"><div class="glow" style="background:var(--green);right:-80px;bottom:-80px"></div><h3>SSH の先でも、<wbr>同じエディタ</h3><p>いつもの SSH の設定のまま、サーバのファイルも手元と同じ速さで。サーバ側に Node も要らない。</p>
 <div class="chips" style="margin-top:22px"><span style="font-family:ui-monospace,Menlo,monospace">ssh://you@dev-box</span><span>⎇ main</span><span>● 接続中</span></div>
 <pre style="margin:22px 0 0;padding:18px 20px;border:1px solid var(--line);border-radius:14px;background:#06070b;font:13.5px/1.9 ui-monospace,Menlo,monospace;color:var(--dim);white-space:pre-wrap"><span style="color:var(--acc2)">$</span> <span style="color:var(--fg)">ne ssh://you@dev-box/~/app</span>
 › dev-box に接続しました
 › サーバ側の necoder を起動（小さな単体のプログラム）
 › <span style="color:var(--green)">開きました</span>　ファイル・Git・ターミナル・AI がそのまま</pre></div>
-<div class="t s3"><h3>迷ったら ⌘⇧P</h3><p>コマンドはパレットから全部。ファイルも、検索も、プロジェクトの切り替えも。</p><div class="pic"><img src="/assets/demo/palette.png" alt=""></div></div>
+<div class="t s3"><h3>迷ったら ⌘⇧P</h3><p>コマンドはパレットから全部。ファイルも、検索も、プロジェクトの切り替えも。</p><div class="pic" style="--x:26%;--y:3%"><img src="/assets/demo/palette.png" alt=""></div></div>
 </div></section>
 
-<section class="s" id="fleet"><div class="eyebrow">FLEET</div><h2>AI を、チームのように走らせる。</h2><p class="lead">作業（Task）ごとに worktree を切り、エージェントを並べて同時に。リーダー役の Captain に任せれば、割り振りと取りまとめまで。</p>
+<section class="s" id="fleet"><div class="eyebrow">FLEET</div><h2>AI を、<wbr>チームのように<wbr>走らせる。</h2><p class="lead">作業（Task）ごとに worktree を切り、エージェントを並べて同時に。リーダー役の Captain に任せれば、割り振りと取りまとめまで。</p>
 <div class="bento">
-<div class="t s4" style="padding-bottom:0"><div class="glow" style="background:var(--violet);right:-60px;bottom:-60px"></div><h3>何が、どこで、どこまで進んでいるか</h3><p>すべての Task とエージェントの状態を 1 画面で。</p><div class="pic" style="margin-bottom:0"><img src="/assets/img/fleet.png" alt=""></div></div>
+<div class="t s4" style="padding-bottom:0"><div class="glow" style="background:var(--violet);right:-60px;bottom:-60px"></div><h3>何が、どこで、<wbr>どこまで進んでいるか</h3><p>すべての Task とエージェントの状態を 1 画面で。</p><div class="pic" style="margin-bottom:0;--x:25%;--y:6%"><img src="/assets/img/fleet.png" alt=""></div></div>
 <div class="t s2" style="display:flex;flex-direction:column;justify-content:center;gap:6px"><div class="glow" style="background:var(--acc);left:-60px;top:-60px"></div><img class="pix" src="/assets/img/lp/fleet.png" alt="" style="width:108%;margin:0 -4% 18px"><h3>Captain が仕切る</h3><p>やりたいことを伝えれば、Task に分けて AI に配る。終わったら差分を見て取り込むだけ。</p></div>
 </div></section>
 
 <section class="s" id="phone"><div class="eyebrow">ON THE GO</div>
 <div class="bento">
-<div class="t s3" style="display:flex;flex-direction:column;justify-content:center;padding:48px"><h2 style="font-size:42px">外出中も、<br>スマホから。</h2><p style="font-size:17px">QR コードを読むだけで、スマホから AI の様子を見て、続きを頼める。承認や質問にも、その場で答えられる。</p><img class="pix" src="/assets/img/lp/phone.png" alt="" style="width:200px;margin:26px 0 0"></div>
-<div class="t s3" style="display:grid;place-items:center;padding:40px 20px"><div class="glow" style="background:var(--acc);left:20%;top:20%"></div>
+<div class="t s3 ph-copy"><h2>外出中も、<br>スマホから。</h2><p>QR コードを読むだけで、スマホから AI の様子を見て、続きを頼める。承認や質問にも、その場で答えられる。</p><img class="pix" src="/assets/img/lp/phone.png" alt=""></div>
+<div class="t s3 ph-stage"><div class="glow" style="background:var(--acc);left:20%;top:20%"></div>
 <div class="phones"><div class="ph back"><img src="/assets/img/lp/pwa-approve.png" alt="スマホで実行の承認を求められている necoder の画面"></div><div class="ph front"><img src="/assets/img/lp/pwa-home.png" alt="スマホの necoder のスレッド一覧"></div></div></div>
 </div></section>
 
-<section class="s" id="nyaco"><div class="eyebrow">MEET NYACO</div><h2>AI の気持ちは、Nyaco が教えてくれる。</h2><p class="lead">AI が考えているのか、書いているのか、終わったのか。パネルの Nyaco を見れば、文字を読まなくても分かる。</p>
+<section class="s" id="nyaco"><div class="eyebrow">MEET NYACO</div><h2>AI の気持ちは、<wbr>Nyaco が教えてくれる。</h2><p class="lead">AI が考えているのか、書いているのか、終わったのか。パネルの Nyaco を見れば、文字を読まなくても分かる。</p>
 <div class="mascots">
 <div class="m"><img class="pix" src="/assets/mascot/think.gif" alt=""><b>考え中</b><span>じっくり考えている</span></div>
 <div class="m"><img class="pix" src="/assets/mascot/typing.gif" alt=""><b>作業中</b><span>コードを書いている</span></div>
@@ -167,14 +196,14 @@ html[data-os=mac] .dl-win,html[data-os=windows] .dl-mac{display:none!important}h
 <div class="m"><img class="pix" src="/assets/mascot/doze.gif" alt=""><b>待機中</b><span>呼ばれるまでうたた寝</span></div>
 </div></section>
 
-<section class="s"><div class="eyebrow">EVERYTHING ELSE</div><h2>エディタとしても、一人前。</h2><p class="lead">AI がいなくても困らない、毎日の道具がそろっている。</p>
+<section class="s"><div class="eyebrow">EVERYTHING ELSE</div><h2>エディタとしても、<wbr>一人前。</h2><p class="lead">AI がいなくても困らない、毎日の道具がそろっている。</p>
 <div class="feat"><span>補完・定義へ移動（LSP）</span><span>Git の差分・ステージ・blame</span><span>ターミナル</span><span>プロジェクト全体の検索</span><span>マルチカーソル</span><span>HTML のプレビュー</span><span>テーマの着せ替え</span><span>コード以外の相談は Chat モードで</span><span>日本語 / English</span></div>
 <div class="trust"><div><b>無料</b><span>ずっと無料。アカウント登録も要らない。</span></div><div><b>オープンソース</b><span>AGPL-3.0。ソースはすべて GitHub に。</span></div><div><b>テレメトリーなし</b><span>使い方を外へ送らない。</span></div><div><b>Mac と Windows</b><span>同じエディタを、どちらでも。</span></div></div>
 </section>
 
 <section class="cta"><img class="pix" src="/assets/img/lp/wave.png" alt=""><h2>次のエディタは、<br>エージェントごと動く。</h2>
-<a class="btn dl-mac" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg">Mac 用ダウンロード</a><a class="btn dl-win" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe">Windows 用ダウンロード</a>
-<p class="note"><span class="dl-mac">無料 · macOS 13 以降<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe">Windows 用はこちら</a></span></span><span class="dl-win">無料 · Windows 10 以降<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg">Mac 用はこちら</a></span></span></p></section>
+<div class="dl"><a class="btn dl-mac" href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg"><span>Mac 用<span class="dl-word">ダウンロード</span></span></a><a class="btn dl-win" href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe"><span>Windows 用<span class="dl-word">ダウンロード</span></span></a></div>
+<p class="note"><span class="dl-mac">無料 · macOS 13 以降<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder-windows-x64-setup.exe">Windows 用はこちら</a></span></span><span class="dl-win">無料 · Windows 10 以降<span class="dl-other"> · <a href="https://github.com/iKora128/necoder/releases/latest/download/necoder.dmg">Mac 用はこちら</a></span></span><span class="dl-any"><span>パソコン用の無料アプリ</span><span><span class="nb">macOS 13 以降</span> / <span class="nb">Windows 10 以降</span></span></span></p></section>
 </div>
 <footer><div class="wrap in"><span style="font-weight:800;color:var(--fg)">necoder</span><span style="flex:1"></span><a href="https://github.com/iKora128/necoder">GitHub</a><a href="/code-signing-policy/">Code signing policy</a><a href="https://github.com/iKora128/necoder/releases">すべてのバージョン</a><span>AGPL-3.0</span><a href="/?lang=en" hreflang="en">English</a></div></footer>
 </body></html>
