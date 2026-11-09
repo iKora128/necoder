@@ -5,6 +5,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-11-09
+
+Chat keeps Gmail, Google Calendar, and your other connectors after it has been idle, and can now look things up on your Mac with a confirmation for each command.
+
+### Added
+
+- **Commands in Chat**: Claude and Codex can run commands to answer questions about this Mac, such as its OS version, network, or disk space, instead of asking you to paste output. Claude asks before every command, and Chat does not offer "allow from now on" for commands. Codex follows its own sandbox, as in the editor: in Read only it runs read-only commands without asking and asks for anything else. In Bypass / Full access, commands run without asking.
+
+### Fixed
+
+- **Connectors after idle**: Chat stops an unused agent after 10 minutes and starts it again on your next message. Claude Code fetches the connector list after it starts, so a message sent right away could see no connectors, and a failed fetch was never retried. Chat now starts the agent as soon as you begin typing, waits up to 3 seconds for the list before the first message, and, if no connector is available, restarts Claude and sends the same message again (up to twice). If that still fails, a line in the conversation says so.
+- **No more `/model fable` → `/model opus` in conversations**: Claude now starts on the thread's model. Before, it started on the model in `~/.claude/settings.json` and was switched back, and the switch was recorded every time the agent restarted. The model then told you that you had switched models.
+- **Summaries, titles, and commit messages**: one-shot generation now uses the official Claude Code install (`~/.local/bin/claude`) before the `claude` found first on `PATH`. An old npm install answered with "API Error: 404" and exit code 0, and that text was used as the result. Output that starts with "API Error:" is now treated as a failure.
+- **Agents at startup**: opening necoder no longer starts one agent per project in the rail. Only the panel you are looking at prepares a session, sessions that never receive a message are stopped after the idle time, and a blank thread no longer says its conversation could not be restored.
+- **Chrome tools in Chat**: Claude Code's Chrome integration no longer leaks into Chat when it is enabled in your Claude Code settings.
+
+### 日本語
+
+Chat はしばらく放置した後も Gmail・Google カレンダーなどのコネクタを使えるようになりました。また、この Mac のことを、コマンドごとに確認を取りながら自分で調べられるようになりました。
+
+### 追加
+
+- **Chat でのコマンド実行**: OS の版・ネットワーク・空き容量など、この Mac に関する質問に、Claude と Codex が自分でコマンドを走らせて答えます（出力を貼ってもらう往復がなくなります）。Claude は実行の前に毎回確認し、コマンドには「以後許可」を出しません。Codex はエディタと同じく自分の sandbox に従い、Read only では読むだけのコマンドを確認なしで走らせ、それ以外は確認します。Bypass / Full access では確認なしで走ります。
+
+### 修正
+
+- **放置した後のコネクタ**: Chat は使っていないエージェントを 10 分で止め、次の送信で起動し直します。Claude Code はコネクタの一覧を起動の後で取りに行くので、すぐ送るとコネクタが 1 つも見えず、取り損ねた一覧は取り直されませんでした。入力を始めた時点でエージェントを起こし、最初の送信は一覧が揃うまで最大 3 秒待ち、それでもコネクタが使えなければ Claude を起動し直して同じ内容を送り直します（2 回まで）。それでも繋がらない時は会話に一言出します。
+- **会話に `/model fable` → `/model opus` が積もらない**: Claude をスレッドのモデルで起動するようにしました。これまでは `~/.claude/settings.json` のモデルで起動してから戻していたため、起動し直すたびに切り替えが記録され、AI が「あなたがモデルを切り替えた」と説明していました。
+- **要約・題・コミットメッセージ**: 一発生成で、PATH で最初に見つかる `claude` より公式の置き場（`~/.local/bin/claude`）を先に使います。npm で入れた古い版が「API Error: 404」を終了コード 0 で返し、その文が結果として使われていました。「API Error:」で始まる出力は失敗として扱います。
+- **起動時のエージェント**: necoder を開いたときに、レールのプロジェクトの数だけエージェントを起動しなくなりました。セッションを先に張るのは見ているパネルだけで、1 度も送らなかったセッションもアイドル時間で止めます。白紙のスレッドに「会話を引き継げなかった」と出なくなりました。
+- **Chat に Chrome の道具が混ざらない**: Claude Code の設定で Chrome 連携を有効にしていても、Chat には入らなくなりました。
+
 ## [0.1.37] - 2026-11-04
 
 Chat now supports Claude Code and Codex, connected services, and permission modes. This release also includes the sign-in and Google Antigravity changes prepared for v0.1.36, whose release was cancelled.
