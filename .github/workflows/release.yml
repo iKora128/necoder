@@ -40,11 +40,13 @@ jobs:
 
   macos:
     needs: remote-servers
-    runs-on: macos-14 # Apple Silicon
+    runs-on: macos-15 # Apple Silicon（macos-14 は 2026-11 に打ち切り）
     env:
       # これが空なら署名/notarize をスキップして「未署名 .dmg」を出す（動線だけ先に作れる）。
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
       ZED_SOURCE_REV: b2d9c2e122fbc408d42276b4456243ba4f90f181
+      # Info.plist の LSMinimumSystemVersion と揃える。ビルド機の macOS を上げても 13 で動く物を作る。
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
       # タグと Cargo.toml の不一致は「更新チップが無限に出る」実害になる（updater は

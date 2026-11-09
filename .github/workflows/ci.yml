@@ -13,7 +13,7 @@ on:
 
 jobs:
   test-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       # toolchain は rust-toolchain.toml（1.95.0）で固定 → rustup が自動取得。

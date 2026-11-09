@@ -42,6 +42,6 @@ welcome・クラッシュ報告）は実装済み — ここに残っている�
 ## 3. 公開後の伸びしろ（順不同）
 
 - [ ] Homebrew cask（リリース済み dmg の sha256 が要るのでリリース後）
-- [ ] Intel (x86_64) mac ビルドの提供判断（現在は macos-14 = Apple Silicon のみ）
+- [ ] Intel (x86_64) mac ビルドの提供判断（現在は macos-15 = Apple Silicon のみ・最低 macOS 13 は `MACOSX_DEPLOYMENT_TARGET` で固定）
 - [ ] DMG の背景画像（現在は Applications リンクのみ）
 - [ ] Linux GUI ビルドの実機検証（CI の check-linux は continue-on-error のまま）
