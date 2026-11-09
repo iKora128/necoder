@@ -1990,6 +1990,12 @@ pub fn oneshot_text_on(
         git_fail_message(&output)
     );
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    // Claude Code は API の失敗を終了コード 0 のまま stdout に書く。答えとして使わない。
+    anyhow::ensure!(
+        !raw.trim_start().starts_with("API Error:"),
+        "生成に失敗: {}",
+        raw.trim()
+    );
     Ok(strip_code_fence(&raw))
 }
 

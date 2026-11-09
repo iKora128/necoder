@@ -1067,6 +1067,7 @@ impl Workspace {
         // 「消えています」と見間違えない）。
         self.forget_fleet_worktrees();
         self.update_agent_destination_for(index, cx);
+        self.sync_agent_on_screen(cx);
         if is_remote {
             self.refresh_explorer_for(index, cx);
             self.ensure_connection_pumps(cx);

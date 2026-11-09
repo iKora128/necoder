@@ -80,6 +80,8 @@ agent:
   connection_key_unreadable: "接続「%{connection}」のキーをキーチェーンから読み込めませんでした: %{reason}"
   connection_provider_rejected: "接続「%{connection}」をエージェントが受け付けなかったので起動しません: %{reason}"
   connection_task_env_skipped: "接続を渡すセッションのため、.necoder/task.env の %{names} は読み込みませんでした"
+  connectors_reconnecting: "Gmail などのコネクタに繋がっていなかったため、Claude を起動し直して同じ内容を送り直しています"
+  connectors_unavailable: "Gmail などのコネクタに繋がりませんでした。この返事はコネクタなしです。少し待ってから送り直してください"
   pill_connection: "接続: %{connection}（エージェントはこの契約の API で動作します・設定 › 接続 で変更）"
   err_agent_lookup: "エージェントを検索できません（接続を確認して再開してください）: %{message}"
   err_launch_not_in_registry: "%{id} の起動情報が見つかりません。設定 → AI エージェント → エージェントを追加 で一覧を更新してください"
@@ -1977,7 +1979,6 @@ chat:
   connector_always_allow: 常に許可
   denied_connector: "%{tool} はブロックされています。設定の「コネクタ」で変えられます"
   denied_write: "渡されていない場所への書き込みを拒否しました: %{path}"
-  denied_execute: コマンドの実行を拒否しました（Chat はシェルを使いません）
   err_folder: "チャットのフォルダを用意できません: %{message}"
   err_no_documents: 書類フォルダの場所が分かりません（設定 chat.directory で指定できます）
   no_project: プロジェクトなし

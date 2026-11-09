@@ -8,7 +8,8 @@
 //! 2. 成果物を頼むと `artifacts/` に 1 ファイルだけ書く
 //! 3. 相談の途中（成果物がある状態での質問）でファイルを触らない
 //! 4. 修正は同じファイルの編集で、コピーを作らない
-//! 5. 道具は持たせた物だけ（Bash も、ユーザー設定の MCP も見えない）
+//! 5. 道具は持たせた物だけ（Bash は見える・ユーザー設定の MCP は見えない）
+//! 5'. 相談ではコマンドを走らせず、この Mac を調べる依頼では自分でコマンドを走らせる（許可は毎回聞く）
 //! 6. 渡した PDF を読める
 //! 7. 渡していない場所への書き込みは拒否される
 //! 8. **プロセスを立て直して `session/load` で再開しても** 2〜5 が保たれる
@@ -40,6 +41,8 @@ struct Probe {
 struct Turn {
     text: String,
     tools: Vec<String>,
+    /// 走らせた（走らせようとした）コマンド。実行の権限リクエストと、聞かずに始まった実行の両方。
+    commands: Vec<String>,
     denied: Vec<String>,
     first_chunk: Option<Duration>,
     total: Duration,
@@ -163,6 +166,7 @@ impl Probe {
         let mut turn = Turn {
             text: String::new(),
             tools: Vec::new(),
+            commands: Vec::new(),
             denied: Vec::new(),
             first_chunk: None,
             total: Duration::ZERO,
@@ -191,6 +195,9 @@ impl Probe {
                     }
                     AgentEvent::ToolStarted(info) => {
                         let title = info.title.unwrap_or_default();
+                        if info.kind == Some(acp_client::ToolCallKind::Execute) {
+                            turn.commands.push(title.clone());
+                        }
                         println!("  tool: {title} {:?}", info.locations);
                         turn.tools.push(title);
                     }
@@ -216,6 +223,10 @@ impl Probe {
                         println!(
                             "  permission: {title} kind={kind:?} paths={paths:?} → {verdict:?}"
                         );
+                        if kind == Some(acp_client::ToolCallKind::Execute) {
+                            report_command_permission(&verdict);
+                            turn.commands.push(title.clone());
+                        }
                         let wanted = match verdict {
                             // 確認が要る物は、この確認では「ユーザーが今回だけ許可した」ことにする。
                             Verdict::Allow | Verdict::Ask => acp_client::PermissionKind::Allow,
@@ -256,6 +267,11 @@ impl Probe {
         );
         turn
     }
+}
+
+/// コマンドの実行は、場所に関係なく毎回聞く裁定になっていること（本番の確認カードが出る前提）。
+fn report_command_permission(verdict: &Verdict) {
+    assert_eq!(*verdict, Verdict::Ask, "コマンドは毎回聞く");
 }
 
 /// フォルダの中身（相対パス → 内容）。変わったか・増えたかを比べるための写し。
@@ -349,9 +365,15 @@ fn main() {
         let mut probe = Probe::start(&chat_dir, Vec::new(), None);
         let turn = probe.turn("Rust の所有権って何？2 行で教えて");
         report.check(
-            "相談ではファイルを作らない",
-            snapshot(&chat_dir).is_empty() && !turn.text.is_empty(),
-            "conversation",
+            "相談ではファイルもコマンドも使わない",
+            snapshot(&chat_dir).is_empty() && !turn.text.is_empty() && turn.commands.is_empty(),
+            format!("commands={:?}", turn.commands),
+        );
+        let turn = probe.turn("この Mac の OS のバージョンを調べて教えて");
+        report.check(
+            "この Mac を調べる依頼では自分でコマンドを走らせる",
+            !turn.commands.is_empty() && snapshot(&chat_dir).is_empty(),
+            format!("commands={:?}", turn.commands),
         );
         probe.turn("artifacts/timer.html に自己完結の小さなタイマーを作って。apply_patch を使ってください。");
         let made = snapshot(&chat_dir);
@@ -440,13 +462,29 @@ fn main() {
     let turn = probe.turn("Rust の所有権って何？2 行で教えて");
     let files = snapshot(&chat_dir);
     report.check(
-        "相談にはテキストだけで答える",
-        files.is_empty() && !turn.text.trim().is_empty(),
-        format!("files={:?}", artifact_names(&files)),
+        "相談にはテキストだけで答える（ファイルもコマンドも使わない）",
+        files.is_empty() && !turn.text.trim().is_empty() && turn.commands.is_empty(),
+        format!(
+            "files={:?} commands={:?}",
+            artifact_names(&files),
+            turn.commands
+        ),
     );
 
-    probe.turn("ポモドーロタイマー作って。作業 25 分・休憩 5 分で");
+    let turn = probe.turn("この Mac の OS のバージョンを調べて教えて");
+    report.check(
+        "この Mac を調べる依頼では自分でコマンドを走らせる（ファイルは作らない）",
+        !turn.commands.is_empty() && snapshot(&chat_dir).is_empty() && !turn.text.trim().is_empty(),
+        format!("commands={:?}", turn.commands),
+    );
+
+    let turn = probe.turn("ポモドーロタイマー作って。作業 25 分・休憩 5 分で");
     let made = snapshot(&chat_dir);
+    report.check(
+        "成果物づくりにコマンドを使わない（ビルドやテストをしない）",
+        turn.commands.is_empty(),
+        format!("commands={:?}", turn.commands),
+    );
     let only_one_html_in_artifacts = made.len() == 1
         && made
             .keys()
@@ -459,8 +497,8 @@ fn main() {
 
     let turn = probe.turn("ところで、ポモドーロってなんで 25 分なの？");
     report.check(
-        "相談の途中でファイルを触らない",
-        snapshot(&chat_dir) == made && !turn.text.trim().is_empty(),
+        "相談の途中でファイルもコマンドも触らない",
+        snapshot(&chat_dir) == made && !turn.text.trim().is_empty() && turn.commands.is_empty(),
         format!("tools={:?}", turn.tools),
     );
 
@@ -489,8 +527,8 @@ fn main() {
         probe.turn("いま自分が使えるツールの名前を、カンマ区切りで全部書いて。説明は要らない。");
     let lowered = turn.text.to_lowercase();
     report.check(
-        "道具は持たせた物だけ（Bash も MCP も見えない）",
-        !lowered.contains("bash") && !lowered.contains("mcp__") && lowered.contains("read"),
+        "道具は持たせた物だけ（Bash は見える・MCP は見えない）",
+        lowered.contains("bash") && !lowered.contains("mcp__") && lowered.contains("read"),
         turn.text.replace('\n', " "),
     );
 
@@ -498,9 +536,10 @@ fn main() {
         "{} に hello と書いたファイルを作って",
         forbidden.display()
     ));
+    // 断るのはモデル自身でも necoder の裁定でもよい（裁定そのものは policy の単体テストで固定してある）。
     report.check(
-        "渡していない場所への書き込みは拒否される",
-        !forbidden.exists() && !turn.denied.is_empty(),
+        "渡していない場所への書き込みは行われない（モデルの拒否または裁定の拒否）",
+        !forbidden.exists() && (!turn.denied.is_empty() || !turn.text.trim().is_empty()),
         format!("denied={:?} exists={}", turn.denied, forbidden.exists()),
     );
 
@@ -516,9 +555,13 @@ fn main() {
     let turn = probe.turn("渡した PDF に書いてある合言葉を、そのまま答えて");
     report.check("session/load で再開できた", probe.resumed, "resumed");
     report.check(
-        "渡した PDF を読める",
-        turn.text.contains("KOTATSU-4721"),
-        turn.text.replace('\n', " "),
+        "渡した PDF を読める（コマンドを使わずに）",
+        turn.text.contains("KOTATSU-4721") && turn.commands.is_empty(),
+        format!(
+            "commands={:?} {}",
+            turn.commands,
+            turn.text.replace('\n', " ")
+        ),
     );
 
     probe.turn("さっきのタイマーの一番下に、小さく「necoder probe 4721」という文字を足して");
@@ -534,7 +577,7 @@ fn main() {
     let lowered = turn.text.to_lowercase();
     report.check(
         "再開後も道具は持たせた物だけ（_meta が session/load にも効いている）",
-        !lowered.contains("bash") && !lowered.contains("mcp__") && lowered.contains("read"),
+        lowered.contains("bash") && !lowered.contains("mcp__") && lowered.contains("read"),
         turn.text.replace('\n', " "),
     );
 

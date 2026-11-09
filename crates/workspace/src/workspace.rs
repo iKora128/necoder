@@ -2902,6 +2902,69 @@ mod tests {
 
     /// 開いた後に `git init` されたフォルダ: git の状態を読み直すとリポジトリ ID が git の値に揃う
     /// （root の代用のままだと、後で切った Task が別リポジトリ扱いになり系譜から外れる）。
+    /// 先張りはプロジェクトごとのパネル全部ではなく、見ている 1 枚だけに許す。全部に許すと、起動の
+    /// たびにレールの数だけエージェントが立つ（2026-11-04: 13 プロジェクトで 13 本・約 5GB）。
+    #[gpui::test]
+    fn only_the_visible_project_panel_may_prewarm(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_on_screen_{}_{}",
+            std::process::id(),
+            agent_panel::now_unix_ms()
+        ));
+        let roots: Vec<PathBuf> = ["a", "b", "c"].iter().map(|name| root.join(name)).collect();
+        for path in &roots {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(roots.clone(), Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            let on_screen = |workspace: &Workspace, cx: &App| -> Vec<bool> {
+                workspace
+                    .project_sessions
+                    .sessions
+                    .iter()
+                    .map(|session| session.agent_panel.read(cx).is_on_screen())
+                    .collect()
+            };
+            assert_eq!(
+                on_screen(workspace, cx),
+                vec![true, false, false],
+                "起動直後は active だけ"
+            );
+            workspace.switch_project(2, window, cx);
+            assert_eq!(
+                on_screen(workspace, cx),
+                vec![false, false, true],
+                "切り替えたら行き先だけ"
+            );
+            workspace.set_chat_mode(true, window, cx);
+            assert_eq!(
+                on_screen(workspace, cx),
+                vec![false, false, false],
+                "Chat の間はプロジェクトのパネルを見ていない"
+            );
+            workspace.set_chat_mode(false, window, cx);
+            assert_eq!(
+                on_screen(workspace, cx),
+                vec![false, false, true],
+                "Chat を抜けたら戻る"
+            );
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[gpui::test]
     fn repository_id_follows_git_init_after_opening(cx: &mut gpui::TestAppContext) {
         let base = std::env::temp_dir().join(format!(

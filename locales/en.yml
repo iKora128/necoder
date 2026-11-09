@@ -79,6 +79,8 @@ agent:
   connection_key_unreadable: "Couldn't read the key of connection \"%{connection}\" from the keychain: %{reason}"
   connection_provider_rejected: "Not starting because the agent rejected connection \"%{connection}\": %{reason}"
   connection_task_env_skipped: "This session carries a connection, so .necoder/task.env was not allowed to set %{names}"
+  connectors_reconnecting: "Gmail and the other connectors were not connected, so Claude is restarting and sending your message again"
+  connectors_unavailable: "Could not connect to Gmail and the other connectors. This reply was made without them; wait a moment and send again"
   pill_connection: "Connection: %{connection} (the agent runs on this plan's API; change it in Settings › Connections)"
   err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
   err_launch_not_in_registry: "%{id} isn't in the ACP registry (refresh it from Settings → AI agents → Add agent)"
@@ -1976,7 +1978,6 @@ chat:
   connector_always_allow: Always allow
   denied_connector: "%{tool} is blocked. You can change this in Connectors settings"
   denied_write: "Refused a write outside this chat's folder and attachments: %{path}"
-  denied_execute: Refused to run a command (Chat has no shell)
   err_folder: "Could not prepare the chat folder: %{message}"
   err_no_documents: Could not locate the Documents folder (set chat.directory in settings)
   no_project: no project

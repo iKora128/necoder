@@ -1135,6 +1135,8 @@ impl Workspace {
                 });
             }
         }
+        // 宛先を入れると先張りが予約されるので、その前に「見ているのは active だけ」と伝える。
+        workspace.sync_agent_on_screen(cx);
         // Fleet は全 Task の composer を同時に操作できるので、active だけでなく全 session の宛先を設定。
         for index in 0..workspace.project_sessions.projects.len() {
             workspace.update_agent_destination_for(index, cx);

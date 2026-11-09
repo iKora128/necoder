@@ -45,6 +45,12 @@ pub struct SessionPreset {
     /// モデルから隠す道具（SDK の `disallowedTools`）。設定でオフにしたコネクタは
     /// `mcp__claude_ai_Figma`、ブロックした道具は `mcp__claude_ai_Gmail__reply` の形で渡す。
     pub disallowed_tools: Vec<String>,
+    /// claude.ai のコネクタの接続状態を毎ターン受け取る（アダプタの `emitRawSDKMessages` で SDK の
+    /// `system/init` だけを `_claude/sdkMessage` として中継させる・[`crate::AgentEvent::Connectors`]）。
+    /// Claude Code は起動直後にコネクタの一覧を取り損ねると、そのプロセスの間は取り直さない
+    /// （2026-11-09: 起こし直しの直後の ECONNREFUSED で Gmail もカレンダーも戻らなかった）。
+    /// 状態が見えれば、necoder が起こし直して取り直させられる。
+    pub watch_connectors: bool,
 }
 
 impl SessionPreset {
@@ -78,10 +84,21 @@ impl SessionPreset {
                 serde_json::Value::String(system_prompt.clone()),
             );
         }
+        let mut claude_code = serde_json::Map::new();
         if !options.is_empty() {
+            claude_code.insert("options".to_string(), serde_json::Value::Object(options));
+        }
+        if self.watch_connectors {
+            // 中継させるのはターンの始めの `system/init` だけ（全部だと本文が二重に流れる）。
+            claude_code.insert(
+                "emitRawSDKMessages".to_string(),
+                serde_json::json!([{ "type": "system", "subtype": "init" }]),
+            );
+        }
+        if !claude_code.is_empty() {
             meta.insert(
                 "claudeCode".to_string(),
-                serde_json::json!({ "options": options }),
+                serde_json::Value::Object(claude_code),
             );
         }
         (!meta.is_empty()).then_some(meta)
@@ -169,6 +186,7 @@ mod tests {
                 "false".to_string(),
             )]),
             disallowed_tools: vec!["mcp__claude_ai_Figma".to_string()],
+            watch_connectors: false,
         };
         let meta = serde_json::Value::Object(preset.to_meta().expect("meta"));
         assert_eq!(
@@ -180,6 +198,24 @@ mod tests {
                     "disallowedTools": ["mcp__claude_ai_Figma"],
                 } },
             })
+        );
+    }
+
+    /// コネクタを見張るセッションは、ターンの始めの `system/init` だけを中継させる。
+    #[test]
+    fn watching_connectors_asks_for_the_init_message_only() {
+        let preset = SessionPreset {
+            tools: Some(vec!["ToolSearch".to_string()]),
+            watch_connectors: true,
+            ..SessionPreset::default()
+        };
+        let meta = serde_json::Value::Object(preset.to_meta().expect("meta"));
+        assert_eq!(
+            meta,
+            serde_json::json!({ "claudeCode": {
+                "options": { "tools": ["ToolSearch"] },
+                "emitRawSDKMessages": [{ "type": "system", "subtype": "init" }],
+            } })
         );
     }
 

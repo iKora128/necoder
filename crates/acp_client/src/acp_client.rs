@@ -381,6 +381,14 @@ pub enum AgentEvent {
     /// レート制限の知らせ（O11）。Claude は `usage_update._meta["_claude/rateLimit"]` で送ってくる。
     /// アカウント単位の値。1 回の知らせに全部の窓が載るとは限らないので、受け手は窓ごとに差し替える。
     RateLimits(usage::RateLimits),
+    /// claude.ai のコネクタの接続状態（ターンの始めの `system/init`・
+    /// [`preset::SessionPreset::watch_connectors`] を立てたセッションだけ）。
+    Connectors(ConnectorReport),
+    /// コネクタが 1 つも使えなかったので、このターンを畳んで Claude を起こし直し、同じ指示を
+    /// 送り直している（UI はターンを続けたまま、一言だけ出す）。
+    ConnectorsReconnecting,
+    /// 起こし直してもコネクタに繋がらなかった。このターンはコネクタ無しで進む。
+    ConnectorsUnavailable,
     /// ターンに使ったトークン（`PromptResponse._meta.quota`・O11）。`TurnEnded` の直前に流す。
     TurnUsage(usage::TurnTokens),
     /// エージェントが広告する権限モード一覧 + 現在モード（セッション開始時）。`(mode_id, 表示名)`。
@@ -861,6 +869,164 @@ impl Steering {
     }
 }
 
+/// claude.ai のコネクタ（`claude.ai Gmail` など）の接続状態。名前は Claude Code での名前のまま。
+///
+/// Claude Code は起動直後にコネクタの一覧を取りに行き、取り損ねる（通信の失敗）とそのプロセスの間は
+/// 取り直さない。一覧に 1 つも無い・全部が失敗、は「このプロセスでは使えない」を意味する。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConnectorReport {
+    pub connected: Vec<String>,
+    /// まだ繋いでいる途中（`ToolSearch` は繋がるのを待つので、使えないわけではない）。
+    pub pending: Vec<String>,
+    /// 繋がらなかった（`failed`）。
+    pub failed: Vec<String>,
+    /// ログインし直しが要る（`needs-auth`）。起こし直しても直らない。
+    pub needs_auth: Vec<String>,
+}
+
+impl ConnectorReport {
+    /// このプロセスでは 1 つも使えない（一覧に無い・全部失敗）。繋いでいる途中・要ログインは含めない。
+    pub fn none_usable(&self) -> bool {
+        self.connected.is_empty() && self.pending.is_empty() && self.needs_auth.is_empty()
+    }
+
+    /// 一覧に 1 つでも載っている（このアカウントにはコネクタがある）。
+    fn any_listed(&self) -> bool {
+        !(self.connected.is_empty()
+            && self.pending.is_empty()
+            && self.failed.is_empty()
+            && self.needs_auth.is_empty())
+    }
+}
+
+/// コネクタが使えなかった時に起こし直す回数（1 つの指示につき）。
+const CONNECTOR_RESTARTS: usize = 2;
+
+/// 起こしてから最初の指示を送るまでに置く間（コネクタを見張るセッションだけ）。
+///
+/// Claude Code はコネクタの一覧を起動の後で取りに行くので、起こしてすぐ送ると、その指示の間は
+/// 1 つも見えない（実測 2026-11-09: 0.7 秒で 0 件、1.5 秒で一部、3 秒で揃う）。起こし直しの
+/// 2 回目は長めに待つ — 放置明けの最初の通信が数秒 ECONNREFUSED で弾かれる環境があり
+/// （本人の Mac で約 8 秒）、その間に取りに行くとまた取り損ねる。
+fn connector_grace(restarts: usize) -> std::time::Duration {
+    #[cfg(test)]
+    if CONNECTORS_EXPECTED_FOR_TEST.get().is_some() {
+        return std::time::Duration::ZERO;
+    }
+    std::time::Duration::from_secs(if restarts >= 2 { 8 } else { 3 })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// テスト用: 印のファイルの代わり（本人のデータフォルダに触れない）。立てている間は待ちも 0。
+    static CONNECTORS_EXPECTED_FOR_TEST: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// 「このアカウントにはコネクタがある」の印。一覧が空の時に、取り損ねたのか本当に無いのかを
+/// 見分ける（無い人のセッションを毎回起こし直さない）。起こし直しても空なら消す。
+fn connectors_seen_marker() -> Option<std::path::PathBuf> {
+    paths::data_dir().map(|dir| dir.join("claude-connectors-seen"))
+}
+
+fn connectors_expected() -> bool {
+    #[cfg(test)]
+    if let Some(expected) = CONNECTORS_EXPECTED_FOR_TEST.get() {
+        return expected;
+    }
+    connectors_seen_marker().is_some_and(|marker| marker.exists())
+}
+
+fn remember_connectors(seen: bool) {
+    #[cfg(test)]
+    if CONNECTORS_EXPECTED_FOR_TEST.get().is_some() {
+        CONNECTORS_EXPECTED_FOR_TEST.set(Some(seen));
+        return;
+    }
+    let Some(marker) = connectors_seen_marker() else {
+        return;
+    };
+    let result = if seen {
+        if marker.exists() {
+            return;
+        }
+        marker
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&marker, b""))
+    } else {
+        match std::fs::remove_file(&marker) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(error) = result {
+        eprintln!(
+            "コネクタの印を更新できない（{}）: {error}",
+            marker.display()
+        );
+    }
+}
+
+/// ターンの始めの一覧を見て、起こし直すか決める。
+#[derive(Debug, PartialEq, Eq)]
+enum ConnectorVerdict {
+    Fine,
+    Restart,
+    GiveUp,
+}
+
+fn judge_connectors(report: &ConnectorReport, expected: bool, restarts: usize) -> ConnectorVerdict {
+    if !report.none_usable() || !expected {
+        ConnectorVerdict::Fine
+    } else if restarts < CONNECTOR_RESTARTS {
+        ConnectorVerdict::Restart
+    } else {
+        ConnectorVerdict::GiveUp
+    }
+}
+
+/// claude-agent-acp が SDK のメッセージをそのまま中継する通知（`emitRawSDKMessages`）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, acp::JsonRpcNotification)]
+#[notification(method = "_claude/sdkMessage")]
+struct ClaudeSdkMessage {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    message: serde_json::Value,
+}
+
+/// SDK の `system/init` から claude.ai のコネクタの状態を取り出す。init でなければ `None`。
+fn connector_report(message: &serde_json::Value) -> Option<ConnectorReport> {
+    let field = |key: &str| message.get(key).and_then(serde_json::Value::as_str);
+    if field("type") != Some("system") || field("subtype") != Some("init") {
+        return None;
+    }
+    let mut report = ConnectorReport::default();
+    let servers = message
+        .get("mcp_servers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten();
+    for server in servers {
+        let Some(name) = server.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !name.starts_with("claude.ai ") {
+            continue;
+        }
+        let bucket = match server.get("status").and_then(serde_json::Value::as_str) {
+            Some("connected") => &mut report.connected,
+            Some("pending") => &mut report.pending,
+            Some("needs-auth") => &mut report.needs_auth,
+            // 本人がオフにしたコネクタは数えない。
+            Some("disabled") => continue,
+            _ => &mut report.failed,
+        };
+        bucket.push(name.to_string());
+    }
+    Some(report)
+}
+
 /// ACP エージェント（claude-agent-acp）の起動設定。
 pub struct AgentCommand {
     managed_npm: Option<(String, String)>,
@@ -878,6 +1044,16 @@ impl AgentCommand {
     /// 既定エージェント（Claude）の起動コマンド。`cwd` はプロジェクトルート。互換用。
     pub fn claude(cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
         AGENTS.first()?.command(cwd)
+    }
+
+    /// claude-agent-acp を起こすコマンドか（necoder の置き場・npx・設定の上書きのどれでも）。
+    fn is_claude_adapter(&self) -> bool {
+        let mentions = |text: &str| text.contains("claude-agent-acp");
+        self.managed_npm
+            .as_ref()
+            .is_some_and(|(package, binary)| mentions(package) || mentions(binary))
+            || mentions(&self.path.to_string_lossy())
+            || self.args.iter().any(|arg| mentions(arg))
     }
 
     /// env 無しで組む（既存経路の短縮形・他の crate の試験が偽エージェントを起こす口）。
@@ -1269,7 +1445,12 @@ impl AgentKind {
     /// タイトルは既定名のまま（壊れない・Claude 決め打ちもしない）。
     pub fn oneshot(&self) -> Option<&'static str> {
         match self.id {
-            "claude" => Some(r#"claude -p "{prompt}" < {excerpt}"#),
+            // 公式の置き場を PATH より先に見る。npm で入れた古い `claude` が PATH の先にあると、
+            // 退役したモデルを呼んで「API Error: 404」を終了コード 0 で出し、それが要約や題に
+            // なっていた（2026-11-09・nvm の下の 1.0.120）。
+            "claude" => Some(
+                r#"cli=claude; for candidate in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude"; do if [ -x "$candidate" ]; then cli="$candidate"; break; fi; done; "$cli" -p "{prompt}" < {excerpt}"#,
+            ),
             "codex" => Some(
                 r#"codex exec --sandbox read-only --color never --output-last-message {out} "{prompt}" < {excerpt} >/dev/null 2>&1 && cat {out}"#,
             ),
@@ -2447,7 +2628,7 @@ pub async fn run_session(
 pub async fn run_session_on(
     host: Arc<dyn Host>,
     command: AgentCommand,
-    preferences: SessionPreferences,
+    mut preferences: SessionPreferences,
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
@@ -2484,6 +2665,9 @@ pub async fn run_session_on(
         Some(_) => ConnectionRoute::Env,
         None => ConnectionRoute::None,
     };
+    // コネクタが使えずに起こし直した回数と、次の起動で最初に流す指示（[`Attempt::Restart`]）。
+    let mut restarts = 0;
+    let mut pending = std::collections::VecDeque::new();
     loop {
         let attempt = run_session_attempt(
             &host,
@@ -2491,12 +2675,24 @@ pub async fn run_session_on(
             &task_env,
             &preferences,
             route,
+            AttemptStart {
+                pending: std::mem::take(&mut pending),
+                restarts,
+            },
             &mut command_rx,
             &event_tx,
         )
         .await?;
         match attempt {
             Attempt::Finished => return Ok(()),
+            Attempt::Restart {
+                session_id,
+                pending: carried,
+            } => {
+                restarts += 1;
+                preferences.resume = Some(session_id);
+                pending = carried;
+            }
             Attempt::NeedsEnv => {
                 eprintln!(
                     "{} は providers/set を広告しない。接続を環境変数で渡して起こし直す",
@@ -2525,6 +2721,12 @@ enum Attempt {
     Finished,
     /// `providers/set` を広告しないエージェントだった（セッションは開いていない）。env で起こし直す。
     NeedsEnv,
+    /// コネクタが 1 つも使えなかった。`session_id` を `session/load` で引き継いで起こし直し、
+    /// `pending`（送り直す指示 + ターン中に届いた設定の変更）を最初に流す。
+    Restart {
+        session_id: String,
+        pending: std::collections::VecDeque<SessionCommand>,
+    },
 }
 
 /// `providers/set` を送る（`session/new` / `session/load` の前・issue #38 H3）。Rust の ACP crate が
@@ -2544,13 +2746,52 @@ async fn set_provider(
     .map(|_| ())
 }
 
+/// Claude をスレッドのモデルで**起こす**ための env（`ANTHROPIC_MODEL`）。
+///
+/// 渡さないと Claude Code は `~/.claude/settings.json` の `model`（例 `fable[1m]`）で起き、
+/// `session/load` ではアダプタがそのモデルへ切り替え、続けて necoder が希望のモデルへ戻す。
+/// この往復が会話に `/model fable` → `/model opus` と記録され、エージェントを起こし直すたび
+/// （アイドル停止の後の送信など）に会話へ積もる。モデルはそれを「ユーザーが切り替えた」と読んで
+/// いた（2026-11-09）。起動時に渡せば最初から希望のモデルで起き、切り替えは起きない。
+///
+/// 接続（別の宛先）を渡すセッションでは触らない（モデル名の体系が宛先ごとに違う）。
+fn launch_model_env(
+    command: &AgentCommand,
+    preferences: &SessionPreferences,
+) -> BTreeMap<String, String> {
+    let model = preferences
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| {
+            !model.is_empty()
+                && !model.contains(char::is_whitespace)
+                && !model.eq_ignore_ascii_case("default")
+        })
+        .filter(|_| preferences.connection.is_none() && command.is_claude_adapter());
+    model
+        .map(|model| ("ANTHROPIC_MODEL".to_string(), model.to_lowercase()))
+        .into_iter()
+        .collect()
+}
+
+/// 1 回の起動に持ち込むもの（[`Attempt::Restart`] の続き）。
+struct AttemptStart {
+    /// セッションを開いたら最初に流す指示（送り直す指示と、前の起動のターン中に届いた設定の変更）。
+    pending: std::collections::VecDeque<SessionCommand>,
+    /// コネクタが使えずに起こし直した回数（最初の起動は 0）。
+    restarts: usize,
+}
+
 /// [`run_session_on`] の 1 回の起動（プロセスを起こして、セッションが終わるまで）。
+#[allow(clippy::too_many_arguments)]
 async fn run_session_attempt(
     host: &Arc<dyn Host>,
     command: &AgentCommand,
     task_env: &std::collections::HashMap<String, String>,
     preferences: &SessionPreferences,
     route: ConnectionRoute,
+    start: AttemptStart,
     command_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<Attempt> {
@@ -2562,6 +2803,8 @@ async fn run_session_attempt(
         .unwrap_or_default();
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
+        // いちばん弱い層（task.env・agent_servers・プリセット・接続のどれでも上書きできる）。
+        .envs(launch_model_env(command, preferences))
         .envs(task_env.clone())
         .envs(command.env.clone())
         // プリセットの環境変数が後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
@@ -2582,6 +2825,12 @@ async fn run_session_attempt(
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
     // 渡しても意味がない。判定はここで取る。
     let is_remote = host.is_remote();
+    let spawned_at = std::time::Instant::now();
+    let watch_connectors = preferences.preset.watch_connectors;
+    let AttemptStart {
+        pending: mut carried,
+        restarts,
+    } = start;
     let mut process = host
         .spawn_process(&spec)
         .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
@@ -2617,7 +2866,9 @@ async fn run_session_attempt(
             };
             // ログイン待ちの間に届いた設定の変更（ターンの待ち行列へ引き継ぐ）。
             let mut deferred: std::collections::VecDeque<SessionCommand> =
-                std::collections::VecDeque::new();
+                std::mem::take(&mut carried);
+            // この起動で最初の指示か（コネクタの一覧が揃うのを待つのは最初の 1 回だけ）。
+            let mut first_prompt = true;
             // このセッションを開くまでにログインしたか（開いてから UI に知らせる）。
             let mut logged_in = false;
             // 接続（issue #38 H3）: `providers/set` を `session/new` / `session/load` より前に送る。
@@ -3105,6 +3356,31 @@ async fn run_session_attempt(
                 // タスクアクター経由で接続ドライバごと落ち、「ACP セッションが異常終了」になる。
                 // 自前送信して応答をターンループで待てば、失敗を**そのターンだけ**に留められる
                 // （応答が返せている＝接続もプロセスも生きているので、セッションを維持して再送できる）。
+                // コネクタを見張るセッションは、起こしてすぐの指示を一覧が揃うまで待たせる
+                // （[`connector_grace`]）。先張り・入力中に起こしたなら、たいてい待ちは残っていない。
+                if watch_connectors && std::mem::take(&mut first_prompt) {
+                    let grace = connector_grace(restarts);
+                    let waited = spawned_at.elapsed();
+                    if waited < grace {
+                        let rest = grace - waited;
+                        blocking::unblock(move || std::thread::sleep(rest)).await;
+                    }
+                }
+                // 起こし直す時に同じ指示を送り直せるよう、送る前に控えておく。
+                let resend = watch_connectors.then(|| {
+                    if images.is_empty() {
+                        SessionCommand::Prompt(prompt.clone())
+                    } else {
+                        SessionCommand::PromptWithImages {
+                            text: prompt.clone(),
+                            images: images.clone(),
+                        }
+                    }
+                });
+                // 起こし直すと決めたターン。以後の更新は UI へ流さず（捨てる先へ流す）、終端で
+                // [`Attempt::Restart`] を返す。権限の問いは受け手が居ないので取り消し扱いになる。
+                let mut restarting = false;
+                let (discard_tx, _discarded) = mpsc::unbounded::<AgentEvent>();
                 let prompt_response = connection
                     .send_request(v1::PromptRequest::new(
                         session_id.clone(),
@@ -3142,6 +3418,8 @@ async fn run_session_attempt(
                     };
                     let update = match turn_event {
                         TurnEvent::Command(Some(SessionCommand::Cancel)) => {
+                            // 人が止めた。起こし直しの途中でも、送り直さずに普通に畳む。
+                            restarting = false;
                             // 通知なので応答は無い。エージェントが `StopReason::Cancelled` を
                             // 返してターンを畳む → 下の StopReason 分岐で TurnEnded が流れる。
                             connection
@@ -3212,6 +3490,18 @@ async fn run_session_attempt(
                         }
                         // ターンの終端。中断（拒否/キャンセル）は「注意を要する終わり方」として
                         // 区別する。上限到達・未知バリアントは完了扱い（会話は続けられる）。
+                        TurnEvent::PromptFinished(Ok(_)) | TurnEvent::PromptFinished(Err(_))
+                            if restarting =>
+                        {
+                            steering.release_waiting(&event_tx);
+                            if let Some(resend) = resend {
+                                deferred.push_front(resend);
+                            }
+                            return Ok(Attempt::Restart {
+                                session_id: session_id.to_string(),
+                                pending: std::mem::take(&mut deferred),
+                            });
+                        }
                         TurnEvent::PromptFinished(Ok(response)) => {
                             let end = match response.stop_reason {
                                 v1::StopReason::Refusal | v1::StopReason::Cancelled => {
@@ -3268,7 +3558,37 @@ async fn run_session_attempt(
                     };
                     // 通知（本文・ツール・状態）とリクエスト（権限確認・Elicitation）を捌く。リクエストは
                     // 応答するまで返らない＝ターンは正しくブロックされる（agent 側も待っている）。
-                    handle_session_message(update, &event_tx).await?;
+                    let sink = if restarting { &discard_tx } else { &event_tx };
+                    let report = handle_session_message(update, sink).await?;
+                    let Some(report) = report.filter(|_| watch_connectors && !restarting) else {
+                        continue;
+                    };
+                    if report.any_listed() {
+                        remember_connectors(true);
+                    }
+                    match judge_connectors(&report, connectors_expected(), restarts) {
+                        ConnectorVerdict::Fine => {}
+                        ConnectorVerdict::Restart => {
+                            eprintln!(
+                                "claude.ai のコネクタが 1 つも使えない（起こし直し {} 回目）",
+                                restarts + 1
+                            );
+                            restarting = true;
+                            connection
+                                .send_notification(v1::CancelNotification::new(session_id.clone()))
+                                .ok();
+                            event_tx
+                                .unbounded_send(AgentEvent::ConnectorsReconnecting)
+                                .ok();
+                        }
+                        ConnectorVerdict::GiveUp => {
+                            // 起こし直しても空＝本当に無い（外した）のかもしれない。次からは待たない。
+                            remember_connectors(false);
+                            event_tx
+                                .unbounded_send(AgentEvent::ConnectorsUnavailable)
+                                .ok();
+                        }
+                    }
                 }
             }
             Ok::<Attempt, acp::Error>(Attempt::Finished)
@@ -3299,20 +3619,34 @@ async fn run_session_attempt(
 /// 待機中で同じ道**を通す — 待機中に届いた更新も、ターン中と同じ写像（[`session_update_events`]）で
 /// UI へ流れる。リクエストは応答するまで返らない＝呼び出し側のループもそのぶん止まる
 /// （エージェント側も待っている）。
+///
+/// 戻り値はコネクタの一覧（その 1 通がターンの始めの `system/init` だった時だけ）。
 async fn handle_session_message(
     message: acp::SessionMessage,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
-) -> Result<(), acp::Error> {
+) -> Result<Option<ConnectorReport>, acp::Error> {
     let acp::SessionMessage::SessionMessage(dispatch) = message else {
         // StopReason は `send_prompt` 経由でしか流れず、ここは自前送信（PromptFinished で終端を
         // 受ける）なので届かない。将来のバリアント（enum は #[non_exhaustive]）ともども無視する。
-        return Ok(());
+        return Ok(None);
     };
+    let mut connectors = None;
     acp::util::MatchDispatch::new(dispatch)
         .if_notification(async |notification: v1::SessionNotification| {
             session_update_events(notification.update, |event| {
                 event_tx.unbounded_send(event).ok();
             });
+            Ok(())
+        })
+        .await
+        // ターンの始めの SDK `system/init`（コネクタを見張るセッションだけが受け取る）。
+        .if_notification(async |notification: ClaudeSdkMessage| {
+            if let Some(report) = connector_report(&notification.message) {
+                event_tx
+                    .unbounded_send(AgentEvent::Connectors(report.clone()))
+                    .ok();
+                connectors = Some(report);
+            }
             Ok(())
         })
         .await
@@ -3332,7 +3666,8 @@ async fn handle_session_message(
             },
         )
         .await
-        .otherwise_ignore()
+        .otherwise_ignore()?;
+    Ok(connectors)
 }
 
 /// `session/load` が再生する履歴のうち、**状態**（[`is_session_state_event`]）だけを UI へ流す。
@@ -3962,6 +4297,195 @@ async fn handle_elicitation_request(
 
 #[cfg(test)]
 mod tests {
+    /// SDK の `system/init` から claude.ai のコネクタだけを状態ごとに分ける（本人がオフにした物は数えない）。
+    #[test]
+    fn the_init_message_is_read_into_a_connector_report() {
+        let message = serde_json::json!({
+            "type": "system", "subtype": "init",
+            "mcp_servers": [
+                {"name": "claude.ai Gmail", "status": "connected"},
+                {"name": "claude.ai Figma", "status": "pending"},
+                {"name": "claude.ai Stripe", "status": "needs-auth"},
+                {"name": "claude.ai Drive", "status": "failed"},
+                {"name": "claude.ai Canva", "status": "disabled"},
+                {"name": "necoder", "status": "connected"},
+            ],
+        });
+        let report = super::connector_report(&message).expect("init");
+        assert_eq!(report.connected, ["claude.ai Gmail"]);
+        assert_eq!(report.pending, ["claude.ai Figma"]);
+        assert_eq!(report.needs_auth, ["claude.ai Stripe"]);
+        assert_eq!(report.failed, ["claude.ai Drive"]);
+        assert!(!report.none_usable());
+        let other = serde_json::json!({"type": "assistant"});
+        assert!(super::connector_report(&other).is_none());
+    }
+
+    /// 起こし直すのは「あるはずなのに 1 つも使えない」時だけ。2 回やってもだめなら諦める。
+    #[test]
+    fn connectors_are_restarted_only_when_expected_and_missing() {
+        use super::{judge_connectors, ConnectorReport, ConnectorVerdict};
+        let empty = ConnectorReport::default();
+        let failed = ConnectorReport {
+            failed: vec!["claude.ai Gmail".to_string()],
+            ..ConnectorReport::default()
+        };
+        let connecting = ConnectorReport {
+            pending: vec!["claude.ai Gmail".to_string()],
+            ..ConnectorReport::default()
+        };
+        assert_eq!(judge_connectors(&empty, true, 0), ConnectorVerdict::Restart);
+        assert_eq!(
+            judge_connectors(&failed, true, 1),
+            ConnectorVerdict::Restart
+        );
+        assert_eq!(judge_connectors(&empty, true, 2), ConnectorVerdict::GiveUp);
+        assert_eq!(judge_connectors(&empty, false, 0), ConnectorVerdict::Fine);
+        assert_eq!(
+            judge_connectors(&connecting, true, 0),
+            ConnectorVerdict::Fine
+        );
+    }
+
+    /// 偽エージェント: 1 本目のプロセスはコネクタの一覧が空の init を送り（取り損ねた状態）、
+    /// 本文を 1 つ漏らしてから cancel を待つ。2 本目（`session/load`）は繋がった init と答えを返す。
+    const AGENT_THAT_MISSES_CONNECTORS: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def chunk(sid, text):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid,
+                     "update": {"sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": text}}}})
+
+def init(sid, servers):
+    send({"jsonrpc": "2.0", "method": "_claude/sdkMessage",
+          "params": {"sessionId": sid,
+                     "message": {"type": "system", "subtype": "init", "mcp_servers": servers}}})
+
+loaded = False
+pending = None
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "s1"}})
+    elif method == "session/load":
+        loaded = True
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    elif method == "session/prompt":
+        sid = params["sessionId"]
+        text = params["prompt"][0]["text"]
+        if not loaded:
+            init(sid, [])
+            chunk(sid, "leaked")
+            pending = rid
+        else:
+            init(sid, [{"name": "claude.ai Gmail", "status": "connected"}])
+            chunk(sid, "answer:" + text)
+            send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+            sys.exit(0)
+    elif method == "session/cancel" and pending is not None:
+        send({"jsonrpc": "2.0", "id": pending, "result": {"stopReason": "cancelled"}})
+        sys.exit(0)
+"#;
+
+    /// コネクタを取り損ねたプロセスは、ターンを畳んで起こし直し、同じ指示を送り直す。UI には
+    /// 「起こし直す」の一言と最後の答えだけが届き、畳んだターンの本文・終端は届かない。
+    #[test]
+    fn a_session_that_missed_its_connectors_is_restarted_and_the_prompt_resent() {
+        super::CONNECTORS_EXPECTED_FOR_TEST.set(Some(true));
+        let preferences = SessionPreferences {
+            preset: super::preset::SessionPreset {
+                watch_connectors: true,
+                ..super::preset::SessionPreset::default()
+            },
+            ..SessionPreferences::default()
+        };
+        let Some((outcome, events)) = run_fake_agent_until_session_ends(
+            AGENT_THAT_MISSES_CONNECTORS,
+            preferences,
+            Some("Gmail を見て"),
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        super::CONNECTORS_EXPECTED_FOR_TEST.set(None);
+        outcome.expect("正常に畳む");
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chunks, ["answer:Gmail を見て"], "{events:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ConnectorsReconnecting))
+                .count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::TurnEnded { .. }))
+                .count(),
+            1,
+            "畳んだターンの終端は UI に届かない: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SessionStarted { session_id, resumed: true, .. } if session_id == "s1"
+            )),
+            "同じ会話を session/load で引き継ぐ: {events:?}"
+        );
+    }
+
+    /// Claude はスレッドのモデルで起こす（起こし直すたびに `/model fable` → `/model opus` が会話へ
+    /// 積もらない）。Claude 以外・接続つき・既定のままのスレッドには何も足さない。
+    #[test]
+    fn claude_is_launched_on_the_thread_model() {
+        let claude = || {
+            super::AgentCommand::new(
+                "/usr/bin/npx".into(),
+                vec!["@agentclientprotocol/claude-agent-acp@0.84.0".into()],
+                "/tmp".into(),
+            )
+        };
+        let wants = |model: &str| super::SessionPreferences {
+            model: Some(model.to_string()),
+            ..Default::default()
+        };
+        let env = super::launch_model_env(&claude(), &wants("opus[1m]"));
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL").map(String::as_str),
+            Some("opus[1m]")
+        );
+        assert!(super::launch_model_env(&claude(), &wants("default")).is_empty());
+        assert!(super::launch_model_env(&claude(), &wants("Opus 5.5")).is_empty());
+        assert!(
+            super::launch_model_env(&claude(), &super::SessionPreferences::default()).is_empty()
+        );
+        let codex = super::AgentCommand::new("codex-acp".into(), Vec::new(), "/tmp".into());
+        assert!(super::launch_model_env(&codex, &wants("gpt-6.1-sol")).is_empty());
+    }
+
     /// 認証切れの判定: claude-agent-acp の実文言（OAuth 失効）と Codex/Copilot 系の定型句を拾い、
     /// API のストリーミング切断・タイムアウトなど**再ログインで直らない失敗**は拾わない。
     #[test]
@@ -6931,9 +7455,10 @@ for line in sys.stdin:
             .and_then(|k| k.oneshot())
             .unwrap();
         assert!(
-            claude.contains("claude -p")
-                && claude.contains("{prompt}")
+            claude.contains(r#"-p "{prompt}""#)
                 && claude.contains("{excerpt}")
+                && claude.contains("$HOME/.local/bin/claude"),
+            "公式の置き場を PATH より先に見る: {claude}"
         );
         // codex は agent 実行で stdout が汚いため --output-last-message + cat でクリーンに拾う。
         let codex = AgentKind::by_label("Codex")
@@ -7097,6 +7622,9 @@ for line in sys.stdin:
                             eprintln!("[cost] {amount} {currency}")
                         }
                         AgentEvent::RateLimits(limits) => eprintln!("[rate limits] {limits:?}"),
+                        AgentEvent::Connectors(report) => eprintln!("[connectors] {report:?}"),
+                        AgentEvent::ConnectorsReconnecting => eprintln!("[connectors] 起こし直す"),
+                        AgentEvent::ConnectorsUnavailable => eprintln!("[connectors] 繋がらない"),
                         AgentEvent::TurnUsage(tokens) => eprintln!("[turn usage] {tokens:?}"),
                         AgentEvent::Modes { modes, current } => {
                             eprintln!("[modes] current={current} available={modes:?}")

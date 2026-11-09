@@ -1107,8 +1107,8 @@ const PREWARM_DELAY: std::time::Duration = std::time::Duration::from_millis(500)
 
 /// 先張りで立てたまま **1 度も使っていない** セッションを、同時に何本まで抱えるか。
 ///
-/// 実測（2026-09-11・本人環境）: 未送信のセッションは adapter + 子で **約 16MB**（使うと 46MB、
-/// 会話が育つと 244MB）。つまり「見ただけのタブ」が溜まるほど無駄が積む。2 本にしてあるのは、
+/// 実測（2026-11-04・本人環境・`footprint`）: 未送信でも 1 本 **約 390MB**（claude 208 + adapter 65 +
+/// MCP 1 個につき 115）。つまり「見ただけのタブ」が溜まるほど無駄が積む。2 本にしてあるのは、
 /// タブを行き来（A→B→A）しても立て直しが起きない最小の数だから。超えた分は古い順に畳む
 /// （畳んでもピルの選択肢は在庫（[`AgentAdvertisement`]）から出続けるので見た目は変わらない）。
 const MAX_IDLE_PREWARMED_SESSIONS: usize = 2;
@@ -2578,12 +2578,17 @@ pub struct AgentPanel {
     prewarm_gen: u32,
     /// この宛先で先張りを試したスレッド id。失敗しても連打しない（1 スレッド 1 回）。
     prewarmed: std::collections::HashSet<String>,
+    /// 入力を始めたので起こし直したスレッド（[`Self::wake_agent_for_typing`]）。止めるたびに外す。
+    typing_woken: std::collections::HashSet<String>,
     /// 先張りで立てたセッションを持つスレッド id（古い順）。[`MAX_IDLE_PREWARMED_SESSIONS`] を
     /// 超えたら、まだ使われていない古い物から畳む。
     prewarm_order: Vec<String>,
     /// このパネルで先張りしてよいか。Fleet の Task セルは **false** — 画面に N 枚並べただけで
     /// エージェントのプロセスが N 本立つのを避ける（あちらは送信で立てる）。
     prewarm_allowed: bool,
+    /// このパネルを人が見ているか（Workspace が [`Self::set_on_screen`] で配る）。パネルは
+    /// プロジェクトごとに 1 枚あるので、見ていないパネルまで先張りするとレールの数だけ立つ。
+    prewarm_on_screen: bool,
     /// Chat モードのパネルか（`chat.rs`）。スレッドは全部チャットで、cwd はチャットごとのフォルダ。
     chat_mode: bool,
     /// チャットの一覧（開いていないチャットは DB の行だけ）。変化の節目で作り直す。
@@ -2726,6 +2731,11 @@ impl AgentPanel {
         // 移動のどれでも composer は notify するので、ここで開閉を決める）。
         cx.observe(&composer, |panel, _composer, cx| {
             panel.refresh_mention_state(cx)
+        })
+        .detach();
+        // Chat: 止めておいたエージェントを、打ち始めた時点で起こし直す（送る頃には揃っている）。
+        cx.observe(&composer, |panel, _composer, cx| {
+            panel.wake_agent_for_typing(cx)
         })
         .detach();
         // 画像の貼り付け（スクリーンショット）→ 添付にして、次の 1 通に image ブロックで添える。
@@ -3133,8 +3143,10 @@ PYEOF"#;
             remote_connection_noted: std::collections::HashSet::new(),
             prewarm_gen: 0,
             prewarmed: std::collections::HashSet::new(),
+            typing_woken: std::collections::HashSet::new(),
             prewarm_order: Vec::new(),
             prewarm_allowed: true,
+            prewarm_on_screen: true,
             chat_mode: false,
             chat_rows: Vec::new(),
             chat_search: String::new(),
@@ -5180,7 +5192,8 @@ PYEOF"#;
             cx.background_executor().timer(PREWARM_DELAY).await;
             panel
                 .update(cx, |panel, cx| {
-                    if panel.prewarm_gen == generation {
+                    // 待っている間に別のプロジェクトへ移ったら立てない。
+                    if panel.prewarm_gen == generation && panel.prewarm_on_screen {
                         panel.prewarm_thread(&thread_id, cx);
                     }
                 })
@@ -5189,10 +5202,31 @@ PYEOF"#;
         .detach();
     }
 
+    /// このパネルを人が見ているか（先張りしてよいパネルか）。
+    pub fn is_on_screen(&self) -> bool {
+        self.prewarm_on_screen
+    }
+
+    /// このパネルを人が見ているかを受け取る。見え始めたら、そこで初めて先張りを予約する。
+    /// 立っているセッションは止めない（戻ってすぐ使えるように。回収は idle の弁に任せる）。
+    pub fn set_on_screen(&mut self, on_screen: bool, cx: &mut Context<Self>) {
+        if self.prewarm_on_screen == on_screen {
+            return;
+        }
+        self.prewarm_on_screen = on_screen;
+        if on_screen {
+            self.schedule_prewarm(cx);
+        }
+    }
+
     /// 先張りの対象（アクティブスレッドの id）。対象が無ければ `None`:
-    /// Fleet の Task セル / 宛先未定 / 設定で off / もう繋がっている / この宛先で試行済み。
+    /// Fleet の Task セル / 見ていないパネル / 宛先未定 / 設定で off / もう繋がっている / この宛先で試行済み。
     fn prewarm_target(&self, cx: &App) -> Option<String> {
-        if !self.prewarm_allowed || self.dest_cwd.is_none() || !settings::get(cx).agent_prewarm {
+        if !self.prewarm_allowed
+            || !self.prewarm_on_screen
+            || self.dest_cwd.is_none()
+            || !settings::get(cx).agent_prewarm
+        {
             return None;
         }
         let thread = self.threads.get(self.active)?;
@@ -8400,6 +8434,7 @@ PYEOF"#;
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         let mut session_id_changed = false;
         let resumed_session = matches!(event, AgentEvent::SessionStarted { resumed: true, .. });
+        let session_started = matches!(event, AgentEvent::SessionStarted { .. });
         let mut history_replayed = false;
         let mut seat_violation: Option<(SharedString, String)> = None;
         match event {
@@ -8422,7 +8457,8 @@ PYEOF"#;
                 // 起こしたばかりのセッション（先張りを含む）を、別スレッドの見回りが巻き込まないように。
                 thread.last_active_at_ms = now_unix_ms();
                 // 引き継げたか/引き継げなかったかの一言。前回 id が無い新規スレッドは黙って始める。
-                let had_previous = thread.acp_session_id.is_some();
+                // 先張りだけで畳まれた白紙のスレッドも id を持つが、失う会話が無いので何も言わない。
+                let had_previous = thread.acp_session_id.is_some() && !thread.entries.is_empty();
                 thread.session_note = if resumed {
                     Some(SharedString::from(i18n::t!("agent.session_resumed")))
                 } else if had_previous {
@@ -8998,6 +9034,20 @@ PYEOF"#;
                     .entries
                     .push(Entry::Agent(SharedString::from(message)));
             }
+            // claude.ai のコネクタを取り損ねたプロセスを起こし直している / 起こし直しても繋がらなかった
+            // （Chat・acp_client が送り直しまで面倒を見る）。走行状態は触らない（ターンは続いている）。
+            // 状態そのものは acp_client が判断に使う（UI は上の 2 つの知らせだけを出す）。
+            AgentEvent::Connectors(_) => {}
+            AgentEvent::ConnectorsReconnecting => {
+                thread.entries.push(Entry::Agent(SharedString::from(i18n::t!(
+                    "agent.connectors_reconnecting"
+                ))));
+            }
+            AgentEvent::ConnectorsUnavailable => {
+                thread.entries.push(Entry::Agent(SharedString::from(i18n::t!(
+                    "agent.connectors_unavailable"
+                ))));
+            }
             // 接続を渡すので task.env から読まなかった変数（issue #38 H3）。走行状態は触らない。
             AgentEvent::TaskEnvSkipped(names) => {
                 thread
@@ -9152,6 +9202,10 @@ PYEOF"#;
             if let Some(thread) = self.threads.get_mut(thread_index) {
                 thread.last_active_at_ms = now_unix_ms();
             }
+            self.schedule_idle_agent_sweep(cx);
+        }
+        // 先張りのまま 1 度も送らないセッションにはターン終了が来ない。立った時点でも見回りを予約する。
+        if session_started {
             self.schedule_idle_agent_sweep(cx);
         }
         if permission_waiting {
@@ -19226,6 +19280,17 @@ PYEOF"#;
             panel.prewarm_allowed = false;
             assert_eq!(panel.prewarm_target(cx), None);
             panel.prewarm_allowed = true;
+
+            // 見ていないプロジェクトのパネル（起動時にレールの数だけ立てない）。
+            panel.set_on_screen(false, cx);
+            assert_eq!(panel.prewarm_target(cx), None);
+            let generation = panel.prewarm_gen;
+            panel.set_on_screen(true, cx);
+            assert_ne!(panel.prewarm_gen, generation, "見え始めたら予約する");
+            assert_eq!(
+                panel.prewarm_target(cx).as_deref(),
+                Some(active_id.as_str())
+            );
 
             // 設定で off にできる（idle メモリを優先したい人向け。既定は on）。
             settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(false))

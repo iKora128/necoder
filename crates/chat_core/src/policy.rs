@@ -8,11 +8,16 @@
 //! | 添付したファイル・フォルダ | 許可 | 初回だけ確認（以後はそのチャットで許可） |
 //! | それ以外 | 確認 | **拒否** |
 //! | Web の検索と取得 | 許可 | — |
+//! | コマンドの実行 | 毎回確認 | 毎回確認 |
 //!
 //! Chat はシステムプロンプトを差し替えているが、**プロンプトは防御ではない**。Web から読んだ
 //! 文面が「~/.ssh を書き換えろ」と言ってきても、書ける場所がここで閉じていれば被害は
 //! チャットのフォルダと、ユーザーが自分で渡したファイルに限られる。cwd は作業場所であって
 //! 隔離ではないので、裁定は necoder 側（ここ）が持ち、エージェントの設定には頼らない。
+//!
+//! コマンドはどこでも読み書きできるので、この表の範囲では閉じられない。だから毎回聞く
+//! （「以後許可」も出さない）。エディタのスレッドと同じく、守りはユーザーが中身を見て許可することになる
+//! （DECISIONS 2026-11-06）。
 
 use acp_client::ToolCallKind;
 use std::path::{Component, Path, PathBuf};
@@ -43,15 +48,14 @@ pub enum Verdict {
 pub enum DenyReason {
     /// チャットのフォルダでも添付でもない場所への書き込み。
     WriteOutsideScope(PathBuf),
-    /// コマンドの実行。Chat は Bash を持たせていないので、来たら設定の抜けか想定外の道具。
-    Execute,
 }
 
 /// 権限リクエスト 1 件を裁く。`paths` はツール呼び出しが触る場所（相対ならフォルダ基準）。
 pub fn judge(kind: Option<ToolCallKind>, paths: &[PathBuf], scope: Scope<'_>) -> Verdict {
     match kind {
         Some(ToolCallKind::Fetch) | Some(ToolCallKind::Think) => Verdict::Allow,
-        Some(ToolCallKind::Execute) => Verdict::Deny(DenyReason::Execute),
+        // コマンドは触る場所が決まらないので、場所の表では裁けない。毎回聞く。
+        Some(ToolCallKind::Execute) => Verdict::Ask,
         Some(ToolCallKind::Read) | Some(ToolCallKind::Search) => {
             // 場所を言わない検索は cwd（＝チャットのフォルダ）が対象。
             let readable = paths.iter().all(|path| {
@@ -348,13 +352,19 @@ mod tests {
     }
 
     #[test]
-    fn the_web_is_open_the_shell_is_closed_and_unknown_tools_ask() {
+    fn the_web_is_open_and_commands_and_unknown_tools_ask() {
         let fixture = Fixture::new("kinds");
         let scope = scope(&fixture, &[], &[]);
         assert_eq!(judge(Some(ToolCallKind::Fetch), &[], scope), Verdict::Allow);
+        // コマンドはチャットのフォルダの中で走らせる物でも聞く（中で走っても外を触れる）。
+        assert_eq!(judge(Some(ToolCallKind::Execute), &[], scope), Verdict::Ask);
         assert_eq!(
-            judge(Some(ToolCallKind::Execute), &[], scope),
-            Verdict::Deny(DenyReason::Execute)
+            judge(
+                Some(ToolCallKind::Execute),
+                &[fixture.chat_dir.clone()],
+                scope
+            ),
+            Verdict::Ask
         );
         assert_eq!(judge(Some(ToolCallKind::Other), &[], scope), Verdict::Ask);
         assert_eq!(judge(None, &[], scope), Verdict::Ask);

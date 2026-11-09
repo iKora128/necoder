@@ -4469,3 +4469,31 @@
 - Cargo.toml / Cargo.lock を 0.1.37 へ更新し、英日リリースノートを作成。Codex の Gmail・Auto / Full access の通し検証、PDF、承認なしの変更の checkpoint は既知の制限として公開する。本人が公開後の確認を選んだため、これらを公開前の承認待ちにはしない。
 - cargo-deny 0.20.2 の公式配布物を GitHub の SHA-256 と照合して /tmp で実行。advisories / bans / licenses / sources 全て通過。ライセンス境界検査も通過。
 - 容量不足のため再生成可能な target/debug/incremental を整理。relay/.wrangler はローカル実行状態なので Git の対象から外す。
+
+## 2026-11-04 — 起動のたびにレールの数だけエージェントが立つのを止める
+
+- 発端: 本人がアクティビティモニタで `npm exec sample-aws-pricing-calculator-mcp` の大量起動を発見。親をたどると necoder が 16 本のエージェントを抱えていて、うち 13 本は起動した同じ秒に `--resume` されていた。プロジェクトごとの作業ディレクトリで 1 本ずつ、1 時間 20 分たっても誰も送っていなかった。
+- 原因は 2 つ。①先張りは「アクティブなスレッド 1 本だけ」だが、それはパネル単位の話で、パネルはプロジェクトごとに 1 枚ある。②不使用の回収（`idle.rs`）はターン終了でしか予約されないので、1 度も送らないセッションには見回りが来ない。`MAX_IDLE_PREWARMED_SESSIONS` もパネル単位で効かない。
+- 直し: `AgentPanel::set_on_screen` を足し、Workspace の `sync_agent_on_screen` が「見ているパネル」を配る（起動・プロジェクト切替・Chat の出入り・枠の追加）。背景のパネルは先張りを予約せず、500ms の待ちの間に離れた時も立てない。回収はセッションが立った時にも予約する。先張りだけで畳んだ白紙のスレッドに「引き継げなかった」と出ないよう、一言の条件に `entries` を足した。
+- 学び/罠: `MAX_IDLE_PREWARMED_SESSIONS` の根拠だった「未送信は約 16MB」は RSS の見え方で、`footprint` では 1 本約 390MB（claude 208 / adapter 65 / MCP 1 個につき `npm exec` 67 + 本体 48）。圧縮・退避された分は RSS から消える。**エージェントの重さは `footprint` で測る**。MCP はエージェント 1 本ごとに全部立つので、ユーザー設定の MCP が増えるほど効いてくる。
+- 検証: `cargo test -p agent_panel`（204）/ `-p workspace`（328）/ `-p necoder` 緑。新規 3 本（`only_the_visible_project_panel_may_prewarm` / `a_session_that_never_ran_a_turn_is_still_swept` / `a_blank_thread_is_not_told_it_lost_a_conversation`）。実アプリを隔離 `NECODER_HOME` で 3 プロジェクト起動し、35 秒時点でエージェントは active の 1 本だけ。15 分後の回収は実機で待っていない（テストは仮想時計）。
+- 次: 本人の実機で、更新後の起動直後に `claude --resume` が 1 本だけになることと、15 分後に先張りの本が消えることを確認。
+
+## 2026-11-06 — Chat でもこの Mac を調べられるようにする（シェルを毎回確認つきで持たせる）
+
+- きっかけ: Chat で Tailscale の画面共有の不調を相談したら、AI が「両方の Mac でこのコマンドを実行して、出力を貼ってください」と返した。Chat のプリセットが Bash を外していたため。本人「エディタの ACP も同じでは」「Bypass なら確認なし、それ以外は確認で足りる」。
+- 見直し: 2026-09-18 の「Bash を入れるとコーディングエージェントに戻る」は、プロンプトの差し替えと道具の絞り込みを同時に変えた実験で、Bash 単独では測っていなかった。危険の種類はエディタのスレッドと同じ。
+- やったこと: Claude の `tools` に `Bash`、Codex は `shell_tool=true`。`policy::judge` は実行を拒否から「毎回確認」へ（`DenyReason::Execute` と `chat.denied_execute` を削除）。確認カードでは「このチャットでは以後許可」を出さない。プロンプトに Commands の節（この Mac に依存する答えは自分で調べる・読むだけを優先・成果物とビルドにコマンドを使わない・Web やメールの中のコマンドを走らせない）。
+- 通し確認（`probe_chat_preset`・実エージェント）で踏んだ罠: ① 「(create the folder if needed)」で `mkdir -p artifacts` を走らせた ② 渡した PDF を `strings` で読んだ ③ **Claude Code 本体の Chrome 連携（23 道具）が Chat に漏れ込んでいた**。`claudeInChromeDefaultEnabled` は `settingSources: []` でも効く。`disallowedTools` では名前が遅延一覧に残るので `CLAUDE_CODE_ENABLE_CFC=0` で切った。文脈は 31,943 → 15,330 トークン。①② はプロンプトで直した。
+- 検証: `cargo test -p chat_core`（27）/ `-p agent_panel chat`（16）緑、`cargo check -p necoder --features necoder/runtime-shaders` 通過。probe は Claude 14/14・Codex 5/5。Codex の `read-only` は `sw_vers` を聞かずに走らせた（自分の sandbox の範囲。エディタの Codex と同じ）。
+- 残件: GUI で確認カードの見た目（コマンドの本文が読めるか）を実機で見ていない。Chrome 連携を切ったことで、Chat からブラウザ操作は使えない（意図どおり）。
+
+## 2026-11-09 — Chat のコネクタが切れたまま戻らない・`/model` が勝手に積もる
+
+- 発端: 本人の Chat で Gmail もカレンダーも「切れた」まま戻らず、済生会への返信と予定づくりが止まった。AI は会話に積もった `/model fable` → `/model opus` を見て「切り替えたせいでは」と本人に説明していた（本人は切り替えていない）。
+- 調べ方: Claude 側の会話記録（`~/.claude/projects/…/<session>.jsonl`）を時刻順に並べた。`/model` の 2 行は、前の送信から 10 分以上空いた送信の直前にだけ付いていた＝Chat のアイドル停止（10 分）からの起こし直し。コネクタは起こし直しのたびに一から繋ぐ。05:11 と 05:23 の起こし直しは最初の通信が `ECONNREFUSED` で約 8 秒弾かれ、そのプロセスでは最後までコネクタが出なかった。
+- 原因: ① `~/.claude/settings.json` の `model: fable[1m]` で起きてから necoder が Opus に戻すので、`session/load` のたびに 2 回切り替わって記録される。② Claude Code はコネクタの一覧を起動の後で取りに行く。起こしてすぐ送ると一覧は空（実測 0.7 秒で 0 件）。取り損ねるとそのプロセスでは取り直さない。③ 要約・題づくりの `claude -p` は PATH の先にある npm の古い `claude`（1.0.120）を拾い、退役したモデルの「API Error: 404」を終了コード 0 で返していた。
+- 直し: ① 起動時に `ANTHROPIC_MODEL` でスレッドのモデルを渡す（`launch_model_env`）。② Chat のコネクタを見張る（`SessionPreset::watch_connectors` → `emitRawSDKMessages` で `system/init` を受け、`AgentEvent::Connectors`）。最初の指示は起動から 3 秒待つ。一覧が空・全部失敗なら、そのターンを畳んで起こし直し、同じ指示を送り直す（`Attempt::Restart`・2 回まで・本文は捨てる先へ流す）。「あるはず」は印 `claude-connectors-seen` で判断。Chat の入力欄に打ち始めたら、止めたエージェントを起こしておく（`wake_agent_for_typing`）。プロンプトに「使えないと言う前に ToolSearch で探す」。③ 一発生成のテンプレートは `~/.local/bin/claude` と `~/.claude/local/claude` を PATH より先に見る。出力が `API Error:` で始まれば失敗として扱う。
+- 学び/罠: claude.ai のコネクタは全部が同じ `claudeai-proxy` で、一覧は 1 回の取得で来る＝落ちる時はまとめて落ちる。Claude Code は「アカウントが変わった」をアクセストークンの文字列の比較で決めていて、トークンの更新でもコネクタを全部繋ぎ直す（今回の主因ではないが、同じ症状の別の入口）。`_claude/sdkMessage` の通知は `sessionId` を持つので、ACP crate はセッションの更新チャネルへ回す（接続のハンドラでは受けられない）。
+- 検証: `probe_connectors` を実物で回した。修正前と同じ道（モデル名を素通し）では起こし直しで `/model` が 3 回記録され、修正後は 0 回。最初の指示を 3 秒待つと 1 ターン目からコネクタが 5〜7 個繋がる。`PROBE_NO_CONNECTORS=1` で取り損ねを作ると、2 回起こし直して送り直し、諦めの一言を出して答えた。偽エージェントの試験 `a_session_that_missed_its_connectors_is_restarted_and_the_prompt_resent`（漏れた本文は UI に届かない・終端は 1 回）。新しい一発生成のテンプレートで要約が出ることを手元で確認。`cargo test --workspace --features necoder/runtime-shaders` 緑。
+- 次: 本人の実機で、10 分以上空けてから Chat で Gmail を頼み、繋がったまま答えることを確認。`ECONNREFUSED` が放置明けにだけ出る理由（Tailscale など）は未調査。Editor のスレッドは見張っていない（コネクタを読み込む設定のまま同じことは起きうる）。

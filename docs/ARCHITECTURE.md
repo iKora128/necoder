@@ -324,6 +324,10 @@ composer 下のピルは最初の送信まで空で押せない（0.1.14 の実�
 
 そこで **先張り（prewarm）**: `AgentPanel::schedule_prewarm` が、宛先が決まった時・復元直後・
 タブ切替・新規タブ・agent 切替で、**アクティブなスレッド 1 本だけ**のセッションを 500ms 後に立てる。
+ただし対象は**人が見ている session のパネルだけ**で、Workspace が `Workspace::sync_agent_on_screen` で
+`AgentPanel::set_on_screen` を配る（起動・プロジェクト切替・Chat の出入り）。パネルはプロジェクトごとに
+1 枚あるので、これが無いと**レールのプロジェクト数だけ**起動時にエージェントが立つ（2026-11-04 実測:
+13 プロジェクトで 13 本が同時に `--resume`）。Fleet で active 以外のセルは先張りせず、送信で立てる。
 
 - **1 枚だけ**なのは necoder が「スレッド 1 本 = エージェントのプロセス 1 本」だから。Zed は
   `AgentConnectionStore` で **agent ごとに 1 接続を共有**するので画面を開いた分だけ繋いでよいが、
@@ -336,11 +340,19 @@ composer 下のピルは最初の送信まで空で押せない（0.1.14 の実�
   `AgentPanel::catalog` に agent 別で控え、**まだセッションの無いタブのピル**もそこから選択肢と
   表示名を出す。そこで選んだ value_id は sticky に載り、次に開くセッションへ
   `SessionPreferences` で渡る（＝先に選んでから送れる）
+- **Claude はスレッドのモデルで起こす**（`launch_model_env`・環境変数 `ANTHROPIC_MODEL`）。
+  `session/set_config_option` だけだと、Claude Code は `~/.claude/settings.json` の `model`（例
+  `fable[1m]`）で起き、`session/load` でアダプタがそのモデルへ切り替えてから necoder が戻す。この往復が
+  会話に `/model fable` → `/model opus` と記録され、起こし直すたびに積もり、モデルが「ユーザーが
+  切り替えた」と読んでいた（2026-11-09）。接続（別の宛先）を渡すセッションには付けない
 - **抱える数に上限**（`MAX_IDLE_PREWARMED_SESSIONS` = 2）: 先張りしたまま 1 度も送っていない
   セッションは 2 本までで、超えたら古い順に畳む（送信路を捨てるだけ＝`HostProcess` の drop で
   プロセスも落ちる。`session_serial = 0` に戻して「意図して畳んだ」と印を付け、切断バナーを
-  出さない）。実測（2026-09-11）: 未送信のセッションは adapter + 子で **~16MB**、使うと ~46MB、
-  会話が育つと ~244MB。だから「見ただけのタブ」の分だけを刈る。畳んでもピルは在庫から出続ける
+  出さない）。だから「見ただけのタブ」の分だけを刈る。畳んでもピルは在庫から出続ける。実測
+  （2026-11-04・`footprint`）: 未送信でも 1 本 **~390MB**（claude 208 + adapter 65 + MCP 1 個につき
+  `npm exec` 67 + 本体 48）。RSS は圧縮・退避された分が消えて見えるので、ここの見積もりには使わない
+- **回収は idle の弁と共通**（`idle.rs`）: ターン終了に加えて **セッションが立った時**も見回りを予約する。
+  ターン終了だけだと、先張りしたまま 1 度も送らなかったセッションは見回りが来ず、永久に残る
 - **定期ポーリングはしない**。一覧の変化はセッション中に `ConfigOptionUpdate` で push される
 - `settings.agent_prewarm`（既定 on）で off にできる＝ idle メモリを優先する選択肢を残す
 

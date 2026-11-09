@@ -92,6 +92,7 @@ impl Workspace {
                 .update(cx, |panel, cx| panel.parent_width_changed(cx));
             self.focus_session_surface(false, false, window, cx);
         }
+        self.sync_agent_on_screen(cx);
         self.save_state(cx);
         cx.notify();
     }

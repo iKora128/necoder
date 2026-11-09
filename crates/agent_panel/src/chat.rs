@@ -605,14 +605,17 @@ impl AgentPanel {
         };
         Some(match chat_core::policy::judge(kind, &paths, scope) {
             Verdict::Allow => ChatPermission::Allow,
+            // コマンドは毎回聞く。「以後許可」で覚えるのは添付への書き込みだけなので、出さない。
+            Verdict::Ask if kind == Some(acp_client::ToolCallKind::Execute) => {
+                ChatPermission::Ask {
+                    grantable: Vec::new(),
+                }
+            }
             Verdict::Ask => ChatPermission::Ask {
                 grantable: chat_core::policy::grants_for(&paths, scope),
             },
             Verdict::Deny(DenyReason::WriteOutsideScope(path)) => ChatPermission::Deny {
                 notice: i18n::t!("chat.denied_write", "path" => &path.display().to_string()),
-            },
-            Verdict::Deny(DenyReason::Execute) => ChatPermission::Deny {
-                notice: i18n::t!("chat.denied_execute"),
             },
         })
     }
@@ -1294,7 +1297,7 @@ mod tests {
             assert!(preferences.preset.to_meta().is_none(), "Claude の meta は送らない");
             assert!(preferences.mcp_servers.is_empty(), "ACP の MCP で OFF を上書きさせない");
             let config: serde_json::Value = serde_json::from_str(&preferences.preset.env["CODEX_CONFIG"]).unwrap();
-            assert_eq!(config["features"]["shell_tool"], false);
+            assert_eq!(config["features"]["shell_tool"], true, "コマンドは毎回の確認つきで使える");
             assert_eq!(config["features"]["apps"], false);
             assert!(config["developer_instructions"].as_str().unwrap().contains("敬語は使わない"));
             assert_eq!(config["mcp_servers"]["necoder_chat"]["args"][1], "--chat-read");

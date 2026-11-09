@@ -9,8 +9,8 @@
 //! 初回応答が数秒遅れることだけ）。だから止めてよいのは**会話を引き継げるスレッドだけ**:
 //! エージェントが `loadSession` を広告していて、セッション id を控えてある場合。
 //!
-//! 常時回る時計は持たない。ターンが終わるたびに一発のタイマーを仕掛け、猶予が明けた時点で
-//! まだ使っていなければそこで止める（何も起きていない間は CPU を使わない）。
+//! 常時回る時計は持たない。セッションが立った時とターンが終わった時に一発のタイマーを仕掛け、
+//! 猶予が明けた時点でまだ使っていなければそこで止める（何も起きていない間は CPU を使わない）。
 
 use super::*;
 
@@ -25,7 +25,7 @@ impl AgentPanel {
         }
     }
 
-    /// 猶予が明けた頃に見回る予約（ターン終了ごとに 1 回）。
+    /// 猶予が明けた頃に見回る予約（セッションが立った時とターン終了ごとに 1 回）。
     pub(crate) fn schedule_idle_agent_sweep(&mut self, cx: &mut Context<Self>) {
         let minutes = self.idle_stop_minutes(cx);
         if minutes == 0 {
@@ -78,6 +78,49 @@ impl AgentPanel {
         quiet && resumable
     }
 
+    /// Chat: 止めておいたエージェントを、入力欄に打ち始めた時点で起こし直す。
+    ///
+    /// 起こし直した Claude は、claude.ai のコネクタ（Gmail など）の一覧を起動の後で取りに行く。
+    /// 送信で起こすと一覧が揃うまで最初の指示を待たせる（acp_client の `connector_grace`）ので、
+    /// 打っている間に起こしておけば、その待ちが表に出ない。会話を引き継げるスレッドだけ
+    /// （`session/load` で同じ会話に戻る）。1 回止めるごとに 1 回だけ試す（起こせなくても連打しない）。
+    pub(crate) fn wake_agent_for_typing(&mut self, cx: &mut Context<Self>) {
+        if !self.chat_mode {
+            return;
+        }
+        let index = self.active;
+        let Some(thread) = self.threads.get(index) else {
+            return;
+        };
+        if thread.command_tx.is_some()
+            || thread.running
+            || !thread.session_resumable
+            || thread.acp_session_id.is_none()
+            || self.typing_woken.contains(&thread.id)
+        {
+            return;
+        }
+        if self.composer.read(cx).plain_text().trim().is_empty() {
+            return;
+        }
+        self.typing_woken.insert(thread.id.clone());
+        let Some(cwd) = self.session_cwd(index) else {
+            return;
+        };
+        // 起こせなければ黙る（送れば同じ経路で理由が出る）。
+        let Ok((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) else {
+            return;
+        };
+        if let Some(thread) = self.threads.get_mut(index) {
+            thread.command_tx = Some(command_tx);
+            thread.session_serial = serial;
+            thread.usage_key = Some(usage_key);
+            thread.session_lost = false;
+            thread.session_seated = thread.seat.is_some();
+        }
+        cx.notify();
+    }
+
     /// `cutoff`（unix ms）より前から使っていない、止めてよいスレッドのエージェントを止める。
     fn stop_agents_quiet_since(&mut self, cutoff: i64, cx: &mut Context<Self>) -> usize {
         let mut stopped = Vec::new();
@@ -90,6 +133,8 @@ impl AgentPanel {
                 // 自分で止めたセッションの終了を「切れました」と報告させない（先張りの畳みと同じ作法）。
                 thread.session_serial = 0;
                 stopped.push(index);
+                // 次に打ち始めたら、また起こし直してよい。
+                self.typing_woken.remove(&thread.id);
             }
         }
         if stopped.is_empty() {
@@ -262,6 +307,63 @@ mod tests {
                 vec!["/compact".to_string()],
                 "実行中の /compact はターン完了後に送るキューへ・二重には積まない"
             );
+        });
+        std::fs::remove_file(settings_path).ok();
+    }
+
+    /// 先張りのまま 1 度も送らないセッションにはターン終了が来ない。立った時の予約で回収する
+    /// （2026-11-04・これが無くて 13 本が 1 時間以上残っていた）。
+    #[gpui::test]
+    fn a_session_that_never_ran_a_turn_is_still_swept(cx: &mut gpui::TestAppContext) {
+        let settings_path = settings_for_test(cx, "never-used");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.threads = vec![live_thread("prewarmed", 0)];
+            panel.active = 0;
+            panel.on_event(
+                0,
+                AgentEvent::SessionStarted {
+                    session_id: "session-prewarmed".into(),
+                    resumed: false,
+                    resumable: true,
+                    steerable: false,
+                },
+                cx,
+            );
+            // 時計は仮想なので、壁時計で見る「最後に使った時刻」だけ猶予の外へ置く。
+            panel.threads[0].last_active_at_ms = 0;
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(15 * 60 + 6));
+        cx.run_until_parked();
+        panel.update(cx, |panel, _cx| {
+            assert!(
+                panel.threads[0].command_tx.is_none(),
+                "ターンが無くても猶予が明けたら止まる"
+            );
+        });
+        std::fs::remove_file(settings_path).ok();
+    }
+
+    /// 先張りだけで畳まれた白紙のスレッドは、次のセッションで「引き継げなかった」と言わない。
+    #[gpui::test]
+    fn a_blank_thread_is_not_told_it_lost_a_conversation(cx: &mut gpui::TestAppContext) {
+        let settings_path = settings_for_test(cx, "blank-note");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.threads = vec![live_thread("blank", 0)];
+            panel.active = 0;
+            panel.on_event(
+                0,
+                AgentEvent::SessionStarted {
+                    session_id: "session-new".into(),
+                    resumed: false,
+                    resumable: true,
+                    steerable: false,
+                },
+                cx,
+            );
+            assert!(panel.threads[0].session_note.is_none());
         });
         std::fs::remove_file(settings_path).ok();
     }

@@ -425,6 +425,7 @@ impl Workspace {
         }
         self.refresh_git_status(cx);
         self.update_agent_destination(cx);
+        self.sync_agent_on_screen(cx);
         if self.session()._watch.is_none() {
             self.start_watcher(cx);
         }
@@ -435,6 +436,24 @@ impl Workspace {
         }
         // remote の接続状態の購読（冪等・I/O 無し）。レールの並びが変わっても取りこぼさない。
         self.ensure_connection_pumps(cx);
+    }
+
+    /// どのパネルを人が見ているかを配る。先張りは見ているパネルだけに許す（レールのプロジェクト
+    /// 全部で起動時にエージェントを立てない）。Fleet の他のセルは見えていても送信で立てる。
+    pub(crate) fn sync_agent_on_screen(&self, cx: &mut Context<Self>) {
+        let chat_active = self.project_sessions.chat_active;
+        let active = self.project_sessions.active;
+        for (index, session) in self.project_sessions.sessions.iter().enumerate() {
+            let on_screen = !chat_active && index == active;
+            for panel in &session.fleet_agents {
+                panel.update(cx, |panel, cx| panel.set_on_screen(on_screen, cx));
+            }
+        }
+        if let Some(chat) = &self.project_sessions.chat {
+            for panel in &chat.fleet_agents {
+                panel.update(cx, |panel, cx| panel.set_on_screen(chat_active, cx));
+            }
+        }
     }
 
     /// Agent パネルの宛先チップにアクティブプロジェクト名・ブランチを反映する。
