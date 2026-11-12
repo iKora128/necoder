@@ -1985,6 +1985,9 @@ chat:
   search_placeholder: Search chats
   no_results: No chats match
   agents_running: "Running %{n} / %{total}"
+  editor_threads: Editor threads
+  peek_open_in_editor: Open in Editor
+  peek_close: Close
   group_pinned: Pinned
   group_today: Today
   group_yesterday: Yesterday

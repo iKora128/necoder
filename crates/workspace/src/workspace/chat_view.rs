@@ -6,6 +6,9 @@
 //! - 中央 = `AgentPanel`（Chat モード）。transcript・composer・承認カードはそのまま
 //! - 右 = **既存のエディタ領域**。artifact は「チャットのフォルダに書かれたファイル」を
 //!   プレビュー表示のタブで開いたもの。開いている物が無ければ右は閉じていて、会話が中央に広がる
+//! - 右（もう 1 つの使い方）= **Editor のスレッド**。一覧の下の「エディタのスレッド」を押すと、
+//!   そのプロジェクトの `AgentPanel` を右に出す（Chat を離れずに進みを見る・承認する・返事を打つ）。
+//!   ファイル・diff を開く操作はそのプロジェクトの Editor へ移ってから行う
 //!
 //! Chat はプロジェクトに属さない。だから `ProjectSessions` の `projects` / `sessions`（レールの枠と
 //! 同じ添字で並ぶ）には混ぜず、別に 1 本だけ持つ。Chat 中は `Deref` がその session を返すので、
@@ -88,6 +91,8 @@ impl Workspace {
             self.focus_chat_composer(window, cx);
         } else {
             self.project_sessions.chat_active = false;
+            self.chrome.chat_peek = None;
+            self.chrome.chat_peek_active = false;
             self.agent_panel
                 .update(cx, |panel, cx| panel.parent_width_changed(cx));
             self.focus_session_surface(false, false, window, cx);
@@ -122,7 +127,80 @@ impl Workspace {
         if let Some(panel) = self.chat_panel() {
             panel.update(cx, |panel, cx| panel.open_chat(id, cx));
         }
+        self.chrome.chat_peek_active = false;
         self.focus_chat_composer(window, cx);
+    }
+
+    /// Chat の右で Editor のスレッドを開く（`panel` = そのプロジェクトの Agent パネル）。
+    /// パネルのアクティブなスレッドも替わる＝Editor へ戻った時もそのスレッドが前に居る。
+    pub(crate) fn open_chat_peek(
+        &mut self,
+        panel: Entity<AgentPanel>,
+        thread_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chat_mode() || self.chat_peek_session(&panel).is_none() {
+            return;
+        }
+        panel.update(cx, |panel, cx| {
+            panel.focus_thread(thread_index, cx);
+            panel.parent_width_changed(cx);
+        });
+        self.chrome.chat_peek = Some(panel.clone());
+        self.chrome.chat_peek_active = true;
+        self.sync_agent_on_screen(cx);
+        // 載せ替えた直後のフォーカスは次のフレームで（`focus_chat_composer` と同じ規律）。
+        window.defer(cx, move |window, cx| {
+            panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+        });
+        cx.notify();
+    }
+
+    /// 右のスレッドを閉じて会話へ戻る。
+    pub(crate) fn close_chat_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = self.chrome.chat_peek.take() else {
+            return;
+        };
+        self.chrome.chat_peek_active = false;
+        panel.update(cx, |panel, cx| panel.parent_width_changed(cx));
+        self.sync_agent_on_screen(cx);
+        self.agent_active = true;
+        self.focus_chat_composer(window, cx);
+        cx.notify();
+    }
+
+    /// 右のスレッドのプロジェクト（session の添字）。プロジェクトを閉じていれば `None`。
+    pub(crate) fn chat_peek_session(&self, panel: &Entity<AgentPanel>) -> Option<usize> {
+        self.project_sessions
+            .sessions
+            .iter()
+            .position(|session| session.fleet_agents.contains(panel))
+    }
+
+    /// 右のスレッドを、そのプロジェクトの Editor へ持っていく（⤢・「Editor で開く」・ファイルを開く操作）。
+    pub(crate) fn hand_chat_peek_to_editor(
+        &mut self,
+        panel: Entity<AgentPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.chat_peek_session(&panel) else {
+            return;
+        };
+        self.chrome.chat_peek = None;
+        self.chrome.chat_peek_active = false;
+        self.project_sessions.sessions[index].agent_panel = panel.clone();
+        // Chat を抜けてから切り替える（同じプロジェクトなら抜けるだけ）。
+        self.set_chat_mode(false, window, cx);
+        self.switch_project(index, window, cx);
+        self.chrome.show_right = true;
+        self.agent_active = true;
+        panel.update(cx, |panel, cx| panel.parent_width_changed(cx));
+        window.defer(cx, move |window, cx| {
+            panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+        });
+        cx.notify();
     }
 
     /// 検索欄の文字をパネルへ流す（絞り込みと全文検索はパネルと storage の仕事）。
@@ -506,7 +584,14 @@ impl Workspace {
     /// Chat モードの本体（titlebar と statusbar の間）。
     pub(crate) fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let artifact_open = !self.tabs.is_empty();
-        div()
+        // 右のスレッドは成果物より前に出す（閉じれば成果物のタブがそのまま戻る）。
+        let peek = self
+            .chrome
+            .chat_peek
+            .clone()
+            .and_then(|panel| Some((self.chat_peek_session(&panel)?, panel)));
+        let right_open = artifact_open || peek.is_some();
+        let mut row = div()
             .flex()
             .flex_1()
             .min_h_0()
@@ -514,10 +599,298 @@ impl Workspace {
             .when(self.chrome.show_left, |row| {
                 row.child(self.render_chat_sidebar(cx))
             })
-            .child(self.render_chat_center(artifact_open, cx))
-            .when(artifact_open, |row| {
-                row.child(self.render_chat_artifacts(cx))
+            .child(self.render_chat_center(right_open, cx));
+        if let Some((session_index, panel)) = peek {
+            row = row.child(self.render_chat_peek(session_index, panel, cx));
+        } else if artifact_open {
+            row = row.child(self.render_chat_artifacts(cx));
+        }
+        row
+    }
+
+    /// 右 = Editor のスレッド。上に 1 行（プロジェクト ⎇ ブランチ・Editor で開く・✕）、下はそのプロジェクトの
+    /// Agent パネルそのもの（スレッドのタブ・承認カード・composer も Editor と同じに効く）。
+    fn render_chat_peek(
+        &self,
+        session_index: usize,
+        panel: Entity<AgentPanel>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let (name, color, branch) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| {
+                (
+                    slot.name.clone(),
+                    slot.color,
+                    slot.branch.clone().or_else(|| slot.worktree_branch.clone()),
+                )
             })
+            .unwrap_or_else(|| (SharedString::default(), theme.fg2, None));
+        let handoff = panel.clone();
+        let button = |id: &'static str, label: SharedString| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(label)
+        };
+        let header = div()
+            .flex_none()
+            .h(px(34.))
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .pl(px(12.))
+            .pr(px(6.))
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.bg0)
+            .child(div().flex_none().size(px(8.)).rounded_full().bg(color))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(px(200.))
+                    .truncate()
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(name),
+            )
+            .when_some(branch, |header, branch| {
+                header.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(format!("⎇ {branch}"))),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                button(
+                    "chat-peek-editor",
+                    SharedString::from(i18n::t!("chat.peek_open_in_editor")),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.hand_chat_peek_to_editor(handoff.clone(), window, cx);
+                    }),
+                ),
+            )
+            .child(
+                button("chat-peek-close", SharedString::from("✕"))
+                    .tooltip(Tooltip::text(
+                        format!(
+                            "{}  {}",
+                            i18n::t!("chat.peek_close"),
+                            keymap_core::keystroke_label("cmd-w")
+                        ),
+                        theme.clone(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_chat_peek(window, cx);
+                        }),
+                    ),
+            );
+        div()
+            .flex_none()
+            .w(gpui::relative(0.42))
+            .min_w(px(420.))
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(theme.bg1)
+            .border_l_1()
+            .border_color(theme.border)
+            // ⌘W の宛先をここに（会話・成果物を押すと外れる）。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, _cx| this.chrome.chat_peek_active = true),
+            )
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(panel.cached(StyleRefinement::default().flex().flex_col().size_full())),
+            )
+    }
+
+    /// 一覧の下の「エディタのスレッド」: 全プロジェクトのスレッドを、手が要る物（承認・質問待ち）→
+    /// 動いている物 → 終わった物 → 待機の順に。押すと右で開く。スレッドが 1 本も無ければ出さない。
+    fn render_chat_editor_threads(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let theme = self.theme.clone();
+        let mut rows: Vec<(
+            SharedString,
+            Entity<AgentPanel>,
+            usize,
+            agent_panel::AgentStatus,
+        )> = Vec::new();
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
+            let Some(session) = self.project_sessions.sessions.get(index) else {
+                continue;
+            };
+            // アーカイブ済みの Task は出さない（スレッド一覧と同じ）。
+            if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Archived {
+                continue;
+            }
+            for (panel, thread, status) in session.agent_statuses(cx) {
+                rows.push((slot.name.clone(), panel, thread, status));
+            }
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        rows.sort_by(|left, right| {
+            right
+                .3
+                .activity
+                .urgency()
+                .cmp(&left.3.activity.urgency())
+                .then_with(|| {
+                    let at = |status: &agent_panel::AgentStatus| {
+                        status.last_input_at_ms.unwrap_or(status.created_at_ms)
+                    };
+                    at(&right.3).cmp(&at(&left.3))
+                })
+        });
+        let collapsed = self.chrome.chat_editor_threads_collapsed;
+        let total = rows.len();
+        let peeking = self.chrome.chat_peek.clone();
+        let head = div()
+            .id("chat-editor-threads-head")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(4.))
+            .text_size(px(10.))
+            .font_weight(gpui::FontWeight::BOLD)
+            .text_color(theme.fg2)
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.fg1))
+            .child(if collapsed { "▸" } else { "▾" })
+            .child(SharedString::from(i18n::t!("chat.editor_threads")))
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .child(SharedString::from(total.to_string())),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    cx.stop_propagation();
+                    this.chrome.chat_editor_threads_collapsed =
+                        !this.chrome.chat_editor_threads_collapsed;
+                    cx.notify();
+                }),
+            );
+        let mut section = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(head);
+        if collapsed {
+            return Some(section.into_any_element());
+        }
+        let mut list = div()
+            .id("chat-editor-threads")
+            .flex()
+            .flex_col()
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .pb(px(6.));
+        for (row_index, (project, panel, thread, status)) in rows.into_iter().enumerate() {
+            let selected =
+                peeking.as_ref() == Some(&panel) && panel.read(cx).active_thread() == thread;
+            let color = status.color;
+            let target = panel.clone();
+            list = list.child(
+                div()
+                    .id(("chat-editor-thread", row_index))
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .pl(px(9.))
+                    .pr(px(10.))
+                    .py(px(5.))
+                    .border_l_2()
+                    .border_color(gpui::transparent_black())
+                    .cursor_pointer()
+                    .when(selected, |element| {
+                        element.bg(theme.bg2).border_color(color)
+                    })
+                    .when(!selected, |element| {
+                        element.hover(|style| style.bg(theme.bg1))
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(12.))
+                            .h(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(agent_panel::activity_dot(
+                                ("chat-editor-dot", row_index),
+                                8.0,
+                                color,
+                                status.activity,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(if selected { theme.fg0 } else { theme.fg1 })
+                                    .child(status.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg2)
+                                    .child(project),
+                            ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_chat_peek(target.clone(), thread, window, cx);
+                        }),
+                    ),
+            );
+        }
+        section = section.child(list);
+        Some(section.into_any_element())
     }
 
     fn render_chat_center(&self, artifact_open: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -533,7 +906,10 @@ impl Workspace {
             .bg(theme.bg1)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, _cx| this.agent_active = true),
+                cx.listener(|this, _, _window, _cx| {
+                    this.agent_active = true;
+                    this.chrome.chat_peek_active = false;
+                }),
             )
             .children(self.render_chat_artifact_bar(cx))
             .child(
@@ -628,7 +1004,10 @@ impl Workspace {
             .border_color(theme.border)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, _cx| this.agent_active = false),
+                cx.listener(|this, _, _window, _cx| {
+                    this.agent_active = false;
+                    this.chrome.chat_peek_active = false;
+                }),
             )
             .child(
                 div()
@@ -777,6 +1156,7 @@ impl Workspace {
             .child(new_button)
             .child(search)
             .child(list)
+            .children(self.render_chat_editor_threads(cx))
             .child(
                 div()
                     .flex_none()

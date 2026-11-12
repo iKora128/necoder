@@ -129,6 +129,7 @@ Editor / Fleet に並ぶ第 3 のモード。claude.ai や ChatGPT のような�
 | Chat で claude.ai のコネクタを使う（Gmail など） | P1 | **実装済み**（設定 `chat.connectors`・既定 off・§5・§7。Claude のみ） |
 | 使っていないチャットのエージェントを自動で止める（再開は `session/load`） | P1 | **実装済み**（`chat.idle_stop_minutes` 既定 10。全スレッド共通の弁は `agent_idle_stop_minutes` 既定 15・§7） |
 | Chat から Editor のスレッドへ引き継ぐ（要約を渡して新しいスレッド） | P2 | 新規 |
+| Chat に居たまま Editor のスレッドを右で開く（一覧の下の「エディタのスレッド」・トースト） | P1 | **実装済み**（2026-11-12・本人要望。UI-SPEC §13） |
 | メッセージを編集して再送・再生成 | P2 | 要調査（ACP に標準の口が無い） |
 | チャットごとに MCP を選ぶ | later | 全体のスイッチとサービスごとの ON / OFF で足りるので作らない（2026-11-04・本人判断） |
 | Remote（PWA）から Chat | P2 | 改修 |

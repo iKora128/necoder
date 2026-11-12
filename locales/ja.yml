@@ -1986,6 +1986,9 @@ chat:
   search_placeholder: チャットを検索
   no_results: 一致するチャットはありません
   agents_running: "起動中 %{n} / %{total}"
+  editor_threads: エディタのスレッド
+  peek_open_in_editor: Editor で開く
+  peek_close: 閉じる
   group_pinned: ピン留め
   group_today: 今日
   group_yesterday: 昨日

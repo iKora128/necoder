@@ -340,6 +340,7 @@ impl AgentPanel {
             return;
         }
         self.open_menu = None;
+        self.link_menu = None;
         self.thread_menu = Some(ThreadMenu { index, position });
         cx.notify();
     }

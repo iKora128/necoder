@@ -4497,3 +4497,20 @@
 - 学び/罠: claude.ai のコネクタは全部が同じ `claudeai-proxy` で、一覧は 1 回の取得で来る＝落ちる時はまとめて落ちる。Claude Code は「アカウントが変わった」をアクセストークンの文字列の比較で決めていて、トークンの更新でもコネクタを全部繋ぎ直す（今回の主因ではないが、同じ症状の別の入口）。`_claude/sdkMessage` の通知は `sessionId` を持つので、ACP crate はセッションの更新チャネルへ回す（接続のハンドラでは受けられない）。
 - 検証: `probe_connectors` を実物で回した。修正前と同じ道（モデル名を素通し）では起こし直しで `/model` が 3 回記録され、修正後は 0 回。最初の指示を 3 秒待つと 1 ターン目からコネクタが 5〜7 個繋がる。`PROBE_NO_CONNECTORS=1` で取り損ねを作ると、2 回起こし直して送り直し、諦めの一言を出して答えた。偽エージェントの試験 `a_session_that_missed_its_connectors_is_restarted_and_the_prompt_resent`（漏れた本文は UI に届かない・終端は 1 回）。新しい一発生成のテンプレートで要約が出ることを手元で確認。`cargo test --workspace --features necoder/runtime-shaders` 緑。
 - 次: 本人の実機で、10 分以上空けてから Chat で Gmail を頼み、繋がったまま答えることを確認。`ECONNREFUSED` が放置明けにだけ出る理由（Tailscale など）は未調査。Editor のスレッドは見張っていない（コネクタを読み込む設定のまま同じことは起きうる）。
+
+## 2026-11-12 — transcript のリンク: 全画面中でも見える・右クリックで開き方を選ぶ
+
+- 発端: 本人「AI を最大化しているとき、リンクを押してもファイルが見えない」「リンクを右クリックしたら Finder に表示など細かく選びたい」。
+- 原因: エディタ領域へ出す対話操作は `exit_agent_full_screen` を通す決まり（2026-09-11）だが、transcript のリンクは `pending_navigation` / `pending_preview` → `open_file_then` の経路で、`open_file` を通らないので畳まれていなかった。
+- 直し: `open_transcript_path` の、既定のアプリへ回す分岐の後で全画面を畳む（既定のアプリで開く時は necoder の画面が変わらないので畳まない）。ツールカードの `▣ プレビュー`（`OpenPreviewRequest`）も同じ。Chat の成果物の自動表示は人の意思でないので触らない（Chat はそもそも全画面が無い）。
+- 右クリック: `agent_panel/src/link_menu.rs`。`link_at` で拾った行き先にメニュー（スレッドのメニューと同じ deferred + anchored）。Finder・既定のアプリ・コピーはパネルから直に `project::*_local` / クリップボード（workspace へイベントを足すほどの判断が無い）。開くは従来の `activate_link`。
+- 検証: `link_menu_lists_actions_and_copies`（項目の並び・相対パスはプロジェクトの中だけ・コピーの中身）、`opening_a_surface_while_the_agent_is_maximized_unmaximizes_it` に transcript リンクの段を追加。
+
+## 2026-11-12 — Chat に居たまま Editor のスレッドを右で開く
+
+- 発端: 本人「Chat モードのときにスレッドが開けないのが結構不便」。選択肢（押したら Editor へ飛ぶ / Chat のまま右で開く）から**右で開く**を本人が選んだ。
+- 形: 一覧の下に「エディタのスレッド」（全プロジェクト・手が要る順）。押すとそのプロジェクトの `AgentPanel` を右（成果物と同じ場所・同じ幅）に `cached` で載せる。上に 1 行（プロジェクト ⎇ ブランチ・`Editor で開く`・✕）。状態は `chrome.chat_peek`（パネルの Entity）だけで、どのスレッドかはパネルのアクティブなスレッドに任せる（右のタブで切り替えても追従する）。
+- 罠と決め: ① 右のパネルのイベントは project session として届くので、ファイル・diff・プレビュー・履歴をそのまま積むと**見えない session に溜まる**。`peek_event_needs_editor` に当たる物は `pending_chat_peek_handoff` を立て、`process_pending_shell_effects` の**先頭で** Editor へ移す（同じ cycle の `pending_navigation` が移った先の session で消化される）。② ⌘W は Chat では会話宛てなので、右を最後に触ったかを `chat_peek_active` で持ち、その時は右だけを閉じる。③ 見えているパネルの判定（`sync_agent_on_screen`）に右のパネルを含めた。④ Chat 中のトーストから飛ぶ `jump_to_thread` も右で開く（承認にその場で答えられる）。
+- 検証: `chat_peeks_an_editor_thread_and_hands_files_to_the_editor`（開く・⌘W で右だけ閉じる・リンクで Editor へ移ってタブが開く・戻ったら閉じている）。offscreen（`NECODER_CHAT_PROBE="seed;peek:0"`）で右のスレッドと左の一覧を目視。
+- 残: 実機で、右のスレッドの承認カードを押す・返事を打つ・IME の確定を確かめていない。
+

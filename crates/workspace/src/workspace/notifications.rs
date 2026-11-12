@@ -68,6 +68,19 @@ impl Workspace {
         // 解決・取り消し・別の要求に替わった承認への Captain の推薦を捨てる（FLEET-V2 §5.5・次の承認待ちや
         // ターンの終わりはここを通る。推薦が無ければ何もしない）。
         self.prune_captain_recommendations(cx);
+        // Chat の右で開いたスレッドから、エディタ領域を使う操作が来た: そのプロジェクトの Editor へ移る。
+        // 開く物（pending_*）はいつもどおり session に積み、移った後の同じ effect cycle で消化される。
+        if self.chat_mode()
+            && self.chrome.chat_peek.as_ref() == Some(&panel)
+            && self.peek_event_needs_editor(session_index, event)
+        {
+            self.chrome.pending_chat_peek_handoff = Some(panel.clone());
+            cx.notify();
+            // ⤢ は「Editor で開く」として扱う（Chat に AI 全画面は無い）。
+            if matches!(event, agent_panel::PanelEvent::ToggleFullScreenRequest) {
+                return;
+            }
+        }
         match event {
             agent_panel::PanelEvent::ThreadViewed { .. } => {} // 上で済ませた
             agent_panel::PanelEvent::HumanSend { thread, text } => {
@@ -372,6 +385,8 @@ impl Workspace {
             }
             // ツールカードの `▣ プレビュー`: 最初からプレビュー表示で開く（source ⇄ は ⌘⇧V）。
             agent_panel::PanelEvent::OpenPreviewRequest { path } => {
+                // 押した＝見たい。AI 全画面のままだと中央が Agent で、開いても出ない。
+                self.exit_agent_full_screen(cx);
                 self.project_sessions.sessions[session_index].pending_preview = Some(path.clone());
                 cx.notify();
             }
@@ -529,6 +544,30 @@ impl Workspace {
         (kind, SharedString::from(text))
     }
 
+    /// Chat の右のスレッドから来たイベントのうち、Editor の画面が要る物。既定のアプリ・ブラウザへ
+    /// 出すだけの物（フォルダ・necoder が描けない形式・localhost 以外の URL）は Chat に居たままでよい。
+    fn peek_event_needs_editor(
+        &self,
+        session_index: usize,
+        event: &agent_panel::PanelEvent,
+    ) -> bool {
+        match event {
+            agent_panel::PanelEvent::OpenPathRequest { path, .. } => {
+                let local = self
+                    .project_sessions
+                    .projects
+                    .get(session_index)
+                    .is_none_or(|slot| !slot.worktree.host().is_remote());
+                !(local && (path.is_dir() || opens_in_default_app(path)))
+            }
+            agent_panel::PanelEvent::OpenPreviewRequest { .. }
+            | agent_panel::PanelEvent::OpenDiffRequest { .. }
+            | agent_panel::PanelEvent::OpenHistoryRequest
+            | agent_panel::PanelEvent::ToggleFullScreenRequest => true,
+            _ => false,
+        }
+    }
+
     /// トーストを積む（右下・5 秒で自動で消える・UI-SPEC §8）。
     /// transcript のパスリンクを開く（M12-17）。
     ///
@@ -536,7 +575,7 @@ impl Workspace {
     /// フォルダと necoder が描けない形式だけ OS 既定へ回す。ROADMAP の当初案は「`.html` は
     /// ブラウザ」だったが、M14 で HTML プレビュータブが入り**エクスプローラのクリックは中で開く**
     /// ようになったため、同じファイルの開き方が経路で割れないよう中で開く側へ揃えた（2026-09-16）。
-    fn open_transcript_path(
+    pub(crate) fn open_transcript_path(
         &mut self,
         session_index: usize,
         path: PathBuf,
@@ -567,6 +606,9 @@ impl Workspace {
             }
             return;
         }
+        // ここから先はエディタ領域にタブを出す。AI 全画面のままだと中央が Agent に差し替わって
+        // いて、開いても見えない（2026-11-12 報告）。クリック＝見たい意思なので畳む。
+        self.exit_agent_full_screen(cx);
         // ローカルの `.html` を**行指定なしで**指された時は、ソースではなく整形プレビューを出す
         // （「見せたい」意図で貼られるため。行番号つきならその行の source を見たいので下へ流す）。
         // リモートの HTML は webview を持てない（`EditorView::html_preview` が local 限定）。
@@ -741,7 +783,13 @@ impl Workspace {
         if session_index >= self.project_sessions.sessions.len() {
             return;
         }
-        if self.chrome.fleet_mode {
+        if self.chat_mode() {
+            // Chat に居たまま右で開く（承認・質問にその場で答えられる）。
+            let panel = self.project_sessions.sessions[session_index]
+                .agent_panel
+                .clone();
+            self.open_chat_peek(panel, thread_index, window, cx);
+        } else if self.chrome.fleet_mode {
             // 編隊モードは Agent ドックを出さない。当該エージェントをグリッドに出して拡大する。
             self.reveal_agent_in_fleet(session_index, thread_index, window, cx);
         } else {

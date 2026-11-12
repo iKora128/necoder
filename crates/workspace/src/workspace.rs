@@ -1438,6 +1438,16 @@ struct ChromeState {
     chat_accent: Option<Hsla>,
     /// 復元: 最後に見ていたチャット。初めて Chat を開いた時に 1 度だけそこへ戻る。
     chat_restore: Option<String>,
+    /// Chat の右で開いている Editor のスレッド（そのプロジェクトの Agent パネル。None = 閉）。
+    /// Chat を離れずに進みを見る・承認する・返事を打つための窓（2026-11-12 本人要望）。
+    chat_peek: Option<Entity<AgentPanel>>,
+    /// 最後に触った面が右のスレッドか（⌘W の宛先。会話・成果物を押すと外れる）。
+    chat_peek_active: bool,
+    /// 右のスレッドからエディタ領域を使う操作（ファイル・diff・履歴・⤢）が来た: そのプロジェクトの
+    /// Editor へ移ってから処理する。パネルのイベントには Window が無いので次の effect cycle で。
+    pending_chat_peek_handoff: Option<Entity<AgentPanel>>,
+    /// Chat の一覧の「エディタのスレッド」を畳んでいるか（この起動の間だけ）。
+    chat_editor_threads_collapsed: bool,
     /// このターンでエージェントが触ると予告したファイル（ターン終了時に取り込む）。
     chat_touched: Vec<PathBuf>,
     /// 復元で Chat モードへ入る予約（window のある描画で消化）。
@@ -2107,6 +2117,7 @@ impl Workspace {
     /// effect cycle の末尾へまとめて送る。これにより root Render は状態変更や I/O を行わない。
     fn has_pending_shell_effects(&self) -> bool {
         self.chrome.pending_agent_full_screen_toggle
+            || self.chrome.pending_chat_peek_handoff.is_some()
             || self.chrome.pending_settings_command.is_some()
             || self.chrome.pending_open_settings_json
             || !self.chrome.pending_external_open.is_empty()
@@ -2133,6 +2144,10 @@ impl Workspace {
     }
 
     fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 先頭で: Editor へ移った後の session に、同じ effect cycle の pending_navigation 等が効く。
+        if let Some(panel) = self.chrome.pending_chat_peek_handoff.take() {
+            self.hand_chat_peek_to_editor(panel, window, cx);
+        }
         // 窓を持たない経路（パネルのイベント）で開いた入力欄・閉じた後の戻り先へフォーカスを渡す。
         if let Some(focus) = self.chrome.focus_next_frame.take() {
             window.focus(&focus, cx);
@@ -4547,6 +4562,16 @@ mod tests {
                 !workspace.chrome.agent_full_screen,
                 "ファイルを開いたら全画面は畳む"
             );
+
+            // transcript のリンク（2026-11-12 報告: 全画面のまま押しても何も見えなかった）。
+            workspace.toggle_agent_full_screen_state(window, cx);
+            assert!(workspace.chrome.agent_full_screen);
+            let active = workspace.project_sessions.active;
+            workspace.open_transcript_path(active, file.clone(), Some(1), None, cx);
+            assert!(
+                !workspace.chrome.agent_full_screen,
+                "transcript のリンクを押したら全画面は畳む"
+            );
         });
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -5342,6 +5367,68 @@ mod tests {
             // レールでプロジェクトを選んだら Chat を抜ける（同じプロジェクトでも「そこへ戻る」）。
             workspace.switch_project(0, window, cx);
             assert!(!workspace.chat_mode());
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Chat の右で Editor のスレッドを開く（2026-11-12）。⌘W は右だけを閉じ、ファイルを開く操作は
+    /// そのプロジェクトの Editor へ移ってから行う。Chat を抜けたら右は残らない。
+    #[gpui::test]
+    fn chat_peeks_an_editor_thread_and_hands_files_to_the_editor(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "peek");
+        let source = root.join("project/main.rs");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let project_panel = workspace.project_sessions.sessions[0].agent_panel.clone();
+            workspace.set_chat_mode(true, window, cx);
+            let chat_panel = workspace.agent_panel.clone();
+
+            workspace.open_chat_peek(project_panel.clone(), 0, window, cx);
+            assert_eq!(workspace.chrome.chat_peek.as_ref(), Some(&project_panel));
+            assert!(workspace.chat_mode(), "Chat に居たまま");
+
+            // ⌘W は右のスレッドだけを閉じる（チャットもスレッドも閉じない）。
+            let chat_threads = chat_panel.read(cx).statuses().len();
+            let project_threads = project_panel.read(cx).statuses().len();
+            workspace.close_tab(&CloseTab, window, cx);
+            assert!(workspace.chrome.chat_peek.is_none());
+            assert_eq!(chat_panel.read(cx).statuses().len(), chat_threads);
+            assert_eq!(project_panel.read(cx).statuses().len(), project_threads);
+
+            // 右のスレッドのリンク → そのプロジェクトの Editor でファイルが開く。
+            workspace.open_chat_peek(project_panel.clone(), 0, window, cx);
+            workspace.on_panel_event(
+                project_panel.clone(),
+                &agent_panel::PanelEvent::OpenPathRequest {
+                    path: source.clone(),
+                    line: Some(1),
+                    column: None,
+                },
+                cx,
+            );
+            assert!(
+                workspace.chat_mode(),
+                "移るのは window のある effect cycle で"
+            );
+            workspace.process_pending_shell_effects(window, cx);
+            assert!(!workspace.chat_mode(), "Editor へ移った");
+            assert_eq!(workspace.project_sessions.active, 0);
+            assert!(workspace.chrome.chat_peek.is_none());
+            assert!(
+                workspace.chrome.show_right,
+                "スレッドは右のドックに見えている"
+            );
+        });
+        // 読み込みは背景（open_file_then）。
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.tabs.iter().any(|tab| tab.path == source),
+                "ファイルはプロジェクト側のタブに開いた"
+            );
+            // Chat へ戻ったら右は閉じている（前に開いていた物を勝手に出さない）。
+            workspace.set_chat_mode(true, window, cx);
+            assert!(workspace.chrome.chat_peek.is_none());
         });
         let _ = std::fs::remove_dir_all(root);
     }

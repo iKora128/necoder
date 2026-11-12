@@ -30,6 +30,7 @@ mod auto_prompt;
 mod chat;
 mod history;
 mod idle;
+mod link_menu;
 mod recipes;
 mod remote;
 mod search;
@@ -2510,6 +2511,8 @@ pub struct AgentPanel {
     open_menu: Option<Selector>,
     /// スレッドタブ（一覧の行）の右クリックメニュー（O15。None = 閉）。
     thread_menu: Option<history::ThreadMenu>,
+    /// transcript のリンクの右クリックメニュー（None = 閉）。
+    link_menu: Option<link_menu::LinkMenu>,
     /// Add context の候補（プロジェクトのファイル相対パス。workspace が渡す）と開閉。
     context_files: Vec<SharedString>,
     context_menu_open: bool,
@@ -3113,6 +3116,7 @@ PYEOF"#;
             pressed_link: None,
             open_menu: None,
             thread_menu: None,
+            link_menu: None,
             context_files: Vec::new(),
             context_menu_open: false,
             context_query: String::new(),
@@ -4920,7 +4924,7 @@ PYEOF"#;
         let keystroke = &event.keystroke;
         if keystroke.key == "escape" {
             // スレッドのメニューが開いていれば、まずそれを閉じる（ターンは止めない）。
-            if self.close_thread_menu(cx) {
+            if self.close_thread_menu(cx) || self.close_link_menu(cx) {
                 cx.stop_propagation();
                 return;
             }
@@ -10845,6 +10849,15 @@ PYEOF"#;
                 MouseButton::Left,
                 cx.listener(Self::on_transcript_mouse_down),
             )
+            // リンクの上の右クリック = 開き方のメニュー（Finder で表示・パスをコピー等）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    if this.open_link_menu_at(event.position, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             // move は root 側で拾う（`on_mouse_move` は hover 中しか発火せず、composer 上へ
             // 引っ張った途端に途切れるため。composer リサイズと同じ作法）。
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
@@ -14075,6 +14088,8 @@ impl Render for AgentPanel {
             .children(self.render_rename_dialog(cx))
             // スレッドの右クリックメニュー（窓の座標で最前面に出す・O15）。
             .children(self.render_thread_menu(cx))
+            // transcript のリンクの右クリックメニュー（同じく最前面）。
+            .children(self.render_link_menu(cx))
     }
 }
 
@@ -20266,6 +20281,63 @@ PYEOF"#;
         assert_eq!(
             seen.borrow().as_slice(),
             ["path /tmp/a.rs Some(42) Some(7)", "url https://necoder.com"]
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+    /// リンクの右クリックメニュー: ローカルのファイルは Finder / 既定のアプリ / コピーを並べ、
+    /// 相対パスはプロジェクトの中だけ。URL は開くとコピーだけ。コピーはクリップボードへ書く。
+    #[gpui::test]
+    fn link_menu_lists_actions_and_copies(cx: &mut gpui::TestAppContext) {
+        use link_menu::LinkMenuAction;
+        let settings_path = init_test_settings(cx, "link-menu");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let root = PathBuf::from("/tmp/necoder-link-menu");
+        let inside = LinkDestination::File {
+            path: root.join("mockups/history-lr.html"),
+            line: None,
+            column: None,
+        };
+        let outside = LinkDestination::File {
+            path: PathBuf::from("/etc/hosts"),
+            line: None,
+            column: None,
+        };
+        let url = LinkDestination::Url("https://necoder.com".into());
+        panel.update(cx, |panel, cx| {
+            panel.dest_cwd = Some(root.clone());
+            assert_eq!(
+                panel.link_menu_actions(&inside),
+                [
+                    LinkMenuAction::Open,
+                    LinkMenuAction::Reveal,
+                    LinkMenuAction::OpenWithDefaultApp,
+                    LinkMenuAction::CopyPath,
+                    LinkMenuAction::CopyRelativePath,
+                ]
+            );
+            assert!(
+                !panel
+                    .link_menu_actions(&outside)
+                    .contains(&LinkMenuAction::CopyRelativePath),
+                "プロジェクトの外に相対パスは無い"
+            );
+            assert_eq!(
+                panel.link_menu_actions(&url),
+                [LinkMenuAction::Open, LinkMenuAction::CopyPath]
+            );
+            panel.run_link_menu_action(inside.clone(), LinkMenuAction::CopyRelativePath, cx);
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("mockups/history-lr.html".to_string())
+        );
+        panel.update(cx, |panel, cx| {
+            panel.run_link_menu_action(url.clone(), LinkMenuAction::CopyPath, cx);
+            assert!(panel.link_menu.is_none(), "実行したら閉じる");
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("https://necoder.com".to_string())
         );
         let _ = std::fs::remove_file(settings_path);
     }

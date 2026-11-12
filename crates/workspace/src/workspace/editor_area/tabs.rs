@@ -15,6 +15,11 @@ impl Workspace {
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        // Chat の右で開いた Editor のスレッドを最後に触っていたら、それを閉じる（スレッド自体は閉じない）。
+        if self.chat_mode() && self.chrome.chat_peek.is_some() && self.chrome.chat_peek_active {
+            self.close_chat_peek(window, cx);
+            return;
+        }
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。

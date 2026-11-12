@@ -244,7 +244,8 @@ impl Workspace {
     /// `query:<語>` = 入力に語を入れる / `select:<n>` = 選べる行の n 番目を選ぶ / `confirm` = ⏎ /
     /// `close` = 閉じる / `count` = 区分ごとの件数を stderr へ（題は出さない）/
     /// `handoff` = いまのスレッドを「新しいセッションで続ける」/
-    /// `menu` = いまのスレッドの右クリックメニューを開く。
+    /// `menu` = いまのスレッドの右クリックメニューを開く /
+    /// `linkmenu:<相対パス>` = transcript のリンクの右クリックメニューをそのファイルで開く。
     #[cfg(debug_assertions)]
     pub fn debug_history_probe(
         &mut self,
@@ -283,6 +284,17 @@ impl Workspace {
                 panel.update(cx, |panel, cx| {
                     let index = panel.active_thread();
                     panel.debug_open_thread_menu(index, position, cx)
+                });
+            }
+            "linkmenu" => {
+                let panel = self.agent_panel.clone();
+                let position = point(window.viewport_size().width - px(380.), px(220.));
+                let path = self
+                    .active_worktree()
+                    .map(|worktree| worktree.root().join(argument))
+                    .unwrap_or_else(|| PathBuf::from(argument));
+                panel.update(cx, |panel, cx| {
+                    panel.debug_open_link_menu(path, position, cx)
                 });
             }
             other => eprintln!("NECODER_HISTORY_PROBE: 未知のコマンド {other}"),
@@ -1189,13 +1201,23 @@ impl Workspace {
     /// `settings-connection:<ひな形の id>` = 設定の「接続を追加」/ `settings-open:<id>` = AI
     /// エージェントのページで行を開く / `settings-host:<名前>` = 偽の SSH 先を足して選ぶ /
     /// `settings-theme-save:<名前>` = 外観の「自分のテーマとして保存」を開く / `settings-theme-submit` = その保存を押す / `find:<語>` /
-    /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
+    /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける / `peek:<n>` = 右で n 番目の
+    /// プロジェクトの Editor のスレッドを開く。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (name, argument) = command.split_once(':').unwrap_or((command, ""));
         match name {
             "open" => self.set_chat_mode(true, window, cx),
             "editor" => self.set_chat_mode(false, window, cx),
+            // 右で Editor のスレッドを開く（`peek:<プロジェクトの番号>`・既定 0 = 先頭のスレッド）。
+            "peek" => {
+                self.set_chat_mode(true, window, cx);
+                let index = argument.parse::<usize>().unwrap_or(0);
+                if let Some(session) = self.project_sessions.sessions.get(index) {
+                    let panel = session.agent_panel.clone();
+                    self.open_chat_peek(panel, 0, window, cx);
+                }
+            }
             "seed" => {
                 self.set_chat_mode(true, window, cx);
                 if let Some(panel) = self.chat_panel() {

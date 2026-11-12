@@ -443,9 +443,12 @@ impl Workspace {
     pub(crate) fn sync_agent_on_screen(&self, cx: &mut Context<Self>) {
         let chat_active = self.project_sessions.chat_active;
         let active = self.project_sessions.active;
+        // Chat の右で開いている Editor のスレッドも見えている。
+        let peek = self.chrome.chat_peek.as_ref().filter(|_| chat_active);
         for (index, session) in self.project_sessions.sessions.iter().enumerate() {
-            let on_screen = !chat_active && index == active;
+            let project_on_screen = !chat_active && index == active;
             for panel in &session.fleet_agents {
+                let on_screen = project_on_screen || peek == Some(panel);
                 panel.update(cx, |panel, cx| panel.set_on_screen(on_screen, cx));
             }
         }
