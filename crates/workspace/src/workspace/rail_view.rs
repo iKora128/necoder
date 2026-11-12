@@ -291,11 +291,22 @@ impl Workspace {
             // ── アクティビティアイコン（settings.rail で個別に表示/非表示・Lucide SVG）──
             .when(rail.threads, |element| {
                 if chat_mode {
+                    // Chat から押すと、スレッド一覧を出した Editor へ戻る（2026-11-12 本人要望）。
                     return element.child(
-                        div()
-                            .relative()
-                            .child(self.rail_icon_inert("rail-threads", "icons/inbox.svg"))
-                            .children(self.attention_count_mark(self.attention_totals(cx))),
+                        self.rail_icon(
+                            "rail-threads",
+                            "icons/inbox.svg",
+                            i18n::t!("rail.threads_from_chat"),
+                            theme.fg2,
+                        )
+                        .relative()
+                        .children(self.attention_count_mark(self.attention_totals(cx)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.show_threads_from_chat(window, cx)
+                            }),
+                        ),
                     );
                 }
                 // スレッド一覧（herd）。右上に全体の確認待ちの印（UI-SPEC §8）。Fleet 中は同じ枠が

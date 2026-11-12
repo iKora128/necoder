@@ -73,6 +73,19 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Chat のレールのスレッドのアイコン: Editor へ戻り、左にスレッド一覧を出してキーを一覧に置く
+    /// （↑↓ でスレッドを選び ⏎ で入力欄へ）。Editor のアイコンと違ってトグルではない。
+    pub(crate) fn show_threads_from_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_chat_mode(false, window, cx);
+        if !self.herd_column_visible(cx) {
+            self.toggle_herd_sidebar(cx);
+        }
+        // 一覧は次のフレームで描かれる（描かれる前にフォーカスすると宛先が孤立する）。
+        let threads = self.chrome.threads_focus.clone();
+        window.defer(cx, move |window, cx| window.focus(&threads, cx));
+        cx.notify();
+    }
+
     /// 左カラムにいま herd が出ているか。レールの点灯とトグルが同じ判定を読む。左カラムの優先順は
     /// Editor（`render`）が herd 先頭、Fleet（`render_fleet_left_column`）が Todo / git 先頭なので分ける。
     pub(crate) fn herd_column_visible(&self, cx: &App) -> bool {

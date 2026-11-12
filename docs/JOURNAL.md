@@ -4513,4 +4513,5 @@
 - 罠と決め: ① 右のパネルのイベントは project session として届くので、ファイル・diff・プレビュー・履歴をそのまま積むと**見えない session に溜まる**。`peek_event_needs_editor` に当たる物は `pending_chat_peek_handoff` を立て、`process_pending_shell_effects` の**先頭で** Editor へ移す（同じ cycle の `pending_navigation` が移った先の session で消化される）。② ⌘W は Chat では会話宛てなので、右を最後に触ったかを `chat_peek_active` で持ち、その時は右だけを閉じる。③ 見えているパネルの判定（`sync_agent_on_screen`）に右のパネルを含めた。④ Chat 中のトーストから飛ぶ `jump_to_thread` も右で開く（承認にその場で答えられる）。
 - 検証: `chat_peeks_an_editor_thread_and_hands_files_to_the_editor`（開く・⌘W で右だけ閉じる・リンクで Editor へ移ってタブが開く・戻ったら閉じている）。offscreen（`NECODER_CHAT_PROBE="seed;peek:0"`）で右のスレッドと左の一覧を目視。
 - 残: 実機で、右のスレッドの承認カードを押す・返事を打つ・IME の確定を確かめていない。
+- 追記（同日・v0.1.39 の後）: 本人「左のレールのスレッドボタンを押せるようにしたい」。Chat ではレールのプロジェクト機能のアイコンを全部 `rail_icon_inert`（薄く・押せない）にしていた。スレッドのアイコンだけ押せるようにし、押すと Editor へ戻ってスレッド一覧を出す（`show_threads_from_chat`・一覧へのフォーカスは次のフレーム）。試験 `the_threads_icon_in_chat_returns_to_the_editor_with_the_list`。
 

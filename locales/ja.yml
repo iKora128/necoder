@@ -744,6 +744,7 @@ rail:
   git: ソース管理  %{key}
   todos: Todo ボード
   threads: スレッド（全ワークスペース）
+  threads_from_chat: "スレッド（Editor に戻って一覧を出す）"
   fleet_sidebar: Fleet サイドバー（Task 一覧）
   agent: AI エージェントの表示切替
   terminal: ターミナル  %{key}

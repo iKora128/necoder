@@ -743,6 +743,7 @@ rail:
   git: Source control  %{key}
   todos: Todo board
   threads: Threads (all workspaces)
+  threads_from_chat: "Threads (back to the Editor with the list)"
   fleet_sidebar: Fleet sidebar (Tasks)
   agent: Toggle AI agent panel
   terminal: Terminal  %{key}

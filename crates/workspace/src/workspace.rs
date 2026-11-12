@@ -5433,6 +5433,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Chat のレールのスレッドのアイコンは押せる: Editor へ戻り、左にスレッド一覧が出る（2026-11-12）。
+    #[gpui::test]
+    fn the_threads_icon_in_chat_returns_to_the_editor_with_the_list(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "threads_icon");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_chat_mode(true, window, cx);
+            workspace.show_threads_from_chat(window, cx);
+            assert!(!workspace.chat_mode());
+            assert!(workspace.herd_column_visible(cx));
+            // もう一度押しても一覧は畳まない（トグルではない）。
+            workspace.set_chat_mode(true, window, cx);
+            workspace.show_threads_from_chat(window, cx);
+            assert!(workspace.herd_column_visible(cx));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Chat で開いたタブは Chat の session のもの。プロジェクトの枠（復元されるタブの並び）を汚さない。
     #[gpui::test]
     fn chat_tabs_never_leak_into_the_project_slot(cx: &mut gpui::TestAppContext) {
