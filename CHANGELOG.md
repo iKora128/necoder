@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.39] - 2026-11-12
+
+Chat can now show your Editor threads on the right, so you can follow them, approve, and reply without leaving Chat. Links in the conversation also get a right-click menu.
+
+### Added
+
+- **Editor threads in Chat**: an "Editor threads" list under the chat list shows the threads of every project, with the ones waiting for you first, then running, finished, and idle. Click one to open it on the right, in the same place as artifacts. It is the same agent panel as in the Editor: thread tabs, approval cards, and the message box all work there. `Open in Editor` takes the thread to its project, and ✕ or ⌘W closes the right side without closing the thread. Opening a file, diff, preview, or history from that thread switches to the project's Editor first. Clicking a toast about a thread while in Chat also opens it on the right.
+- **Right-click on links in the conversation**: file links offer Open / Reveal in Finder / Open with default app / Copy path / Copy relative path (only for files inside the project). URL links offer Open / Copy URL. Reveal in Finder and Open with default app are not shown for SSH projects.
+
+### Fixed
+
+- **Links while the agent is maximized**: clicking a file link or the `▣ Preview` chip while the AI panel was full screen opened the file behind the panel, so nothing seemed to happen. Full screen now closes first so the file is visible. Folders and files opened in another app keep full screen as it is.
+
+### 日本語
+
+Chat の右に Editor のスレッドを出せるようになりました。Chat を離れずに進みを見たり、承認したり、返事を打ったりできます。会話の中のリンクには右クリックのメニューが付きました。
+
+### 追加
+
+- **Chat で Editor のスレッドを開く**: チャットの一覧の下に「エディタのスレッド」を足しました。全プロジェクトのスレッドを、あなた待ち、動いている、終わった、待機の順に並べます。押すと、成果物と同じ右の場所にそのスレッドが開きます。中身は Editor の AI パネルと同じで、スレッドのタブも承認カードも入力欄もそこで使えます。`Editor で開く` でそのプロジェクトへ移り、✕ か ⌘W で右を閉じます（スレッドは閉じません）。右のスレッドからファイル・diff・プレビュー・履歴を開くと、先にそのプロジェクトの Editor へ移ります。Chat 中にスレッドのトーストを押した時も右で開きます。
+- **会話のリンクの右クリック**: ファイルのリンクでは、開く / Finder で表示 / 既定のアプリで開く / パスをコピー / 相対パスをコピー（プロジェクトの中のファイルだけ）を選べます。URL のリンクでは、開く / URL をコピーです。SSH 先のプロジェクトでは Finder と既定のアプリは出しません。
+
+### 修正
+
+- **AI を全画面にしている時のリンク**: 全画面のままファイルのリンクや `▣ プレビュー` を押すと、パネルの裏でファイルが開き、何も起きないように見えていました。先に全画面を解いてから開くようにしました。フォルダや別のアプリで開くファイルの時は、全画面のままにします。
+
 ## [0.1.38] - 2026-11-09
 
 Chat keeps Gmail, Google Calendar, and your other connectors after it has been idle, and can now look things up on your Mac with a confirmation for each command.
