@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Changed
+
+- **Threads icon in Chat**: the threads icon in the rail was dimmed and did nothing in Chat. It now takes you back to the Editor with the thread list open, so you can pick a thread with ↑↓ and press ⏎ to type.
+
+### 日本語
+
+### 変更
+
+- **Chat でのスレッドのアイコン**: Chat ではレールのスレッドのアイコンが薄く、押しても何も起きませんでした。押すと Editor に戻ってスレッドの一覧が開き、↑↓ でスレッドを選んで ⏎ で入力欄へ移れます。
+
 ## [0.1.39] - 2026-11-12
 
 Chat can now show your Editor threads on the right, so you can follow them, approve, and reply without leaving Chat. Links in the conversation also get a right-click menu.
