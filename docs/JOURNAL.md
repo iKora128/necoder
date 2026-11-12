@@ -4515,3 +4515,12 @@
 - 残: 実機で、右のスレッドの承認カードを押す・返事を打つ・IME の確定を確かめていない。
 - 追記（同日・v0.1.39 の後）: 本人「左のレールのスレッドボタンを押せるようにしたい」。Chat ではレールのプロジェクト機能のアイコンを全部 `rail_icon_inert`（薄く・押せない）にしていた。スレッドのアイコンだけ押せるようにし、押すと Editor へ戻ってスレッド一覧を出す（`show_threads_from_chat`・一覧へのフォーカスは次のフレーム）。試験 `the_threads_icon_in_chat_returns_to_the_editor_with_the_list`。
 
+## 2026-11-12 — Chat を 10 分放置すると「node が無い」で起動できない
+
+- 発端: 本人「`ACP agent を起動できない: …/.nvm/versions/node/v24.22.2/bin/node: … No such file or directory (os error 2)` が、Chat を 10 分放置した後に出がち」。
+- 調べ: node はそのパスに在った。本人の DB の `thread_chats.dir` を並べると 11 件中 10 件のフォルダが無い。**spawn の cwd が無いと Rust は ENOENT を返し、文脈にはプログラムのパスしか載らない**＝「node が無い」と読める。
+- 原因: アイドル停止（Chat 10 分）の `tidy_chat_dir` が空のフォルダを消す（設計どおり）。作り直しは送信の `ensure_chat_dir` だけで、11-09 に入れた「打ち始めたら起こす」`wake_agent_for_typing` は `session_cwd` をそのまま渡していた。先張り・再開の道も同じ。
+- 直し: `start_session` の入口で `prepare_session_cwd`（Chat なら `folder::ensure`）。どの道で起こしても同じパスで作り直す。`!` のシェル（`shell_cwd`）は前から作り直していた。
+- 罠: 撮影用の `NECODER_CHAT_PROBE=seed` は `NECODER_HOME` だけでは書類フォルダを隔離しない（`paths` の決まり）。`NECODER_DOCUMENTS_DIR` も付ける。今日の撮影で本物の `~/Documents/necoder` に見本を 2 つ作ってしまい、ゴミ箱へ移した。
+- 検証: `a_tidied_chat_folder_is_recreated_before_the_agent_starts`、`cargo test -p agent_panel`（206）。実機の 10 分放置は未確認。
+

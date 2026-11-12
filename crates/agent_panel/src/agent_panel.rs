@@ -8012,6 +8012,18 @@ PYEOF"#;
         self.dest_cwd.clone()
     }
 
+    /// 起動の直前に作業ディレクトリを用意する。Chat のフォルダは、エージェントが止まった時に空なら
+    /// 片付けている（`tidy_chat_dir`）ので、**同じパスで**作り直す。送信の道は `ensure_chat_dir` で
+    /// 作り直していたが、入力を始めた時の起こし直し・先張り・再開の道は素通りで、無いフォルダを cwd に
+    /// spawn して ENOENT になり「node が無い」と見える失敗になっていた（2026-11-12）。
+    pub(crate) fn prepare_session_cwd(&self, cwd: &Path) -> Result<(), String> {
+        if !self.chat_mode {
+            return Ok(());
+        }
+        chat_core::folder::ensure(cwd)
+            .map_err(|error| i18n::t!("chat.err_folder", "message" => &error.to_string()))
+    }
+
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
     /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドル・通し番号・
     /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる
@@ -8042,6 +8054,7 @@ PYEOF"#;
             .map(|thread| thread.id.clone())
             .unwrap_or_default();
         let host = self.dest_host.clone();
+        self.prepare_session_cwd(&cwd)?;
         // 組み込み・設定で足したエージェント（H1）のどちらも、今の設定の一覧から引く。
         let agent = settings::agent_by_label(cx, &agent_label)
             .ok_or_else(|| i18n::t!("agent.err_no_acp"))?;

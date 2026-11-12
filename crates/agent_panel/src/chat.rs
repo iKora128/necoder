@@ -1285,6 +1285,22 @@ mod tests {
         drop(fixture);
     }
 
+    /// 回帰（2026-11-12）: 止まった時に空のフォルダを片付けても、起こし直す前に同じパスで作り直す。
+    /// 作り直さずに起こすと cwd が無くて spawn が ENOENT になり、「node が無い」と見えていた。
+    #[gpui::test]
+    fn a_tidied_chat_folder_is_recreated_before_the_agent_starts(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "tidied_folder");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let dir = panel.ensure_chat_dir(panel.active, "相談", cx).expect("folder");
+            panel.tidy_chat_dir(panel.active);
+            assert!(!dir.exists(), "空なら片付ける");
+            panel.prepare_session_cwd(&dir).expect("作り直せる");
+            assert!(dir.is_dir(), "同じパスで作り直す");
+        });
+        drop(fixture);
+    }
+
     #[gpui::test]
     fn codex_chat_uses_its_preset_on_every_start(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "codex_preset");
