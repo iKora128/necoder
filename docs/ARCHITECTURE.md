@@ -624,3 +624,5 @@ workspace/view -> project model -> Host trait <- LocalHost / RemoteHost
   [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) を正とする。
 
 Chat の Codex セッションは `chat_core::preset::codex_session_preset` で構成する。`CODEX_CONFIG` に指示・ツール制限・アプリ権限・MCP をまとめ、ACP の mcpServers で OFF 指定が上書きされることを避ける。AI と権限の記憶は `chat.agent` / `chat.permission_modes`。詳細と未検証事項は `CHAT.md` 末尾。
+
+Codex の起動時は `acp_client::apply_codex_launch_model` がスレッドの選択モデルを `CODEX_CONFIG.model` に合わせる（接続の指定がない場合）。環境変数を重ねた後に既存の JSON オブジェクトへモデルだけを足し、Chat・席の指示や権限・MCP 制限を保つ。`session/load` 後の `SetConfig` では再開時のモデル不一致警告に間に合わないため、最初から選択モデルで会話を開く。未選択ならエージェントの既定に従う。アイドル停止の猶予は変えない。

@@ -1056,6 +1056,16 @@ impl AgentCommand {
             || self.args.iter().any(|arg| mentions(arg))
     }
 
+    /// codex-acp を起こすコマンドか（necoder の置き場・npx・設定の上書きのどれでも）。
+    fn is_codex_adapter(&self) -> bool {
+        let mentions = |text: &str| text.contains("codex-acp");
+        self.managed_npm
+            .as_ref()
+            .is_some_and(|(package, binary)| mentions(package) || mentions(binary))
+            || mentions(&self.path.to_string_lossy())
+            || self.args.iter().any(|arg| mentions(arg))
+    }
+
     /// env 無しで組む（既存経路の短縮形・他の crate の試験が偽エージェントを起こす口）。
     pub fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
         Self {
@@ -2775,6 +2785,38 @@ fn launch_model_env(
         .collect()
 }
 
+/// Codex も会話を読む**前**からスレッドのモデルで起こす。load 後の SetConfig だけでは、
+/// ローカルの既定モデルで再開したという警告が会話に残る。アダプタが new/load の両方へ渡す
+/// CODEX_CONFIG にモデルを足す。Chat・席の権限/MCP 制限を消さないよう、環境変数を重ねた後に
+/// オブジェクトを編集する。不正な設定は捨てずにエラーとし、値自体はエラーへ含めない。
+fn apply_codex_launch_model(
+    command: &AgentCommand,
+    preferences: &SessionPreferences,
+    spec: &mut CommandSpec,
+) -> Result<()> {
+    if !command.is_codex_adapter() || preferences.connection.is_some() {
+        return Ok(());
+    }
+    let Some(model) = preferences.model.as_deref().map(str::trim).filter(|model| {
+        !model.is_empty()
+            && !model.contains(char::is_whitespace)
+            && !model.eq_ignore_ascii_case("default")
+    }) else {
+        return Ok(());
+    };
+    let mut config = match spec.env.get("CODEX_CONFIG") {
+        Some(config) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(config)
+            .map_err(|_| {
+                anyhow::anyhow!("Codex の CODEX_CONFIG は JSON オブジェクトで指定してください")
+            })?,
+        None => serde_json::Map::new(),
+    };
+    config.insert("model".into(), model.into());
+    spec.env
+        .insert("CODEX_CONFIG".into(), serde_json::to_string(&config)?);
+    Ok(())
+}
+
 /// 1 回の起動に持ち込むもの（[`Attempt::Restart`] の続き）。
 struct AttemptStart {
     /// セッションを開いたら最初に流す指示（送り直す指示と、前の起動のターン中に届いた設定の変更）。
@@ -2801,7 +2843,7 @@ async fn run_session_attempt(
         .filter(|_| route == ConnectionRoute::Env)
         .map(|connection| connection.env.clone())
         .unwrap_or_default();
-    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
+    let mut spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
         // いちばん弱い層（task.env・agent_servers・プリセット・接続のどれでも上書きできる）。
         .envs(launch_model_env(command, preferences))
@@ -2811,6 +2853,7 @@ async fn run_session_attempt(
         .envs(preferences.preset.env.clone())
         // 接続の変数が最後（task.env・agent_servers・プリセットのどれにも上書きさせない）。
         .envs(connection_env);
+    apply_codex_launch_model(command, preferences, &mut spec)?;
     // 起動してすぐ落ちた時の stderr から伏せる値（env に加え、`providers/set` のヘッダ＝キー）。
     let mut secret_env = spec.env.clone();
     if let Some(provider) = preferences
@@ -4484,6 +4527,149 @@ for line in sys.stdin:
         );
         let codex = super::AgentCommand::new("codex-acp".into(), Vec::new(), "/tmp".into());
         assert!(super::launch_model_env(&codex, &wants("gpt-6.1-sol")).is_empty());
+    }
+
+    /// 起動時のモデル指定は Chat・席が渡す制限や MCP を壊さず、既存の model だけを置き換える。
+    #[test]
+    fn codex_launch_model_preserves_preset_config() {
+        for (path, args) in [
+            ("/agents/codex-acp", Vec::new()),
+            ("npx", vec!["@agentclientprotocol/codex-acp@2.6.0".into()]),
+        ] {
+            let command = AgentCommand::new(path.into(), args, "/tmp".into());
+            let preferences = SessionPreferences {
+                model: Some("gpt-6.1-sol".into()),
+                ..Default::default()
+            };
+            let original = serde_json::json!({
+                "model": "gpt-5.6-sol",
+                "developer_instructions": "Chat の指示",
+                "features": {"multi_agent": false},
+                "mcp_servers": {"external": {"enabled": false}},
+                "apps": {"_default": {"enabled": false}},
+            });
+            let mut spec =
+                CommandSpec::new(path, "/tmp").envs([("CODEX_CONFIG", original.to_string())]);
+            super::apply_codex_launch_model(&command, &preferences, &mut spec).expect("設定できる");
+            let config: serde_json::Value =
+                serde_json::from_str(&spec.env["CODEX_CONFIG"]).expect("JSON");
+            let mut expected = original;
+            expected["model"] = "gpt-6.1-sol".into();
+            assert_eq!(config, expected);
+        }
+    }
+
+    /// 未選択・表示名・別エージェントは既存の起動設定のまま。不正な JSON は黙って消さない。
+    #[test]
+    fn codex_launch_model_leaves_defaults_and_rejects_invalid_config() {
+        let codex = AgentCommand::new("codex-acp".into(), Vec::new(), "/tmp".into());
+        for model in [None, Some(""), Some("default"), Some("GPT-6.1 Sol")] {
+            let preferences = SessionPreferences {
+                model: model.map(str::to_owned),
+                ..Default::default()
+            };
+            let mut spec = CommandSpec::new("codex-acp", "/tmp");
+            super::apply_codex_launch_model(&codex, &preferences, &mut spec).expect("既定のまま");
+            assert!(spec.env.is_empty());
+        }
+        let preferences = SessionPreferences {
+            model: Some("gpt-6.1-sol".into()),
+            ..Default::default()
+        };
+        let other = AgentCommand::new("other-acp".into(), Vec::new(), "/tmp".into());
+        let mut spec = CommandSpec::new("other-acp", "/tmp");
+        super::apply_codex_launch_model(&other, &preferences, &mut spec).expect("対象外");
+        assert!(spec.env.is_empty());
+        let connected = SessionPreferences {
+            connection: Some(glm_for_claude_code()),
+            ..preferences.clone()
+        };
+        super::apply_codex_launch_model(&codex, &connected, &mut spec).expect("接続の設定を保つ");
+        assert!(spec.env.is_empty());
+        for invalid in ["not json", "[]", "null", "\"private-config-value\""] {
+            let mut spec = CommandSpec::new("codex-acp", "/tmp").envs([("CODEX_CONFIG", invalid)]);
+            let error = super::apply_codex_launch_model(&codex, &preferences, &mut spec)
+                .expect_err("不正な設定は知らせる");
+            assert!(!format!("{error:#}").contains("private-config-value"));
+            assert_eq!(spec.env["CODEX_CONFIG"], invalid);
+        }
+    }
+
+    /// load 後に切り替えても遅い。別プロセスが session/load を受けた時点で選択モデルが
+    /// CODEX_CONFIG に入り、Chat の制限も残っていることを確認する（モデル API は呼ばない）。
+    #[test]
+    fn codex_resume_receives_the_thread_model_before_loading() {
+        const AGENT: &str = r#"
+import json, os
+
+def send(obj):
+    print(json.dumps(obj), flush=True)
+
+config = json.loads(os.environ.get("CODEX_CONFIG", "{}"))
+for line in sys.stdin:
+    msg = json.loads(line)
+    method, rid = msg.get("method"), msg.get("id")
+    if method == "initialize":
+        result = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}
+    elif method in ("session/load", "session/new"):
+        assert config.get("model") == "gpt-6.1-sol", "wrong startup model"
+        assert config.get("features") == {"multi_agent": False}, "lost preset"
+        result = {"sessionId": "previous"} if method == "session/new" else {}
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "previous", "update": {"sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": config["model"]}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        break
+    else:
+        continue
+    send({"jsonrpc": "2.0", "id": rid, "result": result})
+"#;
+        let Some(mut command) = fake_agent_command(AGENT) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        // Python を起こしつつ、起動コマンドは codex-acp として識別させる。
+        command.args.push("codex-acp".into());
+        command
+            .env
+            .insert("CODEX_CONFIG".into(), r#"{"model":"gpt-5.6-sol"}"#.into());
+        let mut preferences = SessionPreferences {
+            model: Some("gpt-6.1-sol".into()),
+            resume: Some("previous".into()),
+            ..Default::default()
+        };
+        preferences.preset.env.insert(
+            "CODEX_CONFIG".into(),
+            r#"{"features":{"multi_agent":false}}"#.into(),
+        );
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("続き".into()))
+            .expect("送れる");
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let collect = async move {
+                let mut events = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    events.push(event);
+                }
+                drop(command_tx);
+                events
+            };
+            futures::join!(session, collect)
+        });
+        outcome.expect("同じモデルで再開できる");
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::SessionStarted { session_id, resumed: true, .. } if session_id == "previous"
+        )), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(event,
+                AgentEvent::AgentChunk(text) if text == "gpt-6.1-sol"
+            )),
+            "{events:?}"
+        );
     }
 
     /// 認証切れの判定: claude-agent-acp の実文言（OAuth 失効）と Codex/Copilot 系の定型句を拾い、

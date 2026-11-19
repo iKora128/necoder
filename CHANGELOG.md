@@ -16,6 +16,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 ### Fixed
 
 - **Chat after 10 minutes idle**: typing into a chat whose agent had been stopped could fail with "ACP agent を起動できない: …/node: … No such file or directory". Node was there; the chat's folder was not. Chat removes an empty chat folder when it stops the agent and recreates it before sending, but starting the agent early when you begin typing skipped that step. Every way of starting a Chat agent now recreates the folder at the same path first.
+- **Codex threads resumed with another model**: reopening a Codex thread started Codex with its local default model and switched to the thread's model afterwards, which left a warning in the conversation that it had been resumed with a different model. necoder now starts Codex with the thread's model. Threads that use a connection, or have no model chosen, start as before.
 
 ### 日本語
 
@@ -30,6 +31,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 ### 修正
 
 - **10 分放置した後の Chat**: エージェントが止まったチャットに入力すると、「ACP agent を起動できない: …/node: … No such file or directory」で失敗することがありました。node はあり、無かったのはチャットのフォルダです。Chat はエージェントを止める時に空のフォルダを片付け、送信の前に作り直していましたが、入力を始めた時にエージェントを先に起こす道はそれを飛ばしていました。Chat のエージェントをどの道で起こす時も、先に同じパスでフォルダを作り直します。
+- **別のモデルで再開された Codex のスレッド**: Codex のスレッドを開き直すと、Codex はまず手元の既定のモデルで起き、あとからスレッドのモデルへ切り替わっていました。そのため「別のモデルで再開した」という警告が会話に残っていました。最初からスレッドのモデルで起こすようにしました。接続を使うスレッドと、モデルを選んでいないスレッドは今までどおりです。
 
 ## [0.1.39] - 2026-11-12
 
