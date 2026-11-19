@@ -188,6 +188,14 @@ impl RegistryAgent {
         self.distribution.uvx.clone().map(Launch::Uvx)
     }
 
+    /// npm の配布（**binary も載せている項目でも返す**）。組み込みのエージェントはレジストリから npm の
+    /// 版だけを取り、起動の形（PATH / npx）は変えない。[`Self::launch`] は binary を先に選ぶので、
+    /// 組み込みがそれで判断すると、項目に binary が足された時から npm の版を見失い、組み込みの既定の
+    /// 版に戻ったままになる（claude-acp に binary が載ってから 0.73.0 で止まっていた・2026-11-19）。
+    pub fn npm(&self) -> Option<&NpxDistribution> {
+        self.distribution.npx.as_ref()
+    }
+
     /// 起動に node/npx が要るか（設定画面の説明用）。
     pub fn needs_node(&self) -> bool {
         matches!(self.launch(), Some(Launch::Npx(_)))
@@ -539,6 +547,34 @@ mod tests {
         );
         // sha256 が無いプラットフォームも落とさない（検証を省くだけ）。
         assert!(amp.distribution.binary["linux-x86_64"].sha256.is_none());
+    }
+
+    /// binary と npx の両方を載せた項目（claude-acp の今の形）。このマシンの起動は binary を選ぶが、
+    /// 組み込みが版を取る npm の配布は見える。
+    #[test]
+    fn npm_distribution_is_reachable_when_a_binary_is_also_listed() {
+        let registry = parse(
+            r#"{"version":"1.0.0","agents":[
+              {"id":"claude-acp","name":"Claude Agent","version":"0.108.1","description":"",
+               "distribution":{
+                 "binary":{"darwin-aarch64":{"archive":"https://example.invalid/claude.zip",
+                                             "cmd":"./claude-agent-acp"}},
+                 "npx":{"package":"@agentclientprotocol/claude-agent-acp@0.108.1"}}}
+            ]}"#,
+        )
+        .expect("パースできる");
+        let claude = registry.agent("claude-acp").expect("在る");
+        assert!(matches!(
+            claude.launch_for(Some("darwin-aarch64")),
+            Some(Launch::Binary { .. })
+        ));
+        assert_eq!(
+            claude.npm().map(|npx| npx.package.as_str()),
+            Some("@agentclientprotocol/claude-agent-acp@0.108.1")
+        );
+        // npm の配布が無い項目は無いまま（binary だけの物を npm 扱いしない）。
+        let sample = parse(SAMPLE).expect("パースできる");
+        assert!(sample.agent("amp-acp").expect("在る").npm().is_none());
     }
 
     #[test]

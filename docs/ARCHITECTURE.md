@@ -195,6 +195,10 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **レジストリ** = ACP プロジェクトの公開 CDN（ベンダー中立）。起動時はキャッシュだけ読み、
   ネットワークは起動 12 秒後に背景で後追い（1 時間スロットル）。**走行中のスレッドには適用しない**
 - **組み込みカタログ** = `const AGENTS`。necoder が検証した既定値で、オフライン・未登録時の土台
+- **組み込みがレジストリから取るのは npm の版だけ**（`RegistryAgent::npm`）。項目が binary も載せていても
+  npm の版を取る（binary / uvx の配備は足したエージェントだけ）。binary を先に選ぶ `launch()` で判断すると、
+  項目に binary が足された時から組み込みの既定の版に戻ったままになる（claude-acp が 0.73.0 で止まって
+  いた・2026-11-19）。解決・掃除（`sweep_stale_adapters`）・設定の版の表示（`builtin_registry_npm`）が同じ見方
 - **`CLAUDE_CODE_EXECUTABLE` が無いファイルを指していたら使わない**（`ignore_missing_claude_executable`・
   このマシンで起こす時だけ）。空の値にして渡す＝アダプタに同梱の Claude Code で起きる。指定を渡したままだと
   `session/new` / `session/load` が「native binary not found」で全部落ちる。ログには毎回、会話にはアプリの

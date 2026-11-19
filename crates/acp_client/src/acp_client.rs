@@ -1269,10 +1269,8 @@ pub fn sweep_stale_adapters() {
     let keep: Vec<String> = registry
         .agents
         .iter()
-        .filter_map(|entry| match entry.launch() {
-            Some(registry::Launch::Npx(npx)) => Some(npx.package),
-            _ => None,
-        })
+        // binary も載せている項目の npm の版も残す（組み込みはそれで起きる・`RegistryAgent::npm`）。
+        .filter_map(|entry| entry.npm().map(|npx| npx.package.clone()))
         .chain(
             AGENTS
                 .iter()
@@ -1513,12 +1511,14 @@ impl AgentKind {
         }
 
         // 2) レジストリ。組み込みは npm の版だけをここから取る（binary / uvx の配備は設定で足した
-        //    エージェントだけ・組み込みの既定の起動＝PATH / npx は変えない）。npx 以外は次へ。
+        //    エージェントだけ・組み込みの既定の起動＝PATH / npx は変えない）。npm の配布が無ければ次へ。
+        //    binary も載せている項目でも npm の版を取る — `launch()` は binary を先に選ぶので、それで
+        //    判断すると claude-acp（両方を載せている）が組み込みの既定の版に戻ったままになる。
         if let Some(entry) = self
             .registry_id
             .and_then(|id| registry.and_then(|reg| reg.agent(id)))
         {
-            if let Some(registry::Launch::Npx(npx)) = entry.launch() {
+            if let Some(npx) = entry.npm() {
                 if npx.args.is_empty() {
                     if let Some(mut resolved) = install::cached_command(
                         &npx.package,
@@ -1773,14 +1773,12 @@ impl AgentKind {
             resolved.env = settings_env;
             return Ok(Some(resolved));
         }
-        // レジストリの版で npx 経路を組む（remote 上の npx を使う）。
+        // レジストリの版で npx 経路を組む（remote 上の npx を使う）。binary も載せている項目でも
+        // npm の版を取る（`launch()` はこのマシンの binary を先に選ぶ＝リモートの判断に使えない）。
         let registry_package = self
             .registry_id
             .and_then(|id| registry.and_then(|reg| reg.agent(id)))
-            .and_then(|entry| match entry.launch() {
-                Some(registry::Launch::Npx(npx)) => Some(npx),
-                _ => None,
-            });
+            .and_then(|entry| entry.npm().cloned());
         let Some(mut resolved) = self.command_on_with_package(
             host,
             cwd,
@@ -4860,6 +4858,43 @@ for line in sys.stdin:
         assert_eq!(
             resolved.env.get("FROM_REGISTRY").map(String::as_str),
             Some("1")
+        );
+    }
+
+    /// レジストリの項目が binary と npx の両方を載せていても（claude-acp の今の形）、組み込みは npm の版を
+    /// レジストリから取る。binary を先に選ぶ `launch()` で判断していた間は、組み込みの既定の版
+    /// （0.73.0）に戻ったままだった（2026-11-19）。
+    #[test]
+    fn registry_npm_version_is_used_even_when_a_binary_is_listed() {
+        if find_in_path("npx").is_none() {
+            return;
+        }
+        // このマシンのキーで binary を載せる（別のキーだと、直す前でも npx が選ばれて試験にならない）。
+        let Some(platform) = registry::platform_key() else {
+            return;
+        };
+        let registry = registry::parse(&format!(
+            r#"{{"version":"1.0.0","agents":[
+              {{"id":"claude-acp","name":"Claude Agent","version":"99.0.0","description":"",
+               "distribution":{{
+                 "binary":{{"{platform}":{{"archive":"https://example.invalid/claude.zip",
+                                           "cmd":"./claude-agent-acp"}}}},
+                 "npx":{{"package":"@agentclientprotocol/claude-agent-acp@99.0.0"}}}}}}
+            ]}}"#
+        ))
+        .expect("サンプルを読める");
+        let entry = registry.agent("claude-acp").expect("在る");
+        assert!(
+            matches!(entry.launch(), Some(registry::Launch::Binary { .. })),
+            "このマシンの起動は binary が先（前提）"
+        );
+        let resolved = claude()
+            .resolve_command(".", None, Some(&registry))
+            .expect("レジストリから解決する");
+        let spec = resolved.args.join(" ");
+        assert!(
+            spec.contains("0.0.0 - 99.0.0"),
+            "レジストリの npm の版が使われていない: {spec}"
         );
     }
 
