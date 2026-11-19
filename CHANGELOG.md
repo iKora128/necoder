@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Added
+
+- **Font size of the conversation**: Settings › Appearance has two new steppers, "Your message font size (px)" and "AI response font size (px)", each from 8 to 32px. Open conversations pick up a change right away. The defaults are 15px for your messages and 13px for responses (they were fixed at 13.5px and 12.5px). Headings in a response scale with the response size.
+
 ### Changed
 
 - **Threads icon in Chat**: the threads icon in the rail was dimmed and did nothing in Chat. It now takes you back to the Editor with the thread list open, so you can pick a thread with ↑↓ and press ⏎ to type.
@@ -14,6 +18,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 - **Chat after 10 minutes idle**: typing into a chat whose agent had been stopped could fail with "ACP agent を起動できない: …/node: … No such file or directory". Node was there; the chat's folder was not. Chat removes an empty chat folder when it stops the agent and recreates it before sending, but starting the agent early when you begin typing skipped that step. Every way of starting a Chat agent now recreates the folder at the same path first.
 
 ### 日本語
+
+### 追加
+
+- **会話の文字サイズ**: 設定 › 外観に「送信メッセージの文字サイズ（px）」と「AIの返答の文字サイズ（px）」を足しました。8〜32px の範囲で別々に変えられ、開いている会話にもすぐ反映されます。既定は送信メッセージが 15px、返答が 13px です（これまでは 13.5px と 12.5px の固定でした）。返答の見出しは、返答の文字サイズに合わせて大きさが変わります。
 
 ### 変更
 

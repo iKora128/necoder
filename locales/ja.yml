@@ -1093,6 +1093,8 @@ settings:
   pref_update_check_sub: オフにすると、AI エージェントの一覧も自動では更新しません
   pref_reduce_motion: 動きを減らす
   pref_font_size: フォントサイズ
+  pref_agent_user_font_size: "送信メッセージの文字サイズ（px）"
+  pref_agent_font_size: "AIの返答の文字サイズ（px）"
   pref_tab_size: タブ幅
   pref_terminal_font_size: "ターミナルのフォントサイズ"
   pref_terminal_scrollback: ターミナルの履歴行数

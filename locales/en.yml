@@ -1092,6 +1092,8 @@ settings:
   pref_update_check_sub: When off, the AI agent list isn't refreshed automatically either
   pref_reduce_motion: Reduce motion
   pref_font_size: Font size
+  pref_agent_user_font_size: "Your message font size (px)"
+  pref_agent_font_size: "AI response font size (px)"
   pref_tab_size: Tab width
   pref_terminal_font_size: Terminal font size
   pref_terminal_scrollback: Terminal scrollback

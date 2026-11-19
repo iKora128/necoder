@@ -526,6 +526,10 @@ pub struct Settings {
     pub theme_overrides: Value,
     pub density: Density,
     pub font_size: f32,
+    /// AI 会話の送信メッセージの文字サイズ（論理 px・既定 15・8〜32）。
+    pub agent_user_font_size: f32,
+    /// AI 会話の返答本文の文字サイズ（論理 px・既定 13・8〜32）。
+    pub agent_font_size: f32,
     pub tab_size: usize,
     /// soft wrap（折り返し表示）。⌥Z で一時トグルもできる。
     pub soft_wrap: bool,
@@ -718,6 +722,8 @@ impl Default for Settings {
             theme_overrides: Value::Object(serde_json::Map::new()),
             density: Density::Compact,
             font_size: 13.0,
+            agent_user_font_size: 15.0,
+            agent_font_size: 13.0,
             tab_size: 4,
             soft_wrap: false,
             format_on_save: false,
@@ -810,6 +816,21 @@ pub enum AutoSave {
 }
 
 impl Settings {
+    /// AI 会話の（送信メッセージ, 返答本文）のサイズ。手編集の範囲外は 8〜32px に収める。
+    pub fn agent_font_sizes(&self) -> (f32, f32) {
+        let bounded = |value: f32, default: f32| {
+            if value.is_finite() {
+                value.clamp(8.0, 32.0)
+            } else {
+                default
+            }
+        };
+        (
+            bounded(self.agent_user_font_size, 15.0),
+            bounded(self.agent_font_size, 13.0),
+        )
+    }
+
     /// `theme_overrides.<theme_name>` の（トークンのキー, 色）。文字列でない値は飛ばす。
     pub fn theme_override_pairs(&self, theme_name: &str) -> Vec<(String, String)> {
         self.theme_overrides
@@ -875,6 +896,8 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "theme_overrides": {},
   "density": "compact",
   "font_size": 13.0,
+  "agent_user_font_size": 15.0,
+  "agent_font_size": 13.0,
   "tab_size": 4,
   "auto_save": "off",
   "preview_tabs": true,
@@ -2086,6 +2109,32 @@ mod tests {
             SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, r#"{ "keep_awake": "of" }"#])
                 .expect("マージできる");
         assert_eq!(typo.settings().keep_awake_mode(), KeepAwake::WhileWorking);
+    }
+
+    #[test]
+    fn agent_font_sizes_default_override_and_bound_hand_edited_values() {
+        let defaults = SettingsStore::default();
+        assert_eq!(defaults.settings().agent_font_sizes(), (15.0, 13.0));
+        assert_eq!(Settings::default().agent_font_sizes(), (15.0, 13.0));
+        let old = SettingsStore::from_json_layers(&[r#"{"font_size": 13}"#]).unwrap();
+        assert_eq!(old.settings().agent_font_sizes(), (15.0, 13.0));
+        let custom = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{"agent_user_font_size": 18, "agent_font_size": 16.5}"#,
+        ])
+        .unwrap();
+        assert_eq!(custom.settings().agent_font_sizes(), (18.0, 16.5));
+        let outside = SettingsStore::from_json_layers(&[
+            r#"{"agent_user_font_size": -1, "agent_font_size": 200}"#,
+        ])
+        .unwrap();
+        assert_eq!(outside.settings().agent_font_sizes(), (8.0, 32.0));
+        let non_finite = Settings {
+            agent_user_font_size: f32::NAN,
+            agent_font_size: f32::INFINITY,
+            ..Settings::default()
+        };
+        assert_eq!(non_finite.agent_font_sizes(), (15.0, 13.0));
     }
 
     /// O25: ターミナルの見た目は既定で設定を持つ前と同じ（12.5pt・1 万行・ブロック）。書けば上書き。

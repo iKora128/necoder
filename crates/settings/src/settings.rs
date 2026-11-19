@@ -2589,6 +2589,7 @@ impl SettingsView {
     /// 適用（全ビューへの波及）は shell の apply_theme が要るので [`SettingsViewEvent::SelectTheme`] で上げる。
     fn appearance_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
+        let (user_font_size, agent_font_size) = settings.agent_font_sizes();
         let accent = self.accent;
         let current = settings.theme.as_str();
         let mut chips = div().flex().flex_wrap().gap(px(4.));
@@ -2710,6 +2711,26 @@ impl SettingsView {
                 i18n::t!("settings.font_terminal"),
                 &settings.terminal_font_family,
                 i18n::t!("settings.font_terminal_default"),
+                cx,
+            ))
+            .child(self.stepper_row(
+                "agent_user_font_size",
+                i18n::t!("settings.pref_agent_user_font_size"),
+                f64::from(user_font_size),
+                8.0,
+                32.0,
+                1.0,
+                false,
+                cx,
+            ))
+            .child(self.stepper_row(
+                "agent_font_size",
+                i18n::t!("settings.pref_agent_font_size"),
+                f64::from(agent_font_size),
+                8.0,
+                32.0,
+                1.0,
+                false,
                 cx,
             ))
             // 行の詰め具合（O27）: エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さ。

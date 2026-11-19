@@ -2466,6 +2466,8 @@ pub struct AgentPanel {
     renaming: Option<(usize, Entity<EditorView>)>,
     /// transcript のスクロール（M13 UX: ホイールで遡れる。ストリーミング中は底に居る時だけ追従）。
     transcript_list: ListState,
+    /// 設定から反映した（送信メッセージ, AI の返答本文）の文字サイズ。
+    transcript_font_sizes: (f32, f32),
     /// 直近にレイアウトされたビューポート先頭の項目 index（[`Self::transcript_top_item`]）。
     transcript_top_item_seen: Cell<usize>,
     /// transcript 専用フォーカス。出力をドラッグした後の ⌘A / ⌘C を composer の選択状態から
@@ -2752,7 +2754,19 @@ impl AgentPanel {
         .detach();
         // 設定変更（UI トグル / 手編集 / CLI / MCP のどれでも）に追従して composer へ反映。
         cx.observe_global::<settings::SettingsGlobal>(|panel, cx| {
-            let submit_on_enter = settings::get(cx).submit_on_enter;
+            let settings = settings::get(cx);
+            let font_sizes = settings.agent_font_sizes();
+            if panel.transcript_font_sizes != font_sizes {
+                panel.transcript_font_sizes = font_sizes;
+                // 文字の折り返しと各項目の高さを測り直す。会話本文と選択は保持する。
+                *panel.styled_text_cache.borrow_mut() = StyledTextEntityCache::default();
+                panel.transcript_regions.borrow_mut().clear();
+                panel
+                    .transcript_list
+                    .remeasure_items(0..panel.transcript_list.item_count());
+                cx.notify();
+            }
+            let submit_on_enter = settings.submit_on_enter;
             if submit_on_enter != panel.submit_on_enter {
                 panel.submit_on_enter = submit_on_enter;
                 panel.composer.update(cx, |composer, cx| {
@@ -3095,6 +3109,7 @@ PYEOF"#;
             live_rendered_at: None,
             renaming: None,
             transcript_list,
+            transcript_font_sizes: settings::get(cx).agent_font_sizes(),
             transcript_top_item_seen: Cell::new(0),
             transcript_focus: cx.focus_handle(),
             tabs_scroll: ScrollHandle::new(),
@@ -11141,7 +11156,7 @@ PYEOF"#;
                     .min_w_0() // flex 子の折り返しを許可（はみ出し防止）
                     .px(px(11.))
                     .py(px(8.))
-                    .text_size(px(13.5))
+                    .text_size(px(self.transcript_font_sizes.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.fg0)
                     .child(self.selectable_text(shown, cx));
@@ -11506,7 +11521,7 @@ PYEOF"#;
                     .flex_col()
                     .min_w_0()
                     .gap(px(6.))
-                    .text_size(px(12.5))
+                    .text_size(px(self.transcript_font_sizes.1))
                     .text_color(theme.fg0)
                     // テーマが回答の面（chat_agent_bg）を決めた時だけ塗る。既定は塗らない＝従来の見た目。
                     .when_some(theme.chat_agent_bg, |element, background| {
@@ -11628,12 +11643,13 @@ PYEOF"#;
             .enumerate()
             .map(|(block_index, block)| match block {
                 markdown::Block::Heading { level, text, spans } => {
-                    let size = match level {
-                        1 => 16.0,
-                        2 => 14.5,
-                        3 => 13.5,
-                        _ => 12.5,
-                    };
+                    let size = self.transcript_font_sizes.1
+                        + match level {
+                            1 => 3.5,
+                            2 => 2.0,
+                            3 => 1.0,
+                            _ => 0.0,
+                        };
                     div()
                         .pt(px(2.))
                         .text_size(px(size))
@@ -11825,8 +11841,8 @@ PYEOF"#;
         let theme = &self.theme;
         let layout = markdown::table_columns(&head, &rows);
         let columns = layout.len();
-        // 表示幅 1 単位 → px（transcript 本文 12.5px・ASCII 1 文字 ≒ 0.75em（折り返し余裕込み））。
-        let unit = 12.5 * 0.75;
+        // 表示幅 1 単位 → px（ASCII 1 文字 ≒ 本文サイズの 0.75em・折り返し余裕込み）。
+        let unit = self.transcript_font_sizes.1 * 0.75;
         let render_row =
             |mut cells: Vec<markdown::TableCell>, header: bool, cx: &mut Context<Self>| {
                 cells.resize_with(columns, || markdown::TableCell {
@@ -18567,6 +18583,62 @@ PYEOF"#;
             "単一選択も要素 1 つの並びで返す"
         );
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 設定変更で本文のキャッシュを作り直し、開いている会話へ反映する。無関係な設定では捨てない。
+    #[gpui::test]
+    fn transcript_font_sizes_follow_saved_settings(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "transcript_fonts");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let cached_text = panel.update(cx, |panel, cx| {
+            assert_eq!(panel.transcript_font_sizes, (15.0, 13.0));
+            panel.threads[panel.active]
+                .entries
+                .push(Entry::Agent("返答本文".into()));
+            let _element = panel.push_selectable("返答本文".into(), Vec::new(), cx);
+            let cached_text = panel
+                .styled_text_cache
+                .borrow()
+                .items
+                .values()
+                .next()
+                .unwrap()
+                .2
+                .entity_id();
+            settings::set_user_value(cx, "tab_size", serde_json::json!(2)).unwrap();
+            cached_text
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            assert!(panel
+                .styled_text_cache
+                .borrow()
+                .items
+                .values()
+                .any(|(_, _, text)| text.entity_id() == cached_text));
+            settings::set_user_value(cx, "agent_user_font_size", serde_json::json!(18)).unwrap();
+            settings::set_user_value(cx, "agent_font_size", serde_json::json!(16.5)).unwrap();
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, _cx| {
+            assert_eq!(panel.transcript_font_sizes, (18.0, 16.5));
+            assert!(panel
+                .styled_text_cache
+                .borrow()
+                .items
+                .values()
+                .all(|(_, _, text)| text.entity_id() != cached_text));
+            assert!(matches!(
+                panel.threads[panel.active].entries.last(),
+                Some(Entry::Agent(text)) if text == "返答本文"
+            ));
+        });
+        let saved = settings_core::SettingsStore::from_json_layers(&[
+            &std::fs::read_to_string(&settings_path).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(saved.settings().agent_font_sizes(), (18.0, 16.5));
+        std::fs::remove_file(settings_path).unwrap();
     }
 
     fn init_test_settings(cx: &mut gpui::TestAppContext, label: &str) -> PathBuf {
