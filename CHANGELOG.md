@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-11-19
+
+Claude threads no longer stop when `CLAUDE_CODE_EXECUTABLE` points to a file that is gone, and the built-in Claude adapter follows the public registry again, so it brings a current Claude Code with it. You can also set the font size of your messages and of AI responses.
+
 ### Added
 
 - **Font size of the conversation**: Settings › Appearance has two new steppers, "Your message font size (px)" and "AI response font size (px)", each from 8 to 32px. Open conversations pick up a change right away. The defaults are 15px for your messages and 13px for responses (they were fixed at 13.5px and 12.5px). Headings in a response scale with the response size.
@@ -21,6 +25,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 - **Claude adapter version**: the built-in Claude agent stayed on claude-agent-acp 0.73.0 after the public registry started listing a native binary next to the npm package for it. necoder read that entry as "binary only" and fell back to its built-in version. Built-in agents now take the npm version from the registry even when the entry also lists a binary, so the adapter and the Claude Code it ships with follow the registry again.
 
 ### 日本語
+
+`CLAUDE_CODE_EXECUTABLE` が無いファイルを指していても Claude のスレッドが止まらなくなりました。組み込みの Claude のアダプタもまた公開レジストリに追従し、新しい Claude Code を連れてきます。送信メッセージと AI の返答の文字サイズも設定できます。
 
 ### 追加
 
