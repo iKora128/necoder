@@ -652,7 +652,17 @@ printf '%s' 'console.log("adapter")' > node_modules/adapter/index.js
         exclusive.try_lock().unwrap();
         assert!(VersionLease::take(&removing).is_none());
         drop(exclusive);
-        assert!(VersionLease::take(&removing).is_some());
+        // 並列の別の試験が子プロセスを起こす瞬間（fork から exec まで）は、排他ロックの記述子が子にも
+        // 複製されてロックが一瞬残る（上の試験と同じ）。外れるまで少し待つ。
+        let mut leased = VersionLease::take(&removing);
+        for _ in 0..50 {
+            if leased.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            leased = VersionLease::take(&removing);
+        }
+        assert!(leased.is_some(), "ロックが外れたら印を付けられる");
     }
 
     /// 掃除は `keep` にある版と別のパッケージの今の版を残し、途中で止まった削除の跡と版の無い印を片付ける。
