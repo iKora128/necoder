@@ -1880,9 +1880,11 @@ fn bounded_npm_spec(package: &str) -> String {
 }
 
 async fn probe_session(command: &AgentCommand, timeout: Duration) -> bool {
-    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
+    let mut spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
         .envs(command.env.clone());
+    // 起動と同じ見方で確かめる（無いファイルを指す指定は使わない）。知らせるのは起動の時だけ。
+    ignore_missing_claude_executable(LocalHost::shared().as_ref(), command, &mut spec);
     let mut process = match LocalHost::shared().spawn_process(&spec) {
         Ok(process) => process,
         Err(_) => return false,
@@ -2756,6 +2758,66 @@ async fn set_provider(
     .map(|_| ())
 }
 
+/// Claude Code の実行ファイルを差し替える環境変数（claude-agent-acp が読む）。
+const CLAUDE_EXECUTABLE_ENV: &str = "CLAUDE_CODE_EXECUTABLE";
+
+/// [`CLAUDE_EXECUTABLE_ENV`] の指定を使わなかったことを、会話へ知らせたか（アプリの起動ごとに 1 回）。
+/// 指定を直すまでどのスレッドでも同じことが起きるので、起こすたびに会話へ積まない（ログには毎回出す）。
+static MISSING_CLAUDE_EXECUTABLE_NOTICED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `CLAUDE_CODE_EXECUTABLE` が**無いファイル**を指していたら、その指定を使わない（指していた先を返す）。
+///
+/// アダプタはこの変数の値をそのまま Claude Code の実行ファイルとして起こす。無いファイルを指すと
+/// 「Claude Code native binary not found」で `session/new` も `session/load` も通らず、Claude の
+/// スレッドが 1 つも開けなくなる（2026-11-19 実機: launchd の環境に置いた `~/.local/bin/claude` を、
+/// npm で入れた側の `claude update` が消した）。空の値は、アダプタも SDK も「指定なし」と読み、
+/// アダプタに同梱の Claude Code で起きる（claude-agent-acp 0.73.0 / 0.108.1 のソースで確認）。
+///
+/// 見るのは子へ渡る値: `spec.env` が先、無ければこのプロセスの環境（launchd・シェルから継いだ物）。
+/// リモートは触らない（向こうの環境は起こすまで見えない）。試験はこのプロセスの環境を見ない
+/// （開発機の設定で結果を変えない）。
+fn ignore_missing_claude_executable(
+    host: &dyn Host,
+    command: &AgentCommand,
+    spec: &mut CommandSpec,
+) -> Option<PathBuf> {
+    if host.is_remote() || !command.is_claude_adapter() {
+        return None;
+    }
+    let inherited = (!cfg!(test))
+        .then(|| std::env::var(CLAUDE_EXECUTABLE_ENV).ok())
+        .flatten();
+    let missing = missing_claude_executable(
+        spec.env.get(CLAUDE_EXECUTABLE_ENV).map(String::as_str),
+        inherited.as_deref(),
+        // 「無い」と分かった時だけ無い扱い（権限などで読めないだけなら、指定をそのまま渡す）。
+        |path| match std::fs::metadata(path) {
+            Ok(_) => true,
+            Err(error) => !matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ),
+        },
+    )?;
+    spec.env
+        .insert(CLAUDE_EXECUTABLE_ENV.to_string(), String::new());
+    Some(missing)
+}
+
+/// [`ignore_missing_claude_executable`] の判断。`configured` は `spec.env` の値、`inherited` は
+/// このプロセスの環境の値。`spec.env` に在れば（空でも）それが子へ渡る値で、空は「指定なし」。
+/// 絶対パスだけを確かめる（名前だけの指定は子の PATH で探されるので、ここでは決めない）。
+fn missing_claude_executable(
+    configured: Option<&str>,
+    inherited: Option<&str>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let value = configured.or(inherited).filter(|value| !value.is_empty())?;
+    let path = Path::new(value);
+    (path.is_absolute() && !exists(path)).then(|| path.to_path_buf())
+}
+
 /// Claude をスレッドのモデルで**起こす**ための env（`ANTHROPIC_MODEL`）。
 ///
 /// 渡さないと Claude Code は `~/.claude/settings.json` の `model`（例 `fable[1m]`）で起き、
@@ -2863,6 +2925,17 @@ async fn run_session_attempt(
     {
         for (name, value) in &provider.headers {
             secret_env.insert(format!("CONNECTION_HEADER_{name}"), value.clone());
+        }
+    }
+    // 無いファイルを指す `CLAUDE_CODE_EXECUTABLE` は使わない（アダプタに同梱の Claude Code で起こす）。
+    if let Some(missing) = ignore_missing_claude_executable(host.as_ref(), command, &mut spec) {
+        let message = format!(
+            "{CLAUDE_EXECUTABLE_ENV} が指す {} が見つかりません。この指定は使わず、アダプタに同梱の Claude Code で起動します。",
+            missing.display()
+        );
+        eprintln!("{message}");
+        if !MISSING_CLAUDE_EXECUTABLE_NOTICED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            event_tx.unbounded_send(AgentEvent::Notice(message)).ok();
         }
     }
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
@@ -4813,6 +4886,155 @@ for line in sys.stdin:
             Some("1")
         );
         assert_eq!(resolved.env.get("EXTRA").map(String::as_str), Some("yes"));
+    }
+
+    /// 無いファイルを指す絶対パスだけを「無い」と決める。在るファイル・名前だけの指定・空・未設定は
+    /// 触らない。`spec.env` の値がこのプロセスの環境より先（空で上書きしてあれば、継いだ値は見ない）。
+    #[test]
+    fn a_missing_claude_executable_is_judged_from_the_value_the_child_receives() {
+        let root = std::env::temp_dir();
+        let present = root.join("necoder-present-claude");
+        let gone = root.join("necoder-gone-claude");
+        let judge = |configured: Option<&Path>, inherited: Option<&Path>| {
+            super::missing_claude_executable(
+                configured.and_then(Path::to_str),
+                inherited.and_then(Path::to_str),
+                |path| path == present,
+            )
+        };
+        assert_eq!(judge(None, Some(&gone)), Some(gone.clone()));
+        assert_eq!(judge(Some(&gone), None), Some(gone.clone()));
+        assert_eq!(judge(Some(&gone), Some(&present)), Some(gone.clone()));
+        // 在るファイルはそのまま使う。
+        assert_eq!(judge(None, Some(&present)), None);
+        assert_eq!(judge(Some(&present), Some(&gone)), None);
+        // 空で上書きしてあれば「指定なし」（継いだ値へ戻らない）。
+        assert_eq!(judge(Some(Path::new("")), Some(&gone)), None);
+        // 未設定と、名前だけの指定（子の PATH で探される）。
+        assert_eq!(judge(None, None), None);
+        assert_eq!(judge(None, Some(Path::new("claude"))), None);
+    }
+
+    /// 無いファイルを指す `CLAUDE_CODE_EXECUTABLE` は空にして渡す（アダプタは同梱の Claude Code で起きる）。
+    /// 在るファイルを指す指定と、Claude 以外のアダプタには触らない。
+    #[test]
+    fn a_dead_claude_executable_override_is_blanked_for_the_claude_adapter_only() {
+        let directory = tempfile::tempdir().expect("一時フォルダを作れる");
+        let present = directory.path().join("claude");
+        std::fs::write(&present, "").expect("書ける");
+        let gone = directory.path().join("removed").join("claude");
+        let host = LocalHost::shared();
+        let claude = AgentCommand::new("claude-agent-acp".into(), Vec::new(), "/tmp".into());
+        let codex = AgentCommand::new("codex-acp".into(), Vec::new(), "/tmp".into());
+        let spec_pointing_at = |target: &Path| {
+            CommandSpec::new("agent", "/tmp").envs([(
+                super::CLAUDE_EXECUTABLE_ENV,
+                target.to_string_lossy().into_owned(),
+            )])
+        };
+
+        let mut spec = spec_pointing_at(&gone);
+        assert_eq!(
+            super::ignore_missing_claude_executable(host.as_ref(), &claude, &mut spec),
+            Some(gone.clone())
+        );
+        assert_eq!(spec.env[super::CLAUDE_EXECUTABLE_ENV], "");
+
+        let mut spec = spec_pointing_at(&present);
+        assert_eq!(
+            super::ignore_missing_claude_executable(host.as_ref(), &claude, &mut spec),
+            None
+        );
+        assert_eq!(
+            spec.env[super::CLAUDE_EXECUTABLE_ENV],
+            present.to_string_lossy()
+        );
+
+        let mut spec = spec_pointing_at(&gone);
+        assert_eq!(
+            super::ignore_missing_claude_executable(host.as_ref(), &codex, &mut spec),
+            None
+        );
+        assert_eq!(
+            spec.env[super::CLAUDE_EXECUTABLE_ENV],
+            gone.to_string_lossy()
+        );
+    }
+
+    /// 無いファイルを指す `CLAUDE_CODE_EXECUTABLE`（launchd の環境に残った古い指定など）で Claude の
+    /// セッションを止めない。アダプタには空の値が渡り、会話に 1 行知らせる。本物のアダプタは、渡された
+    /// パスを起こそうとして `session/new` で失敗していた（2026-11-19 実機）。
+    #[test]
+    fn a_dead_claude_executable_override_does_not_stop_the_session() {
+        const AGENT: &str = r#"
+import json, os
+
+def send(obj):
+    print(json.dumps(obj), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method, rid = msg.get("method"), msg.get("id")
+    if method == "initialize":
+        result = {"protocolVersion": 1, "agentCapabilities": {}}
+    elif method == "session/new":
+        # 空の値でも未設定でもよい（消えたパスが届かないことだけを見る）。
+        assert not os.environ.get("CLAUDE_CODE_EXECUTABLE"), "dead override reached the adapter"
+        result = {"sessionId": "s1"}
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "started"}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        break
+    else:
+        continue
+    send({"jsonrpc": "2.0", "id": rid, "result": result})
+"#;
+        let Some(mut command) = fake_agent_command(AGENT) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        // Python を起こしつつ、起動コマンドは claude-agent-acp として識別させる。
+        command.args.push("claude-agent-acp".into());
+        let directory = tempfile::tempdir().expect("一時フォルダを作れる");
+        let gone = directory.path().join("removed").join("claude");
+        command.env.insert(
+            super::CLAUDE_EXECUTABLE_ENV.into(),
+            gone.to_string_lossy().into_owned(),
+        );
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("始めて".into()))
+            .expect("送れる");
+        let (outcome, events) = futures::executor::block_on(async move {
+            let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
+            let collect = async move {
+                let mut events = Vec::new();
+                while let Some(event) = event_rx.next().await {
+                    events.push(event);
+                }
+                drop(command_tx);
+                events
+            };
+            futures::join!(session, collect)
+        });
+        outcome.expect("指定が無い時と同じように始まる");
+        assert!(
+            events.iter().any(|event| matches!(event,
+                AgentEvent::AgentChunk(text) if text == "started"
+            )),
+            "{events:?}"
+        );
+        // この試験だけが知らせを出す（他の試験は指定を渡さず、試験はプロセスの環境を見ない）。
+        let gone = gone.to_string_lossy();
+        assert!(
+            events.iter().any(|event| matches!(event,
+                AgentEvent::Notice(message) if message.contains(gone.as_ref())
+            )),
+            "{events:?}"
+        );
     }
 
     #[test]
