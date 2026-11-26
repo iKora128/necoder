@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opening a link on Windows**: opening a localhost link (or an HTML preview) could crash necoder with "RefCell already borrowed". WebView2 runs the Windows message loop while it is being created, and necoder created it while drawing, so other work ran in the middle of the draw. necoder now creates the WebView after the draw finishes.
+- **Sending to a thread in a window with no project** could crash necoder with "index out of bounds". The message tried to log against a Task that does not exist. It is now sent without the log.
+
+### 日本語
+
+### 修正
+
+- **Windows でリンクを開いたとき**: localhost のリンク（と HTML のプレビュー）を開くと「RefCell already borrowed」で落ちることがありました。WebView2 は作る間に Windows のメッセージループを回します。necoder は描画の途中で WebView を作っていたため、描画の途中に別の処理が割り込んでいました。描画が終わってから WebView を作るようにしました。
+- **プロジェクトを開いていない窓でスレッドに送信したとき**、「index out of bounds」で落ちることがありました。無い Task の記録に書き込もうとしていたためです。記録を書かずに送るようにしました。
+
 ## [0.1.40] - 2026-11-19
 
 Claude threads no longer stop when `CLAUDE_CODE_EXECUTABLE` points to a file that is gone, and the built-in Claude adapter follows the public registry again, so it brings a current Claude Code with it. You can also set the font size of your messages and of AI responses.

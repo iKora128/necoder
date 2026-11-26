@@ -204,6 +204,9 @@ pub struct WebViewView {
     main_frame_delegate: Option<objc2::rc::Retained<main_frame::MainFrameOnlyDelegate>>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     last_bounds: Option<Bounds<Pixels>>,
+    /// WebView を作っている途中（[`Self::build_outside_update`]）。待つ間の描画で二つ目を作らない。
+    #[cfg(target_os = "windows")]
+    build_pending: bool,
     /// necoder が最後に置いた WKWebView の枠（AppKit の座標のまま）。これと違っていたら WebKit が動かした
     /// （Web Inspector を付けた・付けたまま閉じた）ので、GPUI の置き場所へ戻す。
     #[cfg(target_os = "macos")]
@@ -254,6 +257,8 @@ impl WebViewView {
             main_frame_delegate: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             last_bounds: None,
+            #[cfg(target_os = "windows")]
+            build_pending: false,
             #[cfg(target_os = "macos")]
             applied_frame: None,
             #[cfg(target_os = "macos")]
@@ -974,6 +979,10 @@ impl WebViewView {
         }
         let native_bounds = rect(bounds);
         if self.webview.is_none() {
+            #[cfg(target_os = "windows")]
+            if self.build_pending {
+                return;
+            }
             let Some(url) = self.url.clone() else {
                 return;
             };
@@ -985,7 +994,7 @@ impl WebViewView {
             } else if let Some(web) = &self.web {
                 builder = localhost_builder(builder, web, &events);
             }
-            match builder
+            let builder = builder
                 .with_url(url)
                 .with_bounds(native_bounds)
                 .with_visible(true)
@@ -993,35 +1002,14 @@ impl WebViewView {
                 // 右クリック →「要素の詳細を表示」で Web Inspector を開けるようにする（HTML を書く用途の
                 // プレビューなので常時 ON。release で効かせるには wry の `devtools` feature が要る）。
                 // macOS では付いたら別の窓へ出す（`after_macos_build` の枠の見張り）。
-                .with_devtools(true)
-                .build_as_child(window)
+                .with_devtools(true);
+            #[cfg(target_os = "macos")]
             {
-                Ok(webview) => {
-                    if let Some(web) = &self.web {
-                        self.after_web_build(&webview, web.zoom, events.clone());
-                    }
-                    #[cfg(target_os = "macos")]
-                    self.after_macos_build(&webview, events);
-                    if self.focus_when_ready {
-                        if let Err(error) = webview.focus() {
-                            self.error = Some(error.to_string());
-                        } else {
-                            self.focus_when_ready = false;
-                        }
-                    }
-                    self.webview = Some(webview);
-                    self.last_bounds = Some(bounds);
-                    // WebView を作る前に頼まれていた Inspector（パレット・破棄の後の再表示の前）。
-                    #[cfg(target_os = "macos")]
-                    if self.devtools.open {
-                        self.show_devtools(cx);
-                    }
-                }
-                Err(error) => {
-                    self.error = Some(error.to_string());
-                    cx.notify();
-                }
+                let result = builder.build_as_child(window);
+                self.finish_build(result, bounds, events, cx);
             }
+            #[cfg(target_os = "windows")]
+            self.build_outside_update(builder, bounds, events, window, cx);
             return;
         }
         if self.last_bounds != Some(bounds) {
@@ -1052,6 +1040,113 @@ impl WebViewView {
                 }
             }
         }
+    }
+}
+
+impl WebViewView {
+    /// 作った WebView を据える（作れなければ理由を出す）。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn finish_build(
+        &mut self,
+        result: wry::Result<WebView>,
+        bounds: Bounds<Pixels>,
+        events: mpsc::UnboundedSender<NativeEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let webview = match result {
+            Ok(webview) => webview,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(web) = &self.web {
+            self.after_web_build(&webview, web.zoom, events.clone());
+        }
+        #[cfg(target_os = "macos")]
+        self.after_macos_build(&webview, events);
+        if self.focus_when_ready {
+            if let Err(error) = webview.focus() {
+                self.error = Some(error.to_string());
+            } else {
+                self.focus_when_ready = false;
+            }
+        }
+        self.webview = Some(webview);
+        self.last_bounds = Some(bounds);
+        // WebView を作る前に頼まれていた Inspector（パレット・破棄の後の再表示の前）。
+        #[cfg(target_os = "macos")]
+        if self.devtools.open {
+            self.show_devtools(cx);
+        }
+    }
+
+    /// Windows の WebView は、App を借りていない foreground task の中で作る。
+    ///
+    /// wry の WebView2 は作り終わるまで `GetMessage` / `DispatchMessage` でメッセージを回して待つ
+    /// （`webview2_com::wait_with_pump`）。gpui の Windows は foreground task をウィンドウのメッセージ
+    /// （`WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD`）で走らせるので、描画（App を借りている最中）の中で
+    /// 作ると、待つ間に別の task が App を借り直して `RefCell already borrowed` で落ちる
+    /// （v0.1.40・リンクから Web タブを開いた時の crash・issue #84）。
+    #[cfg(target_os = "windows")]
+    fn build_outside_update(
+        &mut self,
+        builder: WebViewBuilder<'static>,
+        bounds: Bounds<Pixels>,
+        events: mpsc::UnboundedSender<NativeEvent>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        use wry::raw_window_handle::HasWindowHandle;
+        let parent = match HasWindowHandle::window_handle(window) {
+            Ok(handle) => ParentWindow(handle.as_raw()),
+            Err(error) => {
+                self.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let window_handle = window.window_handle();
+        self.build_pending = true;
+        cx.spawn(async move |this, cx| {
+            // 待つ間に窓が閉じていたら作らない（閉じた HWND に子を付けない）。
+            if cx.update_window(window_handle, |_, _, _| ()).is_err() {
+                return;
+            }
+            let result = builder.build_as_child(&parent);
+            this.update(cx, |view, cx| {
+                view.build_pending = false;
+                view.finish_build(result, bounds, events, cx);
+                // 作っている間に隠された（タブ切替・オーバーレイ）なら隠し直し、破棄タイマーも仕掛ける。
+                if !view.active {
+                    if let Some(webview) = &view.webview {
+                        if let Err(error) = webview.set_visible(false) {
+                            view.error = Some(error.to_string());
+                        }
+                    }
+                    view.schedule_evict(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+/// 描画の中で取った親の HWND を、App を手放した後の WebView の生成へ持ち出す。
+#[cfg(target_os = "windows")]
+struct ParentWindow(wry::raw_window_handle::RawWindowHandle);
+
+#[cfg(target_os = "windows")]
+impl wry::raw_window_handle::HasWindowHandle for ParentWindow {
+    fn window_handle(
+        &self,
+    ) -> Result<wry::raw_window_handle::WindowHandle<'_>, wry::raw_window_handle::HandleError> {
+        // SAFETY: 生成の直前に gpui の窓がまだ開いていることを確かめている（`build_outside_update`）。
+        // 閉じた後の HWND が渡っても WebView2 の生成がエラーを返すだけで、ここから読む物は無い。
+        Ok(unsafe { wry::raw_window_handle::WindowHandle::borrow_raw(self.0) })
     }
 }
 
