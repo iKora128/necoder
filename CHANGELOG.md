@@ -5,17 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · [Semantic Versioning]
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-11-26
+
+Two Windows crashes are fixed: opening a localhost link, and sending to a thread in a window with no project. Opening a remote folder as a project from a Windows client works again.
+
 ### Fixed
 
 - **Opening a link on Windows**: opening a localhost link (or an HTML preview) could crash necoder with "RefCell already borrowed". WebView2 runs the Windows message loop while it is being created, and necoder created it while drawing, so other work ran in the middle of the draw. necoder now creates the WebView after the draw finishes.
 - **Sending to a thread in a window with no project** could crash necoder with "index out of bounds". The message tried to log against a Task that does not exist. It is now sent without the log.
+- **Remote SSH from Windows: "Open here as project"** failed because the Windows client joined remote paths with `\` (`/home/user\myproj`), which the Linux side reads as part of the name. Remote paths are now joined with `/` on Windows, including paths saved by earlier versions. Thanks to @sugimasav005 (#85).
+- **Dependencies**: updated `url` to 2.5.9 (RUSTSEC-2026-0592) and `cookie` to 0.18.3 (RUSTSEC-2026-0594).
 
 ### 日本語
+
+Windows のクラッシュを 2 つ直しました（localhost のリンクを開いたとき・プロジェクトのない窓でスレッドに送信したとき）。Windows から、リモートのフォルダをプロジェクトとして開けるようにもなりました。
 
 ### 修正
 
 - **Windows でリンクを開いたとき**: localhost のリンク（と HTML のプレビュー）を開くと「RefCell already borrowed」で落ちることがありました。WebView2 は作る間に Windows のメッセージループを回します。necoder は描画の途中で WebView を作っていたため、描画の途中に別の処理が割り込んでいました。描画が終わってから WebView を作るようにしました。
 - **プロジェクトを開いていない窓でスレッドに送信したとき**、「index out of bounds」で落ちることがありました。無い Task の記録に書き込もうとしていたためです。記録を書かずに送るようにしました。
+- **Windows からの Remote SSH で「ここをプロジェクトとして開く」**が失敗していました。Windows のクライアントがリモートのパスを `\` でつないでいて（`/home/user\myproj`）、Linux 側はそれを名前の一部として読んでいたためです。Windows でも `/` でつなぐようにしました（以前のバージョンが覚えたパスも直して送ります）。@sugimasav005 さん、ありがとうございました（#85）。
+- **依存**: `url` を 2.5.9（RUSTSEC-2026-0592）、`cookie` を 0.18.3（RUSTSEC-2026-0594）に上げました。
 
 ## [0.1.40] - 2026-11-19
 
