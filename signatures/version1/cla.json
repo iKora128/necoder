@@ -15,6 +15,14 @@
       "created_at": "2026-10-16T09:28:21Z",
       "repoId": 1143021376,
       "pullRequestNo": 68
+    },
+    {
+      "name": "sugimasav005",
+      "id": 361134329,
+      "comment_id": 7163718803,
+      "created_at": "2026-11-25T13:23:55Z",
+      "repoId": 1143021376,
+      "pullRequestNo": 85
     }
   ]
 }
