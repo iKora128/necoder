@@ -587,7 +587,9 @@ impl Workspace {
     /// 人間が Task に直接書いた（介入・§5.4）: 台帳へ `human_send`（原文）を積み、ニュースに載せる。
     /// Captain は単独では起こさない（次の wake に台帳の未読として同乗する）。
     pub(super) fn record_human_send(&mut self, index: usize, thread: &SharedString, text: &str, cx: &mut Context<Self>) {
-        let slot = &self.project_sessions.projects[index];
+        // プロジェクトを開いていない窓にも session は 1 つある（`projects.len().max(1)`）。そこでの送信は
+        // 載せる Task が無い（v0.1.40 で index out of bounds・issue #83）。
+        let Some(slot) = self.project_sessions.projects.get(index) else { return; };
         if slot.task_space.is_integration() { return; }
         let id = slot.task_space.id.0.clone();
         let title = slot.task_space.title.clone();
