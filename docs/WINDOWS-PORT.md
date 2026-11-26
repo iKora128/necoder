@@ -773,6 +773,7 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
 | **コンソール窓** | GUI アプリから子プロセスを起こすと黒窓が一瞬光る | **済（2026-10-09）**: 子プロセスは全部 `child_process::command` で作る（Windows で `CREATE_NO_WINDOW`）。素の `Command::new` を足さない。ターミナルは ConPTY なので対象外 |
 | **`windows_subsystem`** | 付けないと GUI アプリでもコンソールが開く。付けると stdout が消える | **済（2026-10-09）**: `main.rs` に `windows_subsystem = "windows"`。端末から叩いた CLI は `console.rs` が親のコンソールへ繋ぎ直す（パイプで渡された MCP・askpass は触らない）。実機の確認は未 |
 | **環境変数** | 大文字小文字非区別。`HOME` は**存在しない**（`USERPROFILE`） | paths crate |
+| **入れ子のメッセージループ** | gpui は foreground task をウィンドウのメッセージで走らせる。App を借りている最中（描画・`update` の中）に `GetMessage` / `DispatchMessage` を回す呼び出し（wry の WebView2 の生成 = `webview2_com::wait_with_pump`）をすると、待つ間に別の task が App を借り直して `RefCell already borrowed` で落ちる | **済（2026-11-26・#84）**: WebView は描画の中では作らず、App を借りていない foreground task で作る（`WebViewView::build_outside_update`）。メッセージを回して待つ API を描画・`update` の中から呼ばない |
 
 ### スクショを撮るプロセスは **DPI 認識**を宣言すること（2026-08-23 に誤診まで踏んだ）
 
