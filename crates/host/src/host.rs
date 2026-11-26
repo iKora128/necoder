@@ -4603,7 +4603,7 @@ impl RemoteHost {
         }
         let (opened, _) = client.request(
             &Request::OpenProject {
-                path: requested_root.to_path_buf(),
+                path: to_remote_path(requested_root),
             },
             Vec::new(),
         )?;
@@ -4661,13 +4661,13 @@ impl RemoteHost {
     }
 
     fn absolute(&self, relative: PathBuf) -> PathBuf {
-        self.root.join(relative)
+        remote_join(&self.root, &relative)
     }
 
     fn open_project(&self, requested_root: &Path) -> Result<Arc<Self>> {
         let (opened, _) = self.client.request(
             &Request::OpenProject {
-                path: requested_root.to_path_buf(),
+                path: to_remote_path(requested_root),
             },
             Vec::new(),
         )?;
@@ -4831,8 +4831,49 @@ fn relative_to(root: &Path, path: &Path) -> Result<PathBuf> {
         return Ok(PathBuf::new());
     }
     path.strip_prefix(root)
-        .map(Path::to_path_buf)
+        .map(to_remote_path)
         .with_context(|| format!("path is outside remote project: {}", path.display()))
+}
+
+/// 接続先（常に Linux）のパスを `root` + `relative` で組み立てる。
+///
+/// `PathBuf::join` はクライアントの OS の区切りを使うので、Windows で組むと
+/// `/home/user\project` になり、daemon では `\` がただの文字として扱われて見つからない
+/// （エクスプローラの「ここをプロジェクトとして開く」が開けなかった原因）。Windows では `/` で
+/// つなぐ。mac / Linux は `join` が元から POSIX なので挙動を変えない。
+fn remote_join(root: &Path, relative: &Path) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(posix_join(
+            &root.to_string_lossy(),
+            &relative.to_string_lossy(),
+        ))
+    } else {
+        root.join(relative)
+    }
+}
+
+/// `/` 区切りでつなぐ（`relative` が空なら `root` のまま・`\` は `/` に直す）。
+fn posix_join(root: &str, relative: &str) -> String {
+    let root = root.replace('\\', "/");
+    let relative = relative.replace('\\', "/");
+    let relative = relative.trim_start_matches('/');
+    if relative.is_empty() {
+        root
+    } else if root.ends_with('/') {
+        format!("{root}{relative}")
+    } else {
+        format!("{root}/{relative}")
+    }
+}
+
+/// daemon へ送るパスを POSIX の区切りにそろえる。Windows クライアントでは、以前の版が
+/// `\` 混じりで覚えたパス（最近のプロジェクト等）も `/` に直して送る。mac / Linux はそのまま。
+fn to_remote_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// project を指す request を送る。daemon が作り直されて project の番号を知らなければ、開き直して
@@ -5453,6 +5494,32 @@ mod windows_terminal_tests {
             assert!(program == "pwsh" || program == "powershell", "{program}");
         } else {
             assert_eq!(command_then_shell("echo", None).0, "/bin/sh", "mac は変えない");
+        }
+    }
+
+    /// 接続先（Linux）のパスは `/` でつなぐ。Windows クライアントで `\` を混ぜると daemon が
+    /// 別名のフォルダとして探して「プロジェクトとして開く」が失敗していた。
+    #[test]
+    fn remote_paths_are_joined_with_posix_separator() {
+        assert_eq!(posix_join("/home/user", "myproj"), "/home/user/myproj");
+        assert_eq!(posix_join("/home/user/", "myproj"), "/home/user/myproj");
+        assert_eq!(posix_join("/home/user", "a/b"), "/home/user/a/b");
+        assert_eq!(posix_join("/home/user", ""), "/home/user");
+        assert_eq!(posix_join("/", "etc"), "/etc");
+        assert_eq!(posix_join("/home/user", "a\\b"), "/home/user/a/b");
+
+        // Windows の PathBuf の == は `\` と `/` を同一視するので、文字列で比べる。
+        let joined = remote_join(Path::new("/home/user"), Path::new("myproj"));
+        assert_eq!(joined.to_string_lossy(), "/home/user/myproj");
+        if cfg!(windows) {
+            // 以前の版が覚えた `\` 混じりのパスも直して送る。
+            assert_eq!(
+                to_remote_path(Path::new("/home/user\\myproj")).to_string_lossy(),
+                "/home/user/myproj"
+            );
+            let relative =
+                relative_to(Path::new("/home/user"), Path::new("/home/user\\a\\b")).unwrap();
+            assert_eq!(relative.to_string_lossy(), "a/b");
         }
     }
 
